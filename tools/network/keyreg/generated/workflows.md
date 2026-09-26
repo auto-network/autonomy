@@ -14,6 +14,7 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [armor.replace_recovery_slot](#workflow-armor-replace_recovery_slot)
 - [armor.revoke_factor](#workflow-armor-revoke_factor)
 - [armor.set_recovery](#workflow-armor-set_recovery)
+- [ceremony.admission_event](#workflow-ceremony-admission_event)
 - [ceremony.checkpoint_delegate_grant](#workflow-ceremony-checkpoint_delegate_grant)
 - [ceremony.checkpoint_publish](#workflow-ceremony-checkpoint_publish)
 - [ceremony.checkpoint_seed](#workflow-ceremony-checkpoint_seed)
@@ -52,7 +53,6 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [recovery.succession](#workflow-recovery-succession)
 - [rekey.frontier_marker](#workflow-rekey-frontier_marker)
 - [root.rotation](#workflow-root-rotation)
-- [route.admit_on_approval](#workflow-route-admit_on_approval)
 - [route.checkpoint_adopt](#workflow-route-checkpoint_adopt)
 - [route.claim_submit_admit](#workflow-route-claim_submit_admit)
 - [route.claim_submit_stage](#workflow-route-claim_submit_stage)
@@ -60,6 +60,7 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 - [route.join_bootstrap](#workflow-route-join_bootstrap)
 - [route.join_context](#workflow-route-join_context)
 - [route.join_install](#workflow-route-join_install)
+- [route.join_install_bundle_adopt](#workflow-route-join_install_bundle_adopt)
 - [route.link_publish](#workflow-route-link_publish)
 - [route.relay_connect](#workflow-route-relay_connect)
 - [storage.advance_state](#workflow-storage-advance_state)
@@ -177,6 +178,29 @@ Built at the armor layer; exposed by no route or UI yet.
 **Source:** `tools/network/idkit/root_factor_policy.py:set_recovery` (module-op)
 
 **Crib:** §9
+
+<a id="workflow-ceremony-admission_event"></a>
+## ceremony.admission_event
+
+**Status:** designed
+
+**Authority:** persona_signing_key
+
+**Preconditions**
+
+- The fold admits on the event only when: the carried claim verifies under the invitee's key and is the invitee's own claim at its staged position; at least the role's threshold of distinct authorized approvals; the invite is not already redeemed; the claim's position is after the persona's latest removal; the persona is not a member.
+
+**Writes**
+
+- an approver-authored admission event carrying the invitee's unchanged signed member.claim plus the approvals (operator ruling 2026-09-25); in the same window the founder publishes the checkpoint reflecting it (P2)
+
+**Workflow:** actors founder; opens persona; requires persona_signing_key AND claim_staged; produces claim_approval, member_admitted; rule admit_on_approval
+
+**Source:** `tools/network/TLA/OrgAdmissionEvent.tla:Approve` (ceremony)
+
+**Crib:** §8
+
+Realizes P3 without re-signing the claim: a claim's author signature covers its whole payload including approvals and parents (events.py:618-619), and an approval covers only (kind, invite_ref, persona) (events.py:737-744). Requires a new fold handler (lint check 1 then requires its registry row). Not built.
 
 <a id="workflow-ceremony-checkpoint_delegate_grant"></a>
 ## ceremony.checkpoint_delegate_grant
@@ -1033,26 +1057,6 @@ Without the marker the re-key achieves nothing (the F-001 defect); the calibrati
 
 A local verification has no relying party (crib section 0: the owner rewriting their own store is a feature); the load-bearing checks are the registry rebind gate (tools/network/registry/app.py, which resolves the pinned recovery key server-side) and the fleet's root-signed RosterEntry acceptance (tools/network/fleet_roster.py).
 
-<a id="workflow-route-admit_on_approval"></a>
-## route.admit_on_approval
-
-**Status:** designed
-
-**Authority:** persona_signing_key
-
-**Writes**
-
-- the staged claim appended with the approval
-- in the approver's window
-
-**Workflow:** actors founder; opens persona; requires persona_signing_key AND claim_staged; produces claim_approval, member_admitted; rule admit_on_approval
-
-**Source:** `tools/network/TLA/OrgAdmission.tla:Approve` (route)
-
-**Crib:** §8
-
-Proposed consolidation F3+F4 (graph://cde6c8c6-041 §5): admission at countersign, so the checkpoint can run in the same window. Not built.
-
 <a id="workflow-route-checkpoint_adopt"></a>
 ## route.checkpoint_adopt
 
@@ -1210,6 +1214,25 @@ Step J2. Executes on the founder's machine.
 **Crib:** §8
 
 Step J5. Does not produce install_seed_addresses: network-join.js (installAdmitted, :313-327) does not forward reachability_rows although the route reads them (network_routes.py:938-943). Deferred here (:804-805): storage delegate, serve cert, fleet runtime, sync cert.
+
+<a id="workflow-route-join_install_bundle_adopt"></a>
+## route.join_install_bundle_adopt
+
+**Status:** designed
+
+**Authority:** admitted persona
+
+**Writes**
+
+- the join install as route.join_install, and adoption BY FOLD of the founder's current signed checkpoint record carried in the join bundle, atomically with the snapshot
+
+**Workflow:** actors joiner; opens none; requires bootstrap_snapshot AND checkpoint_including_joiner; produces ledger_heads, registry_binding, adopted_checkpoint; rule bundle_adopt
+
+**Source:** `tools/network/TLA/OrgAdmission.tla:Bootstrap` (route)
+
+**Crib:** §8
+
+Closes the install/registry race: today the install route adopts the registry's current record in the same request (network_routes.py: 943-945) but not atomically with the bootstrap snapshot fetched earlier over the join channel. With prover-downgrade and E-any-adm acceptance it removes the need for adopt-by-verification and for the registry to serve the signed record or chain (OrgAdmissionTransitionEAnyAdmDowngrade, OrgAdmissionX3EAnyAdmDowngrade). Not built.
 
 <a id="workflow-route-link_publish"></a>
 ## route.link_publish

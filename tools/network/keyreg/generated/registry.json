@@ -455,7 +455,7 @@
           "step": "J6"
         }
       ],
-      "notes": "Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachability rows (need a prior pull), install seed, relay slots through the dialer's own connector, dialed-in peers. The founder-pulls-joiner direction riding the joiner's dial-in is taken from the record, not re-traced. The single-joiner AND/OR graph cannot express head presence at adoption; OrgAdmission.tla carries that.",
+      "notes": "Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachability rows (need a prior pull), install seed, relay slots through the dialer's own connector, dialed-in peers. The founder-pulls-joiner direction riding the joiner's dial-in is taken from the record, not re-traced. The single-joiner AND/OR graph cannot express head presence at adoption; OrgAdmission.tla carries that. Final rules (auto-qrmlg.12): the org hello accepts E-any-adm (a proof under an older authentic record when the prover is in the verifier's newest member set and the record is at or after its current admission) and prover-downgrade (a side proves back under the seq the other side adopted, from the rider's checkpoint_seq); both change which pulls are admitted, not which artifacts exist, so they leave this requirement set and the counts unchanged. Liveness and safety under the final rules: OrgAdmissionFinalApproval.cfg, OrgAdmissionFinalSelfAdmit.cfg.",
       "proofs": [
         {
           "framework": "tla",
@@ -471,6 +471,21 @@
           "framework": "tla",
           "lemma": "ApprovedIsAdmitted",
           "theory": "OrgAdmission"
+        },
+        {
+          "framework": "tla",
+          "lemma": "RemovedExcluded",
+          "theory": "OrgAdmission"
+        },
+        {
+          "framework": "tla",
+          "lemma": "RekeyedOldKeyExcluded",
+          "theory": "OrgAdmissionLeaves"
+        },
+        {
+          "framework": "tla",
+          "lemma": "ReAdmitAfterRemoval",
+          "theory": "OrgAdmissionLeaves"
         }
       ],
       "requires": [
@@ -492,6 +507,52 @@
         }
       ],
       "scenarios": [
+        {
+          "current": {
+            "founder": 3,
+            "joiner": 3
+          },
+          "from": "self_admit",
+          "minimal": {
+            "founder": 1,
+            "joiner": 1
+          },
+          "rules": [
+            "delegate_checkpoint",
+            "bundle_adopt"
+          ]
+        },
+        {
+          "current": {
+            "founder": 4,
+            "joiner": 4
+          },
+          "from": "approval",
+          "minimal": {
+            "founder": 2,
+            "joiner": 2
+          },
+          "rules": [
+            "admit_on_approval",
+            "bundle_adopt"
+          ]
+        },
+        {
+          "current": {
+            "founder": 4,
+            "joiner": 4
+          },
+          "from": "approval",
+          "minimal": {
+            "founder": 2,
+            "joiner": 2
+          },
+          "rules": [
+            "admit_on_approval",
+            "bundle_adopt",
+            "delegate_checkpoint"
+          ]
+        },
         {
           "current": {
             "founder": 3,
@@ -1753,6 +1814,74 @@
         "symbol": "set_recovery"
       }
     },
+    "ceremony.admission_event": {
+      "actors": [
+        "founder"
+      ],
+      "authority": [
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "an approver-authored admission event carrying the invitee's unchanged signed member.claim plus the approvals (operator ruling 2026-09-25); in the same window the founder publishes the checkpoint reflecting it (P2)"
+        ]
+      },
+      "notes": "Realizes P3 without re-signing the claim: a claim's author signature covers its whole payload including approvals and parents (events.py:618-619), and an approval covers only (kind, invite_ref, persona) (events.py:737-744). Requires a new fold handler (lint check 1 then requires its registry row). Not built.",
+      "opens": "persona",
+      "preconditions": [
+        "The fold admits on the event only when: the carried claim verifies under the invitee's key and is the invitee's own claim at its staged position; at least the role's threshold of distinct authorized approvals; the invite is not already redeemed; the claim's position is after the persona's latest removal; the persona is not a member."
+      ],
+      "produces": [
+        "claim_approval",
+        "member_admitted"
+      ],
+      "proofs": [
+        {
+          "framework": "tla",
+          "lemma": "ApproverCannotForgeClaim",
+          "theory": "OrgAdmissionEvent"
+        },
+        {
+          "framework": "tla",
+          "lemma": "NoDoubleAdmission",
+          "theory": "OrgAdmissionEvent"
+        },
+        {
+          "framework": "tla",
+          "lemma": "AdmissionRespectsRemoval",
+          "theory": "OrgAdmissionEvent"
+        },
+        {
+          "framework": "tla",
+          "lemma": "AdmissionHasThreshold",
+          "theory": "OrgAdmissionEvent"
+        },
+        {
+          "framework": "tla",
+          "lemma": "ApprovalPublishesCheckpoint",
+          "theory": "OrgAdmissionEvent"
+        },
+        {
+          "framework": "tla",
+          "lemma": "ApprovedIsAdmitted",
+          "theory": "OrgAdmission"
+        }
+      ],
+      "requires": [
+        "persona_signing_key",
+        "claim_staged"
+      ],
+      "rule": "admit_on_approval",
+      "source": {
+        "file": "tools/network/TLA/OrgAdmissionEvent.tla",
+        "kind": "ceremony",
+        "symbol": "Approve"
+      },
+      "status": "designed"
+    },
     "ceremony.checkpoint_delegate_grant": {
       "actors": [
         "founder"
@@ -2945,52 +3074,6 @@
         "symbol": "make_rotation"
       }
     },
-    "route.admit_on_approval": {
-      "actors": [
-        "founder"
-      ],
-      "authority": [
-        "persona_signing_key"
-      ],
-      "crib": [
-        "\u00a78"
-      ],
-      "effects": {
-        "writes": [
-          "the staged claim appended with the approval",
-          "in the approver's window"
-        ]
-      },
-      "notes": "Proposed consolidation F3+F4 (graph://cde6c8c6-041 \u00a75): admission at countersign, so the checkpoint can run in the same window. Not built.",
-      "opens": "persona",
-      "produces": [
-        "claim_approval",
-        "member_admitted"
-      ],
-      "proofs": [
-        {
-          "framework": "tla",
-          "lemma": "ApprovedIsAdmitted",
-          "theory": "OrgAdmission"
-        },
-        {
-          "framework": "tla",
-          "lemma": "AdmittedWereApproved",
-          "theory": "OrgAdmission"
-        }
-      ],
-      "requires": [
-        "persona_signing_key",
-        "claim_staged"
-      ],
-      "rule": "admit_on_approval",
-      "source": {
-        "file": "tools/network/TLA/OrgAdmission.tla",
-        "kind": "route",
-        "symbol": "Approve"
-      },
-      "status": "designed"
-    },
     "route.checkpoint_adopt": {
       "actors": [
         "joiner"
@@ -3249,6 +3332,47 @@
         "kind": "route",
         "symbol": "post_join_outcome"
       }
+    },
+    "route.join_install_bundle_adopt": {
+      "actors": [
+        "joiner"
+      ],
+      "authority": [
+        "admitted persona"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "the join install as route.join_install, and adoption BY FOLD of the founder's current signed checkpoint record carried in the join bundle, atomically with the snapshot"
+        ]
+      },
+      "notes": "Closes the install/registry race: today the install route adopts the registry's current record in the same request (network_routes.py: 943-945) but not atomically with the bootstrap snapshot fetched earlier over the join channel. With prover-downgrade and E-any-adm acceptance it removes the need for adopt-by-verification and for the registry to serve the signed record or chain (OrgAdmissionTransitionEAnyAdmDowngrade, OrgAdmissionX3EAnyAdmDowngrade). Not built.",
+      "opens": "none",
+      "produces": [
+        "ledger_heads",
+        "registry_binding",
+        "adopted_checkpoint"
+      ],
+      "proofs": [
+        {
+          "framework": "tla",
+          "lemma": "EveryAdmittedMemberPulls",
+          "theory": "OrgAdmission"
+        }
+      ],
+      "requires": [
+        "bootstrap_snapshot",
+        "checkpoint_including_joiner"
+      ],
+      "rule": "bundle_adopt",
+      "source": {
+        "file": "tools/network/TLA/OrgAdmission.tla",
+        "kind": "route",
+        "symbol": "Bootstrap"
+      },
+      "status": "designed"
     },
     "route.link_publish": {
       "actors": [

@@ -50,6 +50,13 @@ GREEN = [
     # only its tuple) and the founder's record adopted from the join bundle.
     ("OrgAdmissionTransitionEAnyAdmDowngrade.cfg", "OrgAdmission"),
     ("OrgAdmissionX3EAnyAdmDowngrade.cfg", "OrgAdmissionX3"),
+    # auto-qrmlg.12: the admission event (approver-authored, carrying the
+    # invitee's unchanged signed claim plus approvals) and the final rules.
+    ("OrgAdmissionEventT1.cfg", "OrgAdmissionEvent"),
+    ("OrgAdmissionEventT2.cfg", "OrgAdmissionEvent"),
+    ("OrgAdmissionEventNoRedeemedCheck.cfg", "OrgAdmissionEvent"),
+    ("OrgAdmissionFinalApproval.cfg", "OrgAdmission"),
+    ("OrgAdmissionFinalSelfAdmit.cfg", "OrgAdmission"),
     # E-any against rekeyed and re-admitted personas (safety).
     ("OrgAdmissionLeavesEAnyRekey.cfg", "OrgAdmissionLeaves"),
     ("OrgAdmissionLeavesEAnyAdmission.cfg", "OrgAdmissionLeaves"),
@@ -113,6 +120,12 @@ CALIBRATION = [
     ("calibration/TransitionDowngradeBundleOnly.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
     ("calibration/TransitionDowngradeNoJoinAdopt.cfg", "OrgAdmission", "EveryAdmittedMemberPulls"),
     ("calibration/TransitionDowngradeReachesSync.cfg", "OrgAdmission", "NotAllJoinedInSync"),
+    # auto-qrmlg.12: each admission-event check is load-bearing.
+    ("calibration/EventNoSigCheck.cfg", "OrgAdmissionEvent", "ApproverCannotForgeClaim"),
+    ("calibration/EventNoThreshold.cfg", "OrgAdmissionEvent", "AdmissionHasThreshold"),
+    ("calibration/EventNoFloor.cfg", "OrgAdmissionEvent", "AdmissionRespectsRemoval"),
+    ("calibration/EventNoRedeemedNoFloor.cfg", "OrgAdmissionEvent", "NoDoubleAdmission"),
+    ("calibration/EventApprovalAdmits.cfg", "OrgAdmissionEvent", "NoApprovalAdmits"),
 ]
 
 VIOLATION_MARKERS = (

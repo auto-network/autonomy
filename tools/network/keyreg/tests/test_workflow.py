@@ -116,13 +116,13 @@ def test_malformed_and_or(registry):
 
 def test_designed_mutation_needs_rule(registry):
     broken = copy.deepcopy(registry)
-    del broken["mutations"]["route.admit_on_approval"]["rule"]
-    assert any("mutations.route.admit_on_approval" in e and "rule" in e for e in _errors(broken))
+    del broken["mutations"]["ceremony.admission_event"]["rule"]
+    assert any("mutations.ceremony.admission_event" in e and "rule" in e for e in _errors(broken))
 
 
 def test_current_order_runs_built_code_only(registry):
     broken = copy.deepcopy(registry)
-    broken["goals"]["org_sync_pull"]["current_order"][0]["runs"].append("route.admit_on_approval")
+    broken["goals"]["org_sync_pull"]["current_order"][0]["runs"].append("ceremony.admission_event")
     assert any("current_order[0].runs" in e and "designed" in e for e in _errors(broken))
 
 
@@ -187,7 +187,7 @@ def test_every_copy_is_given_produced_or_named(registry):
         origin = registry["artifacts"][copy.partition("@")[0]].get("origin", "workflow")
         assert copy in given or producers.get(copy) or origin in ("defect", "open"), copy
     assert "ledger_heads@founder" in given and "ledger_heads@joiner" not in given
-    assert producers["ledger_heads@joiner"] == ["route.join_install"]
+    assert producers["ledger_heads@joiner"] == ["route.join_install", "route.join_install_bundle_adopt"]
 
 
 def test_goal_names_both_actors_copies(registry):

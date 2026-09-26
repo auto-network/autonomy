@@ -418,3 +418,43 @@ member adopts by fold once events arrive, and the registry serves no
 signed record or chain beyond today's tuple (u3). The E-any liveness
 assumption stands without its P1 clause: a lagging member is eventually
 dialed by, or dials, a node holding every event up to the newest head.
+
+## The admission event and the final rules (bead auto-qrmlg.12)
+
+**Admission event.** The operator ruled it on 2026-09-25: an approver-authored
+event carries the invitee's original signed member.claim, unchanged, plus the
+approvals, and the fold admits on it. `OrgAdmissionEvent.tla` models it
+against a malicious legitimate approver A. A forges claims under its own key,
+attaches its own approval or approvals copied from the ledger (an approval
+covers only kind, invite_ref and persona: events.py:737-744), and replays
+events. The fold checks:
+- the carried claim's signature and staged position;
+- the approval threshold;
+- the redeemed invite;
+- the removal floor;
+- that the persona is not already a member.
+
+Bounds: two personas, three ledger events, two invites. Forged claims are
+parented at the current position only.
+
+| Configuration | Result |
+|---|---|
+| threshold 1 / threshold 2, all checks | clean: `ApproverCannotForgeClaim`, `NoDoubleAdmission`, `AdmissionRespectsRemoval`, `AdmissionHasThreshold`, `ApprovalPublishesCheckpoint` (P2), `ApprovedAdmitted` |
+| signature check deleted | `ApproverCannotForgeClaim` violated |
+| threshold check deleted (threshold 2) | `AdmissionHasThreshold` violated |
+| removal floor deleted | `AdmissionRespectsRemoval` violated |
+| redeemed-invite check deleted | clean: the member check plus the floor refuse every replay within the bound |
+| redeemed-invite check and floor deleted | `NoDoubleAdmission` violated: an admission replayed after the removal re-admits |
+| executability | an approval admits |
+
+**Final rules.** System-level liveness and safety are checked in
+`OrgAdmission.tla`, `OrgAdmissionFinal*.cfg`. The rules are:
+- E-any-adm acceptance;
+- prover-downgrade;
+- founder's record adopted from the join bundle, by fold (no P1);
+- P2;
+- P3, by the admission event.
+
+`EveryAdmittedMemberPulls`, `ApprovedIsAdmitted` and every safety invariant
+are clean with an approval role (538 states) and with a self-admitting role
+(521 states), two joiners, with removals.

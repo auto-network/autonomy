@@ -37,9 +37,21 @@ def test_recorded_scenarios_match_the_record(registry):
     assert table[("approval", ())] == ({"founder": 4, "joiner": 4}, {"founder": 3, "joiner": 2})
     assert table[("approval", ("admit_on_approval",))][1] == {"founder": 2, "joiner": 2}
     assert table[("self_admit", ("delegate_checkpoint",))][1] == {"founder": 1, "joiner": 1}
+    # auto-qrmlg.12 final rules: the admission event realizes admit_on_approval,
+    # bundle_adopt moves the joiner's adoption into install; counts unchanged.
+    assert table[("self_admit", ("delegate_checkpoint", "bundle_adopt"))][1] == {"founder": 1, "joiner": 1}
+    assert table[("approval", ("admit_on_approval", "bundle_adopt"))][1] == {"founder": 2, "joiner": 2}
+    assert table[("approval", ("admit_on_approval", "bundle_adopt", "delegate_checkpoint"))][1] == {
+        "founder": 2, "joiner": 2}
 
 
-@pytest.mark.parametrize("index", range(5))
+def test_final_rules_adopt_at_install(registry):
+    result = keyreg.plan(registry, GOAL, "self_admit", ["delegate_checkpoint", "bundle_adopt"])
+    adopt = [inst.mutation for inst, _w, new in result.steps if "adopted_checkpoint@joiner" in new]
+    assert adopt == ["route.join_install_bundle_adopt"]
+
+
+@pytest.mark.parametrize("index", range(8))
 def test_planner_and_current_order_reproduce_each_scenario(registry, index):
     scenario = _scenarios(registry)[index]
     current, minimal, openings = keyreg.explain_current(
