@@ -574,7 +574,19 @@ def seed_origin_from_certificate(*, environ=None, cert_path=None) -> dict | None
     if not port.isdigit() or not 0 < int(port) < 65536:
         port = "8080"
     origin = f"https://{name}" if port == "443" else f"https://{name}:{port}"
+    # A name that came from the certificate itself is verified; one that came
+    # from DASHBOARD_DOMAIN is checked against the certificate like a typed one.
     try:
-        return record({"mode": "tailscale", "origin": origin, "published_at": _utc_now()})
+        verified = _tailnet_origin_verified_or_false(origin, cert_path)
+        return record({"mode": "tailscale", "origin": origin, "origin_verified": verified,
+                       "published_at": _utc_now()})
     except Exception:
         return None
+
+
+def _tailnet_origin_verified_or_false(origin: str, cert_path=None) -> bool:
+    from tools.dashboard import tls_certificate
+
+    facts = tls_certificate.read_certificate(cert_path) if cert_path is not None else tls_certificate.read_certificate()
+    names = [name for name in (facts.names if facts else ()) if name.endswith(".ts.net")]
+    return _host_of(origin) in names

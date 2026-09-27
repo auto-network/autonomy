@@ -74,6 +74,7 @@ def test_seed_prefers_dashboard_domain_then_the_certificates_tailnet_name(tmp_pa
 
     row = ra.seed_origin_from_certificate(environ={"DASHBOARD_DOMAIN": "Desktop.tail1234.ts.net."})
     assert row["mode"] == "tailscale" and row["origin"] == "https://desktop.tail1234.ts.net:8080"
+    assert row["origin_verified"] is False            # DASHBOARD_DOMAIN alone, no certificate to confirm it
     # The published TLS port, not a constant (reviewer).
     row = ra.seed_origin_from_certificate(environ={"DASHBOARD_DOMAIN": "desktop.tail1234.ts.net", "DASHBOARD_PORT": "8443"})
     assert row["origin"] == "https://desktop.tail1234.ts.net:8443"
@@ -84,6 +85,7 @@ def test_seed_prefers_dashboard_domain_then_the_certificates_tailnet_name(tmp_pa
     _tailnet_certificate(cert, ["localhost", "node.tailabcd.ts.net"])
     row = ra.seed_origin_from_certificate(environ={}, cert_path=str(cert))
     assert row["origin"] == "https://node.tailabcd.ts.net:8080"
+    assert row["origin_verified"] is True             # the name came from the certificate itself (reviewer)
     row = ra.seed_origin_from_certificate(environ={"AUTONOMY_TLS_CERT": str(cert)})
     assert row["origin"] == "https://node.tailabcd.ts.net:8080"
     assert len(written) == 5
