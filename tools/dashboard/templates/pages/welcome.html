@@ -160,16 +160,20 @@
   <!-- ── READY · identity + organization done (design variant 2) ── -->
   <template x-if="ready && !fleetEnrollment && !fleetSync && step === 3">
     <div>
-      <h1>You&rsquo;re set</h1>
-      <p class="sub">Identity, organization, workspace &mdash; all yours.</p>
+      <h1 x-text="userName ? ('Welcome, ' + userName) : 'Welcome'"></h1>
+      <p class="sub">One to go.</p>
       <div class="step done"><div class="n">&check;</div><div class="body">
         <h2 x-text="userName || 'Your identity'"></h2><p>Your identity on this machine.</p></div></div>
       <div class="step done"><div class="n">&check;</div><div class="body">
         <h2 x-text="orgName || 'Your organization'"></h2><p>Your organization.</p></div></div>
-      <div class="step done"><div class="n">&check;</div><div class="body">
-        <h2>First workspace</h2><p>Open and waiting.</p></div></div>
+      <div class="step current" data-testid="welcome-step-workspace"><div class="n">3</div><div class="body">
+        <h2>Open your first workspace</h2>
+        <p>Your assistant starts in Getting Started.</p></div></div>
       <button style="margin-top:.6rem" data-testid="welcome-open-workspace" :disabled="startBusy" @click="goToWorkspace()" x-text="startBusy ? 'Starting your first session…' : 'Go to your workspace'"></button>
       <p class="sub" x-show="startError" x-text="startError" data-testid="welcome-start-error" style="color:#fca5a5"></p>
+      <ul class="sub" x-show="startDetails.length" data-testid="welcome-start-details" style="margin:.3rem 0 0 1.1rem;font-size:.85em;opacity:.85">
+        <template x-for="line in startDetails" :key="line"><li x-text="line"></li></template>
+      </ul>
     </div>
   </template>
 

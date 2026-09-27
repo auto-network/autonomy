@@ -12,12 +12,16 @@ exists. The scan is ``graph credentials import`` run in-process.
   the imports applied; idempotent, the operator's files are never touched.
 
 Both answer ``{"harnesses": [{harness, status, detail, account, usable}],
-"usable": [harness, ...]}``. ``usable`` names the harnesses a session can
-launch with now.
+"usable": [harness, ...], "home": path}``. ``usable`` names the harnesses a
+session can launch with now. ``home`` is the operator's home as the operator
+knows it (``AUTONOMY_HOST_HOME``, the host path mounted at ``/host-home``), so
+a failed scan can say where it looked; ``None`` when the node has no such
+mount.
 """
 from __future__ import annotations
 
 import asyncio
+import os
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -31,7 +35,9 @@ def _scan(dry_run: bool) -> dict:
     report = credential_import.run_import(
         credential_import.operator_home(), dry_run=dry_run,
     )
-    return credential_import.report_to_dict(report)
+    out = credential_import.report_to_dict(report)
+    out["home"] = os.environ.get("AUTONOMY_HOST_HOME") or None
+    return out
 
 
 async def harnesses(request: Request):

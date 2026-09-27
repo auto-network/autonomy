@@ -1,6 +1,26 @@
 // The welcome rail's Alpine component (design graph://9a4219b3). Markup lives
 // in templates/pages/welcome.html and is injected by the shell router; this
 // file only sequences the delivered onboarding, create-org and join flows.
+// When the sign-in scan finds nothing usable, say where it looked and what
+// to do, without naming commands that do not run inside a Compose node.
+var HARNESS_LABELS = { claude: 'Claude', codex: 'Codex', grok: 'Grok' };
+function noSignInMessage(found) {
+  var home = found && found.home;
+  return 'No Claude, Codex or Grok sign-in was found' +
+    (home ? ' in ' + home : ' on this machine') +
+    '. Sign in to one of them on this computer, then press Go to your workspace again.';
+}
+function noSignInDetails(found) {
+  var home = found && found.home;
+  return ((found && found.harnesses) || []).map(function (h) {
+    var why = h.detail || h.status || 'not found';
+    // The scan runs in the dashboard container, where the operator's home is
+    // mounted at /host-home; show the path the operator knows.
+    if (home) why = why.split('/host-home').join(home);
+    return (HARNESS_LABELS[h.harness] || h.harness) + ': ' + why;
+  });
+}
+
 function welcomeApp() {
   return {
     ready: false,
@@ -153,11 +173,15 @@ function welcomeApp() {
     // and lands on it (design of record graph://5f2f5a49-00d v11 §10.6).
     // This step runs once, so nothing records that the session started.
     startError: '',
+    // One line per harness when the sign-in scan found nothing usable: what
+    // was looked for and why it cannot be used, from the scan's own report.
+    startDetails: [],
     startBusy: false,
     async goToWorkspace() {
       if (this.startBusy) return;
       this.startBusy = true;
       this.startError = '';
+      this.startDetails = [];
       try {
         // The first step in Getting Started is the harness sign-in
         // (record v12 FR7a): scan this machine's well-known locations,
@@ -169,8 +193,9 @@ function welcomeApp() {
         var found = await scan.json().catch(function () { return {}; });
         var usable = (found && found.usable) || [];
         if (!scan.ok || !usable.length) {
+          if (scan.ok) this.startDetails = noSignInDetails(found);
           throw new Error(scan.ok
-            ? 'No harness sign-in was found on this machine. Sign in to Claude, Codex or Grok here, or run graph claude install, then try again.'
+            ? noSignInMessage(found)
             : 'Could not check this machine for a harness sign-in (HTTP ' + scan.status + ').');
         }
         var response = await fetch('/api/session/create', {
@@ -190,4 +215,8 @@ function welcomeApp() {
       }
     },
   };
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { noSignInMessage: noSignInMessage, noSignInDetails: noSignInDetails };
 }
