@@ -47,7 +47,9 @@ function load({ canShare = true } = {}) {
     document, navigator, File: FakeFile, console, setTimeout, clearTimeout,
     setInterval, clearInterval, Promise, JSON, Object, Array, Map, Set, Date, Error,
     Alpine: { data(n, f) { components[n] = f; }, store() { return {}; } },
-    fetch: (url) => Promise.resolve({
+    atob: (b) => Buffer.from(b, 'base64').toString('binary'), TextEncoder, Uint8Array,
+    // The page's connect-src refuses data: URIs; so does this fake.
+    fetch: (url) => String(url).startsWith('data:') ? Promise.reject(new TypeError('blocked by CSP')) : Promise.resolve({
       ok: true, blob: () => Promise.resolve({ type: 'application/x-sh' }),
       text: () => Promise.resolve('# md'),
     }),
@@ -130,5 +132,31 @@ describe('viewer attachment video overlay', () => {
   it('a backdrop tap does not close a video; other kinds still close on tap', () => {
     const html = fs.readFileSync(LIGHTBOX_HTML, 'utf8');
     assert.match(html, /@click="lightboxKind !== 'video' && closeLightbox\(\)"/);
+  });
+
+  // Operator's phone, 2026-09-27: a "Read image" tile (an image embedded in
+  // the entry as a data: URI) showed "This file could not be prepared for
+  // sharing", and Save / Share opened an empty Safari view.
+  const PNG = 'data:image/png;base64,' + Buffer.from('PNGBYTES').toString('base64');
+
+  it('prepares an embedded data: image without a fetch, named by its type', () => {
+    const { viewer, shared } = load();
+    viewer.openLightbox(PNG, 'Read image');
+    assert.equal(viewer.lightboxFileState, 'ready');
+    assert.equal(viewer.lightboxFileError, '');
+    assert.equal(viewer.lightboxFile.name, 'image.png');
+    assert.equal(viewer.lightboxFile.type, 'image/png');
+    assert.equal(Buffer.from(viewer.lightboxFile.parts[0]).toString(), 'PNGBYTES');
+    viewer.saveLightboxFile();
+    assert.equal(shared.length, 1);
+    assert.equal(shared[0].files[0], viewer.lightboxFile);
+  });
+
+  it('never navigates to a data: URI when sharing is unavailable', () => {
+    const { viewer, anchors } = load({ canShare: false });
+    viewer.openLightbox(PNG, 'Read image');
+    viewer.saveLightboxFile();
+    assert.equal(anchors.length, 0);
+    assert.match(viewer.lightboxFileError, /Press and hold the image/);
   });
 });

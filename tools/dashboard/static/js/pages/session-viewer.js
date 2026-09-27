@@ -745,6 +745,11 @@
         return 'download';
       },
       _lightboxDefaultName(src) {
+        // An image embedded in the entry (a Read image) is a data: URI: name it
+        // by its type, not by the tail of its base64.
+        var dataType = /^data:([\w.+-]+\/([\w.+-]+))[;,]/i.exec(String(src || ''));
+        if (dataType) return (dataType[1].indexOf('image/') === 0 ? 'image.' : 'file.') +
+          dataType[2].replace(/^svg\+xml$/, 'svg').replace(/^jpeg$/, 'jpg');
         var name = String(src || '').split('/').pop().split(/[?#]/)[0] || 'file';
         try { name = decodeURIComponent(name); } catch (_) {}
         return name;
@@ -757,6 +762,19 @@
         this.lightboxFile = null;
         this.lightboxFileState = 'loading';
         this.lightboxFileError = '';
+        // A data: URI already holds the bytes, and the page's connect-src
+        // refuses to fetch it: build the File directly.
+        if (/^data:/i.test(String(src || ''))) {
+          try {
+            this.lightboxFile = this._fileFromDataUri(src, name || this._lightboxDefaultName(src));
+            this.lightboxFileState = 'ready';
+          } catch (err) {
+            this.lightboxFileState = 'error';
+            this.lightboxFileError = 'This file could not be prepared for sharing.';
+            console.warn('Attachment preparation failed', err);
+          }
+          return;
+        }
         fetch(src, { credentials: 'same-origin' })
           .then((r) => (r.ok ? r.blob() : Promise.reject(new Error('status ' + r.status))))
           .then((blob) => {
@@ -777,6 +795,20 @@
               : 'This file could not be prepared for sharing.';
             console.warn('Attachment preparation failed', err);
           });
+      },
+      _fileFromDataUri(src, name) {
+        var m = /^data:([^;,]*)((?:;[^;,]*)*),(.*)$/is.exec(String(src));
+        if (!m || typeof File !== 'function') throw new Error('unsupported data URI');
+        var type = m[1] || 'application/octet-stream';
+        var bytes;
+        if (/;base64/i.test(m[2])) {
+          var bin = atob(m[3].replace(/\s+/g, ''));
+          bytes = new Uint8Array(bin.length);
+          for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        } else {
+          bytes = new TextEncoder().encode(decodeURIComponent(m[3]));
+        }
+        return new File([bytes], name, { type: type });
       },
       canShareLightboxFile() {
         if (!this.lightboxFile || typeof navigator === 'undefined' ||
@@ -837,6 +869,14 @@
       saveLightboxFile() {
         if (this.lightboxFileState === 'loading') return;
         if (!this.canShareLightboxFile()) {
+          // Safari refuses to open a data: URI as a page (it showed an empty
+          // "Search or enter website name" view): say how to save it instead.
+          if (/^data:/i.test(String(this.lightboxSrc || ''))) {
+            this.lightboxFileError = this.lightboxKind === 'image'
+              ? 'Sharing is not available here. Press and hold the image to save it.'
+              : 'Sharing is not available here.';
+            return;
+          }
           this.openLightboxInNewContext();
           return;
         }
