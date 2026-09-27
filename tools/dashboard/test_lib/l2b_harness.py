@@ -382,12 +382,18 @@ def _run_async_eval(js_expr: str) -> dict:
     )
     stdout = result.stdout.strip()
     if not stdout:
-        return {}
+        # Surface why, rather than an empty dict every caller reads as "no
+        # checks ran" (auto-pg8d2: a whole sweep class failed as {} with the
+        # cause invisible).
+        err = (result.stderr or "").strip()
+        return {"_eval_error": err[-2000:]} if err else {}
     for line in reversed(stdout.split("\n")):
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(parsed, dict) and parsed.get("success") is False:
+            return {"_eval_error": str(parsed.get("error") or "agent-browser eval failed")[:2000]}
         if isinstance(parsed, dict) and "data" in parsed:
             data = parsed["data"]
             if isinstance(data, dict) and "result" in data:

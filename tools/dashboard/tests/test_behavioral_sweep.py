@@ -15215,9 +15215,18 @@ def _c1_smuggled_armor() -> tuple[str, str]:
 
 
 def _c1_password_kdf(body: dict) -> dict:
-    """The KDF block whose salt this repro perturbs. V2 armor nests it under
+    """The KDF block whose salt this repro perturbs. V3 armor nests it under
+    the factor policy (``body["factor_policy"]["factors"][i]["protector"]["kdf"]``);
+    V2 nested it under
     the password factor (``body["factors"][i]["kdf"]``); V1 carried it at
     ``body["kdf"]``. Resolve either so a format bump can't silently miss it."""
+    # V3 armor (factor policy): body["factor_policy"]["factors"][i]["protector"]["kdf"].
+    policy = body.get("factor_policy")
+    if isinstance(policy, dict):
+        for factor in policy.get("factors") or []:
+            protector = factor.get("protector") if isinstance(factor, dict) else None
+            if isinstance(protector, dict) and isinstance(protector.get("kdf"), dict):
+                return protector["kdf"]
     factors = body.get("factors")
     if isinstance(factors, list):
         for factor in factors:
@@ -15530,12 +15539,15 @@ class TestNetworkIdentityCeremony:
         to the same bytes but is NOT the canonical byte form — Python
         rejects it, and the browser decrypt must match (one accepted
         byte form on both sides of the C1/C2 contract)."""
-        from tools.network.idkit.armor import ArmorError, parse_armor
+        # armor.py is the v3 facade since f5f5b7f8: canonicalize_armor is
+        # the parse gate, and it refuses the non-canonical salt as a
+        # malformed password factor salt.
+        from tools.network.idkit.armor import ArmorError, canonicalize_armor
 
         c = self._checks
         assert "non-canonical" in (c["noncanon_reject"] or ""), c.get("noncanon_reject")
-        with pytest.raises(ArmorError, match="canonical"):
-            parse_armor(_c1_noncanonical_b64_armor())   # pinned: Python agrees
+        with pytest.raises(ArmorError, match="salt"):
+            canonicalize_armor(_c1_noncanonical_b64_armor())   # pinned: Python agrees
 
     # ── acceptance: the stored blob is armor only, and it is C2's armor ──
 
