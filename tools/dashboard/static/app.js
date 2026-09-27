@@ -1489,6 +1489,20 @@ async function renderTerminal(cmd, attach) {
 
   const termContainer = document.getElementById('terminal-container');
 
+  // The emulator is fetched on first use (aa71cc94); mounting before it
+  // loads throws inside mountTerminal and left this page on "connecting..."
+  // for every session (Windows test node, 2026-09-27).
+  try {
+    await window.ensureTerminalLibs();
+  } catch (err) {
+    console.warn('[renderTerminal] terminal library failed to load:', err);
+    if (window._terminalPage) {
+      window._terminalPage.setStatus('terminal failed to load', 'text-xs text-red-400');
+    }
+    return;
+  }
+  if (activeTerminalId !== attach) return;   // switched away while loading
+
   _activeTermInstance = window.mountTerminal(termContainer, attach, {
     onStatus: function (state, _msg) {
       if (!window._terminalPage) return;
