@@ -61,7 +61,7 @@ def test_sweep_archives_quiet_designs_and_keeps_live_and_shared_ones(design_db, 
     first = _make(design_db, "Revived", age_days=60, session="auto-dead")
     revived = _make(design_db, "Revived", age_days=2, session="auto-dead", design_id=first)
 
-    monkeypatch.setattr(design_shares, "shared_design_ids", lambda org, now=None: {shared} if org == "autonomy" else set())
+    monkeypatch.setattr(design_shares, "shared_design_ids", lambda org, now=None, strict=False: {shared} if org == "autonomy" else set())
     result = design_lifecycle.sweep(now=NOW, live={"auto-live"})
 
     assert result["archived"] == [quiet]
@@ -82,7 +82,7 @@ def test_sweep_archives_quiet_designs_and_keeps_live_and_shared_ones(design_db, 
 def test_sweep_archives_every_pending_revision_of_the_series(design_db, monkeypatch):
     first = _make(design_db, "Old", age_days=50)
     second = _make(design_db, "Old", age_days=45, design_id=first)
-    monkeypatch.setattr(design_shares, "shared_design_ids", lambda org, now=None: set())
+    monkeypatch.setattr(design_shares, "shared_design_ids", lambda org, now=None, strict=False: set())
     design_lifecycle.sweep(now=NOW, live=set())
     assert _status(design_db, first) == "dismissed"
     assert _status(design_db, second) == "dismissed"
@@ -91,7 +91,7 @@ def test_sweep_archives_every_pending_revision_of_the_series(design_db, monkeypa
 def test_sweep_leaves_already_archived_designs_alone(design_db, monkeypatch):
     rev = _make(design_db, "Done", age_days=90)
     design_db.dismiss_design(rev)
-    monkeypatch.setattr(design_shares, "shared_design_ids", lambda org, now=None: set())
+    monkeypatch.setattr(design_shares, "shared_design_ids", lambda org, now=None, strict=False: set())
     result = design_lifecycle.sweep(now=NOW, live=set())
     assert result["archived"] == [] and result["checked"] == 0
 
@@ -149,8 +149,52 @@ def test_share_for_target_treats_design_and_present_grants_alike_and_others_stri
         {"target_uuid": "note-1", "target_type": "note", "token": "n", "issued_at": "2026-09-02T00:00:00Z"},
     ]
     monkeypatch.setattr(design_shares, "active_grants",
-                        lambda org, types=design_shares.SHARE_TARGET_TYPES, now=None: [g for g in grants if g["target_type"] in set(types)])
+                        lambda org, types=design_shares.SHARE_TARGET_TYPES, now=None, strict=False: [g for g in grants if g["target_type"] in set(types)])
     assert design_shares.share_for_target("autonomy", "design", "deck-1")["shared"] is True    # present grant reaches the design
     assert design_shares.share_for_target("autonomy", "note", "note-1")["grants"][0]["token"] == "n"
     assert design_shares.share_for_target("autonomy", "note", "deck-1")["shared"] is False    # a deck grant is not a note grant
     assert design_shares.share_for_target("autonomy", "present", "other", ["deck-1"])["shared"] is True
+
+
+# ── auto-2v6ay.2: the sweep archives only what it KNOWS is unshared ─────────
+
+
+def test_sweep_keeps_a_quiet_design_with_no_org(design_db, monkeypatch):
+    """No org means no grant set to consult; it used to default to
+    "autonomy", whose failed read said "not shared"."""
+    from tools.dashboard import design_lifecycle, design_shares
+    asked = []
+    monkeypatch.setattr(design_shares, "shared_design_ids",
+                        lambda org, now=None, strict=False: asked.append(org) or set())
+    rev = _make(design_db, "orphan", age_days=30, org=None)
+    result = design_lifecycle.sweep(now=NOW, live=set())
+    assert _status(design_db, rev) == "pending"
+    assert result["archived"] == [] and result["kept_unknown"] == 1
+    assert asked == []
+
+
+def test_sweep_keeps_designs_whose_grants_cannot_be_read(design_db, monkeypatch):
+    from tools.dashboard import design_lifecycle, design_shares
+    from tools.graph.db import GraphDBMissing
+
+    def unreadable(org, now=None, strict=False):
+        assert strict is True, "the sweep must ask for a strict read"
+        raise GraphDBMissing("no store for boatlore")
+    monkeypatch.setattr(design_shares, "shared_design_ids", unreadable)
+    first = _make(design_db, "a", age_days=30, org="boatlore")
+    second = _make(design_db, "b", age_days=30, org="boatlore")
+    result = design_lifecycle.sweep(now=NOW, live=set())
+    assert _status(design_db, first) == "pending" and _status(design_db, second) == "pending"
+    assert result["kept_unknown"] == 2 and result["archived"] == []
+
+
+def test_strict_grant_read_raises_instead_of_answering_none(monkeypatch):
+    from tools.dashboard import design_shares
+    from tools.graph import settings_ops
+
+    def boom(*a, **k):
+        raise RuntimeError("store missing")
+    monkeypatch.setattr(settings_ops, "read_owned_set", boom)
+    assert design_shares.shared_design_ids("boatlore") == set()
+    with pytest.raises(RuntimeError):
+        design_shares.shared_design_ids("boatlore", strict=True)

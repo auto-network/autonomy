@@ -584,3 +584,40 @@ def test_only_guests_get_a_face():
 
     assert compose._guest_avatar("auto-0709-092918") is None
     assert compose._guest_avatar(None) is None
+
+
+# ── auto-2v6ay.2: presence lives in the mission's own org ──────────────────
+
+
+def test_presence_org_is_the_missions_org_else_personal(monkeypatch):
+    from tools.dashboard.plugins.mission_control import compose
+    missions = {"m-org": {"mission_id": "m-org", "org": "boatlore"},
+                "m-none": {"mission_id": "m-none", "org": ""}}
+    pillars = {"p-1": {"pillar_id": "p-1", "mission_id": "m-org"}}
+    monkeypatch.setattr(compose.db, "get_mission", lambda mid: missions.get(mid))
+    monkeypatch.setattr(compose.db, "get_pillar", lambda pid: pillars.get(pid))
+    assert compose.presence_org("mission:m-org") == "boatlore"
+    assert compose.presence_org("pillar:p-1") == "boatlore"
+    assert compose.presence_org("mission:m-none") == "personal"
+    assert compose.presence_org("mission:missing") == "personal"
+    assert compose.presence_org("elsewhere:x") == "personal"
+    assert not hasattr(compose, "PRESENCE_ORG")
+
+
+def test_a_guests_face_is_read_from_where_it_was_written_whatever_the_missions_org(monkeypatch):
+    """Review of b6f30303: presence follows the mission's org, but a face
+    belongs to the visitor. A guest on a mission homed in "autonomy" still
+    shows the photo that was stored in GUEST_FACE_ORG."""
+    from tools.dashboard.plugins.mission_control import compose
+    from tools.dashboard.dao import mission_control_db as db
+    from tools.graph import ops as graph_ops
+
+    asked = []
+    monkeypatch.setattr(graph_ops, "get_attachment",
+                        lambda aid, org=None, **k: asked.append(org) or None)
+    monkeypatch.setattr(db, "get_visitor_by_participant_id",
+                        lambda pid, **kw: {"avatar_attachment_id": "att-1"})
+    monkeypatch.setattr(compose.db, "get_mission",
+                        lambda mid: {"mission_id": mid, "org": "autonomy"})
+    compose._guest_avatar("guest:someone")
+    assert asked == [compose.GUEST_FACE_ORG] == ["personal"]

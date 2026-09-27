@@ -39,8 +39,9 @@ SHARE_TARGET_TYPES = ("design", "present", "note", "mission")
 
 
 def active_grants(org: str | None, target_types: Iterable[str] = SHARE_TARGET_TYPES,
-                  *, now: datetime | None = None) -> list[dict]:
-    """Every unexpired grant of the given types the org holds, newest first."""
+                  *, now: datetime | None = None, strict: bool = False) -> list[dict]:
+    """Every unexpired grant of the given types the org holds, newest first.
+    An unreadable grant set reads as none, or raises when ``strict``."""
     wanted = set(target_types)
     from tools.dashboard import link_approvals
     from tools.dashboard.link_channel_key import fragment_url
@@ -60,6 +61,8 @@ def active_grants(org: str | None, target_types: Iterable[str] = SHARE_TARGET_TY
             target_revision=NETWORK_LINK_GRANT_REVISION,
         ).members
     except Exception:
+        if strict:
+            raise
         logger.debug("design-shares: no readable grant set for org %r", org, exc_info=True)
         return []
     grants = []
@@ -89,13 +92,14 @@ def active_grants(org: str | None, target_types: Iterable[str] = SHARE_TARGET_TY
     return grants
 
 
-def active_design_grants(org: str | None, *, now: datetime | None = None) -> list[dict]:
+def active_design_grants(org: str | None, *, now: datetime | None = None,
+                         strict: bool = False) -> list[dict]:
     """Every unexpired design/present grant the org holds, newest first."""
-    return active_grants(org, DESIGN_TARGET_TYPES, now=now)
+    return active_grants(org, DESIGN_TARGET_TYPES, now=now, strict=strict)
 
 
 def share_for_target(org: str | None, target_type: str, target_uuid: str,
-                     extra_ids: Iterable[str] = ()) -> dict:
+                     extra_ids: Iterable[str] = (), *, strict: bool = False) -> dict:
     """Share state for any shareable asset: ``{"shared", "grants"}``.
 
     Design and Present grants are interchangeable (both serve the design's
@@ -104,13 +108,20 @@ def share_for_target(org: str | None, target_type: str, target_uuid: str,
     """
     types = DESIGN_TARGET_TYPES if target_type in DESIGN_TARGET_TYPES else (target_type,)
     ids = {str(target_uuid)} | {str(i) for i in extra_ids if i}
-    mine = [g for g in active_grants(org, types) if g.get("target_uuid") in ids]
+    mine = [g for g in active_grants(org, types, strict=strict)
+            if g.get("target_uuid") in ids]
     return {"shared": bool(mine), "grants": mine}
 
 
-def shared_design_ids(org: str | None, *, now: datetime | None = None) -> set[str]:
-    """The target ids (design ids or revision ids) with an active grant."""
-    return {g["target_uuid"] for g in active_design_grants(org, now=now) if g["target_uuid"]}
+def shared_design_ids(org: str | None, *, now: datetime | None = None,
+                      strict: bool = False) -> set[str]:
+    """The target ids (design ids or revision ids) with an active grant.
+
+    ``strict=True`` raises when the org's grants cannot be read instead of
+    answering "none": a caller that destroys on "not shared" (the quiet
+    archive sweep) must not treat "could not tell" as "not shared"."""
+    return {g["target_uuid"] for g in active_design_grants(org, now=now, strict=strict)
+            if g["target_uuid"]}
 
 
 def share_for_design(

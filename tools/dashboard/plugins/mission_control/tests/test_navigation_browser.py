@@ -46,7 +46,7 @@ from tools.dashboard.dao import mission_control_db as db
 from pathlib import Path
 db.DB_PATH = Path({db!r})
 db.init_db(db.DB_PATH)
-m = db.create_mission("Nav Test")
+m = db.create_mission("Nav Test", org="testorg")
 mid = m["mission_id"]
 db.push_site_revision(mid, "<body><h1>OVERVIEW SCREEN</h1></body>", "r1")
 pid = db.create_pillar(mid, "Second Pillar", "sess", "#4ade80")["pillar_id"]
@@ -197,7 +197,7 @@ def test_clicking_a_pillar_swaps_the_document_over_the_relay(server, tmp_path):
 
     db.DB_PATH = Path(os.environ["MISSION_CONTROL_DB"])
     db.init_db(db.DB_PATH)
-    mid = db.create_mission("Relay Nav")["mission_id"]
+    mid = db.create_mission("Relay Nav", org="testorg")["mission_id"]
     db.push_site_revision(mid, "<body><h1>OVERVIEW</h1></body>", "r1")
     pid = db.create_pillar(mid, "Second Pillar", "s", "#4ade80")["pillar_id"]
     db.set_pillar_last_done(pid, "Finished a thing.")
@@ -281,7 +281,7 @@ def test_a_refused_ask_says_so_instead_of_clearing_the_box(tmp_path):
 
     db.DB_PATH = Path(os.environ["MISSION_CONTROL_DB"])
     db.init_db(db.DB_PATH)
-    mid = db.create_mission("Refusal")["mission_id"]
+    mid = db.create_mission("Refusal", org="testorg")["mission_id"]
     db.push_site_revision(mid, "<body><h1>SCREEN</h1></body>", "r1")
 
     page = tmp_path / "refusing-host.html"

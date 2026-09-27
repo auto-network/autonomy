@@ -437,7 +437,7 @@
     try {
       var ids = (this.opts.extraIds || []).filter(Boolean).join(',');
       var url = '/api/share-state/' + encodeURIComponent(this.opts.targetType) + '/' + encodeURIComponent(this.opts.targetUuid)
-        + '?org=' + encodeURIComponent(this.opts.org || 'autonomy') + (ids ? '&ids=' + encodeURIComponent(ids) : '');
+        + '?org=' + encodeURIComponent(this.opts.org || 'personal') + (ids ? '&ids=' + encodeURIComponent(ids) : '');
       var res = await fetcher()(url);
       if (this._destroyed || !res.ok) return;
       var data = await res.json();
@@ -468,7 +468,7 @@
           kind: 'link_publish',
           session: 'dashboard-ui',
           request: {
-            org: this.opts.org || 'autonomy',
+            org: this.opts.org || 'personal',
             target_type: this.opts.targetType,
             target_uuid: this.opts.targetUuid,
             meta: {},
@@ -562,7 +562,7 @@
   Control.prototype.manage = function () {
     var grant = this.primaryGrant();
     if (window.AutonomyOrgSettings && typeof window.AutonomyOrgSettings.open === 'function') {
-      window.AutonomyOrgSettings.open(this.opts.org || 'autonomy', { screen: 'published-links', focus: grant ? grant.token : '' });
+      window.AutonomyOrgSettings.open(this.opts.org || 'personal', { screen: 'published-links', focus: grant ? grant.token : '' });
     }
   };
 

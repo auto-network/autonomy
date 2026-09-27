@@ -35,7 +35,7 @@ from tools.dashboard.plugins.mission_control import compose
 from tools.graph.surface import Presence
 with Presence(surface_id="mission:probe-mission", participant_kind="agent",
               participant_id="probe-writer", label="probe-writer",
-              org=compose.PRESENCE_ORG):
+              org=compose.presence_org("mission:probe-mission")):
     pass
 print("wrote")
 """

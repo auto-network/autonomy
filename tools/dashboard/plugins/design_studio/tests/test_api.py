@@ -556,7 +556,8 @@ def test_get_design_series_hides_a_cross_org_design_as_404():
 
 def test_catalog_row_is_shared_when_a_grant_reaches_any_revision():
     rows = _rows()
-    with patch.object(design_api, "_shared_ids_for_org", side_effect=lambda org: {"rev-a1"} if org == "autonomy" else set()):
+    # The rows carry no org, so shares resolve in personal (auto-2v6ay.2, D5).
+    with patch.object(design_api, "_shared_ids_for_org", side_effect=lambda org: {"rev-a1"} if org == "personal" else set()):
         series = {s["design_id"]: s for s in design_api._series_from_rows(rows)}
     assert series["series-a"]["shared"] is True
     assert all(s["shared"] is False for key, s in series.items() if key != "series-a")
@@ -572,12 +573,12 @@ def test_shared_route_lists_grants_that_target_designs_not_on_this_machine():
     ]
     with patch.object(design_api, "_design_rows", return_value=_rows()), \
          patch.object(design_api.api_auth, "organization_scope_from_request", return_value=None), \
-         patch.object(design_shares, "active_design_grants", side_effect=lambda org, now=None: grants if org == "autonomy" else []):
+         patch.object(design_shares, "active_design_grants", side_effect=lambda org, now=None: grants if org == "personal" else []):
         resp = _client().get("/api/design-studio/shared")
     assert resp.status_code == 200
     shares = resp.json()["shares"]
     assert [s["token"] for s in shares] == ["remote"]
-    assert shares[0]["org"] == "autonomy"
+    assert shares[0]["org"] == "personal"
     assert shares[0]["label"] == "Teammate's deck"
 
 

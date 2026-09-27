@@ -532,7 +532,7 @@ def _heartbeat_presence(surface_id: str, participant_id: str,
         with Presence(
             surface_id=surface_id, participant_kind=kind,
             participant_id=participant_id, label=label or participant_id,
-            org=compose.PRESENCE_ORG,
+            org=compose.presence_org(surface_id),
         ):
             pass
     except Exception:
@@ -568,7 +568,7 @@ def _heartbeat_coordinator_presence(surface_id: str, coordinator_session: str) -
             participant_kind="agent",
             participant_id=coordinator_session,
             label=coordinator_session,
-            org=compose.PRESENCE_ORG,
+            org=compose.presence_org(surface_id),
         ):
             pass
     except Exception:
@@ -816,15 +816,17 @@ async def forget_presence(request: Request) -> JSONResponse:
     from tools.graph.surface import SURFACE_PRESENCE_SET_ID
 
     key = f"{surface_id}:{participant_id}"
+    from tools.graph.db import GraphDBMissing
+    org = compose.presence_org(surface_id)
     try:
-        rows = settings_ops.read_set(SURFACE_PRESENCE_SET_ID, org=compose.PRESENCE_ORG)
-    except (LookupError, OSError, ValueError) as exc:
+        rows = settings_ops.read_set(SURFACE_PRESENCE_SET_ID, org=org)
+    except (LookupError, OSError, ValueError, GraphDBMissing) as exc:
         return JSONResponse({"error": f"presence store unavailable: {exc}"},
                             status_code=503)
     for member in rows.members:
         if member.key == key:
             try:
-                settings_ops.remove_setting(member.id, org=compose.PRESENCE_ORG)
+                settings_ops.remove_setting(member.id, org=org)
             except Exception as exc:
                 return JSONResponse({"error": str(exc)}, status_code=409)
             return JSONResponse({"forgotten": key})
@@ -1226,6 +1228,10 @@ def _store_avatar(value, display_name: str) -> tuple[str | None, str | None]:
             # participant photo with no textual equivalent is unreadable
             # to anyone using a screen reader.
             alt_text=f"Profile photo of {display_name}",
+            # Named explicitly, and read back from the same place
+            # (compose.GUEST_FACE_ORG): a face belongs to the visitor, not
+            # to any one mission's org.
+            org=compose.GUEST_FACE_ORG,
         )
     return att["id"], None
 
@@ -1863,11 +1869,12 @@ def _mission_presence(mission_id: str) -> list[dict]:
     from tools.graph.surface import SURFACE_PRESENCE_SET_ID
 
     prefix = f"mission:{mission_id}:"
+    from tools.graph.db import GraphDBMissing
     try:
         rows = settings_ops.read_set(
-            SURFACE_PRESENCE_SET_ID, org=compose.PRESENCE_ORG,
+            SURFACE_PRESENCE_SET_ID, org=compose.presence_org(f"mission:{mission_id}"),
         )
-    except (LookupError, OSError, ValueError):
+    except (LookupError, OSError, ValueError, GraphDBMissing):
         return []  # store genuinely unavailable; a missing arg is not that
     out = []
     for member in rows.members:

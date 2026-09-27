@@ -326,4 +326,20 @@ describe('AssetPresence', () => {
     assert.doesNotMatch(el.html, /disabled aria-busy="true"/);
     ctl.destroy();
   });
+
+  it('an asset with no org reads and requests sharing in personal, never a literal org', async () => {
+    // auto-2v6ay.2 (operator decision D5): the fallback was 'autonomy', an org
+    // a fresh node does not have.
+    const { win, requests } = makeWindow({ responses: { '/api/approvals': { id: 'central-2' } } });
+    win.openApprovalOverlay = () => {};
+    const el = new FakeEl();
+    const ctl = AssetPresence.mount(el, { targetType: 'note', targetUuid: 'note-2', sessions: [] });
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(requests.some((r) => r.url === '/api/share-state/note/note-2?org=personal'));
+    await ctl.requestShare();
+    const post = requests.find((r) => r.url === '/api/approvals');
+    assert.equal(JSON.parse(post.init.body).request.org, 'personal');
+    assert.ok(!requests.some((r) => /org=autonomy/.test(r.url)));
+    ctl.destroy();
+  });
 });

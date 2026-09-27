@@ -401,7 +401,9 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
             form_factor = str(thumb_row.get("form_factor") or "") or _form_factor(thumbnail_revision_id)
         design_org = next(
             (r.get("org") for r in reversed(revisions) if r.get("org")), None)
-        share_org = design_org or "autonomy"
+        # The design's own org, else personal: never a literal org
+        # (auto-2v6ay.2, D5).
+        share_org = design_org or "personal"
         if share_org not in shared_by_org:
             shared_by_org[share_org] = _shared_ids_for_org(share_org)
         shared = any(bool(r.get("shared")) for r in revisions) or bool(
@@ -510,7 +512,7 @@ def _share_state(series: dict, revisions: list[dict]) -> dict:
         from tools.dashboard import design_shares
 
         return design_shares.share_for_design(
-            series.get("org") or "autonomy",
+            series.get("org") or "personal",
             str(series.get("design_id") or ""),
             [str(r.get("id") or "") for r in revisions],
         )
@@ -645,7 +647,7 @@ async def list_shared_remote(request: Request) -> JSONResponse:
         if row.get("org"):
             orgs.add(str(row["org"]))
     scope = api_auth.organization_scope_from_request(request)
-    orgs = {scope} if scope else (orgs | {"autonomy"})
+    orgs = {scope} if scope else (orgs | {"personal"})
     shares = []
     for org in sorted(orgs):
         for grant in design_shares.active_design_grants(org):

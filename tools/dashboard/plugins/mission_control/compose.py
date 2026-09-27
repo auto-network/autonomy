@@ -33,11 +33,33 @@ from tools.dashboard.scripts.build_mission_viewer import bootstrap_source
 #: the guard there does not cover it, because the side that opted out of the
 #: cascade was the WRITER.
 #:
-#: A literal, and honestly so: missions are not org-scoped -- there is one
-#: mission_control.db and no org column on a mission -- so their presence
-#: surface cannot be either. When a mission carries an org, this derives from
-#: the mission and stops being a constant.
-PRESENCE_ORG = "autonomy"
+#: Presence lives in the mission's own org. It was the literal "autonomy"
+#: while missions had no org; they do now, and a node without that org
+#: failed every presence read and write (auto-2v6ay.2, D5). A mission with no
+#: org, or a surface whose mission cannot be found, uses personal: every
+#: identity has one.
+
+
+#: Where a guest's photo is stored and read. A face belongs to the visitor,
+#: not to a surface: one guest, one photo, shown on any mission, so it is not
+#: the mission's org. The upload (entrypoints/api.py ``_store_avatar``) and
+#: this reader both name it, so they cannot drift apart.
+GUEST_FACE_ORG = "personal"
+
+
+def presence_org(surface_id: str) -> str:
+    """The org whose presence rows a surface uses: ``mission:<id>`` or
+    ``pillar:<id>`` resolves to that mission's org, else personal. The
+    reader and every writer derive it the same way, so they meet."""
+    kind, _, ident = str(surface_id).partition(":")
+    ident = ident.split(":", 1)[0]
+    try:
+        if kind == "pillar":
+            ident = (db.get_pillar(ident) or {}).get("mission_id") or ""
+        mission = db.get_mission(ident) if kind in ("mission", "pillar") and ident else None
+    except Exception:
+        mission = None
+    return (dict(mission).get("org") if mission else "") or "personal"
 
 #: The width a face is drawn at, doubled for sharp screens.
 _FACE_PX = 48
@@ -131,9 +153,8 @@ def _presence(surface_id: str, now: float) -> list[dict]:
         # org's database at all (a container worktree, a fresh node) is the
         # "store genuinely unavailable" case in its purest form -- it used to
         # escape as a RuntimeError and take the whole screen down with it.
-        rows = settings_ops.read_set(
-            SURFACE_PRESENCE_SET_ID, org=PRESENCE_ORG,
-        )
+        org = presence_org(surface_id)
+        rows = settings_ops.read_set(SURFACE_PRESENCE_SET_ID, org=org)
     except (LookupError, OSError, ValueError, GraphDBMissing):
         return []          # store genuinely unavailable: render nobody
     here = []
@@ -174,7 +195,7 @@ def _face_bytes(attachment_id: str) -> str | None:
     """
     from tools.graph import ops as _ops
 
-    att = _ops.get_attachment(attachment_id, org=PRESENCE_ORG)
+    att = _ops.get_attachment(attachment_id, org=GUEST_FACE_ORG)
     if not att:
         return None
     path = Path(att.get("file_path") or "")

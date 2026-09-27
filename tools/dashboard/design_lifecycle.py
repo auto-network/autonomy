@@ -119,10 +119,16 @@ def sweep(
     shared: dict[str, set[str]] | None = None,
 ) -> dict:
     """Archive quiet designs.  Returns ``{"archived": [...], "kept_live": n,
-    "kept_shared": n, "checked": n}``.
+    "kept_shared": n, "kept_unknown": n, "checked": n}``.
 
     ``shared`` maps org slug -> ids with an active grant; when omitted it is
     read from the org's link grants for each org that appears.
+
+    A design is archived only when the sweep KNOWS it is not shared. A design
+    with no org has no grant set to consult, and an org whose grants cannot
+    be read cannot vouch for anything; both are kept (``kept_unknown``). This
+    used to default the org to "autonomy", whose failed read answered "none",
+    so a shared design could be archived (auto-2v6ay.2, ruling (c)).
     """
     from agents.design_db import _get_conn
     from tools.dashboard import design_shares
@@ -132,7 +138,8 @@ def sweep(
     live = live_session_ids() if live is None else live
     shared = dict(shared) if shared is not None else {}
     archived: list[str] = []
-    kept_live = kept_shared = 0
+    kept_live = kept_shared = kept_unknown = 0
+    unreadable: set[str] = set()
     checked = 0
     to_archive: list[str] = []
     for design_id, revisions in active_series().items():
@@ -145,9 +152,20 @@ def sweep(
         if sessions & live:
             kept_live += 1
             continue
-        org = next((r.get("org") for r in reversed(revisions) if r.get("org")), None) or "autonomy"
+        org = next((r.get("org") for r in reversed(revisions) if r.get("org")), None)
+        if org is None or org in unreadable:
+            kept_unknown += 1
+            continue
         if org not in shared:
-            shared[org] = design_shares.shared_design_ids(org, now=now)
+            try:
+                shared[org] = design_shares.shared_design_ids(org, now=now, strict=True)
+            except Exception:
+                logger.warning(
+                    "design-lifecycle: link grants of org %r are unreadable; "
+                    "keeping its quiet designs", org, exc_info=True)
+                unreadable.add(org)
+                kept_unknown += 1
+                continue
         ids = {design_id} | {str(r.get("id")) for r in revisions}
         if ids & shared[org]:
             kept_shared += 1
@@ -167,7 +185,8 @@ def sweep(
             conn.close()
         archived = to_archive
         logger.info(
-            "design-lifecycle: archived %d quiet design(s) (kept %d live, %d shared)",
-            len(archived), kept_live, kept_shared,
+            "design-lifecycle: archived %d quiet design(s) (kept %d live, %d shared, "
+            "%d unknown)", len(archived), kept_live, kept_shared, kept_unknown,
         )
-    return {"archived": archived, "kept_live": kept_live, "kept_shared": kept_shared, "checked": checked}
+    return {"archived": archived, "kept_live": kept_live, "kept_shared": kept_shared,
+            "kept_unknown": kept_unknown, "checked": checked}

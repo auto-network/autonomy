@@ -11819,11 +11819,15 @@ async def api_share_state(request):
     if refused is not None:
         return refused
     if not isinstance(org, str) or not org:
-        org = requested_org or "autonomy"
+        # The asset's own org when the surface names it, else personal: never
+        # a literal org (auto-2v6ay.2, D5).
+        org = requested_org or "personal"
     extra = [part for part in (request.query_params.get("ids") or "").split(",") if part]
     try:
+        # strict: an unreadable grant set is "unavailable", not "not shared".
         state = await asyncio.to_thread(
             design_shares.share_for_target, org, target_type, target_uuid, extra,
+            strict=True,
         )
     except Exception:
         logger.exception("share-state: unavailable for %s/%s", target_type, target_uuid)
