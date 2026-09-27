@@ -520,17 +520,19 @@ def test_a_renewed_tls_pair_triggers_the_same_handoff(sup, monkeypatch, tmp_path
     context per worker), so the vault stays warm and no connection drops."""
     import os
 
-    cert = tmp_path / "tls.crt"
-    key = tmp_path / "tls.key"
-    cert.write_text("CERT-1")
-    key.write_text("KEY-1")
+    from tools.dashboard.tests.test_certificate_attention import _pem_pair
+
+    cert, key = _pem_pair(tmp_path, ["node.tailabcd.ts.net"], days=30)
+    (tmp_path / "renewed").mkdir()
+    new_cert, new_key = _pem_pair(tmp_path / "renewed", ["node.tailabcd.ts.net"], days=90)
     sup = _looping(sup, monkeypatch)
     sup.config.ssl_certfile = str(cert)
     sup.config.ssl_keyfile = str(key)
 
     def renew():
-        key.write_text("KEY-2")
-        cert.write_text("CERT-2")
+        # As the renewal script does: the key moves first, then the certificate.
+        key.write_bytes(new_key.read_bytes())
+        cert.write_bytes(new_cert.read_bytes())
         os.utime(cert, ns=(cert.stat().st_atime_ns, cert.stat().st_mtime_ns + 1_000_000))
         sup.timeline.append("renewed")
         return None
@@ -548,11 +550,12 @@ def test_a_renewed_tls_pair_triggers_the_same_handoff(sup, monkeypatch, tmp_path
 
 
 def test_an_unchanged_tls_pair_never_restarts(sup, monkeypatch, tmp_path):
-    cert = tmp_path / "tls.crt"
-    cert.write_text("CERT")
+    from tools.dashboard.tests.test_certificate_attention import _pem_pair
+
+    cert, key = _pem_pair(tmp_path, ["node.tailabcd.ts.net"], days=30)
     sup = _looping(sup, monkeypatch)
     sup.config.ssl_certfile = str(cert)
-    sup.config.ssl_keyfile = None
+    sup.config.ssl_keyfile = str(key)
     sup.script = [_make_ready(sup), lambda: None, lambda: None, _exit()]
     rwn._run_with_handoff(sup)
     assert len([e for e in sup.timeline if e.startswith("spawn:")]) == 1

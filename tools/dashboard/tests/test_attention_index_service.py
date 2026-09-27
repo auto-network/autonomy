@@ -56,6 +56,7 @@ EXPECTED_APPLICATIONS = {
     "fleet": "Fleet",
     "dropbox": "Dropbox",
     "backup": "Backup",
+    "machine": "Machines",
 }
 
 # Non-approval classes (auto-e4e66): kind -> (application, class).
@@ -64,6 +65,12 @@ EXPECTED_NON_APPROVAL_KIND_CLASS = {
     "backup.stale": ("backup", "backup_stale"),
     "backup.drill_failed": ("backup", "restore_drill_failed"),
     "backup.offsite_unreachable": ("backup", "offsite_unreachable"),
+    "machine.tls_certificate_expiring": ("machine", "tls_certificate_expiring"),
+}
+#: Each non-approval scope carries its own locked policy profile.
+EXPECTED_NON_APPROVAL_POLICY = {
+    "backup": AttentionClassPolicy.backup_phase_one,
+    "machine": AttentionClassPolicy.machine_phase_one,
 }
 
 EXPECTED_KIND_CLASS = {
@@ -217,7 +224,7 @@ def test_production_registry_has_exact_apps_kinds_and_uniform_policy():
             application, notification_class,
         )
         assert binding.surface_category == "apps"
-        assert binding.policy == AttentionClassPolicy.backup_phase_one()
+        assert binding.policy == EXPECTED_NON_APPROVAL_POLICY[application]()
         assert binding.runtime is None
     assert all(not row.enabled for row in registry.application_records())
 
@@ -358,9 +365,9 @@ def test_attention_runtime_cannot_activate_an_unmigrated_approval_kind():
 def test_registration_sync_writes_exact_personal_rows_and_is_idempotent():
     store = InMemoryAttentionIndexStore()
     service = _service(store=store)
-    assert service.sync_registrations() == 11
+    assert service.sync_registrations() == 12
     assert service.sync_registrations() == 0
-    assert len(store.application_writes) == 11
+    assert len(store.application_writes) == 12
     assert set(store.applications) == set(EXPECTED_APPLICATIONS)
 
 

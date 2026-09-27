@@ -507,6 +507,14 @@ def build_production_runtime() -> AttentionRouteRuntime:
         logging.getLogger(__name__).exception(
             "backup attention runtimes unavailable; backup classes stay "
             "disabled")
+    try:
+        from tools.dashboard.certificate_attention import (
+            publication_runtimes as certificate_publication_runtimes,
+        )
+        runtimes.update(certificate_publication_runtimes())
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "machine attention runtimes unavailable; machine classes stay disabled")
     attention_registry = build_production_attention_registry(
         approval_registry=approval_registry,
         runtimes=runtimes,

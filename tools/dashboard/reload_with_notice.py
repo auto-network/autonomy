@@ -336,8 +336,13 @@ def _respawn_dead_worker(self: BaseReload) -> None:
 # ── the TLS pair ───────────────────────────────────────────────────────────
 
 def _tls_pair_signature(config) -> tuple | None:
-    """(inode, mtime_ns) of the certificate and key the server was started
-    with, or None when the server is plain HTTP or a file is missing."""
+    """(inode, size, content digest) of the certificate and key the server was
+    started with, or None when the server is plain HTTP or a file is missing.
+    The content digest is what decides: an mtime is coarse on some
+    filesystems and a same-second rewrite must still be seen (the files are a
+    few kilobytes, read once per watcher tick)."""
+    import hashlib
+
     paths = [getattr(config, name, None) for name in ("ssl_certfile", "ssl_keyfile")]
     if not paths[0]:
         return None
@@ -347,9 +352,11 @@ def _tls_pair_signature(config) -> tuple | None:
             continue
         try:
             st = os.stat(path)
+            with open(path, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
         except OSError:
             return None
-        signature.append((st.st_ino, st.st_mtime_ns))
+        signature.append((st.st_ino, st.st_size, digest))
     return tuple(signature)
 
 
@@ -360,8 +367,20 @@ def _tls_pair_changed(self: BaseReload) -> bool:
     connection. The renewal script only installs the pair; this notices it."""
     current = _tls_pair_signature(self.config)
     previous = getattr(self, "_tls_pair", None)
+    if previous is None or current is None or current == previous:
+        self._tls_pair = current
+        return False
+    # Only a pair that loads is worth a hand-off: a worker spawned on a
+    # half-written or mismatched pair would fail its SSL load and die, and
+    # the incumbent would serve on. Try again at the next tick instead.
+    try:
+        ssl.create_default_context().load_cert_chain(
+            self.config.ssl_certfile, getattr(self.config, "ssl_keyfile", None) or None)
+    except Exception as exc:
+        logger.warning("TLS pair changed on disk but does not load yet (%s); waiting", exc)
+        return False
     self._tls_pair = current
-    return previous is not None and current is not None and current != previous
+    return True
 
 
 def _run_with_handoff(self: BaseReload) -> None:

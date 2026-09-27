@@ -50,7 +50,16 @@ _BACKUP_POLICY_VALUES = {
     "route_builder_id": "backup.page.v1",
     "destination_id": "backup.page",
 }
-_POLICY_PROFILES = (_POLICY_VALUES, _BACKUP_POLICY_VALUES)
+#: Machine facts that need the operator (auto-1ei8m part 2): the served TLS
+#: certificate nearing expiry. Same system_health budget as backup; the
+#: Machines page is the destination, focused on this machine's card, which
+#: carries the remediation text.
+_MACHINE_POLICY_VALUES = {
+    **_BACKUP_POLICY_VALUES,
+    "route_builder_id": "fleet.machine.v1",
+    "destination_id": "fleet.machine",
+}
+_POLICY_PROFILES = (_POLICY_VALUES, _BACKUP_POLICY_VALUES, _MACHINE_POLICY_VALUES)
 _APPLICATION_META = {
     "worktrees": ("Worktrees", "attention.application.worktrees"),
     "jira": ("Jira", "attention.application.jira"),
@@ -63,6 +72,7 @@ _APPLICATION_META = {
     "fleet": ("Fleet", "attention.application.fleet"),
     "dropbox": ("Dropbox", "attention.application.dropbox"),
     "backup": ("Backup", "attention.application.backup"),
+    "machine": ("Machines", "attention.application.machine"),
 }
 
 #: Non-approval attention classes, by application scope (auto-e4e66,
@@ -77,6 +87,9 @@ _APPLICATION_CLASSES = {
         ("backup.stale", "backup_stale"),
         ("backup.drill_failed", "restore_drill_failed"),
         ("backup.offsite_unreachable", "offsite_unreachable"),
+    ),
+    "machine": (
+        ("machine.tls_certificate_expiring", "tls_certificate_expiring"),
     ),
 }
 #: Which locked policy profile each non-approval scope's classes carry.
@@ -154,6 +167,10 @@ class AttentionClassPolicy:
     def backup_phase_one(cls) -> "AttentionClassPolicy":
         return cls(**_BACKUP_POLICY_VALUES)
 
+    @classmethod
+    def machine_phase_one(cls) -> "AttentionClassPolicy":
+        return cls(**_MACHINE_POLICY_VALUES)
+
     def to_payload(self) -> dict[str, Any]:
         return {
             "class_policy_revision": self.class_policy_revision,
@@ -171,6 +188,7 @@ class AttentionClassPolicy:
 
 
 _SCOPE_POLICY_FACTORY["backup"] = AttentionClassPolicy.backup_phase_one
+_SCOPE_POLICY_FACTORY["machine"] = AttentionClassPolicy.machine_phase_one
 
 
 def destination_route(
@@ -192,6 +210,10 @@ def destination_route(
         # The backup page IS the review surface; every backup class
         # coalesces there (auto-e4e66).
         return "/backup"
+    if key == ("fleet.machine.v1", "fleet.machine"):
+        # The Machines page, focused on the machine the fact is about; its
+        # card explains the condition and names the remedy (auto-1ei8m).
+        return "/fleet?" + urlencode({"focus": source_guard_ref})
     raise ValueError("unregistered attention route builder")
 
 

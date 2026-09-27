@@ -22,6 +22,8 @@ function fleetPage() {
       word: {
         serving: 'Serving', locked: 'Needs unlock', tunnel: 'Tunnel down',
         cert: 'Certificate expired', restart: 'Restart needed',
+        cert_expiring: 'Dashboard certificate expires soon',
+        cert_expired: 'Dashboard certificate expired',
         paused: 'Paused', away: 'Disconnected', failing: 'Failing',
         first: 'Not synced yet', synced: 'Synced', idle: '',
         link_off: 'Invite link off',
@@ -38,6 +40,8 @@ function fleetPage() {
         first: 'This machine has joined your fleet but has not synchronized with this dashboard yet. Syncing starts automatically once it comes online.',
         link_off: 'This machine was approved, but its invitation link is not active — reactivate the link on this dashboard to finish setup and start syncing.',
         paused: 'This machine is running a different version of Autonomy. Synchronization will resume once the versions match.',
+        cert_expiring: 'The certificate this dashboard serves expires in {days} days. The monthly renewal did not replace it: run tools/dashboard/renew-tls-cert.sh on this machine and read data/cert-renew.log.',
+        cert_expired: 'The certificate this dashboard serves has expired. Run tools/dashboard/renew-tls-cert.sh on this machine and read data/cert-renew.log.',
         away: 'Not responding — it may be asleep or offline. Syncing resumes automatically when it comes back.',
         failing: 'Sync attempts are failing and will keep retrying. If this keeps happening, make sure both machines are up to date.',
       },
@@ -111,6 +115,7 @@ function fleetPage() {
         adapted.runningStale = local.runningStale === true;
         adapted.certStatus = local.certStatus || null;
         adapted.certValidUntil = local.certValidUntil;
+        adapted.dashboardCertificate = local.dashboardCertificate || null;
       }
       return adapted;
     },
@@ -555,6 +560,8 @@ function fleetPage() {
         else if (serving && this.tunnelDegraded(machine)) { id = 'degraded'; tone = 'warn'; }
         else if (serving && !machine.tunnelServing) { id = 'tunnel'; tone = 'failed'; }
         else if (serving && machine.certValidUntil != null && Date.now() > machine.certValidUntil) { id = 'cert'; tone = 'failed'; }
+        else if (machine.dashboardCertificate && machine.dashboardCertificate.daysRemaining <= 0) { id = 'cert_expired'; tone = 'failed'; }
+        else if (machine.dashboardCertificate && machine.dashboardCertificate.expiring) { id = 'cert_expiring'; tone = 'warn'; }
         else if (machine.runningBuild !== machine.installedBuild) { id = 'restart'; tone = 'warn'; }
         else if (serving) { id = 'serving'; tone = 'good'; }
         else { id = 'idle'; tone = 'good'; }
@@ -585,7 +592,8 @@ function fleetPage() {
       return {
         id, tone,
         word: this.STRINGS.word[id] || '',
-        note: (this.STRINGS.note[id] || '').replace('{scopes}', scopes.join(', ') || 'this dashboard'),
+        note: (this.STRINGS.note[id] || '').replace('{scopes}', scopes.join(', ') || 'this dashboard')
+          .replace('{days}', String(Math.max(0, Math.floor(((machine.dashboardCertificate || {}).daysRemaining) || 0)))),
       };
     },
     machineHealthy(machine) { return this.machineState(machine).tone === 'good'; },

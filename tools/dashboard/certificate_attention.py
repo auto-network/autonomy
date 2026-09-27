@@ -1,0 +1,168 @@
+"""Central attention for the served TLS certificate (auto-1ei8m part 2).
+
+The renewal cron on Home failed silently for three months. Whatever the cause
+of a future failure, the operator must hear about it before the certificate
+expires: this deriver reads the served certificate's NotAfter and publishes a
+``machine.tls_certificate_expiring`` item under 21 days, resolved once a fresh
+certificate is served. The item opens the Machines page focused on this
+machine, whose card explains the condition and names the remedy.
+
+Registration of the class is closed substrate code (attention_registry); this
+module supplies the publication runtime, the deriver and the loop.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime, timezone
+
+from tools.dashboard.attention_registry import (
+    AttentionIndexError,
+    AttentionProjectionPlan,
+    AttentionPublicationRuntime,
+    AttentionSourceEvidence,
+)
+from tools.dashboard import tls_certificate
+
+logger = logging.getLogger(__name__)
+
+APPLICATION_SCOPE = "machine"
+KIND = "machine.tls_certificate_expiring"
+#: How often the served certificate is re-read.
+CHECK_INTERVAL_S = 6 * 3600.0
+
+
+def _planner(source: dict) -> AttentionProjectionPlan:
+    return AttentionProjectionPlan(
+        attention_id=source["attention_id"],
+        object_ref=source["object_ref"],
+        participant_role="recipient",
+        attention_state=source["attention_state"],
+        safe_title=source["safe_title"],
+        safe_summary=source.get("safe_summary"),
+        counterparty_ref=None,
+        occurred_at=float(source["occurred_at"]),
+        source_version=int(source["source_version"]),
+    )
+
+
+def _evidence(object_ref: str, source_version: int) -> AttentionSourceEvidence:
+    return AttentionSourceEvidence(
+        source_guard={"kind": "machine", "ref": object_ref, "version": source_version},
+    )
+
+
+def publication_runtimes() -> dict:
+    """(kind, scope) -> runtime, for build_production_attention_registry."""
+    return {
+        (KIND, APPLICATION_SCOPE): AttentionPublicationRuntime(
+            projection_planner=_planner,
+            source_evidence_builder=_evidence,
+        ),
+    }
+
+
+def _machine_id() -> str | None:
+    try:
+        from tools.network import machine_boot
+
+        return machine_boot.machine_id(org="machine")
+    except Exception:
+        return None
+
+
+def derive_condition(facts, *, machine_id: str, now: datetime | None = None) -> dict:
+    """One condition row for this machine's served certificate: needs
+    attention under the warning window (or expired), resolved otherwise.
+    ``source_version`` is the certificate's NotAfter, so a renewed certificate
+    is a newer version and an unchanged one never re-publishes."""
+    now = now or datetime.now(timezone.utc)
+    attention_id = f"machine:{machine_id}:tls-certificate"
+    object_ref = machine_id
+    condition = tls_certificate.expiry_condition(facts, now=now)
+    if condition is None:
+        version = int(facts.not_after.timestamp()) if facts is not None else 0
+        return {
+            "kind": KIND, "attention_id": attention_id, "object_ref": object_ref,
+            "attention_state": "resolved",
+            "safe_title": "Dashboard certificate is current",
+            "safe_summary": None,
+            "occurred_at": now.timestamp(), "source_version": version,
+        }
+    days = condition["days"]
+    if condition["state"] == "expired":
+        title = "Dashboard certificate has expired"
+        summary = (f"The certificate this dashboard serves expired on {condition['not_after']}. "
+                   "Renew it (tools/dashboard/renew-tls-cert.sh) so browsers and the fleet can connect.")
+    else:
+        title = f"Dashboard certificate expires in {int(days)} days"
+        summary = (f"The certificate this dashboard serves expires on {condition['not_after']}. "
+                   "The monthly renewal did not replace it; run tools/dashboard/renew-tls-cert.sh "
+                   "and check data/cert-renew.log.")
+    return {
+        "kind": KIND, "attention_id": attention_id, "object_ref": object_ref,
+        "attention_state": "needs_attention",
+        "safe_title": title, "safe_summary": summary,
+        "occurred_at": now.timestamp(),
+        "source_version": int(facts.not_after.timestamp()),
+    }
+
+
+def publish_condition(index, condition: dict) -> str:
+    """Publish one condition through the sealed-producer seam; returns
+    published | skipped | error:<code>. Resolved rows publish only when the
+    item is currently open; an unchanged version never re-publishes."""
+    attention_id = condition["attention_id"]
+    try:
+        current = index.store.get_item(attention_id)
+    except Exception:
+        current = None
+    payload = getattr(current, "payload", None) or {}
+    if condition["attention_state"] == "resolved":
+        if payload.get("attention_state") != "needs_attention":
+            return "skipped"
+        try:
+            stored_version = int(payload.get("source_version") or 0)
+        except (TypeError, ValueError):
+            stored_version = 0
+        condition["source_version"] = max(int(condition["source_version"]), stored_version + 1)
+    elif (payload.get("attention_state") == condition["attention_state"]
+            and payload.get("source_version") == condition["source_version"]):
+        return "skipped"
+    try:
+        producer = index.registry.producer(condition["kind"], APPLICATION_SCOPE)
+        index.publish(producer, condition)
+        return "published"
+    except AttentionIndexError as exc:
+        return "skipped" if exc.code == "stale_source" else f"error:{exc.code}"
+    except Exception as exc:  # never let one row kill the cycle
+        return f"error:{exc}"
+
+
+def run_cycle(now: datetime | None = None) -> dict:
+    """One pass: read the served certificate, derive, publish."""
+    from tools.dashboard import attention_routes
+
+    machine_id = _machine_id()
+    if not machine_id:
+        return {"outcome": "skipped", "reason": "no machine identity"}
+    facts = tls_certificate.read_certificate()
+    condition = derive_condition(facts, machine_id=machine_id, now=now)
+    outcome = publish_condition(attention_routes._runtime.index, condition)
+    return {"outcome": outcome, "state": condition["attention_state"],
+            "title": condition["safe_title"]}
+
+
+async def loop() -> None:
+    """Runs for the life of the worker: once at start, then every six hours."""
+    while True:
+        try:
+            outcome = await asyncio.to_thread(run_cycle)
+            if outcome.get("outcome") == "published" or str(outcome.get("outcome", "")).startswith("error"):
+                logger.info("certificate attention cycle: %s", outcome)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("certificate attention cycle failed")
+        await asyncio.sleep(CHECK_INTERVAL_S)

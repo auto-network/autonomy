@@ -360,6 +360,7 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
     assert absent == {
         "connectorArmed": None,
         "runningStale": None,
+        "dashboardCertificate": None,
         "certStatus": None,
         "certValidUntil": None,
         "tunnelServing": None,
@@ -381,6 +382,7 @@ def test_local_machine_block_reports_probe_facts_or_stays_null():
         tunnel_serving=False,
     ))["localMachine"]
     assert view == {
+        "dashboardCertificate": None,
         "connectorArmed": False,
         "runningStale": True,
         "certStatus": "ok",

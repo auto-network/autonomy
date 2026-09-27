@@ -256,6 +256,25 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
     )
 
 
+def _dashboard_certificate() -> dict | None:
+    """{daysRemaining, notAfter, expiring} for the served certificate, or
+    None when there is none to read."""
+    try:
+        from tools.dashboard import tls_certificate
+
+        facts = tls_certificate.read_certificate()
+    except Exception:
+        return None
+    if facts is None:
+        return None
+    days = facts.days_remaining()
+    return {
+        "daysRemaining": round(days, 1),
+        "notAfter": int(facts.not_after.timestamp() * 1000),
+        "expiring": days <= tls_certificate.EXPIRY_WARNING_DAYS,
+    }
+
+
 def _display_id(machine_id: str) -> str:
     return f"{machine_id[:6]}…{machine_id[-6:]}"
 
@@ -849,6 +868,10 @@ def project(inputs: ProjectionInputs) -> dict:
         "certValidUntil": (
             cert_not_after * 1000 if isinstance(cert_not_after, int) else None
         ),
+        # The certificate this dashboard SERVES (not the serving delegate):
+        # its expiry is a machine fact the operator must see before the
+        # monthly renewal's failures matter (auto-1ei8m).
+        "dashboardCertificate": _dashboard_certificate(),
         "tunnelServing": inputs.tunnel_serving,
         "tunnelScopesDown": list(inputs.tunnel_scopes_down),
         "scopeStates": [
