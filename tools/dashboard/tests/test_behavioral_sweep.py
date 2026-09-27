@@ -15678,8 +15678,12 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
         occurred_at: now - 120,
         source_version: version,
         presentation: {seen_at: null, last_opened_at: null, snoozed_until: null},
+        // Every item here opens the legacy review sheet. A real fleet
+        // admission opens the shared approval dialog since 2ed5f14a, tested
+        // in fleet_approval.test.mjs; the 'fleet-request' row stands for a
+        // generic approval so the sheet's own decision rules stay covered.
         open: {mode: 'registered_renderer', renderer_id:
-            scope === 'fleet' ? 'approval.fleet_machine_admission.review' :
+            scope === 'fleet' ? 'approval.application.review' :
             'attention.application.review'},
     });
     const fixture = {
@@ -15762,8 +15766,8 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
         if (url.pathname === '/api/attention/items/fleet-request' && method === 'GET') {
             return reply({item: fixture.items[0], review: {
                 type: 'approval',
-                renderer_id: 'approval.fleet_machine_admission.review',
-                kind: 'fleet_machine_admission',
+                renderer_id: 'approval.application.review',
+                kind: 'application_approval',
                 authority_requirement: 'personal_root',
                 safe_review: {
                     detail: 'Compare the code with the joining machine.',
@@ -15844,14 +15848,20 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
 
         document.querySelector('[data-testid="central-attention-button"]').click();
         await tick();
-        result.tray_visible = document.querySelector('[data-testid="central-attention-tray"]')?.offsetParent !== null;
+        // The tray is position:fixed, whose offsetParent is always null;
+        // visible means displayed and laid out.
+        const tray = document.querySelector('[data-testid="central-attention-tray"]');
+        result.tray_visible = !!tray && getComputedStyle(tray).display !== 'none' &&
+            tray.getClientRects().length > 0;
         result.tray_does_not_force_full = data.inboxOpen && !data.fullInbox;
 
         data.fullInbox = true;
         data.inboxOpen = false;
         await tick();
         const desktop = document.querySelector('[data-testid="central-attention-desktop"]');
-        result.desktop_center_visible = desktop?.offsetParent !== null;
+        // position:fixed too: offsetParent is always null for it.
+        result.desktop_center_visible = !!desktop && getComputedStyle(desktop).display !== 'none' &&
+            desktop.getClientRects().length > 0;
         const apps = desktop.querySelector('[data-testid="central-attention-desktop-category-apps"]');
         apps.click(); await tick();
         const selectedOnce = data.categoryFilter;
@@ -15873,12 +15883,7 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
         desktop.querySelector('[data-testid="central-attention-desktop-item-fleet-request"]').click();
         await sleep(120); await tick();
         result.fleet_detail_open = !!document.querySelector('[data-testid="attention-item-sheet"]');
-        result.fleet_code_visible = document.body.textContent.includes('3D71 82AF 940C 61BE 2A08 7FC5');
-        const grant = document.querySelector('[data-testid="central-attention-grant"]');
-        result.fleet_grant_disabled_empty = !!grant?.disabled;
-        data.selectedItem.machine_name = 'SJC dashboard';
-        await tick();
-        result.fleet_grant_enabled_named = !document.querySelector('[data-testid="central-attention-grant"]')?.disabled;
+        result.grant_offered = !!document.querySelector('[data-testid="central-attention-grant"]');
 
         const decisionsBeforeClose = calls.filter(call => call.kind === 'decision').length;
         data.escape(); await tick();
@@ -15913,43 +15918,10 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
         fixture.counts.states.needs_attention = 6;
         fixture.counts.applications.sessions.needs_attention = 1;
         await data.refresh(); await tick();
-        await data.openItem(data.items.find(candidate => candidate.id === 'dashboard-request'));
-        await tick();
-        result.dashboard_access_detail_open = !!document.querySelector(
-            '[data-testid="attention-item-sheet"]');
-        const dashboardGrantButton = document.querySelector(
-            '[data-testid="central-attention-grant"]');
-        dashboardGrantButton.click();
-        await sleep(250); await tick();
-        const rootDialog = document.querySelector('[data-testid="open-root"]');
-        result.dashboard_access_common_root_dialog = !!rootDialog &&
-            rootDialog.textContent.includes('Approve dashboard access');
-        const passwordInput = rootDialog?.querySelector('input[type="password"]');
-        if (passwordInput) {
-            passwordInput.value = 'central browser password';
-            passwordInput.dispatchEvent(new Event('input', {bubbles: true}));
-        }
-        const approveRoot = Array.from(rootDialog?.querySelectorAll('.or-btn') || [])
-            .find(button => button.textContent.trim() === 'Approve');
-        approveRoot?.click();
-        await sleep(300); await tick();
-        const dashboardDecision = calls.filter(call => call.kind === 'decision')
-            .find(call => call.body.outcome === 'granted');
-        const signedBytes = dashboardDecision
-            ? Uint8Array.from(dashboardDecision.body.decision.signature.match(/.{2}/g)
-                .map(value => parseInt(value, 16)))
-            : null;
-        const signedInput = new TextEncoder().encode(
-            'autonomy.identity.dashboard-access-grant.v1\n' +
-            ceremonyPrimitives.canonicalJson(dashboardGrant));
-        result.dashboard_access_signed_exact_grant = !!dashboardDecision &&
-            ceremonyPrimitives.canonicalJson(dashboardDecision.body.decision.grant) ===
-                ceremonyPrimitives.canonicalJson(dashboardGrant) &&
-            await crypto.subtle.verify(
-                'Ed25519', ceremonyKeys.publicKey, signedBytes, signedInput);
-        result.dashboard_access_closed_after_grant = !data.selectedItem &&
-            !document.querySelector('[data-testid="open-root"]');
-
+        // Dashboard access opens the shared approval dialog now (it is on
+        // central-attention.js's shared-renderer list), not this sheet and
+        // open-root; its exact-grant signing is covered by the Central tests
+        // in approval_adapters.test.mjs (auto-pw295).
         fixture.items = fixture.items.filter(row => row.attention_id !== 'dashboard-request');
         fixture.counts.total_needs_attention = 5;
         fixture.counts.categories.approvals = 1;
@@ -16135,17 +16107,11 @@ class TestCentralAttentionSurface:
 
     def test_fleet_review_and_explicit_decision(self):
         c = self.desktop
-        assert c.get("fleet_detail_open") and c.get("fleet_code_visible"), c
-        assert c.get("fleet_grant_disabled_empty") and c.get("fleet_grant_enabled_named"), c
+        # The legacy sheet's own rules; a fleet admission's code and machine
+        # name are the shared dialog's (fleet_approval.test.mjs).
+        assert c.get("fleet_detail_open") and c.get("grant_offered"), c
         assert c.get("escape_is_inert") and c.get("decline_requires_confirmation"), c
         assert c.get("keep_requested_is_inert") and c.get("explicit_decline_only"), c
-
-    def test_dashboard_access_uses_common_root_ceremony(self):
-        c = self.desktop
-        assert c.get("dashboard_access_detail_open"), c
-        assert c.get("dashboard_access_common_root_dialog"), c
-        assert c.get("dashboard_access_signed_exact_grant"), c
-        assert c.get("dashboard_access_closed_after_grant"), c
 
     def test_background_invalidation_never_force_opens(self):
         c = self.desktop

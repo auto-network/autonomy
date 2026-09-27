@@ -40,6 +40,8 @@ function open(bootstrap=false){
 }
 test('review starts with a blank name; closing does not decide',()=>{
   open();assert.equal(q('#machine-name').value,'');assert.equal(q('#machine-name').maxLength,80);
+  // The code the operator compares with the joining machine is on the review.
+  assert.equal(q('#code').textContent,'123 456');
   assert.equal(q('#auth').hidden,true);assert.equal(q('#primary').disabled,true);
   q('#close').click();assert.equal(calls.length,0);
 });
