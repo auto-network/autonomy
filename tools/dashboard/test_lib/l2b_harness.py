@@ -405,7 +405,7 @@ def _run_async_eval(js_expr: str) -> dict:
                         pass
                 if isinstance(val, dict):
                     return val
-                return {}
+                return {"_eval_error": f"eval returned a non-object result: {str(val)[:300]!r}"}
     return {}
 
 

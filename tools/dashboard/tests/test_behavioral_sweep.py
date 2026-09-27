@@ -8098,11 +8098,15 @@ def _navigate_and_eval_async(path: str, js_expr: str, wait_ms: int = 800) -> dic
         )
         stdout = result.stdout.strip()
         if not stdout:
-            return {}
+            err = (result.stderr or "").strip()
+            return {"_eval_error": err[-2000:]} if err else {}
         # Parse last JSON line that has success+data shape
         for line in reversed(stdout.split("\n")):
             try:
                 parsed = json.loads(line)
+                if isinstance(parsed, dict) and parsed.get("success") is False:
+                    # Surface the page's error instead of an empty dict (auto-pg8d2).
+                    return {"_eval_error": str(parsed.get("error") or "agent-browser eval failed")[:2000]}
                 if isinstance(parsed, dict) and "data" in parsed:
                     data = parsed["data"]
                     if isinstance(data, dict) and "result" in data:
@@ -8114,7 +8118,7 @@ def _navigate_and_eval_async(path: str, js_expr: str, wait_ms: int = 800) -> dic
                                 pass
                         if isinstance(val, dict):
                             return val
-                        return {}
+                        return {"_eval_error": f"eval returned a non-object result: {str(val)[:300]!r}"}
                     if isinstance(data, dict):
                         return data
                 if isinstance(parsed, str):
@@ -16145,8 +16149,11 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
     const ceremonySeed = ceremonyPkcs8.slice(-32);
     const ceremonyRootPub = ceremonyPrimitives.bytesToHex(new Uint8Array(
         await crypto.subtle.exportKey('raw', ceremonyKeys.publicKey)));
-    const ceremonyArmor = await ceremonyPrimitives.encryptArmor(
-        ceremonySeed, ceremonyRootPub, 'central browser password', 10000);
+    // v3 armor (the v2 primitives.encryptArmor was removed with f5f5b7f8).
+    const ceremonyPolicy = await import('/static/js/ceremony/root-factor-policy.js');
+    const ceremonyArmor = await ceremonyPolicy.mintPasswordArmor({
+        rootSeed: ceremonySeed, rootPub: ceremonyRootPub,
+        password: 'central browser password', iterations: 10000});
     ceremonySeed.fill(0);
     ceremonyPkcs8.fill(0);
     window.AutonomyNetworkSession = {
