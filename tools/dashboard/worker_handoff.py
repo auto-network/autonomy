@@ -23,6 +23,10 @@ Env contract (child side):
 ``DASHBOARD_WORKER_PREDECESSOR_PID``
     PID of the incumbent worker, when there is one. Absent on a cold start,
     in which case the worker activates immediately.
+``DASHBOARD_HANDOFF_NOTICE_FAILURE``
+    Set only when the supervisor could not deliver its hand-off notice to the
+    incumbent: a short description of the last failure. The replacement
+    raises a Central attention item for it (auto-wb6ok).
 
 The activation marker is ``<ready marker> + ".activate"``. A worker also
 activates if the predecessor PID has vanished without a marker (the
@@ -36,6 +40,8 @@ import asyncio
 import errno
 import logging
 import os
+import signal
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -43,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 READY_MARKER_ENV = "DASHBOARD_WORKER_READY_MARKER"
 PREDECESSOR_PID_ENV = "DASHBOARD_WORKER_PREDECESSOR_PID"
+NOTICE_FAILURE_ENV = "DASHBOARD_HANDOFF_NOTICE_FAILURE"
 ACTIVATE_SUFFIX = ".activate"
 
 #: Reasons ``wait_for_activation`` resolves with; stable strings for logs/tests.
@@ -68,6 +75,47 @@ def predecessor_pid(environ=None) -> int | None:
         logger.warning("ignoring malformed %s=%r", PREDECESSOR_PID_ENV, raw)
         return None
     return pid if pid > 0 else None
+
+
+def notice_failure(environ=None) -> str | None:
+    env = os.environ if environ is None else environ
+    return env.get(NOTICE_FAILURE_ENV) or None
+
+
+def install_snapshot_on_sigterm(snapshot: Callable[[], object]) -> bool:
+    """Worker side: run *snapshot* the moment SIGTERM arrives, then chain to
+    the handler already installed (uvicorn's ``handle_exit``).
+
+    The supervisor SIGTERMs the incumbent before it activates the
+    replacement, and the replacement restores at activation. Snapshotting in
+    the signal handler makes that hand-off independent of the event loop and
+    of the lifespan shutdown: on 2026-09-27 a busy incumbent ignored SIGTERM
+    for 15 s, was killed before its shutdown snapshot, and the vault was lost
+    (auto-wb6ok). A Python signal handler runs on the main thread between
+    bytecodes, so a loop blocked in Python code still runs it at once. Runs
+    once per process. Returns False when not on the main thread (signals can
+    only be installed there)."""
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    previous = signal.getsignal(signal.SIGTERM)
+    fired = False
+
+    def handler(sig, frame):
+        nonlocal fired
+        if not fired:
+            fired = True
+            try:
+                snapshot()
+            except Exception:
+                logger.exception("snapshot on SIGTERM failed")
+        if callable(previous):
+            previous(sig, frame)
+        elif previous == signal.SIG_DFL:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    signal.signal(signal.SIGTERM, handler)
+    return True
 
 
 def activation_marker_path(ready_marker: Path) -> Path:

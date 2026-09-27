@@ -30,8 +30,12 @@ Before spawning, the incumbent is told over the authenticated
 ``/api/internal/restart-notice`` route (mode ``handoff``, with the changed
 file paths so the worker can attribute the reload to a merge or a direct host
 edit) so it snapshots the EventBus replay buffer and the vault key cache for
-the replacement to restore at its own startup. That call is best-effort and
-never blocks the reload.
+the replacement to restore at its own startup. The notice is retried for a
+bounded time (a busy incumbent's event loop has blocked for 1.9 s) and never
+blocks the reload beyond that; a notice that still fails is logged with its
+exception and handed to the replacement, which raises a Central attention
+item (auto-wb6ok). The incumbent also snapshots the vault when it receives
+SIGTERM, so a lost notice no longer loses the vault.
 
 This module is itself watched, so committed probe commits still exercise the
 full path; the supervisor process must be restarted once to pick up changes
@@ -62,7 +66,12 @@ logger = logging.getLogger("uvicorn.error")
 
 _NOTICE_PATH = "/api/internal/restart-notice"
 _TOKEN_HEADER = "X-Dashboard-Restart-Token"
-_REQUEST_TIMEOUT_SECONDS = 1
+#: Per-attempt timeout and attempts for the hand-off notice. One 1 s attempt
+#: lost the vault on 2026-09-27 while the incumbent's loop blocked 0.5-1.9 s
+#: (auto-wb6ok). Worst case before spawning: 3 x 10 s + 1 s + 2 s backoff.
+_REQUEST_TIMEOUT_SECONDS = 10
+_NOTICE_ATTEMPTS = 3
+_NOTICE_BACKOFF_SECONDS = (1.0, 2.0)
 
 #: How long a replacement may take to reach ready before it is abandoned and
 #: the incumbent kept. Startup has been observed at three minutes; the default
@@ -131,53 +140,89 @@ def _restart_notice_url(config: SimpleNamespace) -> str:
     return f"{scheme}://127.0.0.1:{config.port}{_NOTICE_PATH}"
 
 
+def _describe_failure(exc: BaseException) -> str:
+    """Exception type and message, so a timeout, a refusal and an HTTP
+    status read differently in the log."""
+    if isinstance(exc, error.HTTPError):
+        return f"HTTPError {exc.code}"
+    if isinstance(exc, error.URLError):
+        return f"URLError: {type(exc.reason).__name__}: {exc.reason}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 def _notify_dashboard(
-    config: SimpleNamespace, changed_paths=None, *, mode: str = "handoff"
+    config: SimpleNamespace, changed_paths=None, *, mode: str = "handoff",
+    failures: list | None = None, sleep=time.sleep,
 ) -> bool:
-    """Ask the incumbent to snapshot hand-off state. Failure never blocks.
+    """Ask the incumbent to snapshot hand-off state. Failure never blocks the
+    reload beyond the bounded retries.
 
     ``changed_paths`` (the files uvicorn saw change) is forwarded so the worker
-    can attribute the reload to a merge or a direct host edit.
+    can attribute the reload to a merge or a direct host edit. Returns True
+    once delivered; on failure, appends a short description of the last
+    failure to *failures* when given.
     """
     token = os.environ.get("DASHBOARD_RESTART_TOKEN")
     if not token:
         logger.warning("hand-off notice skipped: DASHBOARD_RESTART_TOKEN is unset")
+        if failures is not None:
+            failures.append("DASHBOARD_RESTART_TOKEN is unset")
         return False
     body = json.dumps({
         "mode": mode,
         "changed_files": [str(p) for p in (changed_paths or []) if p],
     }).encode("utf-8")
-    req = request.Request(
-        _restart_notice_url(config),
-        data=body,
-        headers={_TOKEN_HEADER: token, "Content-Type": "application/json"},
-        method="POST",
-    )
     context = ssl._create_unverified_context() if getattr(config, "ssl_certfile", None) else None
-    try:
-        with request.urlopen(req, timeout=_REQUEST_TIMEOUT_SECONDS, context=context) as response:
-            if 200 <= response.status < 300:
-                return True
-            logger.warning("hand-off notice refused with HTTP %s", response.status)
-    except (OSError, error.URLError, error.HTTPError):
-        logger.warning("hand-off notice request failed; reloading without a snapshot")
+    failure = "no attempt made"
+    for attempt in range(1, _NOTICE_ATTEMPTS + 1):
+        req = request.Request(
+            _restart_notice_url(config),
+            data=body,
+            headers={_TOKEN_HEADER: token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=_REQUEST_TIMEOUT_SECONDS, context=context) as response:
+                if 200 <= response.status < 300:
+                    if attempt > 1:
+                        logger.info("hand-off notice delivered on attempt %d", attempt)
+                    return True
+                failure = f"HTTP {response.status}"
+        except (OSError, error.URLError, error.HTTPError) as exc:
+            failure = _describe_failure(exc)
+        logger.warning("hand-off notice attempt %d/%d failed: %s",
+                       attempt, _NOTICE_ATTEMPTS, failure)
+        if failure.startswith(("HTTPError 403", "HTTP 403")):
+            break  # a wrong token does not improve with retries
+        if attempt < _NOTICE_ATTEMPTS:
+            sleep(_NOTICE_BACKOFF_SECONDS[min(attempt, len(_NOTICE_BACKOFF_SECONDS)) - 1])
+    logger.error("hand-off notice failed (%s); the incumbent's SIGTERM snapshot is "
+                 "the remaining vault hand-off", failure)
+    if failures is not None:
+        failures.append(failure)
     return False
 
 
 # ── process helpers ────────────────────────────────────────────────────────
 
-def _spawn(self: BaseReload, predecessor_pid: int | None):
+def _spawn(self: BaseReload, predecessor_pid: int | None,
+           notice_failure: str | None = None):
     """Start a worker with the hand-off environment; returns (process, marker)."""
     marker = _handoff_directory() / f"{uuid.uuid4().hex}.ready"
     previous = {
         key: os.environ.get(key)
-        for key in (worker_handoff.READY_MARKER_ENV, worker_handoff.PREDECESSOR_PID_ENV)
+        for key in (worker_handoff.READY_MARKER_ENV, worker_handoff.PREDECESSOR_PID_ENV,
+                    worker_handoff.NOTICE_FAILURE_ENV)
     }
     os.environ[worker_handoff.READY_MARKER_ENV] = str(marker)
     if predecessor_pid is not None:
         os.environ[worker_handoff.PREDECESSOR_PID_ENV] = str(predecessor_pid)
     else:
         os.environ.pop(worker_handoff.PREDECESSOR_PID_ENV, None)
+    if notice_failure:
+        os.environ[worker_handoff.NOTICE_FAILURE_ENV] = notice_failure[:200]
+    else:
+        os.environ.pop(worker_handoff.NOTICE_FAILURE_ENV, None)
     try:
         process = get_subprocess(config=self.config, target=self.target, sockets=self.sockets)
         process.start()
@@ -252,17 +297,21 @@ def _restart_with_handoff(self: BaseReload) -> None:
     old = self.process
     old_marker = getattr(self, "_ready_marker", None)
     incumbent_alive = old.is_alive()
+    notice_failures: list = []
     if incumbent_alive:
-        _notify_dashboard(self.config, getattr(self, "_last_changed_paths", None))
+        _notify_dashboard(self.config, getattr(self, "_last_changed_paths", None),
+                          failures=notice_failures)
     else:
         logger.warning(
             "incumbent worker [%s] is not running; the replacement activates "
             "immediately", old.pid,
         )
+    notice_failure = notice_failures[-1] if notice_failures else None
     t0 = time.monotonic()
     timeout = _ready_timeout_seconds()
     while True:
-        child, marker = _spawn(self, old.pid if incumbent_alive else None)
+        child, marker = _spawn(self, old.pid if incumbent_alive else None,
+                               notice_failure)
         logger.info(
             "spawned replacement worker [%s]; incumbent [%s] keeps serving until it is ready",
             child.pid, old.pid,

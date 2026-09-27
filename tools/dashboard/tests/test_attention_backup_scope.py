@@ -104,8 +104,8 @@ class TestCatalog:
         registry = build_production_attention_registry()
         approval_policy = AttentionClassPolicy.approval_phase_one().to_payload()
         for application in registry.applications:
-            if application.application_scope == "backup":
-                continue
+            if application.application_scope in ("backup", "machine"):
+                continue  # the non-approval scopes carry their own profiles
             for item in application.classes:
                 assert item.surface_category == "approvals"
                 assert item.policy.to_payload() == approval_policy

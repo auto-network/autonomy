@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import functools
 import os
 from pathlib import Path
 from typing import Callable, Optional
@@ -71,6 +72,14 @@ class _Statfs(ctypes.Structure):
     ]
 
 
+@functools.lru_cache(maxsize=1)
+def _libc():
+    """libc, loaded once. ``find_library`` runs ``ldconfig`` in a subprocess
+    on Linux; the vault snapshot calls this from a SIGTERM handler, which
+    must not fork (auto-wb6ok)."""
+    return ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+
+
 def filesystem_magic(path) -> int:
     """The ``statfs.f_type`` magic of the filesystem backing *path*.
 
@@ -78,7 +87,7 @@ def filesystem_magic(path) -> int:
     permission, unsupported platform) so the guard can fail closed rather
     than mis-classify.
     """
-    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+    libc = _libc()
     buf = _Statfs()
     rc = libc.statfs(os.fsencode(str(path)), ctypes.byref(buf))
     if rc != 0:

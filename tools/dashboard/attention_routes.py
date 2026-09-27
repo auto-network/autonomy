@@ -512,6 +512,10 @@ def build_production_runtime() -> AttentionRouteRuntime:
             publication_runtimes as certificate_publication_runtimes,
         )
         runtimes.update(certificate_publication_runtimes())
+        from tools.dashboard.vault_handoff_attention import (
+            publication_runtimes as vault_handoff_publication_runtimes,
+        )
+        runtimes.update(vault_handoff_publication_runtimes())
     except Exception:
         logging.getLogger(__name__).exception(
             "machine attention runtimes unavailable; machine classes stay disabled")

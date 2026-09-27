@@ -13599,6 +13599,11 @@ async def _snapshot_for_handoff() -> dict[str, bool]:
     Both are re-written at this worker's shutdown as well; the hand-off copy
     only closes the gap so the replacement is warm before it takes traffic."""
     result = {"event_bus": False, "vault": False}
+    try:
+        from tools.dashboard.unlock_routes import save_vault_across_hot_reload
+        result["vault"] = bool(await asyncio.to_thread(save_vault_across_hot_reload))
+    except Exception:
+        logger.exception("hand-off vault snapshot failed; replacement boots locked until activation")
     snapshot_fn = getattr(event_bus, "snapshot", None)
     if callable(snapshot_fn):
         try:
@@ -13606,11 +13611,6 @@ async def _snapshot_for_handoff() -> dict[str, bool]:
             result["event_bus"] = True
         except Exception:
             logger.exception("hand-off EventBus snapshot failed; replacement restores the older one")
-    try:
-        from tools.dashboard.unlock_routes import save_vault_across_hot_reload
-        result["vault"] = bool(await asyncio.to_thread(save_vault_across_hot_reload))
-    except Exception:
-        logger.exception("hand-off vault snapshot failed; replacement boots locked until activation")
     return result
 
 
@@ -13635,15 +13635,16 @@ async def api_internal_restart_notice(request):
     except Exception:
         body, changed_files = {}, []
     if isinstance(body, dict) and body.get("mode") == "handoff":
-        # Announce first so the operator sees the reload begin (cause + progress
+        # Snapshot first: the vault is what a slow answer loses (auto-wb6ok).
+        # Then announce so the operator sees the reload begin (cause + progress
         # bar) while this worker keeps serving; the replacement's activation
-        # emits the matching "complete". Then snapshot for the replacement.
+        # emits the matching "complete".
+        snapshot = await _snapshot_for_handoff()
         try:
             payload = await _announce_restart(changed_files, phase="restarting")
         except Exception:
             logger.exception("could not announce hand-off")
             payload = {}
-        snapshot = await _snapshot_for_handoff()
         return JSONResponse({
             "ok": True,
             "mode": "handoff",
@@ -22290,6 +22291,19 @@ async def _on_startup():
             "vault hot-reload restore raised on startup; the vault stays locked"
         )
     _mark("restore_vault_across_hot_reload")
+    # Snapshot the vault the moment SIGTERM arrives (auto-wb6ok). The reload
+    # supervisor SIGTERMs this worker before activating its replacement, which
+    # restores at activation; writing here, in the signal handler, does not
+    # depend on the event loop answering the hand-off notice or on the lifespan
+    # shutdown finishing before the 15 s SIGKILL (both failed on 2026-09-27).
+    try:
+        from tools.dashboard.unlock_routes import (
+            prepare_sigterm_snapshot, save_vault_on_sigterm,
+        )
+        prepare_sigterm_snapshot()
+        worker_handoff.install_snapshot_on_sigterm(save_vault_on_sigterm)
+    except Exception:
+        logger.exception("could not install the SIGTERM vault snapshot")
     # Replay the Dashboard's Fleet runtime credential from this machine's
     # audited vault (graph://67d0aa5f-885 D3), AFTER the restore above has
     # warmed the delegate that opens it: a reloaded process re-arms Fleet sync
@@ -22727,6 +22741,12 @@ async def _activate_worker(reason: str) -> None:
         # the startup replay could not open yet (graph://67d0aa5f-885 D3).
         with contextlib.suppress(Exception):
             await asyncio.to_thread(fleet_enrollment_routes.rearm_local_runtime_from_vault)
+        # A hand-off that left the vault locked, or whose notice failed, is a
+        # Central attention item, not a silent wait for a human (auto-wb6ok).
+        from tools.dashboard import vault_handoff_attention
+        await asyncio.to_thread(
+            vault_handoff_attention.run_cycle,
+            notice_failure=worker_handoff.notice_failure())
 
     try:
         from agents.dispatch_db import fail_stale_prelaunch_runs

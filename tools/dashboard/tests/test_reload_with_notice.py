@@ -91,7 +91,7 @@ class FakeSupervisor:
 def sup(tmp_path, monkeypatch):
     incumbent = FakeProcess()
     supervisor = FakeSupervisor(tmp_path, incumbent)
-    monkeypatch.setattr(rwn, "_spawn", lambda self, pid: self.spawn(pid))
+    monkeypatch.setattr(rwn, "_spawn", lambda self, pid, *_a: self.spawn(pid))
     notices = []
     monkeypatch.setattr(rwn, "_notify_dashboard", lambda config, changed=None, **kw: notices.append(changed) or True)
     supervisor.notices = notices
@@ -156,7 +156,7 @@ def test_notice_sent_before_spawn_so_incumbent_snapshots_first(sup, monkeypatch)
     def spawn(pid):
         order.append("spawn")
         return real_spawn(pid)
-    monkeypatch.setattr(rwn, "_spawn", lambda self, pid: spawn(pid))
+    monkeypatch.setattr(rwn, "_spawn", lambda self, pid, *_a: spawn(pid))
     sup.script = [_make_ready(sup)]
 
     rwn._restart_with_handoff(sup)
@@ -356,7 +356,7 @@ def test_notice_posts_handoff_mode_with_token(monkeypatch):
             "mode": "handoff",
             "changed_files": ["/app/tools/dashboard/server.py"],
         },
-        "timeout": 1,
+        "timeout": 10,
         "context": None,
     }
 
@@ -419,7 +419,87 @@ def test_notice_failure_does_not_block(monkeypatch):
     def urlopen(*_a, **_k):
         raise OSError("connection refused")
     monkeypatch.setattr(rwn.request, "urlopen", urlopen)
-    assert rwn._notify_dashboard(SimpleNamespace(port=8080, ssl_certfile=None)) is False
+    assert rwn._notify_dashboard(SimpleNamespace(port=8080, ssl_certfile=None),
+                                 sleep=lambda s: None) is False
+
+
+def test_notice_retries_a_busy_incumbent_and_logs_the_exception_type(monkeypatch, caplog):
+    """auto-wb6ok: a timeout is retried with backoff and named in the log."""
+    monkeypatch.setenv("DASHBOARD_RESTART_TOKEN", "t")
+    calls, slept = [], []
+
+    def urlopen(*_a, **_k):
+        calls.append(1)
+        if len(calls) < 3:
+            raise TimeoutError("timed out")
+        return _Response()
+    monkeypatch.setattr(rwn.request, "urlopen", urlopen)
+    with caplog.at_level("WARNING", logger="uvicorn.error"):
+        assert rwn._notify_dashboard(SimpleNamespace(port=8080, ssl_certfile=None),
+                                     sleep=slept.append)
+    assert len(calls) == 3 and slept == [1.0, 2.0]
+    assert "attempt 1/3 failed: TimeoutError: timed out" in caplog.text
+
+
+def test_notice_gives_up_and_reports_the_last_failure(monkeypatch, caplog):
+    monkeypatch.setenv("DASHBOARD_RESTART_TOKEN", "t")
+    monkeypatch.setattr(rwn.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(
+        rwn.error.URLError(ConnectionRefusedError(111, "Connection refused"))))
+    failures = []
+    with caplog.at_level("ERROR", logger="uvicorn.error"):
+        assert rwn._notify_dashboard(SimpleNamespace(port=8080, ssl_certfile=None),
+                                     failures=failures, sleep=lambda s: None) is False
+    assert failures == ["URLError: ConnectionRefusedError: [Errno 111] Connection refused"]
+    assert "hand-off notice failed (URLError: ConnectionRefusedError" in caplog.text
+
+
+def test_wrong_token_is_not_retried(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_RESTART_TOKEN", "t")
+    calls = []
+
+    def urlopen(req, *_a, **_k):
+        calls.append(1)
+        raise rwn.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+    monkeypatch.setattr(rwn.request, "urlopen", urlopen)
+    failures = []
+    assert rwn._notify_dashboard(SimpleNamespace(port=8080, ssl_certfile=None),
+                                 failures=failures, sleep=lambda s: None) is False
+    assert calls == [1] and failures == ["HTTPError 403"]
+
+
+def test_failed_notice_is_handed_to_the_replacement(sup, monkeypatch):
+    """The replacement learns the notice failed, so it can raise attention."""
+    spawned = []
+
+    def notify(config, changed=None, *, failures=None, **kw):
+        failures.append("TimeoutError: timed out")
+        return False
+    monkeypatch.setattr(rwn, "_notify_dashboard", notify)
+    monkeypatch.setattr(rwn, "_spawn", lambda self, pid, failure=None:
+                        spawned.append(failure) or self.spawn(pid))
+    sup.script = [_make_ready(sup)]
+    rwn._restart_with_handoff(sup)
+    assert spawned == ["TimeoutError: timed out"]
+
+
+def test_spawn_passes_the_notice_failure_env_and_restores_it(monkeypatch, tmp_path):
+    seen = {}
+
+    class _Proc:
+        pid = 1
+
+        def start(self):
+            seen["env"] = os.environ.get(rwn.worker_handoff.NOTICE_FAILURE_ENV)
+
+    monkeypatch.setattr(rwn, "get_subprocess", lambda **kw: _Proc())
+    monkeypatch.setattr(rwn, "_handoff_dir", tmp_path)
+    monkeypatch.delenv(rwn.worker_handoff.NOTICE_FAILURE_ENV, raising=False)
+    fake = SimpleNamespace(config=None, target=None, sockets=[])
+    rwn._spawn(fake, 777, "TimeoutError: timed out")
+    assert seen["env"] == "TimeoutError: timed out"
+    assert rwn.worker_handoff.NOTICE_FAILURE_ENV not in os.environ
+    rwn._spawn(fake, 777)
+    assert seen["env"] is None
 
 
 def test_next_capturing_stashes_changed_paths(monkeypatch):

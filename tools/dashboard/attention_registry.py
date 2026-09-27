@@ -90,6 +90,8 @@ _APPLICATION_CLASSES = {
     ),
     "machine": (
         ("machine.tls_certificate_expiring", "tls_certificate_expiring"),
+        # A hot reload that left the vault locked (auto-wb6ok).
+        ("machine.vault_handoff_failed", "vault_handoff_failed"),
     ),
 }
 #: Which locked policy profile each non-approval scope's classes carry.

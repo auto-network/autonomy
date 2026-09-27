@@ -621,10 +621,10 @@ class TestAttentionOperatorAPI:
         assert client.get("/api/attention/items").status_code == 200
         production = attention_routes.build_production_runtime()
         applications = tuple(production.index.registry.applications)
-        assert len(applications) == 11
-        assert sum(len(app.classes) for app in applications) == 17
+        assert len(applications) == 12
+        assert sum(len(app.classes) for app in applications) == 19
         assert [app.application_scope for app in applications if app.enabled] == [
-            "mailbox", "sessions", "fleet", "backup"
+            "mailbox", "sessions", "fleet", "backup", "machine"
         ]
         assert [
             cls.kind
@@ -632,14 +632,15 @@ class TestAttentionOperatorAPI:
             for cls in app.classes
             if cls.publication_enabled
         ] == ["email_send", "dashboard_access", "fleet_machine_admission", "backup.failed",
-              "backup.stale", "backup.drill_failed", "backup.offsite_unreachable"]
+              "backup.stale", "backup.drill_failed", "backup.offsite_unreachable",
+              "machine.tls_certificate_expiring", "machine.vault_handoff_failed"]
         store = InMemoryAttentionIndexStore()
         index = AttentionIndexService(
             registry=production.index.registry, store=store,
         )
-        assert index.sync_registrations() == 11
+        assert index.sync_registrations() == 12
         assert index.sync_registrations() == 0
-        assert len(store.applications) == 11
+        assert len(store.applications) == 12
         assert store.items == {}
 
     @pytest.mark.asyncio

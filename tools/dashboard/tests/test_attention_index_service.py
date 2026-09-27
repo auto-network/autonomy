@@ -66,6 +66,7 @@ EXPECTED_NON_APPROVAL_KIND_CLASS = {
     "backup.drill_failed": ("backup", "restore_drill_failed"),
     "backup.offsite_unreachable": ("backup", "offsite_unreachable"),
     "machine.tls_certificate_expiring": ("machine", "tls_certificate_expiring"),
+    "machine.vault_handoff_failed": ("machine", "vault_handoff_failed"),
 }
 #: Each non-approval scope carries its own locked policy profile.
 EXPECTED_NON_APPROVAL_POLICY = {

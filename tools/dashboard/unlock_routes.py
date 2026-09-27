@@ -51,6 +51,7 @@ enroll passkeys, so gating enrollment cannot lock an agent out.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -58,6 +59,7 @@ import logging
 import os
 import secrets
 import sqlite3
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -1357,6 +1359,10 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             "unlock: this process is warm but NO ramfs snapshot was written — "
             "nothing is carried forward unless a later graceful shutdown "
             "writes one")
+    # An unlock clears a "vault locked after a reload" attention item
+    # (auto-wb6ok). Best-effort; run_cycle never raises.
+    from tools.dashboard import vault_handoff_attention
+    await asyncio.to_thread(vault_handoff_attention.run_cycle)
     return JSONResponse({
         "ok": True,
         "generations": loaded,
@@ -1621,12 +1627,56 @@ def _clear_vault_snapshot() -> None:
     _keycache_clear("vault.hotreload.delegate")
 
 
-def save_vault_across_hot_reload() -> bool:
+#: Serializes snapshot writers: the reload notice (a worker thread), unlock,
+#: the lifespan shutdown, and the SIGTERM handler (auto-wb6ok).
+_SNAPSHOT_LOCK = threading.Lock()
+
+
+def save_vault_across_hot_reload(*, blocking: bool = True) -> bool:
     """Retain personal and organization decryption keys in the existing RAM carrier.
 
     The audited recipient suffices for new personal values. Carry a KEM key
     only when old storage-format values required it. No signing key is saved.
+
+    ``blocking=False`` is the SIGTERM path (:func:`save_vault_on_sigterm`):
+    it runs between bytecodes of whatever the main thread was doing, so it
+    must never wait on a lock that code may hold. If another snapshot is in
+    progress it skips; that snapshot, or the lifespan one, still lands.
     """
+    if not _SNAPSHOT_LOCK.acquire(blocking=blocking):
+        logger.warning("vault snapshot skipped: another snapshot write is in progress")
+        return False
+    try:
+        return _save_vault_snapshot()
+    finally:
+        _SNAPSHOT_LOCK.release()
+
+
+def save_vault_on_sigterm() -> bool:
+    """The SIGTERM-handler snapshot (installed by
+    ``worker_handoff.install_snapshot_on_sigterm``). Locks on this path: only
+    the non-blocking ``_SNAPSHOT_LOCK`` try-acquire, plus logging's re-entrant
+    handler locks. ``_VAULT_CACHE`` is a plain dict, the key cache writes are
+    bare ``os`` calls, and libc for the ramfs check is cached
+    (:func:`prepare_sigterm_snapshot`), so nothing forks or imports.
+
+    Runs on every SIGTERM, including a plain container stop, exactly as the
+    lifespan-shutdown snapshot always has; no new exposure. A log line from
+    here can hit "reentrant call inside BufferedWriter" when the signal
+    interrupted a write to the same stream; logging's handleError swallows
+    it and only that line is lost, never the snapshot."""
+    return save_vault_across_hot_reload(blocking=False)
+
+
+def prepare_sigterm_snapshot() -> None:
+    """Load everything the SIGTERM snapshot touches, ahead of the signal."""
+    from tools.network.storagekit import memory_cache
+
+    memory_cache._libc()
+    _keycache_dir()
+
+
+def _save_vault_snapshot() -> bool:
     audited_delegate = _VAULT_CACHE.get("audited_delegate")
     if not audited_delegate:
         logger.warning("vault snapshot NOT written: missing audited recipient")
