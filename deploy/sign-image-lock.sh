@@ -69,9 +69,21 @@ printf '  %s\n' "${refs[@]}"
 if [[ -n "$VAULT_KEY" ]]; then
     command -v graph >/dev/null || { echo "graph is required for a vault key" >&2; exit 2; }
     echo "==> Requesting release of secured vault key $VAULT_ORG:$VAULT_KEY (approve it to sign)"
-    PRIVATE_KEY="$(graph vault read "$VAULT_KEY" --org "$VAULT_ORG" --wait "$VAULT_WAIT" | tail -n 1)"
+    read_out="$(graph vault read "$VAULT_KEY" --org "$VAULT_ORG" --wait "$VAULT_WAIT")"
+    PRIVATE_KEY="$(printf '%s\n' "$read_out" | tail -n 1)"
+    if [[ "$PRIVATE_KEY" != /* ]]; then
+        # A secured release is asynchronous: the read returns "pending" at
+        # once and the vault places the key at /run/secrets/<name> when the
+        # operator approves. Wait for the file, bounded by VAULT_WAIT.
+        pending="/run/secrets/$VAULT_KEY"
+        if printf '%s' "$read_out" | grep -q "release pending"; then
+            echo "==> Waiting up to ${VAULT_WAIT}s for the approval ($pending)"
+            for _ in $(seq 1 "$VAULT_WAIT"); do [[ -s "$pending" ]] && break; sleep 1; done
+            [[ -s "$pending" ]] && PRIVATE_KEY="$pending"
+        fi
+    fi
     if [[ "$PRIVATE_KEY" != /* || ! -s "$PRIVATE_KEY" ]]; then
-        echo "vault key was not released: $PRIVATE_KEY" >&2
+        echo "vault key was not released: $(printf '%s' "$read_out" | head -n 1)" >&2
         exit 2
     fi
     trap 'rm -f "$PRIVATE_KEY" "${SIGNING_CONFIG:-}"' EXIT
