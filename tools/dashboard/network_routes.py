@@ -3589,7 +3589,22 @@ async def post_service_target_refresh(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "status": result})
 
 
+async def get_remote_access_label_check(request: Request) -> JSONResponse:
+    """The onboarding label question's live check (F6): well-formed, not a
+    look-alike of the platform, a reserved name or the operator's own labels.
+    Local only; the persona digest suffix makes labels unique per persona."""
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import remote_access
+
+    result = remote_access.check_label(org, request.query_params.get("label"))
+    return JSONResponse({"ok": True, "label": result.as_dict()},
+                        headers={"Cache-Control": "no-store"})
+
+
 ROUTES = [
+    Route("/api/network/remote-access/label/check", get_remote_access_label_check, methods=["GET"]),
     Route("/api/network/service-reservations", get_service_reservations, methods=["GET"]),
     Route("/api/network/service-reservations", post_service_reservation, methods=["POST"]),
     Route("/api/network/serve-zones", get_serve_zones, methods=["GET"]),
