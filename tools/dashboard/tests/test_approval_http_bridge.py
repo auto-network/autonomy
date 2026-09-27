@@ -216,6 +216,9 @@ PRODUCTION_KIND_INVENTORY = {
     "jira_write": (
         "session_principal", "approved + terminal execution", ".9", False,
     ),
+    "email_send": (
+        "session_principal", "approved + terminal execution", ".9", False,
+    ),
     "link_publish": (
         "session_principal", "approved + terminal execution.url", ".10", True,
     ),
@@ -261,7 +264,7 @@ def test_production_composition_shares_one_service_and_activates_dashboard_acces
         assert registration.runtime is None
 
 
-def test_exact_twelve_kind_inventory_freezes_requester_result_and_owner():
+def test_exact_kind_inventory_freezes_requester_result_and_owner():
     assert set(PRODUCTION_KIND_INVENTORY) == set(PRODUCTION_APPROVAL_REGISTRY.kinds)
     exceptions = []
     for kind, (requester, result_dependency, migration_owner, fleet_cookie_legacy) in (

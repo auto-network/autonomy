@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""mail-wait [--to X] [--from X] [--subject X] [--text X] [--newer-than 15m] [--timeout 5m] [--json]
+Wait for a matching message (a sign-in code, a verification link) and show it.
+Exits 1 if none arrives before the timeout. By default only messages received
+in the last 15 minutes match, so an old code is never returned."""
+import argparse, json, os, sys, time
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _mail_lib import add_filters, call, fail, filter_params, print_message, query, seconds
+
+p = argparse.ArgumentParser(prog="mail-wait", description=__doc__.splitlines()[1])
+add_filters(p)
+p.add_argument("--timeout", default="5m")
+p.add_argument("--json", action="store_true")
+a = p.parse_args()
+if not a.newer_than:
+    a.newer_than = "15m"
+deadline = time.monotonic() + seconds(a.timeout)
+while True:
+    left = int(deadline - time.monotonic())
+    if left <= 0:
+        fail(f"mail-wait: no matching message within {a.timeout}")
+    r = call("GET", "/api/mailbox/wait" + query(timeout=min(left, 50), **filter_params(a)))
+    if r.get("found"):
+        m = call("GET", f"/api/mailbox/message/{r['messages'][0]['uid']}")
+        print(json.dumps(m, indent=2)) if a.json else print_message(m)
+        sys.exit(0)

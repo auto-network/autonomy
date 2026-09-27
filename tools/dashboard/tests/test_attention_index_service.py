@@ -47,6 +47,7 @@ from tools.graph.schemas.central_attention import (
 EXPECTED_APPLICATIONS = {
     "worktrees": "Worktrees",
     "jira": "Jira",
+    "mailbox": "Mail",
     "links": "Links",
     "sessions": "Sessions",
     "mission_control": "Mission Control",
@@ -68,6 +69,7 @@ EXPECTED_NON_APPROVAL_KIND_CLASS = {
 EXPECTED_KIND_CLASS = {
     "commit_sign": ("worktrees", "approval.commit_sign.requested"),
     "jira_write": ("jira", "approval.jira_write.requested"),
+    "email_send": ("mailbox", "approval.email_send.requested"),
     "link_publish": ("links", "approval.link_publish.requested"),
     "link_revoke": ("links", "approval.link_revoke.requested"),
     "dashboard_access": ("sessions", "approval.dashboard_access.requested"),
@@ -356,9 +358,9 @@ def test_attention_runtime_cannot_activate_an_unmigrated_approval_kind():
 def test_registration_sync_writes_exact_personal_rows_and_is_idempotent():
     store = InMemoryAttentionIndexStore()
     service = _service(store=store)
-    assert service.sync_registrations() == 10
+    assert service.sync_registrations() == 11
     assert service.sync_registrations() == 0
-    assert len(store.application_writes) == 10
+    assert len(store.application_writes) == 11
     assert set(store.applications) == set(EXPECTED_APPLICATIONS)
 
 

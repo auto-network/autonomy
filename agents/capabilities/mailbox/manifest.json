@@ -1,0 +1,32 @@
+{
+    "name": "autonomy/mailbox",
+    "version": 1,
+    "implements": [
+        {
+            "contract": "mailbox",
+            "version": 1
+        }
+    ],
+    "delivery_mode": "mounted_tools",
+    "package_root": "agents/capabilities/mailbox",
+    "tool_paths": [
+        "agents/capabilities/mailbox/tools"
+    ],
+    "tool_target": {
+        "source": "agents/capabilities/mailbox/tools",
+        "target": "/opt/mailbox-tools",
+        "expose_commands": [
+            "mail-list",
+            "mail-read",
+            "mail-wait",
+            "mail-send"
+        ]
+    },
+    "skill_path": "agents/capabilities/mailbox/SKILL.md",
+    "primer_path": "agents/capabilities/mailbox/primer.md",
+    "probe": {
+        "kind": "command",
+        "entrypoint": "mail-list --probe"
+    },
+    "notes": "Broker-backed: reads call the dashboard's /api/mailbox/* routes, which open the org's IMAP mailbox read-only host-side; sending stages a kind=email_send approval and runs host-side only after the operator approves. The mailbox password is in the org's audited vault and never enters the container: no required_env, no secret file mounts. Any IMAP/SMTP mailbox: configured on the org install Setting's broker_config."
+}

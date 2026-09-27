@@ -47,6 +47,7 @@ from tools.graph.schemas.central_attention import (
 EXPECTED_KINDS = {
     "commit_sign",
     "jira_write",
+    "email_send",
     "link_publish",
     "link_revoke",
     "dashboard_access",
@@ -83,6 +84,7 @@ def test_production_catalog_field_map_is_exact():
     expected = {
         "commit_sign": ("worktrees", "session_principal", "organization_signing_key", "never"),
         "jira_write": ("jira", "session_principal", "operator_session", "never"),
+        "email_send": ("mailbox", "session_principal", "operator_session", "never"),
         "link_publish": ("links", "session_principal", "organization_signing_key", "trusted_source_deadline"),
         "link_revoke": ("links", "session_principal", "organization_signing_key", "never"),
         "dashboard_access": ("sessions", "session_principal", "personal_root", "fixed"),

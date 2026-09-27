@@ -1,0 +1,47 @@
+{
+    "name": "mailbox",
+    "version": 1,
+    "summary": "Mediated access to one organization mailbox: read-only listing, reading and waiting for mail; sending only after operator approval. The session never holds the mailbox credential.",
+    "ops": [
+        {
+            "name": "list",
+            "summary": "Newest-first headers of messages matching every given filter, read-only.",
+            "input_schema": {"type": "object", "properties": {
+                "limit": {"type": "integer"}, "to": {"type": "string"}, "from": {"type": "string"},
+                "subject": {"type": "string"}, "text": {"type": "string"},
+                "newer_than": {"type": "integer", "description": "seconds"},
+                "after_uid": {"type": "integer"}}},
+            "output_schema": {"type": "object", "properties": {
+                "folder": {"type": "string"}, "total_in_folder": {"type": "integer"},
+                "matched": {"type": "integer"}, "messages": {"type": "array"}}}
+        },
+        {
+            "name": "read",
+            "summary": "One message by UID: headers, plain text, links, likely one-time codes, attachment names. Does not mark it read.",
+            "input_schema": {"type": "object", "properties": {"uid": {"type": "integer"}}, "required": ["uid"]},
+            "output_schema": {"type": "object", "properties": {
+                "uid": {"type": "integer"}, "from": {"type": "string"}, "to": {"type": "string"},
+                "subject": {"type": "string"}, "text": {"type": "string"}, "links": {"type": "array"},
+                "codes": {"type": "array"}, "attachments": {"type": "array"}}}
+        },
+        {
+            "name": "wait",
+            "summary": "Hold up to 55 seconds for a message matching the filters.",
+            "input_schema": {"type": "object", "properties": {
+                "timeout": {"type": "integer"}, "to": {"type": "string"}, "from": {"type": "string"},
+                "subject": {"type": "string"}, "newer_than": {"type": "integer"}}},
+            "output_schema": {"type": "object", "properties": {
+                "found": {"type": "boolean"}, "messages": {"type": "array"}}}
+        },
+        {
+            "name": "send",
+            "summary": "Send one plain-text email; staged as an email_send approval and sent host-side only if the operator approves.",
+            "input_schema": {"type": "object", "properties": {
+                "to": {"type": "string"}, "cc": {"type": "string"}, "subject": {"type": "string"},
+                "body": {"type": "string"}}, "required": ["to", "subject", "body"]},
+            "output_schema": {"type": "object", "properties": {
+                "ok": {"type": "boolean"}, "message_id": {"type": "string"}, "error": {"type": "string"}}}
+        }
+    ],
+    "notes": "Configuration and credential custody: agents/capabilities/mailbox/backend/api.py. Broker routes: tools/dashboard/mailbox_routes.py."
+}

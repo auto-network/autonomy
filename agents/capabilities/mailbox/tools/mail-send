@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""mail-send --to ADDR [--cc ADDR] --subject TEXT [-f body.txt | body on stdin]
+Send one plain-text email from the mailbox. The exact message is shown to the
+operator for approval; this command blocks until they decide. A decline exits 1:
+confirm intent with the user before retrying."""
+import argparse, json, os, sys
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _mail_lib import SESSION, call, fail
+
+p = argparse.ArgumentParser(prog="mail-send", description=__doc__.splitlines()[1])
+p.add_argument("--to", required=True)
+p.add_argument("--cc", default="")
+p.add_argument("--subject", required=True)
+p.add_argument("-f", "--file")
+a = p.parse_args()
+body = open(a.file).read() if a.file else sys.stdin.read()
+for name, val in (("to", a.to), ("cc", a.cc), ("subject", a.subject)):
+    if "\n" in val or "\r" in val:
+        fail(f"mail-send: {name} may not contain line breaks")
+if not body.strip():
+    fail("mail-send: empty body")
+if not SESSION:
+    fail("mail-send: AUTONOMY_SESSION is not set")
+staged = call("POST", "/api/approvals", {"kind": "email_send", "session": SESSION, "request": {
+    "to": a.to, "cc": a.cc, "subject": a.subject, "body": body}})
+rid = staged.get("id") or fail("mail-send: the dashboard did not accept the request")
+print(f"Waiting for operator approval (request {rid})...", file=sys.stderr)
+while True:
+    r = call("GET", f"/api/approvals/{rid}?wait=55").get("result")
+    if r is None:
+        continue
+    if not r.get("approved"):
+        fail("Operator declined the email. Confirm intent with the user before retrying.")
+    ex = r.get("execution") or {}
+    if not ex.get("ok"):
+        fail(f"mail-send: approved but sending failed: {ex.get('error', 'no execution outcome')}")
+    print(json.dumps(ex, indent=2))
+    break

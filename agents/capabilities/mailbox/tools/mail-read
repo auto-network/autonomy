@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""mail-read UID [--json]
+Show one message: headers, text, links, likely one-time codes, attachment names.
+Read-only: the message is not marked read."""
+import argparse, json, os, sys
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _mail_lib import call, print_message
+
+p = argparse.ArgumentParser(prog="mail-read", description=__doc__.splitlines()[1])
+p.add_argument("uid", type=int)
+p.add_argument("--json", action="store_true")
+a = p.parse_args()
+m = call("GET", f"/api/mailbox/message/{a.uid}")
+print(json.dumps(m, indent=2)) if a.json else print_message(m)

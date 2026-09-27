@@ -54,6 +54,7 @@ _POLICY_PROFILES = (_POLICY_VALUES, _BACKUP_POLICY_VALUES)
 _APPLICATION_META = {
     "worktrees": ("Worktrees", "attention.application.worktrees"),
     "jira": ("Jira", "attention.application.jira"),
+    "mailbox": ("Mail", "attention.application.mailbox"),
     "links": ("Links", "attention.application.links"),
     "sessions": ("Sessions", "attention.application.sessions"),
     "mission_control": ("Mission Control", "attention.application.mission_control"),

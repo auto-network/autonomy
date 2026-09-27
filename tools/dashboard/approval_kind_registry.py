@@ -326,6 +326,10 @@ _PRODUCTION_ROWS = (
      AuthorityRequirement.ORGANIZATION_SIGNING_KEY, ApprovalExpiryPolicy(ExpiryMode.NEVER)),
     ("jira_write", "jira", RequesterPolicy.SESSION_PRINCIPAL,
      AuthorityRequirement.OPERATOR_SESSION, ApprovalExpiryPolicy(ExpiryMode.NEVER)),
+    # A session asks to send one email from its org's mailbox capability; the
+    # operator sees the exact message (tools/dashboard/mailbox_routes.py).
+    ("email_send", "mailbox", RequesterPolicy.SESSION_PRINCIPAL,
+     AuthorityRequirement.OPERATOR_SESSION, ApprovalExpiryPolicy(ExpiryMode.NEVER)),
     ("link_publish", "links", RequesterPolicy.SESSION_PRINCIPAL,
      AuthorityRequirement.ORGANIZATION_SIGNING_KEY,
      ApprovalExpiryPolicy(ExpiryMode.TRUSTED_SOURCE_DEADLINE)),

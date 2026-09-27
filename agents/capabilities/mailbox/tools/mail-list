@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""mail-list [--to X] [--from X] [--subject X] [--text X] [--newer-than 15m] [--limit N] [--json] [--probe]
+List the newest messages in the mailbox, read-only. Nothing is marked read."""
+import argparse, json, os, sys
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _mail_lib import add_filters, call, filter_params, print_list, query
+
+p = argparse.ArgumentParser(prog="mail-list", description=__doc__.splitlines()[1])
+add_filters(p)
+p.add_argument("--limit", type=int, default=20)
+p.add_argument("--json", action="store_true")
+p.add_argument("--probe", action="store_true", help="check the broker and mailbox are reachable")
+a = p.parse_args()
+if a.probe:
+    print(json.dumps(call("GET", "/api/mailbox/probe"), indent=2))
+    sys.exit(0)
+r = call("GET", "/api/mailbox/messages" + query(limit=a.limit, **filter_params(a)))
+print(json.dumps(r, indent=2)) if a.json else print_list(r)

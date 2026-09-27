@@ -12,6 +12,7 @@ const FALLBACK_TAG = 'autonomy-attention';
 const REGISTERED_CLASSES = new Set([
   'approval.commit_sign.requested',
   'approval.jira_write.requested',
+  'approval.email_send.requested',
   'approval.link_publish.requested',
   'approval.link_revoke.requested',
   'approval.dashboard_access.requested',
