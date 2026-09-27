@@ -141,15 +141,21 @@ def test_coverage_reports_both_gaps(parser, monkeypatch, capsys):
 
 
 def test_substrate_mounts_only_when_enabled(monkeypatch):
+    """Mission Control is enabled by default (fresh installs show it); an
+    org's explicit enable row still wins, so a disabled row unmounts it."""
     from tools.graph.plugin_cli import register_plugin_commands
     sub = argparse.ArgumentParser(prog="graph").add_subparsers(dest="cmd")
     assert register_plugin_commands(
-        sub, payload_reader=lambda org: {}) == []
+        sub, payload_reader=lambda org: {"mission": {"enabled": False}}) == []
+    assert "mission" not in sub.choices
     sub2 = argparse.ArgumentParser(prog="graph").add_subparsers(dest="cmd")
     mounted = register_plugin_commands(
         sub2, payload_reader=lambda org: {"mission": {"enabled": True}})
     assert mounted == ["mission"]
     assert "mission" in sub2.choices
+    sub3 = argparse.ArgumentParser(prog="graph").add_subparsers(dest="cmd")
+    assert register_plugin_commands(
+        sub3, payload_reader=lambda org: {}) == ["mission"]   # no row: the default
 
 
 def test_update_refs_append_never_wipe(parser, monkeypatch):

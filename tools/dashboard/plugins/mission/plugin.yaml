@@ -2,10 +2,11 @@ id: mission
 api_version: 1
 org: autonomy
 
-# Ships dormant: the operator enables it at cutover, in the same commit
-# that unhooks the legacy static `graph mission` CLI registration so the
-# verb has exactly one owner at any moment.
-default_enabled: false
+# Enabled by default: fresh installs show Mission Control (operator hand-out,
+# 2026-09-27). The cutover is done: the legacy mission_control plugin is
+# default-disabled and carries no CLI, so `graph mission` has exactly one owner
+# (this plugin's entrypoints.cli). An org's explicit enable row still wins.
+default_enabled: true
 
 paths:
   - /mission

@@ -15,6 +15,14 @@ const ROOT = path.resolve(__dirname, "..", "..");
 const REPO = path.resolve(ROOT, "..", "..", "..", "..");
 const fragment = fs.readFileSync(path.join(ROOT, "page.html"), "utf8");
 const pageJs = fs.readFileSync(path.join(ROOT, "page.js"), "utf8");
+// The shared organization picker (x-org-picker, 4c627dd8) is a directive the
+// shell loads from base.html; it registers on alpine:init, so it must be
+// evaluated before Alpine starts, as the page is served.
+const orgPicker = fs.readFileSync(path.join(
+  ROOT, "..", "..", "static", "js", "org-picker.js"), "utf8");
+// Likewise the shared presence directive (x-asset-presence, 30cf9a89).
+const assetPresence = fs.readFileSync(path.join(
+  ROOT, "..", "..", "static", "js", "asset-presence.js"), "utf8");
 const alpine = fs.readFileSync(path.join(
   REPO, "tools", "dashboard", "static", "vendor",
   "alpine-3.15.12.min.js"), "utf8");
@@ -91,6 +99,8 @@ window.fetch = (url) => {
   });
 };
 window.eval(pageJs);
+window.eval(orgPicker);
+window.eval(assetPresence);
 window.eval(alpine);
 
 setTimeout(() => {
@@ -112,8 +122,11 @@ setTimeout(() => {
     // icon-only selector: initial visible, full names only in the menu
     const slot = d.querySelector("#app-topbar-slot");
     check("org icon in slot", slot.textContent.includes("A"));
-    comp.orgOpen = true;
-    check("menu carries full names (deferred check below)", true);
+    // The shared picker (org-picker.js) renders its listbox into
+    // document.body, so the full names are read from the menu itself.
+    const orgMenu = d.querySelector('.org-picker-menu[aria-label="Organization"]');
+    check("org menu names render",
+      !!orgMenu && orgMenu.textContent.includes("Autonomy Network"));
 
     // THE invariant: legend total === visible rows
     const legendTotal = comp.legend().reduce((a, x) => a + x.n, 0);
@@ -185,18 +198,13 @@ setTimeout(() => {
         check("mission title in toolbar",
           d.querySelector("#app-topbar-slot").textContent
             .includes("Multi-User Autonomy"));
-        check("org menu names render", d.querySelector("#app-topbar-slot")
-          .textContent.includes("Autonomy Network"));
-
-        // inside a mission the org slot becomes the presence stack
+        // inside a mission the org slot becomes the presence stack: the page
+        // swaps the picker out (x-if) for the mission's presence element
         const slotEl = d.querySelector("#app-topbar-slot");
-        const orgBox = slotEl.querySelector('[aria-label="Organization"]')
-          .closest("div.relative");
         check("org selector hidden inside a mission",
-          orgBox.style.display === "none");
+          !slotEl.querySelector('[data-testid="mission-org-select"], .org-picker'));
         check("presence stack mounted inside a mission",
-          !!slotEl.querySelector(".nx-avatar-stack")
-          && slotEl.querySelector(".nx-avatar-stack").style.display !== "none");
+          !!slotEl.querySelector('[data-testid="mission-item-presence"]'));
 
         // the toolbar title is a back target, not just the chevron
         const title = Array.from(

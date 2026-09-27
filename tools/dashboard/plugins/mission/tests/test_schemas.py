@@ -117,6 +117,6 @@ class TestManifest:
         found = {p.manifest.id: p for p in loader.discover() if p.manifest}
         assert "mission" in found
         m = found["mission"].manifest
-        assert m.default_enabled is False
+        assert m.default_enabled is True   # fresh installs show Mission Control
         assert len(m.entrypoints.schemas or []) == 4
         assert "mission_control" in found  # legacy untouched
