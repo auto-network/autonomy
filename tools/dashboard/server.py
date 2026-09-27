@@ -8315,7 +8315,11 @@ _LIFECYCLE_LAUNCHING_TIMEOUT_S = _STEP_TIMEOUTS_S["launching_container"]
 _LIFECYCLE_SETUP_TIMEOUT_S = _STEP_TIMEOUTS_S["setup_running"]
 _LIFECYCLE_WAITING_READY_TIMEOUT_S = _STEP_TIMEOUTS_S["harness_starting"]
 _LIFECYCLE_INJECTING_TIMEOUT_S = _STEP_TIMEOUTS_S["awaiting_first_response"]
-_LIFECYCLE_REGISTER_TIMEOUT_S = 5
+# Registration runs on the event loop. A stalled loop (10 s dolt connects on
+# a node without the beads profile, auto-2v6ay.3) made a host terminal whose
+# container was already up fail at this step on the Windows test node
+# (2026-09-27): allow a stall to pass before declaring the launch failed.
+_LIFECYCLE_REGISTER_TIMEOUT_S = 30
 _LIFECYCLE_TMUX_OP_TIMEOUT_S = 5
 _LIFECYCLE_STOP_TIMEOUT_S = _STEP_TIMEOUTS_S["stopping"]
 _LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S = 5
@@ -9188,7 +9192,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             )
         writer.set_state(tmux_name, "running")
     except TimeoutError as exc:
-        failed_phase = str(exc).split()[0]
+        failed_phase = (str(exc).split() or [phase])[0]
         _fail_lifecycle_start_with_cleanup(
             writer=writer,
             tmux_name=tmux_name,
@@ -9504,7 +9508,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         _fail_lifecycle_start_with_cleanup(
             writer=writer,
             tmux_name=tmux_name,
-            phase=str(exc).split()[0],
+            phase=(str(exc).split() or [phase])[0],
             reason=str(exc),
             attempt=attempt,
             loop=loop,
@@ -9637,7 +9641,7 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         _fail_lifecycle_start_with_cleanup(
             writer=writer,
             tmux_name=tmux_name,
-            phase=str(exc).split()[0],
+            phase=(str(exc).split() or [phase])[0],
             reason=str(exc),
             attempt=attempt,
             loop=loop,
