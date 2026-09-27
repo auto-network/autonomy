@@ -21,7 +21,37 @@ import io
 import json
 from contextlib import redirect_stdout
 
+import logging
+
+import pytest
+
 from tools.graph import harness_cmd
+
+
+@pytest.fixture(autouse=True)
+def _no_dashboard_stdout_logging():
+    """`graph harness` runs in a process that never installs the dashboard's
+    log channels. In a broad xdist run, a dashboard test module that imports
+    tools.dashboard.server configures them at collection time, and their
+    stdout handler then writes warnings into the JSON these tests parse
+    (auto-hc9gy). Detach the dashboard's tagged root handlers for the test
+    and put them back after, so the command runs as it does in production."""
+    try:
+        from tools.dashboard import log_channels
+        tag = log_channels._TAG
+    except Exception:
+        yield
+        return
+    root = logging.getLogger()
+    detached = [h for h in root.handlers if getattr(h, tag, None) is not None]
+    for handler in detached:
+        root.removeHandler(handler)
+    try:
+        yield
+    finally:
+        for handler in detached:
+            if handler not in root.handlers:
+                root.addHandler(handler)
 
 
 def _capture(args, *, responses) -> tuple[str, list[tuple[str, str | None]]]:

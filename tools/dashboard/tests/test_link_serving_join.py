@@ -87,7 +87,7 @@ def grants(monkeypatch):
         },
     }
     monkeypatch.setattr(
-        link_serving, "check_grant", lambda token, org=None, now=None: rows.get(token)
+        link_serving, "check_grant", lambda token, org=None, now=None, grant_id=None: rows.get(token)
     )
     return rows
 
@@ -196,7 +196,7 @@ def test_service_fault_serves_the_refusal(service, grants, monkeypatch):
 def test_grant_without_invite_ref_refuses(service, monkeypatch):
     monkeypatch.setattr(
         link_serving, "check_grant",
-        lambda token, org=None, now=None: {
+        lambda token, org=None, now=None, grant_id=None: {
             "token": TOKEN, "target_type": "org:join",
             "target_uuid": TARGET_UUID, "meta": {},
         },

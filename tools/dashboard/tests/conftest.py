@@ -633,10 +633,48 @@ def test_app(test_db, mock_tmux, tmp_path):
     import importlib
     from tools.dashboard.dao import dashboard_db as db_mod
     importlib.reload(db_mod)
-    # Must reload server after DAO to pick up new connection
+    # Must reload server after DAO to pick up new connection. Importing the
+    # server runs log_channels.configure(), which installs root and routed
+    # handlers (one writes WARNING+ to the current sys.stdout); restore the
+    # logging state afterwards, or a later test in the same worker that
+    # captures stdout reads log lines in its output (auto-hc9gy: the graph
+    # harness --json tests under the broad xdist run).
+    snapshot = _logging_snapshot()
     from tools.dashboard import server
     importlib.reload(server)
-    return server.app
+    try:
+        yield server.app
+    finally:
+        _logging_restore(snapshot)
+
+
+def _logging_loggers():
+    import logging
+    from tools.dashboard import log_channels
+
+    names = [None, "uvicorn.error", log_channels.logger.name]
+    names += [prefix for _channel, prefix in log_channels._routed_loggers()]
+    return [logging.getLogger(name) for name in dict.fromkeys(names)]
+
+
+def _logging_snapshot():
+    return [(lg, list(lg.handlers), lg.level, lg.propagate) for lg in _logging_loggers()]
+
+
+def _logging_restore(snapshot):
+    for lg, handlers, level, propagate in snapshot:
+        for handler in list(lg.handlers):
+            if handler not in handlers:
+                lg.removeHandler(handler)
+                try:
+                    handler.close()
+                except Exception:
+                    pass
+        for handler in handlers:
+            if handler not in lg.handlers:
+                lg.addHandler(handler)
+        lg.setLevel(level)
+        lg.propagate = propagate
 
 
 @pytest.fixture

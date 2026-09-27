@@ -153,6 +153,19 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
     import tools.dashboard.link_channel_key as _lck_mod
     monkeypatch.setattr(_lck_mod, "mint_channel_key", lambda token, org: CHANNEL_PUB)
 
+    # Publish ends with an end-to-end recipient probe over the relay (added
+    # after this test was written); it has its own suite, and this test is
+    # about the minting contract, so the probe is a live recorder, as
+    # test_link_central stubs it. The publish must still go through it.
+    import tools.dashboard.link_approvals as _approvals_mod
+    probes = []
+
+    async def _probe_stub(binding, token, org, *, grant_id=None):
+        probes.append((org, token))
+        return {"live": True, "status": 200, "content_length": 0, "detail": "stub"}
+
+    monkeypatch.setattr(_approvals_mod, "_probe_serving", _probe_stub)
+
     session_key = KeyPair.generate()
 
     def session_cert(persona):
@@ -295,6 +308,8 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
         }
         grant_token = parsed.path.rsplit("/", 1)[-1]
         assert grant_token == GRANT_TOKEN
+        # The published link was probed exactly once, for this org and token.
+        assert probes == [(ORG, GRANT_TOKEN)]
         invite_code_line = next(
             line for line in output.splitlines()
             if line.startswith("  AUTONOMY_INVITE: ")
@@ -312,7 +327,11 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
             org=ORG,
             target_revision=NETWORK_LINK_GRANT_REVISION,
         ).members
-        grant = next(member.payload for member in cached if member.key == grant_token)
+        # Since 1ed46d1f the grant row is keyed by a publisher-minted grant id
+        # and carries the token in its payload (link_approvals.py).
+        member = next(m for m in cached if m.payload.get("token") == grant_token)
+        assert member.key != grant_token
+        grant = member.payload
         assert grant["invite_ref"] == invite.event_id
         assert "#" not in grant["url"]
 

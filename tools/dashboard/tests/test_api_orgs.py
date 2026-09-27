@@ -103,19 +103,32 @@ def orgs_root(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client(test_app):
+    # The org routes are operator acts behind the API default-deny: the test
+    # client carries the operator session a browser holds after unlock (the
+    # same mint the unlock routes issue), not a lowered route policy.
     with TestClient(test_app) as c:
+        from tools.dashboard import unlock_routes
+        c.cookies.set(
+            unlock_routes.SESSION_COOKIE,
+            unlock_routes.mint_session_token(method="test"),
+        )
         yield c
 
 
 # ── GET /api/orgs ─────────────────────────────────────────
 
 
-def test_orgs_list_includes_bootstrap(orgs_root, client):
-    """Dashboard startup auto-bootstraps autonomy + personal orgs."""
+def test_orgs_list_includes_bootstrap(orgs_root, client, monkeypatch):
+    """Dashboard startup bootstraps the personal store only. There is no
+    default first organization (graph://5f2f5a49-00d D7): a shared org exists
+    only when AUTONOMY_FIRST_ORG names one or the operator creates or joins
+    one (org_ops.ensure_bootstrap_orgs; test_first_run pins the same rule)."""
+    monkeypatch.delenv("AUTONOMY_FIRST_ORG", raising=False)
     r = client.get("/api/orgs")
     assert r.status_code == 200
     slugs = {entry["org"]["slug"] for entry in r.json()["orgs"]}
-    assert {"autonomy", "personal"} <= slugs
+    assert "personal" in slugs
+    assert "autonomy" not in slugs
 
 
 def test_orgs_list_after_create(orgs_root, stub_org_schema, client):

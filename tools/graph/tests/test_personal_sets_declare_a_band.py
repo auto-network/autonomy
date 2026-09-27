@@ -171,9 +171,8 @@ def test_the_secret_bearing_personal_sets_are_pinned_to_raw():
         "autonomy.vault.audited",
         "autonomy.vault.secured",
         "autonomy.commit.signing-key",
-        "dashboard.claude.credentials",     # OAuth token triple
-        "dashboard.codex.credentials",      # its sibling, missed until 2026-08-20
-        "dashboard.claude.setup_tokens",
+        # Harness OAuth tokens and setup tokens live here since bcb2d029
+        # (record v16 §10.9), one vault record per account.
         "autonomy.identity.dashboard-auth",
     ]
     wider = {
@@ -185,6 +184,33 @@ def test_the_secret_bearing_personal_sets_are_pinned_to_raw():
         f"these must never reach a peer-visible state, and do not resolve to "
         f"raw alone: {wider}"
     )
+
+
+def test_the_retired_plaintext_credential_sets_stay_unregistered_or_raw():
+    """The pre-vault credential sets were retired by bcb2d029 (2026-09-23):
+    their schemas are gone, harness_credentials.migrate_plaintext_accounts
+    seals any remaining row into autonomy.vault.audited and deprecates it,
+    and nothing writes them again. An unregistered set resolves to the full
+    band, which is what the previous pin reported (auto-hc9gy, part 4: the
+    list was stale, not the declarations). Should anyone register one of
+    these ids again, it must be raw.
+    """
+    from tools.graph.harness_credentials import PLAINTEXT_SETS
+
+    assert set(PLAINTEXT_SETS) == {
+        "dashboard.claude.credentials",
+        "dashboard.codex.credentials",
+        "dashboard.claude.setup_tokens",
+    }
+    reregistered_wider = {
+        set_id: schemas.states_allowed(set_id, 1)
+        for set_id in PLAINTEXT_SETS
+        if schemas.get_schema(set_id, 1) is not None
+        and tuple(schemas.states_allowed(set_id, 1)) != ("raw",)
+    }
+    assert not reregistered_wider, reregistered_wider
+    # Where those tokens live now is itself pinned raw above.
+    assert tuple(schemas.states_allowed("autonomy.vault.audited", 1)) == ("raw",)
 
 
 def test_the_module_filter_has_not_made_this_file_vacuous():
