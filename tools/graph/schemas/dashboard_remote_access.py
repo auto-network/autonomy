@@ -48,9 +48,15 @@ class DashboardRemoteAccessV1(SettingSchema):
         description="The dashboard's origin for every link: the relay origin, the Tailnet "
                     "origin, or the local address onboarding ran on.",
     )
+    publisher: str = field(required=False, description="Relay mode: the scope (personal or an organization slug) the reservation lives in.")
     reservation_id: str = field(required=False, description="Relay mode: the Service reservation the dashboard is published under.")
     app_label: str = field(required=False, description="Relay mode: the app label of that reservation.")
     published_at: str = field(required=True, description="When this mode was recorded (UTC RFC 3339, milliseconds).")
+    paused_relay: dict = field(
+        required=False,
+        description="Local or Tailscale mode: the relay publication an earlier choice made, paused when "
+                    "the operator switched away ({publisher, reservation_id, origin}); resumes on the next relay choice.",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -70,9 +76,19 @@ class DashboardRemoteAccessV1(SettingSchema):
             app_label = payload.get("app_label")
             if not isinstance(app_label, str) or not _APP_LABEL_RE.fullmatch(app_label):
                 raise SchemaValidationError(f"{cls.__name__}: app_label must be a lowercase DNS label")
+            publisher = payload.get("publisher")
+            if not isinstance(publisher, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", publisher):
+                raise SchemaValidationError(f"{cls.__name__}: publisher must name the personal scope or an organization slug")
+            if "paused_relay" in payload:
+                raise SchemaValidationError(f"{cls.__name__}: paused_relay belongs to the local and tailscale modes")
         else:
-            for name in ("reservation_id", "app_label"):
+            for name in ("reservation_id", "app_label", "publisher"):
                 if name in payload:
                     raise SchemaValidationError(f"{cls.__name__}: {name} belongs to the relay mode only")
+            paused = payload.get("paused_relay")
+            if paused is not None:
+                if not isinstance(paused, dict) or set(paused) != {"publisher", "reservation_id", "origin"}:
+                    raise SchemaValidationError(f"{cls.__name__}: paused_relay carries publisher, reservation_id and origin")
+                validate_reservation_key(paused.get("reservation_id"))
         if not _is_rfc3339_millis(payload.get("published_at")):
             raise SchemaValidationError(f"{cls.__name__}: published_at must be UTC RFC 3339 with milliseconds")

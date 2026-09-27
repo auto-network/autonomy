@@ -3626,17 +3626,25 @@ async def post_remote_access_publish(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return _service_publication_error("invalid_json")
-    if not isinstance(body, dict) or not {"mode"} <= set(body) <= {"mode", "app_label"}:
+    if not isinstance(body, dict) or not {"mode"} <= set(body) <= {"mode", "app_label", "label"}:
         return _service_publication_error("unknown_fields")
     from tools.dashboard import remote_access, service_publication
 
+    # A publish is a local-listener operation: through the published relay
+    # route it is refused outright, like enrollment/open (reviewer).
+    recorded = remote_access.current() or {}
+    if remote_access.request_came_through_gateway(request.headers, recorded.get("origin")
+                                                  if recorded.get("mode") == "autonomy" else None):
+        return _service_publication_error("through_gateway", 403)
     # The origin the operator reached the dashboard on: recorded for the local
-    # and Tailscale modes, taken from the request itself (never from the body).
-    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
-    request_origin = f"{scheme}://{request.headers.get('host', '')}" if request.headers.get("host") else None
+    # and Tailscale modes, taken from the request itself (never from the body)
+    # and validated per mode by remote_access.validate_request_origin.
+    request_origin = (f"{request.url.scheme}://{request.headers['host']}"
+                      if request.headers.get("host") else None)
     try:
         row = await remote_access.publish(
-            body.get("mode"), org=org, app_label=body.get("app_label"), request_origin=request_origin)
+            body.get("mode"), org=org, app_label=body.get("app_label"), label=body.get("label"),
+            request_origin=request_origin)
     except service_publication.ServicePublicationError as exc:
         return _service_publication_error(exc.code, exc.status_code, exc.detail)
     except ValueError:

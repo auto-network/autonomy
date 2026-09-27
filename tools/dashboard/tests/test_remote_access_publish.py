@@ -52,6 +52,9 @@ def remote_api(tmp_path, monkeypatch):
     importlib.import_module("tools.graph.schemas.dashboard_remote_access")
     service = importlib.import_module("tools.dashboard.service_publication")
     remote_access = importlib.import_module("tools.dashboard.remote_access")
+    # The status cache is process-wide; each test starts with a cold one.
+    monkeypatch.setattr(remote_access, "_status_cache", None)
+    monkeypatch.setattr(remote_access, "_status_lock", None)
 
     monkeypatch.setattr(service, "_persona_for_org", lambda org: (PERSONA, "Jeremy"))
     monkeypatch.setattr(service, "_read_local_machine_id", lambda: MACHINE_ID)
@@ -129,6 +132,7 @@ def test_one_call_publishes_the_dashboard_under_the_personal_persona(remote_api)
     assert r.status_code == 200, r.text
     row = r.json()["remote_access"]
     assert row["mode"] == "autonomy" and row["app_label"] == "dashboard"
+    assert row["publisher"] == "personal"
     assert row["origin"].startswith("https://dashboard.jeremy-") and row["origin"].endswith(".serve.auto.network")
     [reservation] = _reservations()
     assert reservation.key == row["reservation_id"] and reservation.payload["state"] == "active"
@@ -154,6 +158,83 @@ def test_local_and_tailscale_record_the_origin_the_operator_used(remote_api):
     assert row == {"mode": "local", "origin": "http://localhost", "published_at": row["published_at"]}
     assert _reservations() == [] and _targets() == []
     assert remote_api.remote_access.current()["mode"] == "local"
+
+
+@pytest.mark.parametrize("mode, host, ok", [
+    ("local", "localhost", True), ("local", "127.0.0.1:8088", True), ("local", "192.168.1.20", True),
+    ("local", "desktop.local", True), ("local", "dash.example.com", False), ("local", "100.101.1.1", False),
+    ("tailscale", "desktop.tail1234.ts.net:8080", True), ("tailscale", "100.101.1.1", True),
+    ("tailscale", "localhost", False), ("tailscale", "dash.example.com", False),
+])
+def test_the_recorded_origin_must_fit_the_mode(remote_api, mode, host, ok):
+    r = remote_api.client.post("/api/network/remote-access/publish", json={"mode": mode},
+                               headers={**_headers(), "Host": host})
+    if ok:
+        assert r.status_code == 200, r.text
+        assert r.json()["remote_access"]["origin"] == f"http://{host.rstrip('.')}"
+    else:
+        assert r.status_code == 400 and r.json()["error"] == "origin_invalid"
+
+
+def test_switching_away_from_the_relay_pauses_the_publication(remote_api):
+    """Reviewer: local-only must not leave the dashboard reachable remotely."""
+    relay = _publish(remote_api.client, mode="autonomy").json()["remote_access"]
+    remote_api.converged["reload"] = 0
+    local = _publish(remote_api.client, mode="local").json()["remote_access"]
+    assert local["paused_relay"] == {"publisher": "personal", "reservation_id": relay["reservation_id"],
+                                     "origin": relay["origin"]}
+    [reservation] = _reservations()
+    assert reservation.payload["state"] == "paused"
+    assert remote_api.converged["reload"] == 1
+    status = remote_api.client.get("/api/network/remote-access/status", headers=_headers()).json()["status"]
+    assert status["mode"] == "local" and status["relay_publication"] == "paused"
+    assert status["relay_origin"] == relay["origin"] and "advertised" not in status
+    # Choosing the relay again resumes the same reservation.
+    again = _publish(remote_api.client, mode="autonomy").json()["remote_access"]
+    assert again["reservation_id"] == relay["reservation_id"]
+    assert _reservations()[0].payload["state"] == "active" and len(_reservations()) == 1
+
+
+def test_publish_is_refused_through_the_relay_route(remote_api):
+    relay = _publish(remote_api.client, mode="autonomy").json()["remote_access"]
+    relay_host = relay["origin"].removeprefix("https://")
+    via_host = remote_api.client.post("/api/network/remote-access/publish", json={"mode": "local"},
+                                      headers={**_headers(), "Host": relay_host})
+    assert via_host.status_code == 403 and via_host.json()["error"] == "through_gateway"
+    via_marker = remote_api.client.post("/api/network/remote-access/publish", json={"mode": "local"},
+                                        headers={**_headers(), "X-Forwarded-Host": relay_host})
+    assert via_marker.status_code == 403
+    assert remote_api.remote_access.current()["mode"] == "autonomy"
+
+
+def test_the_chosen_label_names_the_persona_label_slug(remote_api):
+    refused = _publish(remote_api.client, mode="autonomy", label="aut0n0my")
+    assert refused.status_code == 400 and refused.json()["error"] == "label_platform_name"
+    assert _reservations() == []
+    r = _publish(remote_api.client, mode="autonomy", label="boat-lore")
+    assert r.status_code == 200, r.text
+    assert r.json()["remote_access"]["origin"].startswith("https://dashboard.boat-lore-")
+    # Once reserved, the persona's label is bound: another slug is refused,
+    # the same slug (or no label) republishes the same origin.
+    other = _publish(remote_api.client, mode="autonomy", label="other-name")
+    assert other.status_code == 400 and other.json()["error"] == "label_already_bound"
+    same = _publish(remote_api.client, mode="autonomy", label="boat-lore")
+    assert same.status_code == 200 and same.json()["remote_access"]["origin"] == r.json()["remote_access"]["origin"]
+
+
+def test_status_is_single_flight_and_cached_briefly(remote_api, monkeypatch):
+    from tools.dashboard import service_status
+
+    probes = {"n": 0}
+
+    async def counting(org, reservation_id, **_kw):
+        probes["n"] += 1
+        return {"state": "Live", "stages": [], "failed_stage": None, "detail": ""}
+    monkeypatch.setattr(service_status, "service_status", counting)
+    _publish(remote_api.client, mode="autonomy")
+    for _ in range(3):
+        remote_api.client.get("/api/network/remote-access/status", headers=_headers())
+    assert probes["n"] == 1
 
 
 @pytest.mark.parametrize("body, code", [
@@ -190,6 +271,7 @@ def test_status_reports_the_stages_certificate_gate_and_advertisement(remote_api
                                     "reason": "Certificate issuance failed: boom"})
     remote_api.gateway["advertised_routes"] = [row["reservation_id"]]
     remote_api.gateway["auth_helpers"] = ["dashboard-passkey"]
+    remote_api.remote_access._invalidate_status()   # past the 2 s cache
     status = remote_api.client.get("/api/network/remote-access/status", headers=_headers()).json()["status"]
     assert status["certificate"] == "failed" and "boom" in status["certificate_detail"]
     assert status["advertised"] is True and status["gate"] == "up"

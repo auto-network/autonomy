@@ -664,10 +664,16 @@ def _reservation_members(org: str):
 
 
 def reserve_origin(
-    org: str, app_label: str, zone: str | None = None
+    org: str, app_label: str, zone: str | None = None, *, persona_slug: str | None = None,
 ) -> tuple[dict, bool]:
     """Reserve ``<app>.<persona>.serve.auto.network`` or, with ``zone``,
-    ``<app>.<zone>`` directly under a zone this organization has claimed."""
+    ``<app>.<zone>`` directly under a zone this organization has claimed.
+
+    ``persona_slug`` is the operator's answer to onboarding's label question
+    (already checked by remote_access.check_label): it names the persona
+    label's slug for a persona that has none bound yet. A label already bound
+    at the registry always wins (the registry never rebinds).
+    """
     app_label = validate_app_label(app_label)
     persona_pub, display_name = _persona_for_org(org)
     if zone is not None:
@@ -708,7 +714,7 @@ def reserve_origin(
     else:
         payload["persona_label"] = (
             bound_persona_label(org, persona_pub)
-            or normalize_persona_label(display_name, persona_pub)
+            or normalize_persona_label(persona_slug or display_name, persona_pub)
         )
     settings_ops.upsert_by_key(
         NAMESPACE_RESERVATION_SET_ID,

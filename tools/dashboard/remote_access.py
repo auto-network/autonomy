@@ -147,10 +147,21 @@ def check_label(org: str, candidate: object, *, existing: list[str] | None = Non
 
 # ── the publish call and its record (graph://c9d72ea4-feb §10) ─────────────
 
+import asyncio
+import ipaddress
+import time
+from urllib.parse import urlsplit
+
 #: The dashboard's own Service app label when onboarding publishes it.
 DEFAULT_APP_LABEL = "dashboard"
 #: The scope the dashboard publishes under by default (operator, 2026-09-26).
 DEFAULT_PUBLISHER = "personal"
+#: How long one status probe answers every tab's poll (the note: 2 s polls).
+STATUS_CACHE_SECONDS = 2.0
+
+_reload_task: "asyncio.Task | None" = None
+_status_lock: "asyncio.Lock | None" = None
+_status_cache: tuple[float, dict] | None = None
 
 
 def _utc_now() -> str:
@@ -159,7 +170,7 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def record(org: str, payload: dict) -> dict:
+def record(payload: dict) -> dict:
     """Write the operator's remote-access row (personal-homed singleton)."""
     from tools.graph import settings_ops
     from tools.graph.schemas.dashboard_remote_access import (
@@ -167,6 +178,7 @@ def record(org: str, payload: dict) -> dict:
 
     settings_ops.write_by_key(REMOTE_ACCESS_SET_ID, REMOTE_ACCESS_REVISION, REMOTE_ACCESS_KEY,
                               payload, org=None)
+    _invalidate_status()
     return dict(payload)
 
 
@@ -181,79 +193,194 @@ def current() -> dict | None:
     return dict(row["payload"])
 
 
+# ── where a request came from ─────────────────────────────────────────────
+
+def _host_of(origin: str) -> str:
+    return (urlsplit(origin).hostname or "").rstrip(".").lower()
+
+
+def validate_request_origin(mode: str, origin: object) -> str:
+    """The origin recorded for the local and Tailscale modes is the one the
+    operator's browser reached the dashboard on. It is taken from the request
+    and must fit the mode (reviewer): local is a loopback, private, link-local
+    or .local address; Tailscale is a .ts.net name or a CGNAT (100.64/10)
+    address. Scheme http or https, no path. Raises ServicePublicationError."""
+    from tools.dashboard import service_publication
+
+    if not isinstance(origin, str) or not origin:
+        raise service_publication.ServicePublicationError("origin_required", 400)
+    parts = urlsplit(origin)
+    host = (parts.hostname or "").rstrip(".").lower()
+    if parts.scheme not in ("http", "https") or not host or parts.path not in ("", "/") \
+            or parts.query or parts.fragment or parts.username or parts.password:
+        raise service_publication.ServicePublicationError("origin_invalid", 400)
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if mode == "local":
+        fits = (host == "localhost" or host.endswith(".localhost") or host.endswith(".local")
+                or (address is not None and (address.is_loopback or address.is_private
+                                             or address.is_link_local)))
+    elif mode == "tailscale":
+        fits = host.endswith(".ts.net") or (
+            address is not None and address.version == 4
+            and address in ipaddress.ip_network("100.64.0.0/10"))
+    else:
+        fits = False
+    if not fits:
+        raise service_publication.ServicePublicationError("origin_invalid", 400)
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}"
+
+
+def request_came_through_gateway(headers, relay_origin: str | None) -> bool:
+    """True when the request arrived over the published relay route: the
+    gateway strips every client X-Forwarded-* header and adds its own
+    X-Forwarded-Host for the upstream, and the Host is the relay hostname.
+    The publish and enrollment calls are local-listener operations and are
+    refused on that path (reviewer, and the note's enrollment rule)."""
+    host = (headers.get("host") or "").split(":")[0].rstrip(".").lower()
+    if headers.get("x-forwarded-host"):
+        return True
+    return bool(relay_origin) and host == _host_of(relay_origin)
+
+
+# ── the publish call ──────────────────────────────────────────────────────
+
 async def publish(mode: str, *, org: str = DEFAULT_PUBLISHER, app_label: str | None = None,
-                  request_origin: str | None = None) -> dict:
+                  label: str | None = None, request_origin: str | None = None) -> dict:
     """Perform the whole publish deterministically and idempotently.
 
     ``autonomy``: reserve the origin (or reuse it), bind this dashboard as the
-    target on its plain listener (personal-gated by construction), activate,
-    ask the certificate manager and the gateway to converge, and record the
-    row. Re-running returns the same origin and makes no second reservation.
-    ``tailscale`` / ``local``: record the origin the operator reached the
-    dashboard on; nothing is published.
+    target on its plain listener (personal-gated by construction), activate
+    (a publication paused by an earlier switch resumes), ask the certificate
+    manager and the gateway to converge, and record the row. Re-running
+    returns the same origin and makes no second reservation.
+    ``tailscale`` / ``local``: record the validated origin the operator
+    reached the dashboard on, and PAUSE the relay publication if one exists so
+    the dashboard is not reachable remotely while the setting says otherwise.
     """
     from tools.graph.schemas.dashboard_remote_access import REACH_MODES
     from tools.dashboard import service_publication
 
     if mode not in REACH_MODES:
         raise service_publication.ServicePublicationError("invalid_mode", 400)
+    previous = current()
     if mode != "autonomy":
-        if not isinstance(request_origin, str) or not request_origin:
-            raise service_publication.ServicePublicationError("origin_required", 400)
-        return record(org, {"mode": mode, "origin": request_origin, "published_at": _utc_now()})
+        origin = validate_request_origin(mode, request_origin)
+        paused = _pause_relay_publication(previous)
+        row = {"mode": mode, "origin": origin, "published_at": _utc_now()}
+        if paused is not None:
+            row["paused_relay"] = paused
+        return record(row)
 
-    label = app_label if app_label is not None else DEFAULT_APP_LABEL
-    reservation, _created = service_publication.reserve_origin(org, label)
+    if label is not None:
+        check = check_label(org, label)
+        if not check.ok:
+            raise service_publication.ServicePublicationError("label_" + check.code, 400, check.reason)
+        label = check.label
+    app = app_label if app_label is not None else DEFAULT_APP_LABEL
+    reservation, _created = service_publication.reserve_origin(org, app, persona_slug=label)
     reservation_id = reservation["reservation_id"]
     await service_publication.bind_service_target(
         org, reservation_id, None, service_publication.DASHBOARD_TARGET_DEFAULT_PORT,
         kind=service_publication.DASHBOARD_TARGET_KIND)
     service_publication.transition_reservation(org, reservation_id, "active")
     _converge()
-    return record(org, {
+    return record({
         "mode": "autonomy",
         "origin": reservation["origin"],
+        "publisher": org,
         "reservation_id": reservation_id,
         "app_label": reservation["app_label"],
         "published_at": _utc_now(),
     })
 
 
-def _converge() -> None:
+def _pause_relay_publication(previous: dict | None) -> dict | None:
+    """Pause the relay publication an earlier choice made, if any, and ask the
+    gateway to reload; the paused reservation resumes when the operator
+    chooses the relay again. Returns what was paused, for the row and status."""
+    from tools.dashboard import service_publication
+
+    if not previous:
+        return None
+    reservation_id = previous.get("reservation_id")
+    publisher = previous.get("publisher") or DEFAULT_PUBLISHER
+    if previous.get("mode") != "autonomy" or not reservation_id:
+        return previous.get("paused_relay")
+    try:
+        service_publication.transition_reservation(publisher, reservation_id, "paused")
+    except service_publication.ServicePublicationError as exc:
+        if exc.code not in ("reservation_not_found", "reservation_released"):
+            raise
+        return None
+    _converge(certificate=False)
+    return {"publisher": publisher, "reservation_id": reservation_id, "origin": previous.get("origin")}
+
+
+def _converge(*, certificate: bool = True) -> None:
     """Best effort: issue the certificate and reload the gateway now rather
     than at their next tick. Failures here never fail the publish; status
-    reports them."""
-    try:
-        from tools.dashboard import service_certificate_manager
+    reports them. The reload task is kept so it is never garbage-collected
+    mid-flight."""
+    global _reload_task
+    if certificate:
+        try:
+            from tools.dashboard import service_certificate_manager
 
-        service_certificate_manager.request_reconcile()
-    except Exception:
-        pass
+            service_certificate_manager.request_reconcile()
+        except Exception:
+            pass
     try:
-        import asyncio
-
         from tools.dashboard import web_gateway_supervisor
 
-        asyncio.get_running_loop().create_task(web_gateway_supervisor.request_reload())
+        _reload_task = asyncio.get_running_loop().create_task(web_gateway_supervisor.request_reload())
     except Exception:
         pass
+
+
+# ── status ────────────────────────────────────────────────────────────────
+
+def _invalidate_status() -> None:
+    global _status_cache
+    _status_cache = None
 
 
 async def status() -> dict:
-    """The staged progress onboarding polls: what is recorded, and for the
-    relay mode where the publish stands (route, certificate, gate, advertised)."""
+    """The staged progress onboarding polls: what is recorded and, for the
+    relay mode, where the publish stands. One live probe answers every poll
+    within STATUS_CACHE_SECONDS (single-flight: concurrent tabs share it)."""
+    global _status_lock, _status_cache
+    if _status_lock is None:
+        _status_lock = asyncio.Lock()
+    async with _status_lock:
+        if _status_cache is not None and time.monotonic() - _status_cache[0] < STATUS_CACHE_SECONDS:
+            return dict(_status_cache[1])
+        result = await _status_uncached()
+        _status_cache = (time.monotonic(), result)
+        return dict(result)
+
+
+async def _status_uncached() -> dict:
     row = current()
     if row is None:
         return {"mode": None, "origin": None, "recorded": False}
     result = {"mode": row["mode"], "origin": row["origin"], "recorded": True,
               "published_at": row.get("published_at")}
     if row["mode"] != "autonomy":
+        paused = row.get("paused_relay")
+        if paused:
+            result["relay_publication"] = "paused"
+            result["relay_origin"] = paused.get("origin")
         return result
     from tools.dashboard import service_publication, service_status, web_gateway_supervisor
     from tools.dashboard import service_certificate_manager
 
-    org = DEFAULT_PUBLISHER
+    org = row.get("publisher") or DEFAULT_PUBLISHER
     reservation_id = row["reservation_id"]
+    result["publisher"] = org
     result["reservation_id"] = reservation_id
     try:
         link = await service_status.service_status(org, reservation_id)
