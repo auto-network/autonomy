@@ -291,14 +291,31 @@ async def publish(mode: str, *, org: str = DEFAULT_PUBLISHER, app_label: str | N
         kind=service_publication.DASHBOARD_TARGET_KIND)
     service_publication.transition_reservation(org, reservation_id, "active")
     _converge()
-    return record({
+    row = {
         "mode": "autonomy",
         "origin": reservation["origin"],
         "publisher": org,
         "reservation_id": reservation_id,
         "app_label": reservation["app_label"],
         "published_at": _utc_now(),
-    })
+    }
+    # Links keep working before the relay route is live: remember the local
+    # or Tailnet origin this publish was made from (reviewer, auto-w622e).
+    local_origin = _local_origin_of(request_origin) or (previous or {}).get("local_origin")
+    if local_origin:
+        row["local_origin"] = local_origin
+    return record(row)
+
+
+def _local_origin_of(request_origin: str | None) -> str | None:
+    from tools.dashboard import service_publication
+
+    for mode in ("local", "tailscale"):
+        try:
+            return validate_request_origin(mode, request_origin)
+        except service_publication.ServicePublicationError:
+            continue
+    return None
 
 
 def _pause_relay_publication(previous: dict | None) -> dict | None:
@@ -422,15 +439,36 @@ async def _status_uncached() -> dict:
 
 # ── the origin every link uses (auto-w622e) ───────────────────────────────
 
+def relay_route_live(reservation_id: str | None) -> bool:
+    """True while the gateway advertises the dashboard's relay route with its
+    passkey gate helper running: only then is the relay origin reachable."""
+    if not reservation_id:
+        return False
+    try:
+        from tools.dashboard import web_gateway_supervisor
+
+        gateway = web_gateway_supervisor.status()
+    except Exception:
+        return False
+    return (reservation_id in (gateway.get("advertised_routes") or [])
+            and "dashboard-passkey" in (gateway.get("auth_helpers") or []))
+
+
 def dashboard_public_origin() -> str | None:
     """The dashboard's public origin for every operator-facing link, from the
     recorded remote-access row; None only on a node not yet onboarded (links
-    then stay paths). Never derives a hostname and never raises."""
+    then stay paths). In relay mode the relay origin is returned only while
+    its route is advertised with the gate up; until then the local or Tailnet
+    origin the publish was made from. Never derives a hostname, never raises."""
     try:
         row = current()
     except Exception:
         return None
-    origin = (row or {}).get("origin")
+    if not row:
+        return None
+    origin = row.get("origin")
+    if row.get("mode") == "autonomy" and not relay_route_live(row.get("reservation_id")):
+        origin = row.get("local_origin")
     return origin if isinstance(origin, str) and origin else None
 
 
@@ -480,7 +518,11 @@ def seed_origin_from_certificate(*, environ=None, cert_path=None) -> dict | None
         name = _tailnet_name_from_certificate(cert_path) or ""
     if not name or not name.endswith(".ts.net"):
         return None
+    port = (env.get("DASHBOARD_PORT") or "8080").strip()
+    if not port.isdigit() or not 0 < int(port) < 65536:
+        port = "8080"
+    origin = f"https://{name}" if port == "443" else f"https://{name}:{port}"
     try:
-        return record({"mode": "tailscale", "origin": f"https://{name}:8080", "published_at": _utc_now()})
+        return record({"mode": "tailscale", "origin": origin, "published_at": _utc_now()})
     except Exception:
         return None

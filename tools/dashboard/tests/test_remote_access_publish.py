@@ -137,6 +137,7 @@ def test_one_call_publishes_the_dashboard_under_the_personal_persona(remote_api)
     row = r.json()["remote_access"]
     assert row["mode"] == "autonomy" and row["app_label"] == "dashboard"
     assert row["publisher"] == "personal"
+    assert row["local_origin"] == "http://localhost"    # links use it until the relay route is live
     assert row["origin"].startswith("https://dashboard.jeremy-") and row["origin"].endswith(".serve.auto.network")
     [reservation] = _reservations()
     assert reservation.key == row["reservation_id"] and reservation.payload["state"] == "active"

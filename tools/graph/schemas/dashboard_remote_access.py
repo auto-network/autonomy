@@ -52,6 +52,11 @@ class DashboardRemoteAccessV1(SettingSchema):
     publisher: str = field(required=False, description="Relay mode: the scope (personal or an organization slug) the reservation lives in.")
     reservation_id: str = field(required=False, description="Relay mode: the Service reservation the dashboard is published under.")
     app_label: str = field(required=False, description="Relay mode: the app label of that reservation.")
+    local_origin: str = field(
+        required=False,
+        description="Relay mode: the local or Tailnet origin the operator published from; links use it "
+                    "until the relay route is advertised with its gate up.",
+    )
     published_at: str = field(required=True, description="When this mode was recorded (UTC RFC 3339, milliseconds).")
     paused_relay: dict = field(
         required=False,
@@ -82,8 +87,11 @@ class DashboardRemoteAccessV1(SettingSchema):
                 raise SchemaValidationError(f"{cls.__name__}: publisher must name the personal scope or an organization slug")
             if "paused_relay" in payload:
                 raise SchemaValidationError(f"{cls.__name__}: paused_relay belongs to the local and tailscale modes")
+            local_origin = payload.get("local_origin")
+            if local_origin is not None and (not isinstance(local_origin, str) or not _ORIGIN_RE.fullmatch(local_origin)):
+                raise SchemaValidationError(f"{cls.__name__}: local_origin must be an http(s) origin with no path")
         else:
-            for name in ("reservation_id", "app_label", "publisher"):
+            for name in ("reservation_id", "app_label", "publisher", "local_origin"):
                 if name in payload:
                     raise SchemaValidationError(f"{cls.__name__}: {name} belongs to the relay mode only")
             paused = payload.get("paused_relay")

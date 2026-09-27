@@ -536,7 +536,7 @@ no configuration is needed there either.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DASHBOARD_DOMAIN` | `desktop.tail1234.ts.net` | Tailscale hostname the TLS-cert renewal issues for (`renew-tls-cert.sh`). Set to your own node. |
+| `DASHBOARD_DOMAIN` | the existing certificate's `.ts.net` name | Tailscale hostname the TLS-cert renewal issues for (`renew-tls-cert.sh`); when unset the script renews the name found in the current certificate's subjectAltName and logs a refusal to `data/cert-renew.log` when neither exists. Also seeds the dashboard's recorded remote-access origin once, on nodes onboarded before that step existed. |
 | `DASHBOARD_URL` | `https://localhost:8080` | Dashboard base URL for CLI/tools. |
 | `DASHBOARD_AUTH` | *(unset; enforced)* | Recovery kill-switch for the human unlock gate. Only `off`, `0`, `false`, or `no` (case-insensitive) disable enforcement — use to recover from a broken unlock, then unset. Unset or any other value enforces (fail-safe). |
 | `DOLT_BIN` | `dolt` on `PATH` | Path to the `dolt` binary used by `backup-all.sh`. |
