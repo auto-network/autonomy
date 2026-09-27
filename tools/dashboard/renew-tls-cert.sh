@@ -13,7 +13,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${AUTONOMY_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
-DOMAIN="${DASHBOARD_DOMAIN:-desktop.tail1234.ts.net}"
+# No machine name lives in this script: DASHBOARD_DOMAIN names the Tailnet
+# host to issue for (the recorded remote-access origin, without the scheme).
+DOMAIN="${DASHBOARD_DOMAIN:?set DASHBOARD_DOMAIN to the Tailnet name of this node (see autonomy.dashboard.remote-access)}"
 LOG="$REPO_ROOT/data/cert-renew.log"
 
 exec >>"$LOG" 2>&1

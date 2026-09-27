@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 import re
-import socket
 from pathlib import Path
 
 import jinja2
@@ -66,61 +65,22 @@ _env = jinja2.Environment(
 )
 
 
-_DNS_NAME_RE = re.compile(
-    r"^(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
-    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$"
-)
 
 
-_DOCKER_ID_HOSTNAME_RE = re.compile(r"[0-9a-f]{12}")
 
 
-def _operator_dashboard_url(
-    *,
-    configured_domain: str | None = None,
-    hostname: str | None = None,
-    resolv_text: str | None = None,
-) -> str | None:
-    """Return this node's operator-reachable Tailnet dashboard URL.
+def _operator_dashboard_url() -> str | None:
+    """The dashboard's public origin for operator-facing links, as recorded by
+    onboarding's remote-access step (autonomy.dashboard.remote-access); None on
+    a node not yet onboarded, so the primer gives paths only (auto-w622e). No
+    hostname is derived: the old hostname-plus-resolv.conf guess produced a
+    Docker id as a Tailnet name on Compose nodes."""
+    try:
+        from tools.dashboard import remote_access
 
-    ``DASHBOARD_DOMAIN`` is authoritative when configured. Otherwise a
-    host-networked container inherits the host's MagicDNS search suffix in
-    ``/etc/resolv.conf``; combining it with the inherited hostname gives the
-    same fully-qualified name the operator uses from another Tailnet device.
-    """
-    domain = (
-        os.environ.get("DASHBOARD_DOMAIN", "")
-        if configured_domain is None
-        else configured_domain
-    ).strip().rstrip(".")
-    if not domain:
-        host = (hostname if hostname is not None else socket.gethostname())
-        host = host.strip().split(".", 1)[0].lower()
-        if resolv_text is None:
-            try:
-                resolv_text = Path("/etc/resolv.conf").read_text()
-            except OSError:
-                resolv_text = ""
-        suffix = next(
-            (
-                token.rstrip(".")
-                for line in resolv_text.splitlines()
-                if line.strip().startswith(("search ", "domain "))
-                for token in line.split()[1:]
-                if token.rstrip(".").endswith(".ts.net")
-            ),
-            "",
-        )
-        # A bridge/compose container's hostname is its Docker id (twelve
-        # hex digits), not the machine's Tailnet name: joined to the suffix
-        # it produced a link that resolves nowhere (seen live on a Compose
-        # node as aa302e2998c1.<tailnet>.ts.net). Only DASHBOARD_DOMAIN can
-        # name the node there.
-        if host and suffix and not _DOCKER_ID_HOSTNAME_RE.fullmatch(host):
-            domain = f"{host}.{suffix}"
-    if not domain or not _DNS_NAME_RE.fullmatch(domain):
+        return remote_access.dashboard_public_origin()
+    except Exception:
         return None
-    return f"https://{domain}:8080"
 
 
 def _workspace_queries_block(cap, workspace_id: str) -> str:

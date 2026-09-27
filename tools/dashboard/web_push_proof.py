@@ -199,17 +199,15 @@ def _safe_push_failure(exc: Exception) -> tuple[int | None, str | None]:
 
 
 def _vapid_contact(request: Request) -> str:
-    """Return this node's configured HTTPS contact without a repo hostname.
+    """Return this node's HTTPS contact without a repo hostname: the origin
+    onboarding recorded, else the already-validated same-origin request."""
 
-    ``DASHBOARD_DOMAIN`` is the existing machine-local deployment declaration
-    used for the node certificate. Older bare-host installs may not export it,
-    so the already-validated same-origin request is the proof-only fallback.
-    The durable system must move this declaration into the Fleet's designated
-    external-services-host contract rather than invent another hostname source.
-    """
+    # The origin onboarding recorded (auto-w622e) when it is an https one;
+    # the already-validated same-origin request is the proof-only fallback.
+    from tools.dashboard import remote_access
 
-    configured = os.environ.get("DASHBOARD_DOMAIN", "").strip().rstrip(".")
-    candidate = f"https://{configured}" if configured else request.headers["origin"]
+    recorded = remote_access.dashboard_public_origin() or ""
+    candidate = recorded if recorded.startswith("https://") else request.headers["origin"]
     try:
         parsed = urlsplit(candidate)
         port = parsed.port

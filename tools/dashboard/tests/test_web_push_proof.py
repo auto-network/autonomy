@@ -111,7 +111,8 @@ def test_config_returns_uncompressed_vapid_public_key(monkeypatch):
 def test_same_origin_apple_subscription_sends_once(monkeypatch):
     seen = []
     monkeypatch.setattr(api_auth, "require_global_api_authority", lambda _r: None)
-    monkeypatch.setenv("DASHBOARD_DOMAIN", "node.example.test")
+    from tools.dashboard import remote_access
+    monkeypatch.setattr(remote_access, "dashboard_public_origin", lambda: "https://node.example.test")
     monkeypatch.setattr(
         web_push_proof,
         "_send_push",
@@ -130,8 +131,12 @@ def test_same_origin_apple_subscription_sends_once(monkeypatch):
 
 
 def test_vapid_contact_falls_back_to_validated_request_origin(monkeypatch):
-    monkeypatch.delenv("DASHBOARD_DOMAIN", raising=False)
+    from tools.dashboard import remote_access
     request = type("Request", (), {"headers": {"origin": "https://testserver"}})()
+    # No recorded origin, or a plain-http one (local mode), falls back.
+    monkeypatch.setattr(remote_access, "dashboard_public_origin", lambda: None)
+    assert web_push_proof._vapid_contact(request) == "https://testserver"
+    monkeypatch.setattr(remote_access, "dashboard_public_origin", lambda: "http://localhost:80")
     assert web_push_proof._vapid_contact(request) == "https://testserver"
 
 

@@ -225,43 +225,33 @@ def test_the_primer_never_hardcodes_a_dashboard_address():
         assert "agent-browser open https://localhost:8080" not in out
 
 
-def test_operator_dashboard_url_prefers_configured_tailnet_domain(monkeypatch):
+def test_operator_links_use_the_origin_onboarding_recorded(monkeypatch):
+    """Every operator-facing link is built on the remote-access row's origin
+    (auto-w622e), whichever reach mode recorded it."""
+    from tools.dashboard import remote_access
+
+    for origin in ("https://dash.tail1234.ts.net:8080",
+                   "https://dashboard.jeremy-0123456789abcdef0123.serve.auto.network",
+                   "http://localhost:80"):
+        monkeypatch.setattr(remote_access, "current",
+                            lambda origin=origin: {"mode": "x", "origin": origin})
+        out = render_workspace_primer(_cfg(network_host=True))
+        assert f"OPERATOR-FACING LINKS MUST USE `{origin}`" in out
+        assert "NEVER `localhost` OR `host.docker.internal`" in out
+
+
+def test_operator_links_stay_paths_until_onboarding_records_an_origin(monkeypatch):
+    """No hostname is ever derived: a node with no remote-access row gets no
+    absolute base, not a guess from the container hostname or resolv.conf."""
+    from agents import primer_renderer
+    from tools.dashboard import remote_access
+
+    monkeypatch.setattr(remote_access, "current", lambda: None)
     monkeypatch.setenv("DASHBOARD_DOMAIN", "dash.tail1234.ts.net")
+    assert primer_renderer._operator_dashboard_url() is None
     out = render_workspace_primer(_cfg(network_host=True))
-    assert (
-        "OPERATOR-FACING LINKS MUST USE "
-        "`https://dash.tail1234.ts.net:8080`" in out
-    )
-    assert "NEVER `localhost` OR `host.docker.internal`" in out
-
-
-def test_operator_dashboard_url_derives_magicdns_name(monkeypatch):
-    from agents import primer_renderer
-
-    monkeypatch.delenv("DASHBOARD_DOMAIN", raising=False)
-    assert primer_renderer._operator_dashboard_url(
-        configured_domain="",
-        hostname="DESKTOP-EXAMPLE",
-        resolv_text="nameserver 100.100.100.100\nsearch tailabcd.ts.net\n",
-    ) == "https://desktop-example.tailabcd.ts.net:8080"
-
-
-def test_operator_dashboard_url_refuses_a_docker_container_hostname(monkeypatch):
-    """A compose container's hostname is its Docker id; the derived name
-    (aa302e2998c1.<tailnet>.ts.net, seen live) resolves nowhere."""
-    from agents import primer_renderer
-
-    monkeypatch.delenv("DASHBOARD_DOMAIN", raising=False)
-    assert primer_renderer._operator_dashboard_url(
-        configured_domain="",
-        hostname="aa302e2998c1",
-        resolv_text="search tailabcd.ts.net\n",
-    ) is None
-    assert primer_renderer._operator_dashboard_url(
-        configured_domain="node.tailabcd.ts.net",
-        hostname="aa302e2998c1",
-        resolv_text="search tailabcd.ts.net\n",
-    ) == "https://node.tailabcd.ts.net:8080"
+    assert "OPERATOR-FACING LINKS MUST USE" not in out
+    assert not hasattr(primer_renderer, "_DOCKER_ID_HOSTNAME_RE")
 
 
 def test_the_network_section_is_identical_under_both_flag_values():
@@ -649,7 +639,10 @@ def test_writable_session_branch_uses_session_prefix():
 
 def test_graph_api_guidance_and_operator_link_rule_render_on_separate_lines(monkeypatch):
     """Jinja trimming must not join the network section to the link rule."""
-    monkeypatch.setenv("DASHBOARD_DOMAIN", "dash.tail1234.ts.net")
+    from tools.dashboard import remote_access
+
+    monkeypatch.setattr(remote_access, "current",
+                        lambda: {"mode": "tailscale", "origin": "https://dash.tail1234.ts.net:8080"})
     for network_host in (True, False):
         out = render_workspace_primer(_cfg(
             repos=(RepoMount(host="example.com", repo="o/r",

@@ -22326,6 +22326,20 @@ async def _on_startup():
         )
     _mark("settings_mediator.start_action_loop")
 
+    # A node onboarded before the remote-access step existed gets its links'
+    # origin from DASHBOARD_DOMAIN or its local certificate's Tailnet name,
+    # once, when no row is recorded (auto-w622e). A file read; never a probe.
+    try:
+        from tools.dashboard import remote_access as _remote_access
+
+        seeded = await asyncio.to_thread(_remote_access.seed_origin_from_certificate)
+        if seeded:
+            logger.info("remote access: seeded %s origin %s from the local certificate",
+                        seeded["mode"], seeded["origin"])
+    except Exception:
+        logger.exception("remote access origin seed failed; links stay paths until onboarding records one")
+    _mark("remote_access.seed_origin")
+
     # auto.network serving supervisor: bring up the tunnel connector for any
     # org whose serve-cert is provisioned and whose links are live, and arm the
     # watchdog. So a restart re-establishes serving on its own, without waiting
