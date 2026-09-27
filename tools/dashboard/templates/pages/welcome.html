@@ -190,11 +190,14 @@
           </div>
         </template>
         <template x-if="reachBusy && reachChoice === 'autonomy'">
-          <ul class="reach-progress" data-testid="welcome-reach-progress">
-            <template x-for="row in reachProgress()" :key="row.name">
-              <li :class="row.tone"><span x-text="row.mark"></span><span x-text="row.label"></span></li>
-            </template>
-          </ul>
+          <div>
+            <ul class="reach-progress" data-testid="welcome-reach-progress">
+              <template x-for="row in reachProgress()" :key="row.name">
+                <li :class="row.tone"><span x-text="row.mark"></span><span x-text="row.label"></span></li>
+              </template>
+            </ul>
+            <p data-testid="welcome-reach-handoff" x-show="reachHandoffText()" x-text="reachHandoffText()"></p>
+          </div>
         </template>
         <p class="reach-error" x-show="reachError" x-text="reachError" data-testid="welcome-reach-error"></p>
         <div class="actions" style="margin-top:.7rem">

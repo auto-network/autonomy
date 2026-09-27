@@ -228,9 +228,13 @@ function welcomeApp() {
       if (code === 'origin_not_this_node' && detail) return texts[code] + ' ' + detail + '.';
       return texts[code] || (code ? code.replace(/_/g, ' ') : ('The request failed (' + status + ').'));
     },
+    // Live means reachable NOW: the route advertised, its gate up, and the
+    // gateway serving the loaded config. Windows run 10 handed the tab to
+    // the new address while the gateway was still loading, and the tab
+    // stayed blank.
     reachLive() {
       var st = this.reachStatus || this.reach || {};
-      return !!(st.advertised && st.gate === 'up');
+      return !!(st.advertised && st.gate === 'up' && st.gateway_state === 'healthy');
     },
     startReachPolling() {
       var self = this;
@@ -293,6 +297,16 @@ function welcomeApp() {
         return { name: row.name, label: row.label, tone: row.bad ? 'bad' : (row.done ? 'ok' : ''),
                  mark: row.bad ? '✗' : (row.done ? '✓' : '…') };
       });
+    },
+    // Said while the publish converges, so the hand-off is announced before
+    // it happens: once the route is live with its gate up, this page
+    // continues at the new address, where the gate passkey is enrolled
+    // (Windows run 10: the local tab left with no word).
+    reachHandoffText() {
+      var st = this.reachStatus || this.reach || {};
+      if (!st.origin || this.reachLive()) return '';
+      return 'Once the address is live, this page continues at ' + st.origin
+        + ', where you enrol the passkey that guards it. Use the same device you will reach it from.';
     },
     reachTitle() {
       var mode = (this.reach || {}).mode;

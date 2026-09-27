@@ -78,8 +78,14 @@ async function main(){
   assert.equal(app.reachProgress().map(r=>r.tone).join(','),'ok,ok,ok,');
   assert.equal(app.reachTimer,null);
   assert.equal(app.reachPollingStopped,true);
-  // 5. Check again with the gate up and an enrollment URL: the page lands on it
-  state.status={...state.status,gate:'up',enrollment_url:'https://dashboard.alice-0123456789abcdef0123.serve.auto.network/oauth2/enroll?token=abc'};
+  // 5. Gate up and an enrollment URL, but the gateway still loading: the
+  // page does NOT hand off yet (Windows run 10 sent the tab to an address
+  // that was not serving). Once the gateway is healthy, it lands.
+  state.status={...state.status,gate:'up',gateway_state:'loading',enrollment_url:'https://dashboard.alice-0123456789abcdef0123.serve.auto.network/oauth2/enroll?token=abc'};
+  app.checkReachAgain();await settle();await settle();
+  assert.equal(navigated,null);
+  assert.match(app.reachHandoffText(),/continues at https:\/\/dashboard\.alice-0123456789abcdef0123/);
+  state.status={...state.status,gateway_state:'healthy'};
   app.checkReachAgain();await settle();await settle();
   assert.equal(navigated,state.status.enrollment_url);
   assert.equal(app.reachTimer,null);
