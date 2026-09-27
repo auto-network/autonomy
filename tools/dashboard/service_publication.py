@@ -12,6 +12,7 @@ import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from agents.mount_plan import discover_topology
 from tools.dashboard.dao import dashboard_db
@@ -204,20 +205,23 @@ def _persona_for_org(org: str) -> tuple[str, str]:
     return persona_pub, display_name
 
 
+def _owned_member(set_id: str, org: str, key: str):
+    """The one owned member under *key* (``id``, ``key``, resolved
+    ``payload``), read by key instead of reading the whole set and scanning
+    it. The gateway reconcile calls this per reservation; the whole-set
+    read was its largest event-loop stall (auto-hf3ow)."""
+    row = settings_ops.read_set_key(set_id, key, org=org, peers=[])
+    if row is None or not isinstance(row.get("payload"), dict):
+        return None
+    return SimpleNamespace(id=row["id"], key=row["key"], payload=row["payload"])
+
+
 def _member_by_key(org: str, key: str):
-    for member in settings_ops.read_owned_set(
-        NAMESPACE_RESERVATION_SET_ID, org=org
-    ).members:
-        if member.key == key and isinstance(member.payload, dict):
-            return member
-    return None
+    return _owned_member(NAMESPACE_RESERVATION_SET_ID, org, key)
 
 
 def _target_member_by_key(org: str, key: str):
-    for member in settings_ops.read_owned_set(SERVICE_TARGET_SET_ID, org=org).members:
-        if member.key == key and isinstance(member.payload, dict):
-            return member
-    return None
+    return _owned_member(SERVICE_TARGET_SET_ID, org, key)
 
 
 def _reservation_for_target(org: str, key: str, *, serving: bool = False):

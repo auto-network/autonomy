@@ -342,6 +342,45 @@ async def build_desired_state() -> GatewayDesiredState:
         )
 
 
+def _org_publication_snapshot(org: str):
+    """Everything the desired state needs from one org's Settings, read in
+    one call so the reconcile can run it off the event loop (auto-hf3ow:
+    these reads ran on the loop, per reservation, and stalled the dashboard
+    under Settings load). Returns ``None`` when the org publishes nothing
+    here, else ``(candidates, target_rows, facts)`` where ``facts`` maps a
+    reservation id to its active certificate pair and stored hostname
+    (``None`` when unreadable)."""
+    reservations = service_publication.list_reservations(org)
+    target_ids = _local_reservation_ids(org)
+    candidates = sorted(
+        (
+            row
+            for row in reservations
+            if isinstance(row, dict)
+            and row.get("state") in {"active", "paused"}
+            and row.get("reservation_id") in target_ids
+        ),
+        key=lambda row: row["reservation_id"],
+    )
+    if not candidates:
+        return None
+    target_rows = {
+        row["reservation_id"]: row
+        for row in service_publication.list_service_targets(org)
+    }
+    facts = {}
+    for reservation in candidates:
+        reservation_id = reservation["reservation_id"]
+        identity = service_publication.certificate_identity_for_payload(reservation)
+        pair = service_certificate.active_gateway_pair(org, identity)
+        try:
+            hostname = service_gateway.reservation_hostname(org, reservation_id)
+        except Exception:
+            hostname = None
+        facts[reservation_id] = (pair, hostname)
+    return candidates, target_rows, facts
+
+
 async def _build_desired_state() -> GatewayDesiredState:
     from tools.dashboard import service_auth
 
@@ -366,30 +405,16 @@ async def _build_desired_state() -> GatewayDesiredState:
         passkey_gate.HELPER_ID,
     ])
     for org in orgs:
-        reservations = service_publication.list_reservations(org)
-        target_ids = _local_reservation_ids(org)
-        candidates = sorted(
-            (
-                row
-                for row in reservations
-                if isinstance(row, dict)
-                and row.get("state") in {"active", "paused"}
-                and row.get("reservation_id") in target_ids
-            ),
-            key=lambda row: row["reservation_id"],
-        )
-        if not candidates:
+        snapshot = await asyncio.to_thread(_org_publication_snapshot, org)
+        if snapshot is None:
             continue
+        candidates, target_rows, facts = snapshot
         found_publication = True
         if not await _connector_ready(org):
             found_unready_connector = True
             if connector_detail is None:
                 connector_detail = _connector_outcome(org)
             continue
-        target_rows = {
-            row["reservation_id"]: row
-            for row in service_publication.list_service_targets(org)
-        }
         access_modes = {
             reservation_id: row.get("access_mode", "public")
             for reservation_id, row in target_rows.items()
@@ -397,18 +422,14 @@ async def _build_desired_state() -> GatewayDesiredState:
 
         for reservation in candidates:
             reservation_id = reservation["reservation_id"]
-            identity = service_publication.certificate_identity_for_payload(reservation)
-            pair = service_certificate.active_gateway_pair(org, identity)
+            pair, stored_hostname = facts[reservation_id]
             if pair is None:
                 found_missing_certificate = True
                 continue
             if reservation["state"] == "paused":
-                try:
-                    hostname = service_gateway.reservation_hostname(
-                        org, reservation_id
-                    )
-                except Exception:
+                if stored_hostname is None:
                     continue
+                hostname = stored_hostname
                 paused_hosts.append(hostname)
                 certificates[hostname] = pair
                 desired_routes.append(
@@ -461,12 +482,9 @@ async def _build_desired_state() -> GatewayDesiredState:
                 # unavailable page; the reason is logged, never swallowed
                 # (a silent refusal here hid a planner fault, 2026-09-27).
                 logger.info("Service route %s/%s unavailable", org, reservation_id, exc_info=True)
-                try:
-                    hostname = service_gateway.reservation_hostname(
-                        org, reservation_id
-                    )
-                except Exception:
+                if stored_hostname is None:
                     continue
+                hostname = stored_hostname
                 unavailable_hosts.append(hostname)
                 # The unavailable page still terminates TLS for this exact
                 # hostname, so it needs the persona certificate just like an
@@ -793,6 +811,14 @@ class GatewayReconcileWorker:
                     watchdog_at = loop.time() + RECONCILE_INTERVAL_SECONDS
                     continue
                 if self.event_relevant(topic, data):
+                    # A burst of events needs one pass, not one per event:
+                    # every pass reads the whole desired state anyway, and
+                    # events that arrive during it queue for the next.
+                    while True:
+                        try:
+                            queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
                     await self._reconcile_safely()
                     watchdog_at = loop.time() + RECONCILE_INTERVAL_SECONDS
         finally:

@@ -1279,3 +1279,88 @@ async def test_planner_renders_a_personal_session_service_unavailable_not_gated_
     assert plan.ready is True and plan.helpers == ()
     assert "not currently available" in plan.caddyfile
     assert "forward_auth" not in plan.caddyfile
+
+
+# ── auto-hf3ow: Settings reads off the loop, keyed, and coalesced ─────────
+
+
+@pytest.mark.asyncio
+async def test_planner_reads_each_orgs_settings_off_the_event_loop(monkeypatch):
+    import threading
+    seen = []
+    monkeypatch.setattr(sup, "_discover_orgs", lambda: ["autonomy", "anchore"])
+
+    def snapshot(org):
+        seen.append((org, threading.current_thread() is threading.main_thread()))
+        return None
+    monkeypatch.setattr(sup, "_org_publication_snapshot", snapshot)
+    await sup._build_desired_state()
+    assert seen == [("autonomy", False), ("anchore", False)]
+
+
+@pytest.mark.asyncio
+async def test_a_burst_of_relevant_events_reconciles_once():
+    observed = []
+    release = asyncio.Event()
+
+    class Supervisor:
+        async def reconcile(self, plan, force=False):
+            observed.append(plan)
+            if len(observed) == 1:
+                await release.wait()   # the startup pass is busy
+            return {"state": "healthy"}
+
+        def status(self):
+            return {"state": "healthy"}
+
+    async def planner():
+        return desired()
+
+    class EventBus:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+
+        def subscribe(self, **_kwargs):
+            return self.queue
+
+        def unsubscribe(self, _queue):
+            pass
+
+    bus = EventBus()
+    worker = sup.GatewayReconcileWorker(
+        supervisor=Supervisor(), planner=planner,
+        lease_reconciler=NoopLeaseReconciler(),
+    )
+    await worker.start(bus)
+    for _ in range(100):
+        if observed:
+            break
+        await asyncio.sleep(0)
+    for seq in range(5):   # arrives while the startup pass runs
+        await bus.queue.put(("session:registry", {}, seq))
+    release.set()
+    for _ in range(200):
+        await asyncio.sleep(0)
+    await worker.stop()
+    assert len(observed) == 2, "startup pass + ONE pass for the burst"
+
+
+def test_member_by_key_reads_one_key_not_the_whole_set(monkeypatch):
+    from tools.dashboard import service_publication as sp
+    from tools.graph import settings_ops
+
+    def whole_set(*a, **k):
+        raise AssertionError("read the whole set to find one key")
+    monkeypatch.setattr(settings_ops, "read_owned_set", whole_set)
+    calls = []
+
+    def by_key(set_id, key, *, org, peers=None):
+        calls.append((set_id, key, org, peers))
+        return {"id": "row-1", "key": key, "payload": {"state": "active"}} \
+            if key == "k1" else None
+    monkeypatch.setattr(settings_ops, "read_set_key", by_key)
+    member = sp._member_by_key("autonomy", "k1")
+    assert (member.id, member.key, member.payload) == ("row-1", "k1", {"state": "active"})
+    assert sp._target_member_by_key("autonomy", "missing") is None
+    assert calls[0] == (sp.NAMESPACE_RESERVATION_SET_ID, "k1", "autonomy", [])
+    assert calls[1][0] == sp.SERVICE_TARGET_SET_ID
