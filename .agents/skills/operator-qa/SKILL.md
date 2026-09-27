@@ -14,7 +14,7 @@ The operator has stated the core requirement several times: ask one question at 
 1. List every open decision, and name the note or bead that owns each one. That note or bead is where the answer is recorded.
 2. Remove any decision the operator has already made. Search `graph attention --search "<topic>"` and read the owning note's comments. If you find an answer, record it and do not ask it again.
 3. Order the remaining decisions so that a decision which changes the options of another decision comes first.
-4. For each decision, write the options, the consequence of each option in one sentence, and your recommendation with its reason in one sentence.
+4. For each decision, write the options, the consequence of each option in one sentence, and your recommendation with its reason in one sentence. Consequences describe what the option does or rules out, never how long it takes.
 
 ## Asking one question
 
@@ -33,6 +33,7 @@ I recommend <letter>, because <reason in one sentence>.
 Rules for the question:
 - Keep it under about eight lines.
 - Give only the background the choice needs. If the operator needs more, they will ask.
+- Do not give time or effort estimates, in the question, the options or the recommendation.
 - Do not use bead IDs, section numbers, option codes from a design note, or any other label the operator would have to look up. The letters A, B and C are defined in the message itself.
 - Do not bundle two decisions into one question, and do not list the remaining questions.
 - The operator may answer with a letter, with their own words, or with a correction to the question. Treat all three as answers.
