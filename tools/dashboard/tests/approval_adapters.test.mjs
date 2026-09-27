@@ -158,3 +158,37 @@ test('Central exact-ID opener ignores a session switch during either review read
     assert.equal(await opening,false);assert.equal(opened,0);
   }
 });
+
+// The link-publish review, as the operator reads it. These carry what the
+// retired sweep class TestApprovalRequired checked on the worktrees sheet that
+// link_publish no longer renders (3c01bc06 moved it to this shared dialog).
+const shadowText = () => document.querySelector('[data-testid=approval-dialog]')?.shadowRoot.textContent.replace(/\s+/g, ' ') || '';
+test('link review names the organization, the target, the requesting session and who it is prepared for', async () => {
+  await instance._approvalKinds.link_publish.open(instance, {
+    ...request(), recipient: { participant_id: 'guest:ab', display_name: 'Alex Guest' } });
+  assert.equal(q('#org-name').textContent, 'Autonomy Network');
+  assert.match(shadowText(), /Release note/);
+  // The session that asked, by its working title, and its workspace.
+  assert.equal(q('#requester-kind').textContent, 'Requesting session');
+  assert.equal(q('#requester-name').textContent, 'Release');
+  assert.equal(q('#requester-byline').textContent, 'workspace');
+  assert.match(shadowText(), /Prepared for/);
+  assert.match(shadowText(), /Alex Guest/);
+  assert.equal(q('#primary').disabled, false);
+});
+test('an unregistered organization is registered on approval, not blocked by its missing binding', async () => {
+  await instance._approvalKinds.link_publish.open(instance, {
+    ...request(), registration_required: true, binding_error: 'organization is not registered' });
+  assert.equal(q('#review-unavailable').hidden, true);
+  assert.equal(q('#primary').disabled, false);
+});
+test('a request that cannot be approved says why, and Authorize writes nothing', async () => {
+  await instance._approvalKinds.link_publish.open(instance, {
+    ...request(), binding_drift: true });
+  assert.equal(q('#review-unavailable').hidden, false);
+  assert.match(q('#review-unavailable').textContent, /changed after the request was prepared/);
+  assert.equal(q('#primary').disabled, true);
+  q('#primary').click(); await wait(50);
+  assert.equal(signs.length, 0);
+  assert.equal(requests.filter(row => row.options?.method === 'POST').length, 0);
+});
