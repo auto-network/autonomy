@@ -32,7 +32,8 @@ _SINGLE = str.maketrans({
 # Letter pairs that fuse at a glance. "cl"/"d" and "nn"/"m" are left out on
 # purpose: they turn ordinary words (clock, anna) into other ordinary words.
 _PAIRS = (("rn", "m"), ("vv", "w"))
-_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+# Same shape as the reservation validator, tagged labels (`xn--`) refused.
+_LABEL_RE = re.compile(r"^(?![a-z0-9]{2}--)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 def skeleton(label: str) -> str:

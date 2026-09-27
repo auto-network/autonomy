@@ -1265,12 +1265,14 @@ def validate_zone_host_registration(
             "reservation id does not derive from zone and app label")
     return app_label, zone
 
-_APP_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+# Not an RFC 5891 tagged label (`xn--`): Punycode would render as another
+# script's name past every ASCII look-alike check (auto-3q4qn F6).
+_APP_LABEL_RE = re.compile(r"^(?![a-z0-9]{2}--)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _RESERVED_APP_LABELS = frozenset(
     {"_autonomy", "www", "api", "relay", "registry", "auto", "serve"}
 )
 _PERSONA_LABEL_RE = re.compile(
-    r"^[a-z0-9](?:[a-z0-9-]{0,40}[a-z0-9])?-[0-9a-f]{20}\Z"
+    r"^(?![a-z0-9]{2}--)[a-z0-9](?:[a-z0-9-]{0,40}[a-z0-9])?-[0-9a-f]{20}\Z"
 )
 
 

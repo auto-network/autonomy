@@ -60,3 +60,6 @@ def test_well_formed_is_the_dns_label_rule():
     assert ll.is_well_formed("boat-lore") and ll.is_well_formed("a")
     assert not ll.is_well_formed("-boat") and not ll.is_well_formed("Boat") and not ll.is_well_formed("")
     assert not ll.is_well_formed("x" * 64)
+    # RFC 5891 tagged labels (Punycode) are refused before any shape check.
+    assert not ll.is_well_formed("xn--80ak6aa92e") and not ll.is_well_formed("ab--cd")
+    assert ll.is_well_formed("a--b")   # hyphens elsewhere are ordinary

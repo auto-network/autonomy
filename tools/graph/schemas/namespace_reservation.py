@@ -34,7 +34,10 @@ RESERVED_APP_LABELS = frozenset(
 )
 RESERVATION_STATES = ("active", "paused", "released")
 
-_APP_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+# A lowercase DNS label that is not an RFC 5891 tagged label (hyphens in
+# positions 3 and 4, the `xn--` A-label shape): a Punycode label would pass
+# every ASCII look-alike check and display as another script's name.
+_APP_LABEL_RE = re.compile(r"^(?![a-z0-9]{2}--)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _PERSONA_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _PERSONA_PUB_RE = re.compile(r"^[0-9a-f]{64}$")
 _RFC3339_MILLIS_RE = re.compile(

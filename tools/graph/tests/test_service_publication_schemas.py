@@ -79,6 +79,10 @@ def test_app_labels_accept_only_the_exact_dns_vocabulary(label):
         "registry",
         "auto",
         "serve",
+        # RFC 5891 tagged labels: Punycode would pass every ASCII look-alike
+        # check and display as another script's name (reviewer, auto-3q4qn F6).
+        "xn--80ak6aa92e",
+        "ab--cd",
     ],
 )
 def test_app_labels_reject_malformed_and_reserved_values(label):

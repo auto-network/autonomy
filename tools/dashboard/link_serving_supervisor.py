@@ -450,22 +450,39 @@ fresh serving credential iff the status is anything but ``ok``.
     return state
 
 
+#: The personal ledger's genesis, keyed by database path: immutable once set,
+#: so it is read from the ledger once and never folded (serve_cert_state runs
+#: on every status poll).
+_personal_genesis_cache: dict[str, str] = {}
+
+
+def _personal_genesis_id() -> str | None:
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+
+    path = org_ledger_db_path(PERSONAL_SCOPE)
+    cached = _personal_genesis_cache.get(str(path))
+    if cached:
+        return cached
+    if not path.exists():
+        # LedgerStore connects (and so creates) the file; a fresh identity
+        # with no personal database yet must not gain an empty one here.
+        return None
+    with LedgerStore(path) as store:
+        genesis_id = store.ledger.genesis_id
+    if genesis_id:
+        _personal_genesis_cache[str(path)] = genesis_id
+    return genesis_id or None
+
+
 def personal_persona_pub() -> str | None:
     """The persona the personal ledger derives for this identity, or None
     until that ledger has a genesis. Never raises."""
     try:
         from tools.graph import org_ops
-        from tools.network.ledger import LedgerStore, org_ledger_db_path
 
-        path = org_ledger_db_path(PERSONAL_SCOPE)
-        if not path.exists():
-            # LedgerStore connects (and so creates) the file; a fresh identity
-            # with no personal database yet must not gain an empty one here.
+        genesis_id = _personal_genesis_id()
+        if not genesis_id:
             return None
-        with LedgerStore(path) as store:
-            if not store.ledger.genesis_id:
-                return None
-            genesis_id = store.fold().genesis_id
         persona = org_ops.persona_pub_for_org(genesis_id)
         return persona if isinstance(persona, str) and persona else None
     except Exception:

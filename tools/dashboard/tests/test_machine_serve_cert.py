@@ -212,3 +212,28 @@ def test_a_personal_delegate_naming_the_root_is_ok_but_flagged_for_remint(env, m
     # Unknown persona (no ledger genesis yet): nothing to re-mint for.
     monkeypatch.setattr(lss, "personal_persona_pub", lambda: None)
     assert "remint_required" not in lss.serve_cert_state(None)
+
+
+def test_personal_persona_lookup_never_creates_the_database_and_caches_the_genesis(env, monkeypatch, tmp_path):
+    """auto-8sdrr review: the genesis is immutable, read once, never folded;
+    and a fresh identity with no personal.db must not gain an empty one."""
+    import tools.network.ledger as ledger
+
+    empty = tmp_path / "no-identity-yet"
+    empty.mkdir()
+    path = empty / "personal.db"
+    monkeypatch.setattr(ledger, "org_ledger_db_path", lambda slug, root=None: path)
+    assert not path.exists()
+    lss._personal_genesis_cache.clear()
+    assert lss._personal_genesis_id() is None
+    assert not path.exists(), "the lookup must not create personal.db"
+
+    lss._personal_genesis_cache[str(path)] = "ab" * 32
+    calls = []
+    monkeypatch.setattr(lss, "_log", lss._log)
+    from tools.graph import org_ops
+    monkeypatch.setattr(org_ops, "persona_pub_for_org",
+                        lambda genesis: calls.append(genesis) or "cd" * 32)
+    assert lss.personal_persona_pub() == "cd" * 32
+    assert calls == ["ab" * 32]          # served from the cache, no ledger open
+    lss._personal_genesis_cache.clear()
