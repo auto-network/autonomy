@@ -2,27 +2,31 @@
 # Persistent/host state never ships in the image — it lives in the
 # /app/data volume, created by first-run init (tools/init).
 #
-# NOTE: .git is intentionally NOT excluded. deploy/Dockerfile's builder stage
-# reads the commit hash + commit date from it to stamp /app/VERSION, then drops
-# it — the final image (and the autonomy-code volume it seeds) still ships bare
-# files with no .git. Only deploy/Dockerfile builds from this context; the agent
-# images use their own flat context (agents/build.sh), so this does not put .git
-# in any other image.
+# NOTE: .git is intentionally NOT excluded. deploy/Dockerfile stamps /app/VERSION
+# from it and KEEPS it: the node's /app (and the autonomy-code volume it seeds) is
+# a working checkout that follows origin (tools/dashboard/software_update.py).
+# So nothing git TRACKS may be excluded here — a tracked file missing from /app
+# reads as a deletion, the tree is dirty, and the update guard (can_update)
+# refuses on every node built from the image. Excluded directories re-include
+# their tracked files below; deploy/tests/test_dockerignore_keeps_tracked_files.py
+# fails if a tracked file is ever excluded again. Only deploy/Dockerfile builds
+# from this context; the agent images use their own flat context
+# (agents/build.sh).
 
-.gitignore
 .venv
 .browser_profile
 data
+!data/uploads/.gitkeep
 node_modules
 **/__pycache__
 **/*.pyc
 .pytest_cache
-.dockerignore
 
 # Host-local binaries (gitignored anyway; agent images copy these, the
 # home-base image does not)
 agents/bin
 agents/images
+!agents/images/dashboard/Dockerfile
 tools/dashboard/tailwindcss
 
 # Scratch
