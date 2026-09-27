@@ -65,23 +65,29 @@ class DashboardShellDefaultOrgV1(SettingSchema):
 def shell_default_org() -> str:
     """Resolve this node's declared shell default org.
 
-    # org-scope: machine — the declaration above; first-run seeds it. A
-    # node initialized before the seed existed falls back to its first
-    # listed shared organization. A UI/attribution default only — never a
-    # request-scoping input.
+    # org-scope: machine — the declaration above; first-run seeds it when
+    # the node starts with an organization. A node without the seed falls
+    # back to its first listed shared organization, and a node with no
+    # shared organization has no default: there is no default first
+    # organization (graph://5f2f5a49-00d D7), and the empty string is what
+    # the shell reads as "stamp no X-Graph-Org". A followed mirror is never
+    # the answer: it is read-only, and scoping a request to it is refused.
+    # A UI/attribution default only — never a request-scoping input.
     """
     from tools.graph import settings_ops
+    from tools.graph.db import is_followed_org
 
     try:
         members = settings_ops.read_owned_set(
             SHELL_DEFAULT_ORG_SET_ID, org="machine",
         ).members
         for m in members:
-            if m.key == SHELL_DEFAULT_ORG_KEY and m.payload.get("org"):
-                return m.payload["org"]
+            declared = m.payload.get("org") if m.key == SHELL_DEFAULT_ORG_KEY else None
+            if declared and not is_followed_org(declared):
+                return declared
     except Exception:
         pass
     from tools.graph import org_ops
 
     orgs = [r.slug for r in org_ops.list_orgs() if r.type == "shared"]
-    return orgs[0] if orgs else "autonomy"
+    return orgs[0] if orgs else ""

@@ -11951,10 +11951,19 @@ def _has_collaborative_org() -> bool:
     reserved local stores are not collaborative orgs, so they are excluded. A
     genuinely fresh invite-join machine (personal store only) reads False
     here until the operator creates or joins one.
+
+    A followed mirror (``orgs.type='followed'``) is another organization's
+    public surface, filled only by the follow loop: the operator is not a
+    member, so it is not a collaborative org and does not close the gate. A
+    fresh node follows Autonomy from first run, so counting it sent every
+    fresh node past onboarding (compose simulation, 2026-09-27).
     """
     from tools.graph import org_ops
     from tools.graph.db import LOCAL_STORE_SLUGS
-    return any(ref.slug not in LOCAL_STORE_SLUGS for ref in org_ops.list_orgs())
+    return any(
+        ref.slug not in LOCAL_STORE_SLUGS and ref.type != "followed"
+        for ref in org_ops.list_orgs()
+    )
 
 
 def _fleet_enrollment_first_render() -> dict | None:

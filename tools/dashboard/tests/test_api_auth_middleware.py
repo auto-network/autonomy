@@ -274,3 +274,24 @@ def test_global_middleware_covers_the_live_api_route_table():
     ]
     # Dynamic inventory: core and plugin routes share the same app boundary.
     assert len(api_routes) >= 250
+
+
+def test_scoping_to_a_followed_mirror_is_a_typed_refusal(monkeypatch):
+    """A followed mirror is read-only (graph://5f2f5a49-00d §10.4): selecting
+    it with ``X-Graph-Org`` answers 403 with the reason, never an unhandled
+    exception (compose simulation, 2026-09-27: every shell fetch 500'd)."""
+    from tools.graph import db as graph_db
+
+    monkeypatch.setattr(graph_db, "is_followed_org",
+                        lambda slug, **kw: slug == "mirror-org")
+    with TestClient(_app()) as client:
+        client.cookies.update({COOKIE: "valid-cookie"})
+        refused = client.get("/api/probe", headers={"X-Graph-Org": "mirror-org"})
+        assert refused.status_code == 403
+        body = refused.json()
+        assert body["code"] == "followed_org_read_only"
+        assert body["org"] == "mirror-org"
+        # The same client is served in a member organization.
+        served = client.get("/api/probe", headers={"X-Graph-Org": "org-a"})
+        assert served.status_code == 200
+        assert served.json()["effective_org"] == "org-a"

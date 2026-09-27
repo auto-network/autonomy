@@ -884,3 +884,39 @@ def test_getting_started_plugin_installs_two_personal_workspaces(org_graph):
     # A second reconcile changes nothing.
     again = loader.reconcile_declared_settings(loaded)
     assert {r["action"] for r in again} == {"unchanged"}
+
+
+def test_plugin_declared_setting_skips_a_followed_mirror(tmp_path, monkeypatch):
+    """A manifest naming an organization this node only follows has nothing
+    to install: the mirror is read-only (graph://5f2f5a49-00d §10.4), so the
+    loader records the skip instead of a refused write per startup (fresh
+    follower node, compose simulation 2026-09-27)."""
+    from tools.graph.db import _ORG_TYPE_CACHE, GraphDB
+
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+    GraphDB.close_all_pooled()
+    _ORG_TYPE_CACHE.clear()
+    GraphDB.create_org_db(
+        "autonomy", type_="followed", org_id="2d4b90cb-1e89-452b-82cb-68ca44fd8e52",
+    ).close()
+    try:
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+        _write_setting_plugin(plugins_dir, payload=_agent_action_payload())
+        monkeypatch.setattr(loader, "_read_plugin_settings", lambda org=None: {})
+
+        loaded = loader.load_all(plugins_dir=plugins_dir)
+        results = loader.reconcile_declared_settings(loaded)
+
+        assert results == [{"plugin_id": "settingplug", "org": "autonomy",
+                            "status": "skipped", "action": "followed_mirror"}]
+        assert graph_ops.read_set(
+            "dashboard.agent-actions", org="autonomy", peers=[],
+        ).to_dict() == {}
+    finally:
+        GraphDB.close_all_pooled()
+        _ORG_TYPE_CACHE.clear()

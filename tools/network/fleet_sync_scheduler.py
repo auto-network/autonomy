@@ -3922,7 +3922,14 @@ class FleetSyncScheduler:
         scope that has a channel. Blocking; run in a worker thread."""
         signer = self.config.machine_key
         channels = self._org_channels()
+        followed = self._followed_scopes()
         for scope in sorted(self._scope_paths()):
+            if scope in followed:
+                # A followed mirror is filled only by its org:follow pull
+                # (_sync_follow_scope): this machine writes nothing into it,
+                # so it has no write floor to seal and no org channel to
+                # miss. Skipped silently, not warned about every round.
+                continue
             try:
                 store = self._store_for(scope)
             except Exception:

@@ -348,6 +348,7 @@ class ApiIdentityMiddleware:
             return
 
         from tools.graph import ops as graph_ops
+        from tools.graph.db import FollowedOrgReadOnly
 
         request = Request(scope, receive=receive)
         header_org = request.headers.get("x-graph-org") or None
@@ -378,7 +379,22 @@ class ApiIdentityMiddleware:
         request_state = scope.setdefault("state", {})
         request_state["api_principal"] = principal
         request_state["api_organization"] = effective_org
-        token = graph_ops.set_caller_org(effective_org)
+        try:
+            token = graph_ops.set_caller_org(effective_org)
+        except FollowedOrgReadOnly as exc:
+            # A followed mirror is another organization's public surface
+            # (read-only, filled only by the follow loop); a request cannot be
+            # scoped to it (graph://5f2f5a49-00d §10.4). Refused as the typed
+            # answer it is, never an unhandled exception: a stale default or a
+            # switcher offering the mirror must read the reason, not a 500.
+            refusal = JSONResponse(
+                {"error": f"organization {exc.slug!r} is a followed mirror "
+                          "(read-only); a request cannot be scoped to it",
+                 "code": "followed_org_read_only", "org": exc.slug},
+                status_code=403,
+            )
+            await refusal(scope, receive, send)
+            return
         try:
             await self.app(scope, receive, send)
         finally:

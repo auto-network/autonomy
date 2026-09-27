@@ -387,3 +387,20 @@ def test_design_variants_present():
     assert "step === 2" in TEMPLATE   # organization
     assert "step === 3" in TEMPLATE   # ready
     assert "Go to your workspace" in TEMPLATE
+
+
+def test_collaborative_org_excludes_followed_mirror(monkeypatch):
+    """A fresh node follows Autonomy from first run; the mirror is another
+    organization's public surface, not one the operator belongs to, so it
+    must not close the gate (compose simulation, 2026-09-27)."""
+    from tools.dashboard import server
+    from tools.graph import org_ops
+
+    mirror = SimpleNamespace(slug="autonomy", type="followed")
+    monkeypatch.setattr(org_ops, "list_orgs",
+                        lambda *a, **k: _orgs("personal") + [mirror])
+    assert server._has_collaborative_org() is False
+
+    monkeypatch.setattr(org_ops, "list_orgs",
+                        lambda *a, **k: _orgs("personal", "acme") + [mirror])
+    assert server._has_collaborative_org() is True

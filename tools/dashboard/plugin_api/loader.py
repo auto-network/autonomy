@@ -423,6 +423,15 @@ def load_all(
     return out
 
 
+def _is_followed_mirror(org: str) -> bool:
+    try:
+        from tools.graph.db import is_followed_org
+
+        return bool(org) and is_followed_org(org)
+    except Exception:
+        return False
+
+
 def reconcile_declared_settings(
     plugins: list[LoadedPlugin],
     *,
@@ -460,6 +469,17 @@ def reconcile_declared_settings(
             settings,
             manifest=plugin.manifest,
         )
+        if _is_followed_mirror(effective_org):
+            # The manifest names an organization this node only FOLLOWS: its
+            # local database is a read-only mirror of that org's public
+            # surface (graph://5f2f5a49-00d §10.4), so there is nothing to
+            # install into it and every write would be refused. Skipped as a
+            # fact, not logged as a failure.
+            results.append({
+                "plugin_id": plugin.id, "org": effective_org,
+                "status": "skipped", "action": "followed_mirror",
+            })
+            continue
         try:
             if enabled:
                 results.extend(plugin_settings.reconcile_plugin_settings(
