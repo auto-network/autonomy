@@ -150,7 +150,9 @@ class ServiceCertificateManager:
                     continue  # rate-limited or backing off; the state says until when
                 self.in_progress.add(identity)
                 try:
-                    metadata = service_certificate.certificate_metadata(org, persona)
+                    metadata = await asyncio.to_thread(
+                        service_certificate.certificate_metadata, org, persona
+                    )
                     if metadata is None:
                         metadata = await asyncio.to_thread(
                             _import_legacy_pair, org, persona
@@ -170,7 +172,11 @@ class ServiceCertificateManager:
                             org, persona, staging=False
                         )
                     elif self._materialized.get(identity) != metadata["serial"]:
-                        bundle = service_certificate._read_bundle(metadata["vault_key"])
+                        # A sealed-settings read: it rebuilds KeyControl
+                        # (seconds of crypto), so never on the loop (auto-lcsqr).
+                        bundle = await asyncio.to_thread(
+                            service_certificate._read_bundle, metadata["vault_key"]
+                        )
                         await asyncio.to_thread(
                             service_certificate._materialize_bundle,
                             metadata,

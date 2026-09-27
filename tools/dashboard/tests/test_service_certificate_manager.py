@@ -402,3 +402,35 @@ async def test_an_expiring_shared_record_is_still_renewed(monkeypatch):
     await lifecycle.reconcile_once()
 
     assert ordered == [("autonomy", "autonomy.taplink.net")]
+
+
+@pytest.mark.asyncio
+async def test_vault_reads_in_reconcile_run_off_the_event_loop(monkeypatch):
+    """auto-lcsqr: certificate_metadata and _read_bundle are sealed-settings
+    reads that rebuild KeyControl (seconds of crypto). Both must run in a
+    worker thread, never on the loop thread."""
+    import threading
+
+    loop_thread = threading.current_thread()
+    seen = {}
+
+    def fake_metadata(*_args):
+        seen["metadata"] = threading.current_thread()
+        return metadata(not_after=10_000_000, vault_key="k")
+
+    def fake_read_bundle(_key):
+        seen["bundle"] = threading.current_thread()
+        return {"cert": "c", "key": "k"}
+
+    monkeypatch.setattr(certs, "certificate_metadata", fake_metadata)
+    monkeypatch.setattr(certs, "_read_bundle", fake_read_bundle)
+    monkeypatch.setattr(certs, "_materialize_bundle", lambda *_a: None)
+    monkeypatch.setattr(certs, "_retire_old_ramfs", lambda *_a: None)
+    lifecycle = manager.ServiceCertificateManager(
+        now=lambda: 1000,
+        desired_fn=lambda: {("anchore", "persona-abc")},
+    )
+
+    assert await lifecycle.reconcile_once() is True
+    assert seen["metadata"] is not loop_thread
+    assert seen["bundle"] is not loop_thread

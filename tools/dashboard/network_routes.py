@@ -2538,7 +2538,7 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
 
     from tools.dashboard.link_serving_supervisor import machine_serve_cert_row
     write_org = "personal" if settings_ops._resolve_org_arg(org) is None else org
-    previous_serve = machine_serve_cert_row(org_uuid)
+    previous_serve = await asyncio.to_thread(machine_serve_cert_row, org_uuid)
     if previous_serve is not None and previous_serve.get("cert") == body["cert"]:
         try:
             from tools.dashboard.link_serving_supervisor import get_supervisor
@@ -2560,7 +2560,11 @@ async def _post_serve_cert_v3(request: Request, body: dict) -> JSONResponse:
 
     try:
         from tools.dashboard.link_serving_supervisor import get_supervisor
-        get_supervisor().ensure(write_org)
+        # Off the event loop, like the unchanged-credential branch above:
+        # ensure() reads the sealed serving key and starts the connector,
+        # which held the loop for 10.6 s during a founding on Windows
+        # (auto-lcsqr, node i-0bcdb5aeb752645f6, 2026-09-26).
+        await asyncio.to_thread(get_supervisor().ensure, write_org)
     except Exception:
         pass  # reconcile is best-effort; the watchdog retries
     return JSONResponse({"ok": True, "child_pub": cert.child_pub,
