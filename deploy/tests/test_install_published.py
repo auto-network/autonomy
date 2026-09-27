@@ -20,7 +20,7 @@ def _exe(path: Path, body: str) -> None:
 
 
 def _lock(tmp_path: Path, node_digest: str = GOOD, node_ref: str | None = None,
-          host_terminal: bool = True) -> Path:
+          host_terminal: bool = True, service_gateway: bool = True) -> Path:
     node = node_ref or f"ghcr.io/example/autonomy-node@sha256:{node_digest}"
     lock = tmp_path / "image-lock.env"
     lock.write_text(
@@ -31,7 +31,9 @@ def _lock(tmp_path: Path, node_digest: str = GOOD, node_ref: str | None = None,
         f"AUTONOMY_SESSION_PLATFORM_IMAGE=ghcr.io/example/autonomy-session-platform@sha256:{GOOD}\n"
         f"AUTONOMY_SESSION_DIND_IMAGE=ghcr.io/example/autonomy-session-dind@sha256:{GOOD}\n"
         + (f"AUTONOMY_HOST_TERMINAL_IMAGE=ghcr.io/example/autonomy-host-terminal@sha256:{GOOD}\n"
-           if host_terminal else ""),
+           if host_terminal else "")
+        + (f"AUTONOMY_SERVICE_GATEWAY_IMAGE=ghcr.io/example/autonomy-service-gateway@sha256:{GOOD}\n"
+           if service_gateway else ""),
         encoding="utf-8",
     )
     return lock
@@ -88,7 +90,7 @@ def test_every_image_is_verified_with_the_embedded_key(tmp_path):
     result, calls = _run(tmp_path, _lock(tmp_path))
     assert result.returncode == 5  # fakes never answer /api/ping
     verifies = [line for line in calls.splitlines() if line.startswith("cosign verify")]
-    assert len(verifies) == 5
+    assert len(verifies) == 6
     assert all("--key" in line for line in verifies)
     lines = calls.splitlines()
     last_verify = max(i for i, line in enumerate(lines) if line.startswith("cosign verify"))
@@ -103,11 +105,27 @@ def test_every_image_is_verified_with_the_embedded_key(tmp_path):
 def test_a_release_lock_without_the_host_terminal_image_still_installs(tmp_path):
     """deploy/releases/2026.09.26-0d46057.env pins four images; its node
     predates the in-node host terminal and needs no host-terminal image."""
-    result, calls = _run(tmp_path, _lock(tmp_path, host_terminal=False))
+    result, calls = _run(tmp_path, _lock(tmp_path, host_terminal=False, service_gateway=False))
     assert result.returncode == 5, result.stderr  # fakes never answer /api/ping
     verifies = [line for line in calls.splitlines() if line.startswith("cosign verify")]
     assert len(verifies) == 4
     assert not any(line.endswith(" autonomy-host-terminal") for line in calls.splitlines())
+    assert "AUTONOMY_SERVICE_GATEWAY_IMAGE" not in _env_file(tmp_path)
+
+
+def test_the_service_gateway_image_is_verified_pulled_and_recorded_for_the_dashboard(tmp_path):
+    """The dashboard starts the gateway from its own Compose run, where .env
+    is not read: the pinned reference is recorded in .env, which
+    docker-compose.yml passes into the dashboard's environment (Windows run 5:
+    "No such image: autonomy-service-gateway:local")."""
+    result, calls = _run(tmp_path, _lock(tmp_path))
+    assert result.returncode == 5, result.stderr
+    ref = f"ghcr.io/example/autonomy-service-gateway@sha256:{GOOD}"
+    lines = calls.splitlines()
+    assert f"cosign verify --insecure-ignore-tlog --key {tmp_path / 'node' / 'tools' / 'cosign.pub'} {ref}" in lines \
+        or any(line.startswith("cosign verify") and line.endswith(ref) for line in lines)
+    assert any(line.startswith("docker pull") and line.endswith(ref) for line in lines)
+    assert _env_file(tmp_path)["AUTONOMY_SERVICE_GATEWAY_IMAGE"] == ref
 
 
 def _env_file(tmp_path: Path) -> dict[str, str]:

@@ -34,6 +34,7 @@ session_ref="$base/autonomy-session:$RELEASE_TAG"
 platform_ref="$base/autonomy-session-platform:$RELEASE_TAG"
 dind_ref="$base/autonomy-session-dind:$RELEASE_TAG"
 host_terminal_ref="$base/autonomy-host-terminal:$RELEASE_TAG"
+service_gateway_ref="$base/autonomy-service-gateway:$RELEASE_TAG"
 
 echo "==> Building node image from deploy/Dockerfile"
 # Build from a throwaway clean clone. deploy/Dockerfile self-stamps /app/VERSION
@@ -55,6 +56,16 @@ if [[ -n "${AUTONOMY_TAILWIND_URL:-}" ]]; then
 fi
 node_build+=("$node_src/repo")
 "${node_build[@]}"
+
+echo "==> Building Service gateway image from deploy/Dockerfile.service-gateway"
+# The dashboard starts this container itself (docker compose --profile
+# service-gateway from /app) whenever a Service is published, so a released
+# node needs it in the lock like every other image it runs; without it the
+# gateway fails with "No such image" (Windows run 5, 2026-09-27).
+docker build --pull \
+    -f "$node_src/repo/deploy/Dockerfile.service-gateway" \
+    -t "$service_gateway_ref" \
+    "$node_src/repo"
 rm -rf "$node_src"
 
 echo "==> Building existing session image family"
@@ -64,13 +75,14 @@ docker tag autonomy-session-platform "$platform_ref"
 docker tag autonomy-session-dind "$dind_ref"
 docker tag autonomy-host-terminal "$host_terminal_ref"
 
-refs=("$node_ref" "$session_ref" "$platform_ref" "$dind_ref" "$host_terminal_ref")
+refs=("$node_ref" "$session_ref" "$platform_ref" "$dind_ref" "$host_terminal_ref" "$service_gateway_ref")
 names=(
     AUTONOMY_NODE_IMAGE
     AUTONOMY_SESSION_IMAGE
     AUTONOMY_SESSION_PLATFORM_IMAGE
     AUTONOMY_SESSION_DIND_IMAGE
     AUTONOMY_HOST_TERMINAL_IMAGE
+    AUTONOMY_SERVICE_GATEWAY_IMAGE
 )
 
 tmp_lock="$(mktemp "${LOCK_FILE}.tmp.XXXXXX")"

@@ -97,6 +97,12 @@ services:
       # this file requires without a default must reach it through its own
       # environment (auto-8pohz, Windows run 4: "AUTONOMY_SUBNET is missing").
       AUTONOMY_SUBNET: ${AUTONOMY_SUBNET}
+      # The Service gateway image that Compose run starts: the digest-pinned
+      # reference from the release lock on a published node (written to .env
+      # by deploy/install-published.sh), the local build otherwise. Without
+      # it a published node's gateway fails with "No such image" (Windows
+      # run 5, 2026-09-27).
+      AUTONOMY_SERVICE_GATEWAY_IMAGE: ${AUTONOMY_SERVICE_GATEWAY_IMAGE:-autonomy-service-gateway:local}
       # The container's OWN data root, pinned. Without it the code defaults to
       # the repo-relative <repo>/data; on this node /app/data is the real
       # autonomy-data mount, so pinning it keeps every resolved data path as

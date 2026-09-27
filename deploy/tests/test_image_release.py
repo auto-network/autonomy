@@ -104,7 +104,12 @@ def test_publish_builds_pushes_and_records_exact_digests_without_signing(release
     assert ctx != str(ROOT), f"publish must build from a temp clone, not {ROOT}"
     assert ctx.endswith("/repo"), f"expected a clone context dir, got {ctx}"
     assert "agent-build --pull --core-only" in calls
-    assert sum(line.startswith("docker push ") for line in calls) == 5
+    # The Service gateway is built from the same clone and published with the
+    # rest: the dashboard starts it on a published node (Windows run 5).
+    gateway_build = next(line for line in calls if "Dockerfile.service-gateway" in line)
+    assert gateway_build.startswith("docker build --pull ")
+    assert gateway_build.split()[-1] == ctx
+    assert sum(line.startswith("docker push ") for line in calls) == 6
     assert not any(line.startswith("cosign ") for line in calls)
 
     lock = lock_file.read_text(encoding="utf-8").splitlines()
@@ -113,10 +118,14 @@ def test_publish_builds_pushes_and_records_exact_digests_without_signing(release
         "AUTONOMY_RELEASE_TAG=v1.2.3",
     ]
     image_lines = [line for line in lock if line.startswith("AUTONOMY_")][2:]
-    assert len(image_lines) == 5
-    assert image_lines[-1].startswith(
+    assert len(image_lines) == 6
+    assert image_lines[-2].startswith(
         "AUTONOMY_HOST_TERMINAL_IMAGE=registry.test:5000/operator/project/"
         "autonomy-host-terminal@sha256:"
+    )
+    assert image_lines[-1].startswith(
+        "AUTONOMY_SERVICE_GATEWAY_IMAGE=registry.test:5000/operator/project/"
+        "autonomy-service-gateway@sha256:"
     )
     assert all(f"@sha256:{DIGEST}" in line for line in image_lines)
 
@@ -147,7 +156,7 @@ def test_operator_signing_requires_confirmation_and_signs_exact_digests(release_
     calls = log.read_text(encoding="utf-8").splitlines()
     signed = [line for line in calls if line.startswith("cosign sign ")]
     verified = [line for line in calls if line.startswith("cosign verify ")]
-    assert len(signed) == len(verified) == 5
+    assert len(signed) == len(verified) == 6
     for line in signed + verified:
         assert f"@sha256:{DIGEST}" in line
         assert ":v1.2.3" not in line

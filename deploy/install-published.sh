@@ -264,6 +264,13 @@ choose_http_port() {  # choose_http_port <requested-or-empty> <candidate>... ; e
     return 1
 }
 set_env AUTONOMY_IMAGE "${IMG[AUTONOMY_NODE_IMAGE]}"
+# The Service gateway is started by the dashboard itself, from a Compose run
+# inside its container where this .env is not read: docker-compose.yml passes
+# the value into the dashboard's environment. A release cut before the gateway
+# was published (2026.09.26) has none; its gateway cannot start until updated.
+if [[ -n "${IMG[AUTONOMY_SERVICE_GATEWAY_IMAGE]:-}" ]]; then
+    set_env AUTONOMY_SERVICE_GATEWAY_IMAGE "${IMG[AUTONOMY_SERVICE_GATEWAY_IMAGE]}"
+fi
 set_env AUTONOMY_HOST_HOME "$HOST_HOME"
 set_env DASHBOARD_PORT "$PORT"
 HTTP_PORT="$(choose_http_port "$HTTP_PORT" 80 8088 8089)" || {
