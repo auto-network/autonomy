@@ -8,6 +8,8 @@ operation tag, and required payload fields. Bead: auto-p5rbu.
 
 from __future__ import annotations
 
+from tools.graph.schemas.registry import home
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -51,6 +53,7 @@ def _isolate_schema_registry():
 
 @pytest.fixture
 def example_schema():
+    @home("personal")  # tests of emission, not placement
     class V1(schemas.SettingSchema):
         set_id = "autonomy.test.events"
         schema_revision = 1
@@ -221,9 +224,11 @@ def test_delete_setting_emits_event(graph_db_env, example_schema, client, fresh_
 def test_migrate_setting_set_emits_event_per_member(
     graph_db_env, client, fresh_bus,
 ):
+    @home("personal")  # tests of emission, not placement
     class V1(schemas.SettingSchema):
         set_id = "autonomy.test.migrate"
         schema_revision = 1
+    @home("personal")  # tests of emission, not placement
     class V2(schemas.SettingSchema):
         set_id = "autonomy.test.migrate"
         schema_revision = 2
@@ -257,9 +262,11 @@ def test_migrate_setting_set_emits_event_per_member(
 
 
 def test_migrate_dry_run_does_not_emit(graph_db_env, client, fresh_bus):
+    @home("personal")  # tests of emission, not placement
     class V1(schemas.SettingSchema):
         set_id = "autonomy.test.migrate"
         schema_revision = 1
+    @home("personal")  # tests of emission, not placement
     class V2(schemas.SettingSchema):
         set_id = "autonomy.test.migrate"
         schema_revision = 2
