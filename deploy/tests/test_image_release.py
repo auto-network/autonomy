@@ -130,6 +130,28 @@ def test_publish_builds_pushes_and_records_exact_digests_without_signing(release
     assert all(f"@sha256:{DIGEST}" in line for line in image_lines)
 
 
+def test_publish_names_the_ghcr_packages_an_installer_cannot_pull(release_env, tmp_path):
+    """GHCR creates a first-time package private and offers no visibility API
+    (Windows run 6, 2026-09-27: autonomy-service-gateway). The release run
+    probes anonymous pull for every pushed repository and names the private
+    ones with the operator's remedy."""
+    env, log, _lock_file, _ = release_env
+    _write_executable(
+        tmp_path / "bin" / "curl",
+        """#!/usr/bin/env bash
+set -euo pipefail
+url="${@: -1}"
+if [[ "$url" == *autonomy-service-gateway* ]]; then printf '401'; else printf '200'; fi
+""",
+    )
+    env = dict(env, AUTONOMY_REGISTRY="ghcr.io", AUTONOMY_IMAGE_NAMESPACE="auto-network")
+    result = subprocess.run(["bash", str(PUBLISH)], env=env, check=True, capture_output=True, text=True)
+    assert "cannot be pulled anonymously" in result.stderr
+    assert "auto-network/autonomy-service-gateway (401)" in result.stderr
+    assert "autonomy-node" not in result.stderr.split("cannot be pulled anonymously", 1)[1].split("Make each public")[0]
+    assert "https://github.com/orgs/auto-network/packages/container/<package>/settings" in result.stderr
+
+
 def test_operator_signing_requires_confirmation_and_signs_exact_digests(release_env):
     env, log, lock_file, _ = release_env
     subprocess.run(["bash", str(PUBLISH)], env=env, check=True)

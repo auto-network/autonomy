@@ -174,6 +174,16 @@ step "release ${RELEASE_TAG:-?}"
 for name in "${!IMG[@]}"; do
     ref="${IMG[$name]}"
     "$TOOLS/cosign" verify --insecure-ignore-tlog --key "$TOOLS/cosign.pub" "$ref" >/dev/null 2>"$TOOLS/verify.err" || {
+        # cosign fetches the signature from the registry first: a registry
+        # that refuses the anonymous pull (a package left private, a wrong
+        # name) fails here too, and that is not a signature failure. Windows
+        # run 6 (2026-09-27) read a private GHCR package as a bad signature.
+        if grep -Eqi 'UNAUTHORIZED|unauthorized|denied|MANIFEST_UNKNOWN|NAME_UNKNOWN|not found|no such host|could not resolve' "$TOOLS/verify.err"; then
+            echo "IMAGE UNREACHABLE: $ref cannot be pulled anonymously (private package or wrong reference) — refusing to install" >&2
+            sed 's/^/    /' "$TOOLS/verify.err" >&2
+            echo "    A first-time GHCR package is private: make it public in the package's settings, then rerun." >&2
+            exit 9
+        fi
         echo "SIGNATURE CHECK FAILED for $ref — refusing to install" >&2
         sed 's/^/    /' "$TOOLS/verify.err" >&2
         exit 4

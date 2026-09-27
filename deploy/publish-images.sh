@@ -117,4 +117,23 @@ chmod 0644 "$tmp_lock"
 mv "$tmp_lock" "$LOCK_FILE"
 trap - EXIT
 echo "==> Unsigned digest lock written to $LOCK_FILE"
+
+# GHCR creates a first-time package PRIVATE, and an installer's anonymous
+# pull then fails (Windows run 6, 2026-09-27: autonomy-service-gateway).
+# Visibility has no API; the operator changes it in the package settings.
+# Probe the anonymous token endpoint for every published repository so the
+# release run says which packages an installer cannot reach, at push time.
+if [[ "$REGISTRY" == "ghcr.io" ]] && command -v curl >/dev/null 2>&1; then
+    private=()
+    for ref in "${refs[@]}"; do
+        repo="${ref%:*}"; repo="${repo#ghcr.io/}"
+        code="$(curl -s -o /dev/null -w '%{http_code}' "https://ghcr.io/token?scope=repository:${repo}:pull" || echo 000)"
+        [[ "$code" == "200" ]] || private+=("$repo ($code)")
+    done
+    if [[ ${#private[@]} -gt 0 ]]; then
+        echo "!!! These packages cannot be pulled anonymously; an installer will refuse them:" >&2
+        for entry in "${private[@]}"; do echo "    $entry" >&2; done
+        echo "    Make each public: https://github.com/orgs/${NAMESPACE%%/*}/packages/container/<package>/settings -> Change visibility -> Public" >&2
+    fi
+fi
 echo "==> An operator must now run deploy/sign-image-lock.sh"

@@ -12,6 +12,7 @@ INSTALL = ROOT / "deploy" / "install-published.sh"
 PUBLIC_KEY = ROOT / "deploy" / "cosign.pub"
 GOOD = "a" * 64
 BAD = "0" * 64
+PRIVATE = "b" * 64  # the fake registry refuses the anonymous pull of this digest
 
 
 def _exe(path: Path, body: str) -> None:
@@ -51,7 +52,9 @@ def _run(tmp_path: Path, lock: Path, *extra: str,
     _exe(
         fake / "cosign",
         f'#!/usr/bin/env bash\necho "cosign $*" >>"$T_LOG"\n'
-        f'[[ "$*" == *@sha256:{BAD}* ]] && exit 1\nexit 0\n',
+        f'[[ "$*" == *@sha256:{BAD}* ]] && exit 1\n'
+        f'[[ "$*" == *@sha256:{PRIVATE}* ]] && {{ echo "Error: GET https://ghcr.io/token?scope=repository:example/autonomy-node:pull: UNAUTHORIZED" >&2; exit 1; }}\n'
+        'exit 0\n',
     )
     env = dict(os.environ, PATH=f"{fake}:{os.environ['PATH']}", T_LOG=str(log),
                AUTONOMY_COSIGN_BIN=str(fake / "cosign"), HOME=str(tmp_path),
@@ -77,6 +80,18 @@ def test_unsigned_image_is_refused_before_any_pull(tmp_path):
     assert "SIGNATURE CHECK FAILED" in result.stderr
     assert "docker pull" not in calls
     assert "compose up" not in calls
+
+
+def test_a_private_package_is_named_as_unreachable_not_as_a_bad_signature(tmp_path):
+    """Windows run 6 (2026-09-27): GHCR created the new gateway package
+    private, cosign could not fetch its signature, and the installer said
+    SIGNATURE CHECK FAILED. A registry refusal is named as such."""
+    result, calls = _run(tmp_path, _lock(tmp_path, node_digest=PRIVATE))
+    assert result.returncode == 9, result.stderr
+    assert "IMAGE UNREACHABLE" in result.stderr
+    assert "cannot be pulled anonymously" in result.stderr
+    assert "SIGNATURE CHECK FAILED" not in result.stderr
+    assert "docker pull" not in calls
 
 
 def test_floating_tag_in_lock_is_refused(tmp_path):
