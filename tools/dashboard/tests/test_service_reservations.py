@@ -595,8 +595,8 @@ def test_activation_reconciles_the_publishers_serving_connector(reservation_api,
 
     client, _events = reservation_api
     reconciled: list[str] = []
-    monkeypatch.setattr(link_serving_supervisor, "reconcile_after_publication",
-                        lambda org: reconciled.append(org) or {"running": True, "reason": "launched"})
+    monkeypatch.setattr(link_serving_supervisor, "schedule_reconcile_after_publication",
+                        lambda org: reconciled.append(org))
     reservation_id = _reserve(client, "docs").json()["reservation"]["reservation_id"]
     assert _state(client, reservation_id, "paused").status_code == 200
     assert reconciled == []  # pausing is not a reason to start anything

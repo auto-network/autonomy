@@ -302,6 +302,9 @@ async def publish(mode: str, *, org: str = DEFAULT_PUBLISHER, app_label: str | N
     # The route and the certificate both ride the publisher's serving
     # connector: a live publication is its reason to run, so it is
     # reconciled now, before the certificate and the gateway converge on it.
+    # Awaited on purpose (unlike the bind/activate routes): this is the one
+    # onboarding publish, and its first certificate attempt should find the
+    # connector up rather than wait a retry interval.
     await _reconcile_serving(org)
     _converge()
     row = {

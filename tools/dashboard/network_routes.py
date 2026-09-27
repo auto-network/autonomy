@@ -3274,11 +3274,13 @@ async def put_service_reservation_state(request: Request) -> JSONResponse:
 
 async def _reconcile_serving_after_publication(org: str) -> None:
     """A live publication is a reason for the scope's connector to serve:
-    reconcile it now, off the event loop (link_serving_supervisor.
-    reconcile_after_publication logs the outcome and never raises)."""
-    from tools.dashboard.link_serving_supervisor import reconcile_after_publication
+    reconcile it now, as a kept background task so the response does not
+    wait on the connector launch (link_serving_supervisor.
+    reconcile_after_publication logs the outcome and never raises; the
+    watchdog retries)."""
+    from tools.dashboard.link_serving_supervisor import schedule_reconcile_after_publication
 
-    await asyncio.to_thread(reconcile_after_publication, org)
+    schedule_reconcile_after_publication(org)
 
 
 async def get_service_targets(request: Request) -> JSONResponse:

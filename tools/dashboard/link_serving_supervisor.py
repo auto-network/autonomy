@@ -2146,6 +2146,28 @@ def reconcile_after_publication(org: str) -> dict | None:
     return result
 
 
+#: Tasks scheduled by schedule_reconcile_after_publication, kept until done
+#: so they are never garbage-collected mid-flight.
+_publication_tasks: set = set()
+
+
+def schedule_reconcile_after_publication(org: str) -> "asyncio.Task | None":
+    """reconcile_after_publication(org) as a kept background task, for a
+    request handler that must not wait on the connector launch (it is best
+    effort: the watchdog retries and status reports the outcome). Returns
+    the task, or None when no event loop is running."""
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    task = loop.create_task(asyncio.to_thread(reconcile_after_publication, org))
+    _publication_tasks.add(task)
+    task.add_done_callback(_publication_tasks.discard)
+    return task
+
+
 def bootstrap(orgs=None) -> ServingSupervisor:
     """Dashboard-startup entry: reconcile serving for each org, then arm the
     watchdog. So a restart with a provisioned cert + live grants brings serving
