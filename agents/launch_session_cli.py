@@ -360,6 +360,13 @@ def main() -> int:
         ]
         if session_runtime == "privileged":
             cmd.insert(2, "--privileged")
+            # Same per-session nested-Docker volume as launch_session.
+            from agents.session_launcher import _ensure_dind_volume
+            dind_volume = _ensure_dind_volume(args.name, org)
+            if dind_volume is None:
+                return 1
+            cmd.extend(["--mount",
+                        f"type=volume,src={dind_volume},dst=/var/lib/docker"])
         elif session_runtime != "standard":
             docker_runtime = (
                 "sysbox-runc"

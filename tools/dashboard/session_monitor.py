@@ -476,6 +476,87 @@ def _worktree_gc_pass() -> None:
         logger.exception("session_monitor: worktree GC pass raised")
 
 
+# A privileged session's nested Docker store lives on the named volume
+# autonomy-dind-<session> (agents/session_launcher.py, auto-ipq3l). It survives
+# stop, restart and resume by design, so it is reclaimed here, under exactly the
+# worktree GC's guard: terminal past the horizon, re-read at execution time.
+_DIND_VOLUME_LABEL = "autonomy.session"
+
+
+def _dind_volumes() -> list[tuple[str, str, float]] | None:
+    """(volume, session, created epoch) for every labelled nested-Docker
+    volume, or None when docker cannot be asked."""
+    try:
+        listed = subprocess.run(
+            ["docker", "volume", "ls", "-q",
+             "--filter", f"label={_DIND_VOLUME_LABEL}"],
+            capture_output=True, text=True, timeout=60)
+        names = listed.stdout.split() if listed.returncode == 0 else None
+        if not names:
+            return None if names is None else []
+        inspected = subprocess.run(
+            ["docker", "volume", "inspect", *names],
+            capture_output=True, text=True, timeout=60)
+        if inspected.returncode != 0:
+            return None
+        rows = json.loads(inspected.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    out = []
+    for v in rows:
+        session = (v.get("Labels") or {}).get(_DIND_VOLUME_LABEL)
+        if not session:
+            continue
+        try:
+            created = datetime.fromisoformat(
+                v["CreatedAt"].replace("Z", "+00:00")).timestamp()
+        except (KeyError, ValueError, AttributeError):
+            created = time.time()  # unknown age: never counts as old
+        out.append((v["Name"], session, created))
+    return out
+
+
+def _gc_dind_volume(volume: str, session: str, created: float) -> None:
+    """One volume GC step — never raises. Removes only when the session row
+    is terminal past the horizon NOW, or when there is no row and the volume
+    itself is older than the horizon (a launch creates the volume a moment
+    before its container; a dispatch run may never have a row). docker
+    refuses to remove a volume a container still uses, which is the last
+    guard."""
+    try:
+        row = get_session(session)
+    except Exception:
+        return
+    now = time.time()
+    if row is not None:
+        if derive_lifecycle_state(row) not in ("ENDED", "FAILED"):
+            return
+        if (now - (row.get("ended_at") or 0)) < WORKTREE_GC_HORIZON_S:
+            return
+    elif (now - created) < WORKTREE_GC_HORIZON_S:
+        return
+    try:
+        r = subprocess.run(["docker", "volume", "rm", volume],
+                           capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("session_monitor: dind volume rm %s: %s", volume, exc)
+        return
+    if r.returncode == 0:
+        logger.info("session_monitor: removed nested-Docker volume %s", volume)
+    else:
+        logger.warning("session_monitor: dind volume rm %s refused: %s",
+                       volume, r.stderr.strip())
+
+
+def _dind_volume_gc_pass() -> None:
+    try:
+        volumes = _dind_volumes()
+        for volume, session, created in volumes or ():
+            _gc_dind_volume(volume, session, created)
+    except Exception:
+        logger.exception("session_monitor: dind volume GC pass raised")
+
+
 def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
     """Send a nag message to a session via CrossTalk envelope.
 
@@ -4895,6 +4976,7 @@ class SessionMonitor:
                 # the preserve policy and an execution-time state re-check.
                 if (now - self._last_orphan_prune) >= self._ORPHAN_PRUNE_INTERVAL:
                     await asyncio.to_thread(_worktree_gc_pass)
+                    await asyncio.to_thread(_dind_volume_gc_pass)
                     self._last_orphan_prune = now
 
             except Exception:

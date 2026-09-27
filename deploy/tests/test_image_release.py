@@ -140,7 +140,7 @@ def test_publish_stamps_the_source_repository_on_every_image_it_builds(release_e
     log.write_text("")
     env = dict(env, AUTONOMY_IMAGE_SOURCE="https://github.com/auto-network/autonomy")
     subprocess.run(["bash", str(PUBLISH)], env=env, check=True)
-    builds = [line for line in log.read_text().splitlines() if line.startswith("docker build")]
+    builds = [line for line in log.read_text().splitlines() if line.startswith("docker build ")]
     assert len(builds) == 2
     assert all("--label org.opencontainers.image.source=https://github.com/auto-network/autonomy" in line
                for line in builds), builds
@@ -350,3 +350,32 @@ def test_real_cosign_ephemeral_key_rejects_tampered_blob(tmp_path):
     subprocess.run(verify, env=env, check=True)
     payload.write_bytes(b"tampered release artifact")
     assert subprocess.run(verify, env=env, check=False).returncode != 0
+
+
+def test_publish_removes_only_what_it_pushed_after_the_lock_is_written(release_env):
+    """auto-ipq3l / D-D: after the push, the pushed release tags and unused
+    build cache go; the local session family (a node's launch images) stays."""
+    env, log, lock_file, _ = release_env
+    subprocess.run(["bash", str(PUBLISH)], env=env, check=True)
+
+    calls = log.read_text(encoding="utf-8").splitlines()
+    last_push = max(i for i, line in enumerate(calls) if line.startswith("docker push "))
+    rmi = [i for i, line in enumerate(calls) if line.startswith("docker rmi ")]
+    assert len(rmi) == 1 and rmi[0] > last_push and lock_file.exists()
+    removed = calls[rmi[0]].split()[2:]
+    assert len(removed) == 6
+    assert all(ref.startswith("registry.test:5000/operator/project/") and ref.endswith(":v1.2.3")
+               for ref in removed)
+    assert not any("autonomy-session" == ref.split(":")[0] for ref in removed)
+    assert "docker image prune -f" in calls
+    assert "docker builder prune -f" in calls
+    assert not any(line.startswith("docker builder prune") and "-a" in line.split() for line in calls)
+
+
+def test_publish_keeps_pushed_images_when_asked(release_env):
+    env, log, _, _ = release_env
+    env = {**env, "AUTONOMY_KEEP_PUSHED_IMAGES": "1"}
+    subprocess.run(["bash", str(PUBLISH)], env=env, check=True)
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert not any(line.startswith(("docker rmi", "docker image prune", "docker builder prune"))
+                   for line in calls)

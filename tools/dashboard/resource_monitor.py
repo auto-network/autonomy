@@ -28,8 +28,10 @@ Measurement backends, resolved once per session and cached:
 
 Disk components per session: docker overlay upper dir (direct ``du`` when
 readable, else one amortized ``docker ps -s`` per disk interval shared by
-all containers), the session run dir under ``data/agent-runs/``, and the
-session's worktrees under ``data/worktrees/{name}/``.
+all containers), the session run dir under ``data/agent-runs/``, the
+session's worktrees under ``data/worktrees/{name}/``, and for a privileged
+container its nested Docker store (``du`` inside the container, on a
+background thread).
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -80,6 +83,11 @@ _DISK_CADENCE: dict[str, tuple[float, float]] = {
 _YOUNG_AGE_S = 30 * 60.0
 _DOCKER_SIZES_TTL = 240.0       # docker ps -s fallback cache lifetime
 _DOCKER_SIZES_FORCE_TTL = 5.0   # …when a force refresh asks for fresh data
+# Slow docker queries run on their own background thread, never in the tick:
+# `docker ps --size` took over 240 s on a host full of vfs stores, and a du of
+# a nested Docker store is proportional to its size (auto-ipq3l).
+_DOCKER_SIZES_TIMEOUT_S = 600.0
+_NESTED_DU_TIMEOUT_S = 900.0
 
 # Sessions the liveness loop considers still-booting have no container yet;
 # resolving them would burn a docker-inspect for nothing. Mirrors
@@ -259,6 +267,8 @@ class _SessionState:
     container_id: str = ""
     upper_dir: Path | None = None
     pane_pid: int = 0
+    # privileged container: runs a nested dockerd whose store is measured
+    privileged: bool = False
     reader: _CgroupReader | None = None
     next_resolve_at: float = 0.0
     resolve_backoff: float = 5.0
@@ -329,6 +339,11 @@ class ResourceMonitor:
         self._docker_sizes_at = 0.0
         self._upper_dir_readable: bool | None = None
         self._event_bus = None
+        # background docker queries in flight, by key; and the lock that
+        # serializes their result merges with the tick's
+        self._bg_inflight: set[str] = set()
+        self._bg_lock = threading.Lock()
+        self._disk_lock = threading.Lock()
 
     # ── lifecycle ────────────────────────────────────────────────
 
@@ -575,20 +590,28 @@ class ResourceMonitor:
             state.disk_entry_count[c] = entry_count
         if partial is None:
             return None
-        merged = state.disk or {"components": {}, "timings_ms": {}}
         # A rescanned class fully replaces its components, so anything that
         # vanished (e.g. a cleaned-up worktree) doesn't linger in the total.
-        for comp, cls in self._COMPONENT_CLASS.items():
-            if cls in due:
+        drop = [comp for comp, cls in self._COMPONENT_CLASS.items()
+                if cls in due]
+        return self._merge_disk(name, state, partial, drop, now)
+
+    def _merge_disk(self, name: str, state: _SessionState, partial: dict,
+                    drop: list[str], now: float) -> dict:
+        """Fold measured components into the session's disk and persist.
+        Both the tick and the background nested-Docker measure merge here."""
+        with self._disk_lock:
+            merged = state.disk or {"components": {}, "timings_ms": {}}
+            for comp in drop:
                 merged["components"].pop(comp, None)
                 merged["timings_ms"].pop(comp, None)
-        merged["components"].update(partial["components"])
-        merged["timings_ms"].update(partial["timings_ms"])
-        merged["total"] = sum(merged["components"].values())
-        state.disk = merged
-        state.disk_sampled_at = now
-        update_disk_usage(name, merged["total"], json.dumps(merged), now)
-        return merged
+            merged["components"].update(partial["components"])
+            merged["timings_ms"].update(partial["timings_ms"])
+            merged["total"] = sum(merged["components"].values())
+            state.disk = merged
+            state.disk_sampled_at = now
+            update_disk_usage(name, merged["total"], json.dumps(merged), now)
+            return merged
 
     async def refresh_disk(self, tmux_name: str) -> dict | None:
         """Force-refresh one session's full disk footprint (UI affordance).
@@ -611,18 +634,21 @@ class ResourceMonitor:
         try:
             out = subprocess.run(
                 ["docker", "inspect", "-f",
-                 "{{.Id}}\t{{.GraphDriver.Data.UpperDir}}", name],
+                 "{{.Id}}\t{{.GraphDriver.Data.UpperDir}}"
+                 "\t{{.HostConfig.Privileged}}", name],
                 capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             out = None
         if out is not None and out.returncode == 0 and out.stdout.strip():
-            cid, _, upper = out.stdout.strip().partition("\t")
+            cid, _, rest = out.stdout.strip().partition("\t")
+            upper, _, privileged = rest.partition("\t")
             reader = _CgroupReader.probe(cid)
             if reader is not None:
                 state.kind = "container"
                 state.backend = reader.backend
                 state.container_id = cid
                 state.upper_dir = Path(upper) if upper else None
+                state.privileged = privileged == "true"
                 state.reader = reader
                 logger.info("resource_monitor: %s → container cgroup %s",
                             name, reader.backend)
@@ -710,6 +736,8 @@ class ResourceMonitor:
                     key, val, ms = layer
                     components[key] = val
                     timings[key] = ms
+                if state.privileged:
+                    self._measure_nested_docker(name, state)
 
         if not components:
             return None
@@ -721,15 +749,19 @@ class ResourceMonitor:
         t0 = time.monotonic()
         if state.upper_dir is not None and self._upper_dir_readable is not False:
             try:
-                val = _du_bytes(state.upper_dir)
                 # _du_bytes swallows per-entry errors; verify readability once
                 # so an unreadable /var/lib/docker doesn't report 0 forever.
+                # A missing upper dir (the dashboard does not see the daemon's
+                # /var/lib/docker) is the same case: it used to return None
+                # here, before the fallback, so every card showed no container
+                # storage (auto-ipq3l).
                 if self._upper_dir_readable is None:
                     os.scandir(state.upper_dir).close()
                     self._upper_dir_readable = True
+                val = _du_bytes(state.upper_dir)
                 return ("container_fs", val,
                         round((time.monotonic() - t0) * 1000, 2))
-            except PermissionError:
+            except (PermissionError, FileNotFoundError):
                 self._upper_dir_readable = False
                 logger.info(
                     "resource_monitor: overlay upper dir unreadable — "
@@ -737,30 +769,91 @@ class ResourceMonitor:
             except OSError:
                 return None
         # Amortized fallback: one `docker ps -s` per cache lifetime, shared
-        # by all containers. Force refreshes accept a much shorter TTL.
-        now = time.time()
+        # by all containers, on a background thread (it can take minutes).
+        # Force refreshes accept a much shorter TTL.
         ttl = _DOCKER_SIZES_FORCE_TTL if force else _DOCKER_SIZES_TTL
-        if now - self._docker_sizes_at > ttl:
-            try:
-                out = subprocess.run(
-                    ["docker", "ps", "-s", "--format",
-                     "{{.Names}}\t{{.Size}}"],
-                    capture_output=True, text=True, timeout=30)
-                if out.returncode == 0:
-                    sizes = {}
-                    for line in out.stdout.splitlines():
-                        n, _, sz = line.partition("\t")
-                        parsed = _parse_docker_size(sz)
-                        if parsed is not None:
-                            sizes[n] = parsed
-                    self._docker_sizes = sizes
-                    self._docker_sizes_at = now
-            except (OSError, subprocess.TimeoutExpired):
-                return None
+        if time.time() - self._docker_sizes_at > ttl:
+            self._in_background("docker-ps-size", self._refresh_docker_sizes)
         if name in self._docker_sizes:
             return ("container_fs", self._docker_sizes[name],
                     round((time.monotonic() - t0) * 1000, 2))
         return None
+
+    def _refresh_docker_sizes(self) -> None:
+        started = time.time()
+        try:
+            out = subprocess.run(
+                ["docker", "ps", "-s", "--format", "{{.Names}}\t{{.Size}}"],
+                capture_output=True, text=True,
+                timeout=_DOCKER_SIZES_TIMEOUT_S)
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        if out.returncode != 0:
+            return
+        sizes = {}
+        for line in out.stdout.splitlines():
+            n, _, sz = line.partition("\t")
+            parsed = _parse_docker_size(sz)
+            if parsed is not None:
+                sizes[n] = parsed
+        self._docker_sizes = sizes
+        self._docker_sizes_at = started
+
+    def _measure_nested_docker(self, name: str, state: _SessionState) -> None:
+        """Measure a privileged session's nested Docker store in the
+        background and merge it as the ``nested_docker`` component.
+
+        The dashboard cannot read the store from outside (the volume and the
+        overlay dirs are root 710), so it asks the container: ``du`` as root
+        of /var/lib/docker, one filesystem. That is the per-session volume on
+        a new session, or the vfs store in the writable layer on one launched
+        before it. A failed measure drops the component rather than keeping a
+        stale number."""
+        def measure() -> None:
+            t0 = time.monotonic()
+            try:
+                out = subprocess.run(
+                    ["docker", "exec", "-u", "0", name,
+                     "du", "-sxk", "/var/lib/docker"],
+                    capture_output=True, text=True,
+                    timeout=_NESTED_DU_TIMEOUT_S)
+                kib = int(out.stdout.split()[0]) if out.returncode == 0 else None
+            except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+                kib = None
+            if self._states.get(name) is not state:
+                return  # the session ended or its container was re-resolved
+            ms = round((time.monotonic() - t0) * 1000, 2)
+            if kib is None:
+                if "nested_docker" not in (state.disk or {}).get("components", {}):
+                    return
+                self._merge_disk(name, state, {"components": {}, "timings_ms": {}},
+                                 ["nested_docker"], time.time())
+            else:
+                self._merge_disk(
+                    name, state,
+                    {"components": {"nested_docker": kib * 1024},
+                     "timings_ms": {"nested_docker": ms}},
+                    [], time.time())
+
+        self._in_background(f"nested-docker:{name}", measure)
+
+    def _in_background(self, key: str, fn) -> None:
+        """Run *fn* on a daemon thread unless the same key is in flight."""
+        with self._bg_lock:
+            if key in self._bg_inflight:
+                return
+            self._bg_inflight.add(key)
+
+        def run() -> None:
+            try:
+                fn()
+            except Exception:
+                logger.exception("resource_monitor: background %s failed", key)
+            finally:
+                with self._bg_lock:
+                    self._bg_inflight.discard(key)
+
+        threading.Thread(target=run, name=f"resource-{key}", daemon=True).start()
 
     # ── read side ────────────────────────────────────────────────
 

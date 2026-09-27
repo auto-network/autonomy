@@ -427,3 +427,77 @@ def test_disk_columns_migration_and_update(tmp_path):
             db._conn.close()
         db._conn = old_conn
         db._DB_PATH = old_path
+
+
+# ── container storage: fallback + nested Docker (auto-ipq3l) ─────────────
+
+class _Done:
+    def __init__(self, stdout="", returncode=0):
+        self.stdout, self.returncode, self.stderr = stdout, returncode, ""
+
+
+def _container_state(tmp_path, privileged=False):
+    return _SessionState(kind="container", backend="v2",
+                         upper_dir=tmp_path / "no-such-upper",
+                         privileged=privileged)
+
+
+def test_missing_upper_dir_falls_back_to_docker_ps_size(monitor, tmp_path,
+                                                         monkeypatch):
+    """A missing upper dir used to return None before the fallback, so every
+    card showed zero container storage."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return _Done("auto-c\t2.5GB (virtual 9GB)\n")
+
+    monkeypatch.setattr("tools.dashboard.resource_monitor.subprocess.run",
+                        fake_run)
+    monkeypatch.setattr(monitor, "_in_background", lambda key, fn: fn())
+    got = monitor._container_layer_bytes("auto-c", _container_state(tmp_path))
+    assert got is not None and got[:2] == ("container_fs", 2_500_000_000)
+    assert calls[0][:3] == ["docker", "ps", "-s"]
+
+
+def test_privileged_container_reports_nested_docker(monitor, tmp_path,
+                                                     monkeypatch):
+    execs = []
+
+    def fake_run(cmd, **kw):
+        if cmd[:2] == ["docker", "exec"]:
+            execs.append(cmd)
+            return _Done("1200000\t/var/lib/docker\n")
+        return _Done("")
+
+    monkeypatch.setattr("tools.dashboard.resource_monitor.subprocess.run",
+                        fake_run)
+    monkeypatch.setattr(monitor, "_in_background", lambda key, fn: fn())
+    name = "auto-dind"
+    state = _container_state(tmp_path, privileged=True)
+    monitor._states[name] = state
+    row = {"tmux_name": name, "entry_count": 1, "created_at": time.time()}
+    monitor._scan_disk(row, state, time.time(), force=True)
+    assert execs == [["docker", "exec", "-u", "0", name,
+                      "du", "-sxk", "/var/lib/docker"]]
+    assert state.disk["components"]["nested_docker"] == 1200000 * 1024
+    assert state.disk["total"] == sum(state.disk["components"].values())
+    # a HEAVY rescan does not drop it while the next measure is in flight
+    monkeypatch.setattr(monitor, "_in_background", lambda key, fn: None)
+    monitor._scan_disk(row, state, time.time(), force=True)
+    assert state.disk["components"]["nested_docker"] == 1200000 * 1024
+
+
+def test_unprivileged_container_is_not_exec_measured(monitor, tmp_path,
+                                                      monkeypatch):
+    execs = []
+    monkeypatch.setattr(
+        "tools.dashboard.resource_monitor.subprocess.run",
+        lambda cmd, **kw: execs.append(cmd) or _Done(""))
+    monkeypatch.setattr(monitor, "_in_background", lambda key, fn: fn())
+    name = "auto-plain"
+    state = _container_state(tmp_path)
+    monitor._states[name] = state
+    row = {"tmux_name": name, "entry_count": 1, "created_at": time.time()}
+    monitor._scan_disk(row, state, time.time(), force=True)
+    assert not any(c[:2] == ["docker", "exec"] for c in execs)

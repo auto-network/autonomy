@@ -2570,3 +2570,80 @@ def test_workspace_socket_mount_is_still_refused_on_a_containerized_node(
     )
     assert result is None
     assert captured_run == []
+
+
+# ── per-session nested-Docker volume (auto-ipq3l) ────────────────────
+
+@pytest.fixture
+def docker_volumes(monkeypatch):
+    """Record every docker call; `volume inspect` reports a missing volume
+    until one was created."""
+    calls: list[list[str]] = []
+    created: set[str] = set()
+
+    class Done:
+        def __init__(self, rc=0, out="fake-container-id\n"):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:1] == ["docker"]:
+            calls.append(cmd)
+        if cmd[:3] == ["docker", "volume", "inspect"]:
+            return Done(0 if cmd[3] in created else 1, "")
+        if cmd[:3] == ["docker", "volume", "create"]:
+            created.add(cmd[-1])
+            return Done(0, cmd[-1])
+        return Done()
+
+    monkeypatch.setattr(session_launcher.subprocess, "run", fake_run)
+    return calls
+
+
+def test_privileged_session_mounts_its_labelled_dind_volume(
+    tmp_path, fake_creds, fake_crosstalk, docker_volumes,
+):
+    _run(name="auto-dind", needs_nested_docker=True,
+         output_dir=str(tmp_path / "a"))
+    create = [c for c in docker_volumes if c[:3] == ["docker", "volume", "create"]]
+    assert create == [["docker", "volume", "create",
+                       "--label", "autonomy.session=auto-dind",
+                       "--label", "autonomy.org=test-org",
+                       "autonomy-dind-auto-dind"]]
+    run = [c for c in docker_volumes if c[:2] == ["docker", "run"]][0]
+    i = run.index("--mount")
+    assert run[i + 1] == ("type=volume,src=autonomy-dind-auto-dind,"
+                          "dst=/var/lib/docker")
+    assert i < run.index("session-widgets")
+
+    # A resume/restart reuses the same volume: no second create.
+    _run(name="auto-dind", needs_nested_docker=True,
+         output_dir=str(tmp_path / "b"))
+    assert len([c for c in docker_volumes
+                if c[:3] == ["docker", "volume", "create"]]) == 1
+    assert len([c for c in docker_volumes if c[:2] == ["docker", "run"]]) == 2
+
+
+@pytest.mark.parametrize("runtime", ["standard", "sysbox"])
+def test_unprivileged_session_gets_no_dind_volume(
+    tmp_path, fake_creds, fake_crosstalk, docker_volumes, runtime,
+):
+    _run(needs_nested_docker=True, runtime=runtime,
+         output_dir=str(tmp_path / "a"))
+    assert not any(c[:2] == ["docker", "volume"] for c in docker_volumes)
+    run = [c for c in docker_volumes if c[:2] == ["docker", "run"]][0]
+    assert "--mount" not in run
+
+
+def test_dind_volume_create_failure_refuses_the_launch(
+    tmp_path, fake_creds, fake_crosstalk, monkeypatch,
+):
+    calls = []
+
+    class Fail:
+        returncode, stdout, stderr = 1, "", "no space left"
+
+    monkeypatch.setattr(session_launcher.subprocess, "run",
+                        lambda cmd, **kw: calls.append(cmd) or Fail())
+    assert _run(needs_nested_docker=True,
+                output_dir=str(tmp_path / "a")) is None
+    assert not any(c[:2] == ["docker", "run"] for c in calls)

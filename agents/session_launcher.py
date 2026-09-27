@@ -1390,6 +1390,48 @@ def _delete_if_present(path) -> None:
         pass
 
 
+# A privileged session's nested dockerd keeps its store on a per-session named
+# volume instead of the container's writable layer (auto-ipq3l). overlay2
+# cannot stack on the overlay writable layer, so there the startup scripts had
+# to run vfs, which copies every image layer for every container: 17 GB of
+# release images held 105 GB. On a volume (ext4 underneath) they pick overlay2.
+# The name is derived from the session, so resume and restart reuse the store;
+# only the session monitor's tombstoned GC removes it.
+DIND_VOLUME_PREFIX = "autonomy-dind-"
+DIND_VOLUME_LABEL = "autonomy.session"
+
+
+def dind_volume_name(session: str) -> str:
+    return f"{DIND_VOLUME_PREFIX}{session}"
+
+
+def _ensure_dind_volume(session: str, org: str | None) -> str | None:
+    """Create the session's nested-Docker volume with its labels, or reuse it.
+
+    Returns the volume name, or None when docker refused. ``docker run --mount``
+    would create a missing volume by itself, but without the labels the GC's
+    orphan sweep keys on, so the launch creates it first."""
+    volume = dind_volume_name(session)
+    try:
+        found = subprocess.run(["docker", "volume", "inspect", volume],
+                               capture_output=True, text=True, timeout=30)
+        if found.returncode == 0:
+            return volume
+        labels = ["--label", f"{DIND_VOLUME_LABEL}={session}"]
+        if org:
+            labels += ["--label", f"autonomy.org={org}"]
+        made = subprocess.run(["docker", "volume", "create", *labels, volume],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"  ERROR: docker volume create {volume}: {exc}", file=sys.stderr)
+        return None
+    if made.returncode != 0:
+        print(f"  ERROR: docker volume create {volume}: {made.stderr.strip()}",
+              file=sys.stderr)
+        return None
+    return volume
+
+
 def _beads_credential_env_args(org: str | None) -> list[str]:
     """``-e`` args carrying the session's tracker SQL credentials.
 
@@ -2035,6 +2077,16 @@ def launch_session(
             _delete_if_present(codex_auth_copy)
         return None
 
+    dind_args: list[str] = []
+    if resolved_runtime == "privileged":
+        dind_volume = _ensure_dind_volume(name, (metadata or {}).get("org"))
+        if dind_volume is None:
+            if codex_auth_copy is not None:
+                _delete_if_present(codex_auth_copy)
+            return None
+        dind_args = ["--mount",
+                     f"type=volume,src={dind_volume},dst=/var/lib/docker"]
+
     _lap("mounts_assembled")
 
     # ── Session token ────────────────────────────────────────────
@@ -2152,6 +2204,7 @@ def launch_session(
     # Splice in the mount argv resolved+validated above (before the token mint),
     # so a mount refusal never reached this point after minting authority.
     cmd.extend(_mount_argv)
+    cmd.extend(dind_args)
 
     if extra_env:
         for k, v in extra_env.items():

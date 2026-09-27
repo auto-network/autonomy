@@ -493,9 +493,11 @@
         }
         if (!detail || !detail.components) return [];
         // Design d2250266 order + vocabulary: Image / Worktree / Output.
-        // (Image = the container's writable layer; Output = the run dir
+        // (Image = the container's writable layer; Nested Docker = a
+        // privileged session's inner /var/lib/docker; Output = the run dir
         // under agent-runs; Transcript = host-session JSONL.)
-        var order = [['container_fs', 'Image'], ['worktrees', 'Worktree'],
+        var order = [['container_fs', 'Image'], ['nested_docker', 'Nested Docker'],
+                     ['worktrees', 'Worktree'],
                      ['run_dir', 'Output'], ['jsonl', 'Transcript']];
         var rows = [];
         for (var i = 0; i < order.length; i++) {

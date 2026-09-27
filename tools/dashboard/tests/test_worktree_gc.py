@@ -168,3 +168,72 @@ def test_reader_flip_get_live_sessions_keys_on_state(db):
     names = {r["tmux_name"] for r in dashboard_db.get_live_sessions()}
     assert names == {"auto-a", "auto-l"}
     assert dashboard_db.count_live() == 2
+
+
+# ── nested-Docker volumes (auto-ipq3l) ─────────────────────────────────
+
+@pytest.fixture
+def vol_env(db, monkeypatch):
+    """Fake docker volume ls/inspect/rm for the dind volume GC."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    from tools.dashboard import session_monitor as sm
+
+    volumes: dict[str, dict] = {}
+    removed: list[str] = []
+
+    class Done:
+        def __init__(self, stdout="", rc=0):
+            self.stdout, self.returncode, self.stderr = stdout, rc, ""
+
+    def fake_run(cmd, **kw):
+        if cmd[:3] == ["docker", "volume", "ls"]:
+            return Done("\n".join(volumes))
+        if cmd[:3] == ["docker", "volume", "inspect"]:
+            return Done(_json.dumps([volumes[n] for n in cmd[3:]]))
+        if cmd[:3] == ["docker", "volume", "rm"]:
+            removed.append(cmd[3])
+            return Done()
+        raise AssertionError(cmd)
+
+    def add(session, age_s=0.0):
+        created = datetime.fromtimestamp(time.time() - age_s, timezone.utc)
+        name = f"autonomy-dind-{session}"
+        volumes[name] = {
+            "Name": name,
+            "CreatedAt": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "Labels": {"autonomy.session": session, "autonomy.org": "o"},
+        }
+
+    monkeypatch.setattr(sm.subprocess, "run", fake_run)
+    return {"sm": sm, "add": add, "removed": removed}
+
+
+def test_dind_volume_gc_follows_the_worktree_guard(vol_env):
+    sm = vol_env["sm"]
+    horizon = sm.WORKTREE_GC_HORIZON_S
+    _seed("auto-old-ended", "ENDED", ended_ago=horizon + 60)
+    _seed("auto-fresh-ended", "ENDED", ended_ago=60)
+    _seed("auto-active", "ACTIVE")
+    for n in ("auto-old-ended", "auto-fresh-ended", "auto-active"):
+        vol_env["add"](n, age_s=horizon * 2)
+    vol_env["add"]("auto-orphan-old", age_s=horizon + 60)
+    vol_env["add"]("auto-orphan-new", age_s=60)
+
+    sm._dind_volume_gc_pass()
+
+    assert sorted(vol_env["removed"]) == [
+        "autonomy-dind-auto-old-ended", "autonomy-dind-auto-orphan-old"]
+
+
+def test_dind_volume_gc_rechecks_revival(vol_env):
+    sm = vol_env["sm"]
+    _seed("auto-t", "ENDED", ended_ago=sm.WORKTREE_GC_HORIZON_S + 60)
+    from tools.dashboard.session_lifecycle_worker import STATE_AUTHORITY
+
+    STATE_AUTHORITY.transition(
+        "auto-t", "LAUNCHING", phase="requesting", cause="revive",
+    )
+    sm._gc_dind_volume("autonomy-dind-auto-t", "auto-t", 0.0)
+    assert vol_env["removed"] == []

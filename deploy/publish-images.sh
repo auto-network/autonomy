@@ -135,6 +135,21 @@ mv "$tmp_lock" "$LOCK_FILE"
 trap - EXIT
 echo "==> Unsigned digest lock written to $LOCK_FILE"
 
+# Every pushed image is now pullable by the digest in the lock, and signing
+# works from those digests, so the local release tags only hold disk. A
+# release run filled the host disk on 2026-09-27 (auto-ipq3l, operator
+# decision D-D). Remove exactly the tags this run pushed, plus dangling
+# images and unused build cache. The local autonomy-session* family tags stay:
+# on a node they are the images every session launches from, and elsewhere
+# they are the layer cache for the next build. `builder prune` has no -a, so
+# cache still in use survives. AUTONOMY_KEEP_PUSHED_IMAGES=1 keeps it all.
+if [[ "${AUTONOMY_KEEP_PUSHED_IMAGES:-0}" != "1" ]]; then
+    echo "==> Removing the pushed release tags and unused build cache"
+    docker rmi "${refs[@]}" >/dev/null || echo "warning: could not remove every pushed tag" >&2
+    docker image prune -f >/dev/null || echo "warning: docker image prune failed" >&2
+    docker builder prune -f >/dev/null || echo "warning: docker builder prune failed" >&2
+fi
+
 # GHCR creates a first-time package PRIVATE, and an installer's anonymous
 # pull then fails (Windows run 6, 2026-09-27: autonomy-service-gateway).
 # Visibility has no API; the operator changes it in the package settings.
