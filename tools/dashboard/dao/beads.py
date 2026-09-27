@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -201,18 +202,54 @@ def _degrade_when_unreachable(default_factory):
     return decorate
 
 
+# Negative cache for an unreachable Dolt server (auto-2v6ay.3). On a node
+# without the beads profile every connect waited out connect_timeout, and
+# callers on the event loop (the dispatch watcher's head-hash tick) held it
+# for 10 s at a time: on the Windows test node (2026-09-27) that stalled every
+# request and failed a host-terminal launch. After a failed connect, further
+# connects to the same server fail at once until a backoff passes (30 s,
+# doubling to 10 min); a success clears it.
+_UNREACHABLE_BACKOFF_MIN_S = 30.0
+_UNREACHABLE_BACKOFF_MAX_S = 600.0
+_unreachable: dict[tuple[str, int], tuple[float, float]] = {}
+_unreachable_lock = threading.Lock()
+
+
 def _connect(org: str | None) -> pymysql.Connection:
     p = _conn_params(org)
-    return pymysql.connect(
-        host=p["host"],
-        port=p["port"],
-        user=p["user"],
-        password=p["password"],
-        database=p["database"],
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
-        connect_timeout=5,
-    )
+    server = (str(p["host"]), int(p["port"]))
+    with _unreachable_lock:
+        until, backoff = _unreachable.get(server, (0.0, 0.0))
+    if time.monotonic() < until:
+        raise OSError(
+            f"dolt at {server[0]}:{server[1]} was unreachable; next attempt in "
+            f"{until - time.monotonic():.0f}s"
+        )
+    try:
+        conn = pymysql.connect(
+            host=p["host"],
+            port=p["port"],
+            user=p["user"],
+            password=p["password"],
+            database=p["database"],
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=True,
+            connect_timeout=5,
+        )
+    except (pymysql.err.OperationalError, OSError) as exc:
+        # Only "cannot reach the server" (2003 can't connect, 2005 unknown
+        # host, 2006/2013 lost) backs off; an auth or database error is a
+        # real misconfiguration and keeps failing loudly on every call.
+        code = exc.args[0] if isinstance(exc, pymysql.err.OperationalError) and exc.args else None
+        if code not in (None, 2003, 2005, 2006, 2013):
+            raise
+        backoff = min(max(backoff * 2, _UNREACHABLE_BACKOFF_MIN_S), _UNREACHABLE_BACKOFF_MAX_S)
+        with _unreachable_lock:
+            _unreachable[server] = (time.monotonic() + backoff, backoff)
+        raise
+    with _unreachable_lock:
+        _unreachable.pop(server, None)
+    return conn
 
 
 def _get_conn(org: str | None = None) -> pymysql.Connection:
