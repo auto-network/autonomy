@@ -119,7 +119,7 @@ def test_empty_state_serves_welcome(test_client, monkeypatch):
     r = test_client.get("/", follow_redirects=False)
     assert r.status_code in (302, 307)
     assert r.headers["location"] == "/welcome"
-    assert "Three steps and this machine is yours." in test_client.get("/pages/welcome").text
+    assert "Four steps and this machine is yours." in test_client.get("/pages/welcome").text
 
 
 def test_identity_without_org_serves_welcome(test_client, monkeypatch):
@@ -261,7 +261,7 @@ def test_welcome_route_always_served(test_client):
     assert "welcome.js" in r.text
     rail = test_client.get("/pages/welcome")
     assert rail.status_code == 200
-    assert "Three steps and this machine is yours." in rail.text
+    assert "Four steps and this machine is yours." in rail.text
 
 
 # ── Copy: interface, not engineering ──────────────────────────────────
@@ -293,12 +293,14 @@ def test_shell_carries_no_ceremony_code():
                    "publickeycredential", "/api/identity/personal",
                    "/api/identity/passkey", "deriveorgslug"):
         assert banned not in lowered, banned
-    # Three POSTs: one advances an already-persisted Fleet request, one runs
+    # Four POSTs: one advances an already-persisted Fleet request, one runs
     # the harness sign-in scan (graph://5f2f5a49-00d v12 FR7a), one starts
     # the first session through the ordinary session-create path (v11
-    # §10.6). Identity, organization and signing ceremonies remain composed
-    # flows.
-    assert lowered.count("method: 'post'") == 3
+    # §10.6), and one records the reach choice through the remote-access
+    # publish API (auto-1zjk8: a Settings write, no key or ceremony).
+    # Identity, organization and signing ceremonies remain composed flows.
+    assert lowered.count("method: 'post'") == 4
+    assert "/api/network/remote-access/publish" in lowered
     assert "/api/plugins/getting_started/harnesses/import" in lowered
     assert "/api/session/create" in lowered
     assert "/api/fleet/enrollment/local-resume" in lowered

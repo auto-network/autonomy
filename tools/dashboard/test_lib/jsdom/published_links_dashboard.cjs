@@ -31,6 +31,6 @@ async function main(){
   const hello=root.querySelector('[data-service="hello"]');
   assert.match(hello.textContent,/session-a/);
   assert(hello.querySelector('[data-action="access-edit"]'),'a session card keeps its access editor');
-  console.log('published_links_dashboard: ok');
+  console.log('PASS: published links: dashboard card names this dashboard, Personal access, no editor');
 }
 main().catch(e=>{console.error(e);process.exit(1);});

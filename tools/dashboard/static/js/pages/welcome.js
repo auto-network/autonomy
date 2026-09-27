@@ -41,11 +41,26 @@ function welcomeApp() {
     fleetSyncTimer: null,
     fleetResumeTimer: null,
     fleetResumeBusy: false,
+    // Step 2 — how the operator reaches this dashboard (auto-1zjk8). The
+    // recorded row (GET /api/network/remote-access/status) decides whether
+    // the step is done; every transition below is an API result.
+    reach: null,               // the status payload once recorded
+    reachChoice: 'autonomy',   // Autonomy Network is the default
+    reachLabel: '',
+    reachLabelCheck: null,     // last label/check result
+    reachLabelBound: '',       // the persona's permanent label, when it has one
+    reachOrigin: '',           // Tailscale: the Tailnet address the operator names
+    reachBusy: false,
+    reachError: '',
+    reachStatus: null,         // live status while the relay publish converges
+    reachTimer: null,
+    reachLabelTimer: null,
 
     get step() {
       if (!this.hasIdentity) return 1;
-      if (!this.hasOrg) return 2;
-      return 3;
+      if (!(this.reach && this.reach.recorded)) return 2;
+      if (!this.hasOrg) return 3;
+      return 4;
     },
 
     async init() {
@@ -97,7 +112,160 @@ function welcomeApp() {
         this.hasOrg = orgs.length > 0;
         this.orgName = orgs.length ? (orgs[0].name || orgs[0].slug) : '';
       } catch (e) { /* org list unreadable → stay on the org step */ }
+      if (this.hasIdentity) await this.refreshReach();
       this.ready = true;
+    },
+
+    // ── step 2: reach this dashboard from anywhere ───────────────────
+    async refreshReach() {
+      try {
+        var response = await fetch('/api/network/remote-access/status', { cache: 'no-store' });
+        var body = await response.json().catch(function () { return {}; });
+        if (response.ok && body.status) {
+          this.reach = body.status;
+          this.reachStatus = body.status;
+        }
+      } catch (e) { /* unreadable → the step stays current; the operator chooses */ }
+      if (!(this.reach && this.reach.recorded)) await this.refreshReachLabelBound();
+      if (this.reach && this.reach.mode === 'autonomy' && !this.reachLive()) this.startReachPolling();
+    },
+    async refreshReachLabelBound() {
+      try {
+        var response = await fetch('/api/network/remote-access/label/check?label=x', { cache: 'no-store' });
+        var body = await response.json().catch(function () { return {}; });
+        var check = (body && body.label) || {};
+        this.reachLabelBound = check.bound ? (check.against || check.label || '') : '';
+      } catch (e) { this.reachLabelBound = ''; }
+    },
+    reachCanSubmit() {
+      if (this.reachChoice === 'autonomy') {
+        var label = (this.reachLabel || '').trim();
+        return !label || (this.reachLabelCheck && this.reachLabelCheck.ok && this.reachLabelCheck.label === label.toLowerCase());
+      }
+      if (this.reachChoice === 'tailscale') return /^https?:\/\/[^\s/]+$/.test((this.reachOrigin || '').trim());
+      return true;
+    },
+    reachSubmitText() {
+      if (this.reachBusy) return 'Publishing…';
+      return { autonomy: 'Publish on the Autonomy Network', tailscale: 'Use Tailscale', local: 'Keep it local' }[this.reachChoice] || 'Continue';
+    },
+    reachLabelText() {
+      var label = (this.reachLabel || '').trim();
+      if (!label) return '';
+      if (!this.reachLabelCheck) return 'Checking…';
+      if (this.reachLabelCheck.ok) return 'Available: ' + this.reachLabelCheck.label;
+      return this.reachLabelCheck.reason || 'Not available.';
+    },
+    checkReachLabel() {
+      var self = this;
+      var label = (this.reachLabel || '').trim();
+      this.reachLabelCheck = null;
+      if (this.reachLabelTimer) clearTimeout(this.reachLabelTimer);
+      if (!label) return;
+      this.reachLabelTimer = setTimeout(async function () {
+        try {
+          var response = await fetch('/api/network/remote-access/label/check?label=' + encodeURIComponent(label), { cache: 'no-store' });
+          var body = await response.json().catch(function () { return {}; });
+          if ((self.reachLabel || '').trim() !== label) return;   // superseded
+          self.reachLabelCheck = (body && body.label) || { ok: false, reason: 'The label could not be checked.' };
+        } catch (e) {
+          self.reachLabelCheck = { ok: false, reason: 'The label could not be checked right now.' };
+        }
+      }, 250);
+    },
+    async submitReach() {
+      if (this.reachBusy || !this.reachCanSubmit()) return;
+      this.reachBusy = true;
+      this.reachError = '';
+      var body = { mode: this.reachChoice };
+      if (this.reachChoice === 'autonomy' && (this.reachLabel || '').trim()) body.label = this.reachLabel.trim().toLowerCase();
+      if (this.reachChoice === 'tailscale') body.origin = this.reachOrigin.trim();
+      try {
+        var response = await fetch('/api/network/remote-access/publish', {
+          method: 'POST', cache: 'no-store',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        var payload = await response.json().catch(function () { return {}; });
+        if (!response.ok || payload.ok === false) {
+          throw new Error(this.reachErrorText(payload.error, payload.detail, response.status));
+        }
+        this.reach = Object.assign({ recorded: true }, payload.remote_access);
+        this.reachStatus = null;
+        if (this.reachChoice === 'autonomy') this.startReachPolling();
+        window.dispatchEvent(new Event('autonomy:remote-access-changed'));
+      } catch (error) {
+        this.reachError = (error && error.message) || String(error);
+      } finally {
+        this.reachBusy = false;
+      }
+    },
+    reachErrorText(code, detail, status) {
+      var texts = {
+        origin_invalid: 'That address does not fit the choice: a Tailscale address ends in .ts.net, a local one is this machine.',
+        through_gateway: 'Choose this from the dashboard itself, not through its published address.',
+        dashboard_container_unavailable: 'This dashboard is not running as a node container, so it cannot be published yet.',
+        persona_not_configured: 'Create your identity first.',
+        invalid_app_label: 'That name is not a valid address part.',
+      };
+      if (code && code.indexOf('label_') === 0) return detail || 'That name cannot be used.';
+      return texts[code] || (code ? code.replace(/_/g, ' ') : ('The request failed (' + status + ').'));
+    },
+    reachLive() {
+      var st = this.reachStatus || this.reach || {};
+      return !!(st.advertised && st.gate === 'up');
+    },
+    startReachPolling() {
+      var self = this;
+      if (this.reachTimer) return;
+      this.reachTimer = setInterval(function () { self.pollReach(); }, 2000);
+      this.pollReach();
+    },
+    async pollReach() {
+      try {
+        var response = await fetch('/api/network/remote-access/status', { cache: 'no-store' });
+        var body = await response.json().catch(function () { return {}; });
+        if (!response.ok || !body.status) return;
+        this.reachStatus = body.status;
+        if (body.status.enrollment_url && this.reachLive()) {
+          // The gate is up: enrol the gate passkey on the live address.
+          if (this.reachTimer) clearInterval(this.reachTimer);
+          this.reachTimer = null;
+          location.assign(body.status.enrollment_url);
+          return;
+        }
+        if (body.status.mode !== 'autonomy' || (this.reachLive() && !body.status.enrollment_url)) {
+          if (this.reachTimer) clearInterval(this.reachTimer);
+          this.reachTimer = null;
+        }
+      } catch (e) { /* keep polling; the next tick may answer */ }
+    },
+    reachProgress() {
+      var st = this.reachStatus || {};
+      var failed = st.failed_stage || '';
+      var rows = [
+        { name: 'reservation', label: 'Address reserved', done: !!st.reservation_id, bad: failed === 'reservation' },
+        { name: 'certificate', label: 'Certificate issued', done: st.certificate === 'ok', bad: st.certificate === 'failed' },
+        { name: 'route', label: 'Route live on the relay', done: !!st.advertised, bad: false },
+        { name: 'gate', label: 'Passkey gate ready', done: st.gate === 'up', bad: false },
+      ];
+      return rows.map(function (row) {
+        return { name: row.name, label: row.label, tone: row.bad ? 'bad' : (row.done ? 'ok' : ''),
+                 mark: row.bad ? '✗' : (row.done ? '✓' : '…') };
+      });
+    },
+    reachTitle() {
+      var mode = (this.reach || {}).mode;
+      return { autonomy: 'Reachable on the Autonomy Network', tailscale: 'Reachable on your Tailnet', local: 'This machine only' }[mode] || 'Reach this dashboard';
+    },
+    reachSummary() {
+      var st = this.reachStatus || this.reach || {};
+      if (!st.origin) return '';
+      if (st.mode !== 'autonomy') return st.origin;
+      if (this.reachLive()) return st.origin;
+      if (st.certificate === 'failed') return st.origin + ' — certificate issuance failed; see Published Links.';
+      if (st.gate !== 'up' && st.advertised) return st.origin + ' — waiting for the passkey gate.';
+      return st.origin + ' — setting up (' + (st.certificate === 'ok' ? 'route' : 'certificate') + ')…';
     },
 
     async resumeFleetEnrollment() {

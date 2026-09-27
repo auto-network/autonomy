@@ -12,7 +12,13 @@ createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'mem
     '[data-testid="onboarding-step-device"]'));
   withStep('alice','save alice-identity-created',()=>save('alice','alice-identity-created',browser('alice','snapshot','-i')));
   // The product offers Not now for optional device-passkey setup.
-  withStep('alice','skip alice device setup',()=>action('alice','#onboarding-notnow',{},'[data-testid="welcome-create"]'));
+  withStep('alice','skip alice device setup',()=>action('alice','#onboarding-notnow',{},'[data-testid="welcome-reach-submit"]'));
+  // Step 2, reach this dashboard from anywhere (auto-1zjk8): the simulation's relay
+  // issues no certificates, so it records Local only; the Autonomy Network path is
+  // the Windows walkthrough's on a real node. Every transition is the product's own.
+  withStep('alice','choose local reach',()=>click('alice','[data-testid="welcome-reach-local"]'));
+  withStep('alice','record local reach',()=>action('alice','[data-testid="welcome-reach-submit"]',{},'[data-testid="welcome-reach-done"]','[data-testid="welcome-reach-error"]'));
+  withStep('alice','reach summary names this machine',()=>{const summary=textOf('alice','[data-testid="welcome-reach-summary"]');if(!/^https?:\/\/(localhost|127\.0\.0\.1)/.test(summary))throw new Error('reach summary is not the local origin: '+summary);evidence.reachSummary=summary;});
   withStep('alice','save alice personal profile',()=>setPersonalProfile('alice','Alice','Organization founder',directory+'fixtures/alice-photo.png'));
   withStep('alice','start org create',()=>action('alice','[data-testid="welcome-create"]',{},'#create-org-name'));
   withStep('alice','submit org name',()=>action('alice','#create-org-submit',{'#create-org-name':'Simulation Organization'},'.or-in-bare','#create-org-error'));
@@ -75,7 +81,9 @@ createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'mem
     const bobPassword=withStep('bob','create bob password',()=>randomBytes(24).toString('base64url'));
     withStep('bob','submit bob identity',()=>action('bob','#onboarding-primary',{'#onboarding-name':'Bob','#onboarding-password':bobPassword,'#onboarding-password2':bobPassword},
       '[data-testid="onboarding-step-device"]'));
-    withStep('bob','skip bob device setup',()=>action('bob','#onboarding-notnow',{},'[data-testid="welcome-join"]'));
+    withStep('bob','skip bob device setup',()=>action('bob','#onboarding-notnow',{},'[data-testid="welcome-reach-submit"]'));
+    withStep('bob','choose local reach',()=>click('bob','[data-testid="welcome-reach-local"]'));
+    withStep('bob','record local reach',()=>action('bob','[data-testid="welcome-reach-submit"]',{},'[data-testid="welcome-join"]','[data-testid="welcome-reach-error"]'));
     withStep('bob','save bob personal profile',()=>setPersonalProfile('bob','Bob','Joining member'));
     // The welcome rail renders inside the dashboard shell after its fragment
     // loads; observe the control before operating it.

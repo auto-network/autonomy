@@ -35,6 +35,21 @@
   .welcome .actions { display:flex; flex-direction:column; gap:.5rem; }
   .welcome .invite-org { display:flex; align-items:center; gap:.6rem; margin:.15rem 0 .1rem; }
   .welcome .invite-org .mark { width:1.6rem; height:1.6rem; border-radius:6px; background:#374151; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:.8rem; }
+  .welcome .reach-options { display:flex; flex-direction:column; gap:.45rem; margin:.6rem 0 .4rem; }
+  .welcome .reach-option { display:flex; gap:.6rem; align-items:flex-start; padding:.6rem .75rem; border:1px solid var(--line); border-radius:8px; cursor:pointer; }
+  .welcome .reach-option.selected { border-color:var(--accent-hover); }
+  .welcome .reach-option input { margin-top:.2rem; }
+  .welcome .reach-option b { display:block; font-size:.95rem; }
+  .welcome .reach-option span { color:var(--dim); font-size:.85rem; }
+  .welcome .reach-field { margin:.5rem 0; }
+  .welcome .reach-field label { display:block; color:var(--dim); font-size:.82rem; margin-bottom:.25rem; }
+  .welcome .reach-field input { width:100%; box-sizing:border-box; background:#111827; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:.5rem .65rem; font-size:.95rem; }
+  .welcome .reach-check { font-size:.82rem; margin-top:.3rem; min-height:1.1em; }
+  .welcome .reach-check.ok { color:var(--ok); } .welcome .reach-check.bad { color:#fca5a5; }
+  .welcome .reach-progress { list-style:none; padding:0; margin:.6rem 0 0; font-size:.88rem; }
+  .welcome .reach-progress li { display:flex; gap:.5rem; align-items:center; padding:.15rem 0; color:var(--dim); }
+  .welcome .reach-progress li.ok { color:var(--ok); } .welcome .reach-progress li.bad { color:#fca5a5; }
+  .welcome .reach-error { color:#fca5a5; font-size:.88rem; margin-top:.4rem; }
   .welcome button:hover { background:var(--accent-hover); }
   .welcome button.secondary:hover { background:#4b5563; }
 </style>
@@ -105,29 +120,98 @@
   <template x-if="ready && !fleetEnrollment && !fleetSync && step === 1">
     <div>
       <h1>Welcome</h1>
-      <p class="sub">Three steps and this machine is yours.</p>
+      <p class="sub">Four steps and this machine is yours.</p>
       <div class="step current"><div class="n">1</div><div class="body">
         <h2>Create your identity</h2>
         <p>Your name and your keys &mdash; made here, kept here.</p></div>
         <button data-testid="welcome-begin" @click="beginIdentity()">Begin</button></div>
       <div class="step locked"><div class="n">2</div><div class="body">
+        <h2>Reach this dashboard from anywhere</h2>
+        <p>A real address for your phone and other machines, behind your passkey.</p></div></div>
+      <div class="step locked"><div class="n">3</div><div class="body">
         <h2>Create or join an organization</h2>
         <p>Your work lives in organizations &mdash; start one, or accept an invitation.</p></div></div>
+      <div class="step locked"><div class="n">4</div><div class="body">
+        <h2>Open your first workspace</h2>
+        <p>Where you and your assistant build together.</p></div></div>
+    </div>
+  </template>
+
+  <!-- ── REACH · identity done, remote access current ────────────── -->
+  <template x-if="ready && !fleetEnrollment && !fleetSync && step === 2">
+    <div data-testid="welcome-step-reach">
+      <h1 x-text="userName ? ('Welcome, ' + userName) : 'Welcome'"></h1>
+      <p class="sub">Three to go.</p>
+      <div class="step done"><div class="n">&check;</div><div class="body">
+        <h2>Create your identity</h2>
+        <p x-text="userName ? ('You’re ' + userName + ' on this machine.') : 'Your identity is set on this machine.'"></p></div></div>
+      <div class="step current" style="align-items:flex-start"><div class="n">2</div><div class="body">
+        <h2>Reach this dashboard from anywhere</h2>
+        <p>Choose how you will open this dashboard from your phone and your other machines. Every link the dashboard gives you will use this address.</p>
+        <div class="reach-options">
+          <label class="reach-option" :class="reachChoice === 'autonomy' ? 'selected' : ''">
+            <input type="radio" name="reach" value="autonomy" x-model="reachChoice" data-testid="welcome-reach-autonomy">
+            <div><b>Autonomy Network</b><span>A real https address on the Autonomy relay, protected by a passkey before anything reaches this dashboard. No account, no installs on your other devices.</span></div>
+          </label>
+          <label class="reach-option" :class="reachChoice === 'tailscale' ? 'selected' : ''">
+            <input type="radio" name="reach" value="tailscale" x-model="reachChoice" data-testid="welcome-reach-tailscale">
+            <div><b>Tailscale</b><span>Use your own Tailnet. You install Tailscale on each device and open this dashboard by its Tailnet name.</span></div>
+          </label>
+          <label class="reach-option" :class="reachChoice === 'local' ? 'selected' : ''">
+            <input type="radio" name="reach" value="local" x-model="reachChoice" data-testid="welcome-reach-local">
+            <div><b>Local only</b><span>This machine only, at the address you are using now. You can publish it later from Settings.</span></div>
+          </label>
+        </div>
+        <template x-if="reachChoice === 'autonomy' && !reachLabelBound">
+          <div class="reach-field">
+            <label for="welcome-reach-label">Your name in the address (optional)</label>
+            <input id="welcome-reach-label" data-testid="welcome-reach-label" x-model="reachLabel" @input="checkReachLabel()" placeholder="leave empty for a private, random name" autocomplete="off" spellcheck="false">
+            <div class="reach-check" :class="reachLabelCheck ? (reachLabelCheck.ok ? 'ok' : 'bad') : ''" data-testid="welcome-reach-label-check" x-text="reachLabelText()"></div>
+            <p>The name becomes part of the address and is permanent: it cannot be changed later.</p>
+          </div>
+        </template>
+        <template x-if="reachChoice === 'autonomy' && reachLabelBound">
+          <p data-testid="welcome-reach-label-bound">Your address name is already <b x-text="reachLabelBound"></b>.</p>
+        </template>
+        <template x-if="reachChoice === 'tailscale'">
+          <div class="reach-field">
+            <label for="welcome-reach-origin">This dashboard's Tailnet address</label>
+            <input id="welcome-reach-origin" data-testid="welcome-reach-origin" x-model="reachOrigin" placeholder="https://this-machine.tailNNNN.ts.net:8080" autocomplete="off" spellcheck="false">
+            <p>Renew its certificate monthly with <code>tools/dashboard/renew-tls-cert.sh</code>; the address comes from <code>tailscale status</code> on this machine.</p>
+          </div>
+        </template>
+        <template x-if="reachBusy && reachChoice === 'autonomy'">
+          <ul class="reach-progress" data-testid="welcome-reach-progress">
+            <template x-for="row in reachProgress()" :key="row.name">
+              <li :class="row.tone"><span x-text="row.mark"></span><span x-text="row.label"></span></li>
+            </template>
+          </ul>
+        </template>
+        <p class="reach-error" x-show="reachError" x-text="reachError" data-testid="welcome-reach-error"></p>
+        <div class="actions" style="margin-top:.7rem">
+          <button data-testid="welcome-reach-submit" :disabled="reachBusy || !reachCanSubmit()" @click="submitReach()" x-text="reachSubmitText()"></button>
+        </div></div></div>
       <div class="step locked"><div class="n">3</div><div class="body">
+        <h2>Create or join an organization</h2>
+        <p>Your work lives in organizations &mdash; start one, or accept an invitation.</p></div></div>
+      <div class="step locked"><div class="n">4</div><div class="body">
         <h2>Open your first workspace</h2>
         <p>Where you and your assistant build together.</p></div></div>
     </div>
   </template>
 
   <!-- ── MID · identity done, organization current (variant 1) ──── -->
-  <template x-if="ready && !fleetEnrollment && !fleetSync && step === 2">
+  <template x-if="ready && !fleetEnrollment && !fleetSync && step === 3">
     <div>
       <h1 x-text="userName ? ('Welcome, ' + userName) : 'Welcome'"></h1>
       <p class="sub">Two to go.</p>
       <div class="step done"><div class="n">&check;</div><div class="body">
         <h2>Create your identity</h2>
         <p x-text="userName ? ('You’re ' + userName + ' on this machine.') : 'Your identity is set on this machine.'"></p></div></div>
-      <div class="step current"><div class="n">2</div><div class="body">
+      <div class="step done" data-testid="welcome-reach-done"><div class="n">&check;</div><div class="body">
+        <h2 x-text="reachTitle()"></h2>
+        <p x-text="reachSummary()" data-testid="welcome-reach-summary"></p></div></div>
+      <div class="step current"><div class="n">3</div><div class="body">
         <h2>Create or join an organization</h2>
         <template x-if="invited">
           <div class="invite-org" data-testid="welcome-invite-org">
@@ -151,22 +235,24 @@
             </div>
           </template>
         </div></div>
-      <div class="step locked"><div class="n">3</div><div class="body">
+      <div class="step locked"><div class="n">4</div><div class="body">
         <h2>Open your first workspace</h2>
         <p>Where you and your assistant build together.</p></div></div>
     </div>
   </template>
 
-  <!-- ── READY · identity + organization done (design variant 2) ── -->
-  <template x-if="ready && !fleetEnrollment && !fleetSync && step === 3">
+  <!-- ── READY · identity + reach + organization done (design variant 2) ── -->
+  <template x-if="ready && !fleetEnrollment && !fleetSync && step === 4">
     <div>
       <h1 x-text="userName ? ('Welcome, ' + userName) : 'Welcome'"></h1>
       <p class="sub">One to go.</p>
       <div class="step done"><div class="n">&check;</div><div class="body">
         <h2 x-text="userName || 'Your identity'"></h2><p>Your identity on this machine.</p></div></div>
+      <div class="step done" data-testid="welcome-reach-done"><div class="n">&check;</div><div class="body">
+        <h2 x-text="reachTitle()"></h2><p x-text="reachSummary()" data-testid="welcome-reach-summary"></p></div></div>
       <div class="step done"><div class="n">&check;</div><div class="body">
         <h2 x-text="orgName || 'Your organization'"></h2><p>Your organization.</p></div></div>
-      <div class="step current" data-testid="welcome-step-workspace"><div class="n">3</div><div class="body">
+      <div class="step current" data-testid="welcome-step-workspace"><div class="n">4</div><div class="body">
         <h2>Open your first workspace</h2>
         <p>Your assistant starts in Getting Started.</p></div></div>
       <button style="margin-top:.6rem" data-testid="welcome-open-workspace" :disabled="startBusy" @click="goToWorkspace()" x-text="startBusy ? 'Starting your first session…' : 'Go to your workspace'"></button>

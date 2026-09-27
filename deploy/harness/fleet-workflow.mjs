@@ -3,7 +3,7 @@ import {randomBytes} from 'node:crypto';
 import {createWorkflow} from './ui-harness.mjs';
 
 createWorkflow({scope:'personal-fleet',initialServices:['alice'],output:process.argv[2]})
-.runScenario(({browser,js,action,waitFor,waitValue,textOf,save,withStep,evidence,alicePort,bobPort,launchFleetJoiner,readCopiedText,compose})=>{
+.runScenario(({browser,js,action,waitFor,waitValue,click,textOf,save,withStep,evidence,alicePort,bobPort,launchFleetJoiner,readCopiedText,compose})=>{
   const password=randomBytes(24).toString('base64url');
   const noteTitle='Fleet synchronization proof';
   const noteBody='Created on the first dashboard for its second machine: '+randomBytes(12).toString('hex');
@@ -16,7 +16,9 @@ createWorkflow({scope:'personal-fleet',initialServices:['alice'],output:process.
   withStep('alice','create personal identity',()=>action('alice','#onboarding-primary',{
     '#onboarding-name':'Alice','#onboarding-password':password,'#onboarding-password2':password,
   },'[data-testid="onboarding-step-device"]'));
-  withStep('alice','skip optional passkey',()=>action('alice','#onboarding-notnow',{},'[data-testid="welcome-create"]'));
+  withStep('alice','skip optional passkey',()=>action('alice','#onboarding-notnow',{},'[data-testid="welcome-reach-submit"]'));
+  withStep('alice','choose local reach',()=>click('alice','[data-testid="welcome-reach-local"]'));
+  withStep('alice','record local reach',()=>action('alice','[data-testid="welcome-reach-submit"]',{},'[data-testid="welcome-create"]','[data-testid="welcome-reach-error"]'));
   withStep('alice','open personal notes',()=>{
     browser('alice','open','https://localhost:'+alicePort+'/voice-notes');
     waitFor('alice','[data-testid="voice-notes-new"]');
