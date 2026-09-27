@@ -587,6 +587,11 @@ var signRegistryRequestCore;
     var seed = opts.personalRootSeed;
     var orgUuid = opts.orgUuid;
     var rootPub = opts.rootPub;
+    // The subject the serving delegate names: the personal ledger's persona,
+    // which is what personal Services are reserved under, so the registry lets
+    // this tunnel register their hosts (auto-8sdrr). The root stands in until
+    // the ledger has a persona (a brand-new identity's first sign-on).
+    var personaPub = opts.personaPub || rootPub;
     var serve = opts.serve !== false;   // a joiner registers but does not serve
     if (!(seed instanceof Uint8Array) || seed.length !== 32) {
       throw new Error('personalRootSeed must be a 32-byte Uint8Array');
@@ -596,6 +601,9 @@ var signRegistryRequestCore;
     }
     if (typeof rootPub !== 'string' || !/^[0-9a-f]{64}$/.test(rootPub)) {
       throw new Error('rootPub must be the canonical personal root pub');
+    }
+    if (typeof personaPub !== 'string' || !/^[0-9a-f]{64}$/.test(personaPub)) {
+      throw new Error('personaPub must be a canonical persona pub');
     }
     var rootKey;
     try {
@@ -613,8 +621,10 @@ var signRegistryRequestCore;
       // and only when a usable one is not already in place.
       if (serve) {
         var status = await _fetchJsonOrNull('/api/network/serve-cert', null);
-        if (!status || status.status !== 'ok') {
-          var credential = await _mintServeCredential(rootKey, orgUuid, rootPub);
+        // serve_cert_requirement is THE rule (required covers expiry, the
+        // renewal window, a missing DNS-01 delegate and the persona re-mint).
+        if (!status || status.required || status.status !== 'ok') {
+          var credential = await _mintServeCredential(rootKey, orgUuid, personaPub);
           await _postServeCredential(credential, null);
         }
       }
@@ -857,8 +867,12 @@ var signRegistryRequestCore;
           org_uuid: runtime.personal_org_uuid, root_pub: runtime.personal_root_pub, recovery_policy: 'none',
         });
         posts.push({ step: 'binding', url: '/api/network/register', body: { org: null, envelope: registration } });
-        if (runtime.serves && (!personalServe || personalServe.status !== 'ok')) {
-          var credential = await _mintServeCredential(key, runtime.personal_org_uuid, runtime.personal_root_pub);
+        if (runtime.serves && (!personalServe || personalServe.status !== 'ok' || personalServe.remint_required)) {
+          // Subject = the personal ledger's persona (auto-8sdrr); the root only
+          // until the ledger has one. remint_required is the dashboard saying
+          // the stored delegate still names the root.
+          var credential = await _mintServeCredential(key, runtime.personal_org_uuid,
+            runtime.personal_persona_pub || runtime.personal_root_pub);
           posts.push({ step: 'serve-cert', url: '/api/network/serve-cert', body: Object.assign({ org: null }, credential.body) });
         }
       } catch (error) {

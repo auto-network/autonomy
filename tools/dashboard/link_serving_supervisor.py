@@ -433,7 +433,44 @@ fresh serving credential iff the status is anything but ``ok``.
                 "reprovision serving"
             ),
         }
-    return _ok_state(row, org_uuid, not_after, viewer_cert=row.get("viewer_cert"))
+    state = _ok_state(row, org_uuid, not_after, viewer_cert=row.get("viewer_cert"))
+    if state["status"] == "ok" and (org is None or org == PERSONAL_SCOPE):
+        # auto-8sdrr: personal Services are reserved under the personal
+        # ledger's persona and the registry binds their labels to the tunnel's
+        # subject. A delegate that still names the root keeps fleet sync alive
+        # (so it stays "ok" and the connector keeps running) but cannot
+        # register a personal host; the next sign-on re-mints it for the
+        # persona, exactly as the checkpoint scope was re-minted.
+        persona = personal_persona_pub()
+        if persona and cert.subject.id != persona:
+            state["remint_required"] = True
+            state["remint_reason"] = (
+                "the personal serving delegate names the root; personal "
+                "Services need it to name the personal persona")
+    return state
+
+
+def personal_persona_pub() -> str | None:
+    """The persona the personal ledger derives for this identity, or None
+    until that ledger has a genesis. Never raises."""
+    try:
+        from tools.graph import org_ops
+        from tools.network.ledger import LedgerStore, org_ledger_db_path
+
+        path = org_ledger_db_path(PERSONAL_SCOPE)
+        if not path.exists():
+            # LedgerStore connects (and so creates) the file; a fresh identity
+            # with no personal database yet must not gain an empty one here.
+            return None
+        with LedgerStore(path) as store:
+            if not store.ledger.genesis_id:
+                return None
+            genesis_id = store.fold().genesis_id
+        persona = org_ops.persona_pub_for_org(genesis_id)
+        return persona if isinstance(persona, str) and persona else None
+    except Exception:
+        _log.debug("personal persona unavailable", exc_info=True)
+        return None
 
 
 def _ok_state(row: dict, org_uuid: str, not_after: int, *, viewer_cert) -> dict:
@@ -504,9 +541,16 @@ def serve_cert_requirement(org: str | None, *, now: float | None = None) -> dict
         days_remaining = (not_after - int(now)) / 86400.0
         if days_remaining < SERVE_CERT_RENEW_BELOW_DAYS:
             required = True
+    if state.get("remint_required"):
+        # auto-8sdrr: a personal delegate that names the root serves fleet
+        # sync but cannot register a personal Service's host; the next
+        # sign-on re-mints it for the personal persona.
+        required = True
     return {
         "required": required,
         "status": status,
+        **({"remint_required": True, "remint_reason": state.get("remint_reason")}
+           if state.get("remint_required") else {}),
         # Reported whether or not a renewal is due, so the caller can say how
         # long a credential has left instead of only that it is fine for now.
         "days_remaining": (

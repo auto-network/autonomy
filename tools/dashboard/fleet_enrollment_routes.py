@@ -1189,6 +1189,13 @@ async def local_runtime_context(request: Request) -> JSONResponse:
     return runtime_preparation()
 
 
+def _personal_persona_pub() -> str | None:
+    """The persona the personal ledger derives for this identity, or None."""
+    from tools.dashboard import link_serving_supervisor
+
+    return link_serving_supervisor.personal_persona_pub()
+
+
 def runtime_preparation() -> JSONResponse:
     """Public derivation inputs, also consumed by encrypted sign-in preparation."""
     try:
@@ -1214,6 +1221,12 @@ def runtime_preparation() -> JSONResponse:
         # can register it at unlock — idempotently — whenever org_uuid is still
         # null, and every machine derives the same value.
         "personal_org_uuid": fleet_runtime.personal_org_uuid(root_pub),
+        # The personal ledger's persona: the identity personal Services are
+        # reserved under, and therefore the subject the personal serving
+        # delegate must name so the registry lets this tunnel register their
+        # hosts (auto-8sdrr). None until the personal ledger has a genesis;
+        # the browser then falls back to the root as before.
+        "personal_persona_pub": _personal_persona_pub(),
         # Whether THIS machine may serve, and therefore whether the browser
         # mints it a personal serving delegate at unlock.
         #

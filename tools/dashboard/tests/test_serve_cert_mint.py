@@ -90,11 +90,15 @@ PERSONAL_HARNESS = (
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_browser_personal_tunnel_provision_is_idkit_compatible():
+@pytest.mark.parametrize("with_persona", [False, True], ids=["root-only", "ledger-persona"])
+def test_browser_personal_tunnel_provision_is_idkit_compatible(with_persona):
     """The REAL provisionPersonalNetworkIdentity brings the personal identity
     online as its OWN org (the "personal tunnel"): it self-signs the registration
-    envelope AND mints the serving delegate, both with the personal root — no
-    org-key, no org-scoped persona. This runs it in Node and verifies both
+    envelope AND mints the serving delegate with the personal root. The
+    delegate's SUBJECT is the personal ledger's persona when the dashboard
+    knows it (auto-8sdrr: personal Services are reserved under that persona,
+    and the registry binds their labels to the tunnel's subject), else the
+    root. This runs it in Node and verifies both
     artifacts with idkit."""
     from tools.network import fleet_runtime
     from tools.network.idkit import verify_signature
@@ -102,12 +106,14 @@ def test_browser_personal_tunnel_provision_is_idkit_compatible():
 
     personal = KeyPair.generate()
     org_uuid = fleet_runtime.personal_org_uuid(personal.public_hex)
+    ledger_persona = KeyPair.generate().public_hex if with_persona else None
 
     result = subprocess.run(
         ["node", str(PERSONAL_HARNESS)],
         env={**os.environ,
              "AUTONOMY_SEED_HEX": personal.private_hex,
              "AUTONOMY_ROOT_PUB": personal.public_hex,
+             **({"AUTONOMY_PERSONA_PUB": ledger_persona} if ledger_persona else {}),
              "AUTONOMY_ORG_UUID": org_uuid},
         capture_output=True, text=True, timeout=60,
     )
@@ -144,7 +150,8 @@ def test_browser_personal_tunnel_provision_is_idkit_compatible():
     verify_chain(dns01_cert, personal.public_hex, org=org_uuid, now=now,
                  required_scope="serve:dns-01")
     assert cert.subject.kind == "persona"
-    assert cert.subject.id == personal.public_hex
+    assert cert.subject.id == (ledger_persona or personal.public_hex)
+    assert dns01_cert.subject.id == cert.subject.id
     assert viewer_cert.subject.kind == "operator"
     assert viewer_cert.subject.id == viewer_cert.child_pub
     assert KeyPair.from_private_hex(out["serve"]["private_key"]).public_hex == \

@@ -401,7 +401,7 @@ def test_new_identity_can_fetch_encrypted_signin_preparation(env, monkeypatch):
     from tools.vault.personal_object import derive_delegate_audited_recipient
 
     expected = {"vault": {}, "organizations": [], "runtime": {"enabled": False}}
-    monkeypatch.setattr(signon_preparation, "collect", lambda: expected)
+    monkeypatch.setattr(signon_preparation, "collect", lambda only_org=None: expected)
     env.app.router.routes.append(Route(
         "/api/identity/unlock/preparation", signon_preparation.get_preparation,
         methods=["GET"],
@@ -482,6 +482,10 @@ dom.window.close();
     assert runtime["enabled"] is True
     assert runtime["machine_id"] == entry.machine_id
     assert runtime["machine_pub"] == entry.machine_pub
+    # The subject the personal serving delegate must name (auto-8sdrr): the
+    # personal ledger's persona, or None until that ledger has a genesis.
+    persona = runtime["personal_persona_pub"]
+    assert persona is None or (isinstance(persona, str) and len(persona) == 64)
     assert "machine_private_seed" not in json.dumps(payload)
     # Model the next sign-in, not the initial bootstrap session.
     env.cookies.clear()

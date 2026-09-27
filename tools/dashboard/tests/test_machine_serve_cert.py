@@ -154,3 +154,61 @@ def test_the_deprecated_organization_homed_row_is_not_read(env):
         org=ORG,
     )
     assert lss.serve_cert_state(ORG) == {"status": "missing"}
+
+
+def _root_signed_personal_credential(root: KeyPair, org_uuid: str, subject_pub: str):
+    """The browser's personal mint (network-signon.mjs _mintServeCredential):
+    root-signed, persona subject, plus the identity-neutral viewer cert."""
+    delegate = KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        root, delegate.public_hex, scope=("tunnel:serve",), org=org_uuid,
+        subject=Subject("persona", subject_pub), not_before=now - 300, not_after=now + 30 * 86400,
+    )
+    viewer = issue_cert(
+        root, delegate.public_hex, scope=("tunnel:serve",), org=org_uuid,
+        subject=Subject("operator", delegate.public_hex), not_before=cert.not_before,
+        not_after=cert.not_after,
+    )
+    return delegate, cert, viewer
+
+
+@pytest.mark.parametrize("names", ["root", "persona"])
+def test_a_personal_delegate_naming_the_root_is_ok_but_flagged_for_remint(env, monkeypatch, names):
+    """auto-8sdrr: personal Services are reserved under the ledger persona, so
+    a personal delegate whose subject is still the root stays serving (fleet
+    sync must not stop) but reports remint_required; one naming the persona
+    does not."""
+    from tools.network import fleet_runtime
+
+    root, persona = KeyPair.generate(), KeyPair.generate().public_hex
+    org_uuid = fleet_runtime.personal_org_uuid(root.public_hex)
+    now = int(time.time())
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "auto.network",
+        {"org_uuid": org_uuid, "root_pub": root.public_hex,
+         "registry_url": "https://auto.network", "recovery_policy": {"mode": "none"},
+         "binding_expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 86400))},
+        org="personal",
+    )
+    subject = root.public_hex if names == "root" else persona
+    delegate, cert, viewer = _root_signed_personal_credential(root, org_uuid, subject)
+    vault_kit.store_key(org_uuid, delegate.private_hex)
+    vault_kit.store_row(org_uuid, cert=cert.to_json().decode("ascii"),
+                        viewer_cert=viewer.to_json().decode("ascii"),
+                        child_pub=delegate.public_hex, not_after=cert.not_after,
+                        root_pub=root.public_hex)
+    vault_kit.cold()
+    monkeypatch.setattr(lss, "personal_persona_pub", lambda: persona)
+
+    state = lss.serve_cert_state(None)
+    assert state["status"] == "ok", state
+    if names == "root":
+        assert state["remint_required"] is True
+        assert "personal persona" in state["remint_reason"]
+    else:
+        assert "remint_required" not in state
+
+    # Unknown persona (no ledger genesis yet): nothing to re-mint for.
+    monkeypatch.setattr(lss, "personal_persona_pub", lambda: None)
+    assert "remint_required" not in lss.serve_cert_state(None)

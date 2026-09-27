@@ -23,6 +23,7 @@ globalThis.localStorage = { getItem: () => null, setItem: () => {} };
 const SEED_HEX = process.env.AUTONOMY_SEED_HEX;
 const ROOT_PUB = process.env.AUTONOMY_ROOT_PUB;
 const ORG_UUID = process.env.AUTONOMY_ORG_UUID;
+const PERSONA_PUB = process.env.AUTONOMY_PERSONA_PUB || undefined;  // auto-8sdrr: the ledger persona, when known
 
 function hexToBytes(hex) {
   const out = new Uint8Array(hex.length / 2);
@@ -67,6 +68,7 @@ globalThis.window.fetch = globalThis.fetch;
     personalRootSeed: hexToBytes(SEED_HEX),
     orgUuid: ORG_UUID,
     rootPub: ROOT_PUB,
+    personaPub: PERSONA_PUB,
     serve: true,
   });
   if (!registerBody || !serveBody) {

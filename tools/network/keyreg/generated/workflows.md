@@ -465,7 +465,7 @@ The seed is generated and armored in this window; opens root models the human ce
 
 **Crib:** §8
 
-Existing personal branch still emits viewer_cert; do not infer organization content-viewer certificate use from this bootstrap field.
+Existing personal branch still emits viewer_cert; do not infer organization content-viewer certificate use from this bootstrap field. Subject (auto-8sdrr): the personal ledger's persona (runtime personal_persona_pub) when the dashboard knows it, else the personal root; personal Services are reserved under that persona and the registry binds their labels to the tunnel's subject. A stored delegate still naming the root stays ok for fleet sync and reports remint_required, so the next sign-on re-mints it without an outage.
 
 <a id="workflow-ceremony-recovery_policy_change"></a>
 ## ceremony.recovery_policy_change
