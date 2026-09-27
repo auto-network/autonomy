@@ -539,9 +539,12 @@ def _has_live_service_publication(org: str) -> bool:
     remains the application's responsibility.  Consequently their connector
     lifecycle cannot be inferred from ``network.link-grant``.  The durable
     reservation plus target Settings are the existing publication authority.
+
+    The personal scope counts like any organization (auto-4urxx): the
+    operator's own Services, the dashboard's relay route first among them,
+    are served under the personal persona label, so a personal publication
+    must keep the personal connector serving even on a fleet of one machine.
     """
-    if org == PERSONAL_SCOPE:
-        return False
     try:
         from tools.dashboard import service_publication
 

@@ -1561,3 +1561,18 @@ def test_scope_states_names_unarmed_only_with_an_absent_key_file(env, monkeypatc
     spawn.procs[-1].connect()
     row = sup.scope_states([(ORG, ORG)])[0]
     assert row["state"] == "serving"
+
+
+def test_personal_service_publication_keeps_the_personal_connector_serving(monkeypatch):
+    """Personal is the default publisher of the dashboard's relay route
+    (auto-4urxx): a personal reservation with a bound target is a live
+    publication for the connector rule, exactly like an organization's."""
+    from tools.dashboard import service_publication
+
+    rows = {"personal": ([{"reservation_id": "r1", "state": "active"}], [{"reservation_id": "r1"}]),
+            "idle": ([{"reservation_id": "r2", "state": "active"}], [])}
+    monkeypatch.setattr(service_publication, "list_reservations", lambda org: rows[org][0])
+    monkeypatch.setattr(service_publication, "list_service_targets", lambda org: rows[org][1])
+
+    assert sup._has_live_service_publication("personal") is True
+    assert sup._has_live_service_publication("idle") is False

@@ -27,11 +27,12 @@ def desired_personas() -> set[tuple[str, str]]:
     or an organization-owned zone (``<app>.<zone>`` Services share one
     wildcard certificate for the zone).
     """
+    from tools.dashboard.web_gateway_supervisor import PUBLISHING_ORG_TYPES
     from tools.graph import org_ops
 
     desired: set[tuple[str, str]] = set()
     for ref in org_ops.list_orgs():
-        if ref.type != "shared":
+        if ref.type not in PUBLISHING_ORG_TYPES:
             continue
         targets = {
             row.get("reservation_id")

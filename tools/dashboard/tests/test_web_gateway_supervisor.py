@@ -287,7 +287,9 @@ async def test_lease_failure_does_not_skip_gateway_fail_closed_plan():
     assert observed == ["authority-unavailable"]
 
 
-def test_gateway_org_discovery_excludes_the_personal_store(monkeypatch):
+def test_gateway_org_discovery_serves_shared_orgs_and_the_personal_scope(monkeypatch):
+    """Personal is the default publisher of the dashboard's relay route
+    (auto-4urxx); followed mirrors publish nothing."""
     from tools.dashboard import link_serving_supervisor
     from tools.graph import org_ops
 
@@ -302,10 +304,11 @@ def test_gateway_org_discovery_excludes_the_personal_store(monkeypatch):
         lambda: [
             SimpleNamespace(slug="personal", type="personal"),
             SimpleNamespace(slug="autonomy", type="shared"),
+            SimpleNamespace(slug="mirror", type="followed"),
         ],
     )
 
-    assert sup._discover_orgs() == ["autonomy"]
+    assert sup._discover_orgs() == ["autonomy", "personal"]
 
 
 @pytest.mark.asyncio

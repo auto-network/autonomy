@@ -137,10 +137,20 @@ def _dashboard_route_permitted(target_row: dict, access: str) -> bool:
     return target_row.get("kind") != "dashboard" or access == "personal"
 
 
+#: Scopes that publish Services: every collaborative organization and the
+#: operator's personal scope. Personal is the DEFAULT publisher of the
+#: dashboard's own relay route (operator 2026-09-26; auto-4urxx): a fresh node
+#: has an identity and no organization, and its Services are served under the
+#: personal persona label exactly like an organization's.
+PUBLISHING_ORG_TYPES = frozenset({"shared", "personal"})
+
+
 def _discover_orgs() -> list[str]:
     from tools.graph import org_ops
 
-    return sorted(ref.slug for ref in org_ops.list_orgs() if ref.type == "shared")
+    return sorted(
+        ref.slug for ref in org_ops.list_orgs() if ref.type in PUBLISHING_ORG_TYPES
+    )
 
 
 async def _connector_ready(org: str) -> bool:

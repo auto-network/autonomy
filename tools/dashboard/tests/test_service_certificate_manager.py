@@ -434,3 +434,33 @@ async def test_vault_reads_in_reconcile_run_off_the_event_loop(monkeypatch):
     assert await lifecycle.reconcile_once() is True
     assert seen["metadata"] is not loop_thread
     assert seen["bundle"] is not loop_thread
+
+
+def test_desired_personas_include_the_personal_publisher(monkeypatch):
+    """Personal is the default publisher of the dashboard's relay route
+    (auto-4urxx): its persona label needs the wildcard certificate exactly like
+    an organization's; a followed mirror publishes nothing."""
+    from types import SimpleNamespace
+
+    from tools.dashboard import service_publication
+    from tools.graph import org_ops
+
+    monkeypatch.setattr(org_ops, "list_orgs", lambda: [
+        SimpleNamespace(slug="personal", type="personal"),
+        SimpleNamespace(slug="anchore", type="shared"),
+        SimpleNamespace(slug="mirror", type="followed"),
+    ])
+    reservations = {
+        "personal": [{"reservation_id": "p1", "state": "active", "persona_label": "persona-a5b4c3d2e1f00f1e2d3c"}],
+        "anchore": [{"reservation_id": "a1", "state": "paused", "persona_label": "persona-0f1e2d3c4b5a69788796"}],
+        "mirror": [{"reservation_id": "m1", "state": "active", "persona_label": "persona-0000000000000000dead"}],
+    }
+    targets = {"personal": [{"reservation_id": "p1"}], "anchore": [{"reservation_id": "a1"}],
+               "mirror": [{"reservation_id": "m1"}]}
+    monkeypatch.setattr(service_publication, "list_reservations", lambda org: reservations[org])
+    monkeypatch.setattr(service_publication, "list_service_targets", lambda org: targets[org])
+
+    assert manager.desired_personas() == {
+        ("personal", "persona-a5b4c3d2e1f00f1e2d3c"),
+        ("anchore", "persona-0f1e2d3c4b5a69788796"),
+    }
