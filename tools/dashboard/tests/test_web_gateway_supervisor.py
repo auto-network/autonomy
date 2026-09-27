@@ -1109,3 +1109,28 @@ async def test_hostname_lease_reconciler_does_not_release_a_live_pin():
         "connector-status", "serve-host", "release-host",
         "connector-status", "serve-host", "release-host",
     ]
+
+
+def test_runtime_import_survives_an_unreadable_helper_override(tmp_path, caplog):
+    """The runtime is built at import. On a box where /run/autonomy-keycache is
+    root-only (dev, CI, a test runner), the helper record must read as absent,
+    not raise and stop the dashboard from loading."""
+    import os
+    import stat
+
+    locked = tmp_path / "service-auth"
+    locked.mkdir()
+    override = locked / "compose.json"
+    override.write_text('{"services": {}}')
+    locked.chmod(0)
+    try:
+        if os.access(override, os.R_OK):
+            pytest.skip("running as a user that ignores directory modes")
+        runtime = sup.ComposeGatewayRuntime(helper_override=str(override))
+        assert runtime._helpers == ()
+        assert "unreadable" in caplog.text
+    finally:
+        locked.chmod(stat.S_IRWXU)
+
+    missing = sup.ComposeGatewayRuntime(helper_override=str(tmp_path / "absent.json"))
+    assert missing._helpers == ()

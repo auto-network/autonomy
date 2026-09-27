@@ -519,7 +519,17 @@ class ComposeGatewayRuntime:
         self._helper_override = Path(helper_override)
         # The dashboard hot-reloads while Docker containers keep running.
         # The generated override is already the record of the managed helpers.
-        prior = json.loads(self._helper_override.read_text())["services"] if self._helper_override.exists() else {}
+        # Read as "absent" when the keycache is not ours to read (a dev box or
+        # test runner where /run/autonomy-keycache is root-only): this runs at
+        # import, and an unreadable record must not stop the dashboard loading.
+        try:
+            prior = json.loads(self._helper_override.read_text())["services"]
+        except FileNotFoundError:
+            prior = {}
+        except OSError as exc:
+            logger.warning("helper override %s unreadable (%s); managed helpers start unknown",
+                           self._helper_override, exc)
+            prior = {}
         self._helpers = tuple(
             AuthHelper(name.replace("org-oidc-", "org-oidc:", 1),
                        str(Path(service["volumes"][0]["source"]).parent),
