@@ -596,7 +596,10 @@ def _has_live_service_publication(org: str) -> bool:
         )
     except Exception:
         # Settings read failures remain fail-closed: do not keep a public
-        # connector alive based on state we could not establish.
+        # connector alive based on state we could not establish. Said out
+        # loud: a read that fails here keeps a published scope's connector
+        # down with no other trace (Windows run 5).
+        _log.warning("live service publication read failed for org=%s", org, exc_info=True)
         return False
 
 
@@ -1128,6 +1131,9 @@ class ServingSupervisor:
         self._launch_exits: dict = {}
         self._managed: set = set()   # orgs seen via ensure(), re-checked by the watchdog
         self._started_at: dict = {}  # org -> launch time; fresh-tunnel grace
+        self._last_outcome: dict = {}  # org -> (running, reason) of the last reconcile
+        self._last_detail: dict = {}   # org -> which run gates were cold, when refused
+        self._last_logged_detail: dict = {}
         self._grace_s: float = CONNECTOR_STARTUP_TIMEOUT_S
         self._last_served: dict = {}  # org -> last time observed serving
         # org -> when a STALE incumbent was adopted mid-stream to drain; the
@@ -1259,6 +1265,38 @@ class ServingSupervisor:
         return None
 
     def _reconcile(self, org: str) -> dict:
+        """Reconcile one scope and record the outcome: a change of reason is
+        logged at WARNING, so a connector that stays down behind a live
+        publication names its refusal once (Windows run 5, 2026-09-27: the
+        personal connector did not start for eight minutes and the log
+        carried nothing about it)."""
+        result = self._reconcile_scope(org)
+        reason = str(result.get("reason"))
+        running = bool(result.get("running"))
+        detail = self._last_detail.get(org)
+        previous = self._last_outcome.get(org)
+        self._last_outcome[org] = (running, reason)
+        if previous != (running, reason) or self._last_logged_detail.get(org) != detail:
+            self._last_logged_detail[org] = detail
+            (_log.info if running else _log.warning)(
+                "serving connector for org=%s: running=%s reason=%s%s",
+                org, running, reason, f" ({detail})" if detail else "",
+            )
+        return result
+
+    def last_outcome(self, org: str) -> dict | None:
+        """The last reconcile outcome for *org* ({running, reason}), or None
+        before its first reconcile."""
+        outcome = self._last_outcome.get(org)
+        if outcome is None:
+            return None
+        result = {"running": outcome[0], "reason": outcome[1]}
+        detail = self._last_detail.get(org)
+        if detail:
+            result["detail"] = detail
+        return result
+
+    def _reconcile_scope(self, org: str) -> dict:
         now = self._now()
         # `eligibility` is still needed below for active_machine_count, and it
         # remains the singular-ownership election. Only the SERVING GATE moves
@@ -1278,6 +1316,16 @@ class ServingSupervisor:
         # still require a genuine live grant.
         fleet_has_members = (eligibility.active_machine_count or 0) >= 2
         should_run = self._scope_should_run(org, state, now, fleet_has_members)
+        self._last_detail.pop(org, None)
+        if not should_run and state["status"] == "ok":
+            # Which gates were cold, for the outcome log: "no-live-grants"
+            # alone sent a Windows operator after grants when the cold gate
+            # was the publication read.
+            self._last_detail[org] = (
+                f"grant={_has_live_grant(org, now)} "
+                f"publication={_has_live_service_publication(org)} "
+                f"fleet_members={fleet_has_members} member={_is_member_scope(org)}"
+            )
 
         if not should_run:
             # Fresh-tunnel grace: a connector just launched for a first publish
@@ -2078,6 +2126,24 @@ def _discover_startup_orgs() -> list[str]:
         if ref.slug not in LOCAL_STORE_SLUGS
     )
     return discovered
+
+
+def reconcile_after_publication(org: str) -> dict | None:
+    """A live Service publication is one of the connector rule's reasons to
+    serve (ServingSupervisor._scope_should_run): reconcile *org* the moment a
+    publication goes live rather than at the next watchdog tick. Blocking
+    (reads the sealed serving key; run it off the event loop), best-effort
+    (the watchdog retries), and its outcome is logged either way, so a scope
+    that does not start behind a live publication says why (Windows run 5,
+    2026-09-27: the personal connector never started and nothing said why).
+    """
+    try:
+        result = get_supervisor().ensure(org)
+    except Exception:
+        _log.warning("serving reconcile after publication failed: org=%s", org, exc_info=True)
+        return None
+    _log.info("serving reconcile after publication: org=%s %s", org, result)
+    return result
 
 
 def bootstrap(orgs=None) -> ServingSupervisor:

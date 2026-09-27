@@ -1576,3 +1576,34 @@ def test_personal_service_publication_keeps_the_personal_connector_serving(monke
 
     assert sup._has_live_service_publication("personal") is True
     assert sup._has_live_service_publication("idle") is False
+
+
+def test_reconcile_records_and_logs_its_outcome_once_per_change(env, caplog):
+    """Windows run 5 (2026-09-27): the personal connector stayed down behind
+    a live publication for eight minutes and the log said nothing. Every
+    reconcile now records {running, reason}; a change is logged once."""
+    _provision_serve_cert(env)
+    spawn = FakeSpawn()
+    supervisor = sup.ServingSupervisor(spawn=spawn)
+
+    with caplog.at_level("INFO", logger=sup._log.name):
+        first = supervisor.ensure(ORG)
+        assert first == {"running": False, "reason": "no-live-grants"}
+        assert supervisor.last_outcome(ORG) == {
+            "running": False, "reason": "no-live-grants",
+            "detail": "grant=False publication=False fleet_members=False member=False",
+        }
+        refusals = [r for r in caplog.records if "reason=no-live-grants" in r.getMessage()]
+        assert len(refusals) == 1 and refusals[0].levelname == "WARNING"
+        assert f"org={ORG}" in refusals[0].getMessage()
+        assert "publication=False" in refusals[0].getMessage()
+
+        supervisor.ensure(ORG)  # same outcome: nothing new in the log
+        assert len([r for r in caplog.records if "reason=no-live-grants" in r.getMessage()]) == 1
+
+        _put_service_publication(state="active")
+        assert supervisor.ensure(ORG) == {"running": True, "reason": "launched"}
+        assert supervisor.last_outcome(ORG) == {"running": True, "reason": "launched"}
+        launched = [r for r in caplog.records if "reason=launched" in r.getMessage()]
+        assert len(launched) == 1 and launched[0].levelname == "INFO"
+    assert supervisor.last_outcome("never-reconciled") is None

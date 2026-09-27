@@ -299,6 +299,10 @@ async def publish(mode: str, *, org: str = DEFAULT_PUBLISHER, app_label: str | N
         org, reservation_id, None, service_publication.DASHBOARD_TARGET_DEFAULT_PORT,
         kind=service_publication.DASHBOARD_TARGET_KIND)
     service_publication.transition_reservation(org, reservation_id, "active")
+    # The route and the certificate both ride the publisher's serving
+    # connector: a live publication is its reason to run, so it is
+    # reconciled now, before the certificate and the gateway converge on it.
+    await _reconcile_serving(org)
     _converge()
     row = {
         "mode": "autonomy",
@@ -382,6 +386,17 @@ def _pause_relay_publication(previous: dict | None) -> dict | None:
         return None
     _converge(certificate=False)
     return {"publisher": publisher, "reservation_id": reservation_id, "origin": previous.get("origin")}
+
+
+async def _reconcile_serving(org: str) -> None:
+    """Best effort, off the event loop; the outcome is logged by the
+    supervisor and reported by status() as ``connector``."""
+    try:
+        from tools.dashboard.link_serving_supervisor import reconcile_after_publication
+
+        await asyncio.to_thread(reconcile_after_publication, org)
+    except Exception:
+        pass
 
 
 def _converge(*, certificate: bool = True) -> None:
@@ -479,6 +494,14 @@ async def _status_uncached() -> dict:
                 result["certificate_detail"] = state.get("reason", "")
             break
     result["certificate"] = certificate
+    # The publisher's serving connector: the relay route and the DNS-01
+    # certificate both ride it, so its last reconcile outcome is the first
+    # thing to read when the certificate or the route does not come up.
+    try:
+        from tools.dashboard.link_serving_supervisor import get_supervisor
+        result["connector"] = get_supervisor().last_outcome(org)
+    except Exception:
+        result["connector"] = None
     gateway = web_gateway_supervisor.status()
     result["advertised"] = reservation_id in (gateway.get("advertised_routes") or [])
     result["gateway_state"] = gateway.get("state")

@@ -584,3 +584,21 @@ def test_the_personal_scope_publishes_under_the_personal_root(monkeypatch):
     with pytest.raises(service.ServicePublicationError) as refused:
         service._persona_for_org("personal")
     assert refused.value.code == "persona_not_configured"
+
+
+def test_activation_reconciles_the_publishers_serving_connector(reservation_api, monkeypatch):
+    """A live publication is a reason for the scope's connector to serve, so
+    activating one reconciles the scope at once rather than at the next
+    watchdog tick (Windows run 5: the personal connector never started
+    behind a live publication)."""
+    from tools.dashboard import link_serving_supervisor
+
+    client, _events = reservation_api
+    reconciled: list[str] = []
+    monkeypatch.setattr(link_serving_supervisor, "reconcile_after_publication",
+                        lambda org: reconciled.append(org) or {"running": True, "reason": "launched"})
+    reservation_id = _reserve(client, "docs").json()["reservation"]["reservation_id"]
+    assert _state(client, reservation_id, "paused").status_code == 200
+    assert reconciled == []  # pausing is not a reason to start anything
+    assert _state(client, reservation_id, "active").status_code == 200
+    assert reconciled == ["acme"]

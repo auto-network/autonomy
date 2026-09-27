@@ -58,12 +58,13 @@ class FakeLoader:
             raise self.failure
 
 
-def desired(*routes, config="config", ready=True, reason=None):
+def desired(*routes, config="config", ready=True, reason=None, detail=None):
     return sup.GatewayDesiredState(
         caddyfile=config,
         routes=tuple(sup.DesiredRoute(route_id, fingerprint) for route_id, fingerprint in routes),
         ready=ready,
         reason=reason,
+        detail=detail,
     )
 
 
@@ -426,13 +427,18 @@ async def test_unready_dependency_stops_and_never_advertises():
     await supervisor.reconcile(desired(("r1", "route-v1")))
 
     result = await supervisor.reconcile(
-        desired(("r1", "route-v1"), ready=False, reason="connector-unavailable")
+        desired(("r1", "route-v1"), ready=False, reason="connector-unavailable",
+                detail="personal: running=False reason=no-live-grants")
     )
 
     assert result["state"] == "stopped"
     assert result["reason"] == "connector-unavailable"
+    assert result["detail"] == "personal: running=False reason=no-live-grants"
     assert result["advertised_routes"] == []
     assert runtime.stops == 1
+    # A ready plan clears the detail with the reason.
+    result = await supervisor.reconcile(desired(("r1", "route-v1")))
+    assert "detail" not in result
 
 
 @pytest.mark.asyncio
@@ -624,12 +630,16 @@ async def test_planner_stays_dormant_until_connector_is_serving(monkeypatch):
         return False
 
     monkeypatch.setattr(sup, "_connector_ready", connector_not_ready)
+    monkeypatch.setattr(sup, "_connector_outcome",
+                        lambda org: f"{org}: running=False reason=no-live-grants")
 
     plan = await sup.build_desired_state()
 
     assert plan.routes == ()
     assert plan.ready is False
     assert plan.reason == "connector-unavailable"
+    # The supervisor's own refusal travels with the reason (Windows run 5).
+    assert plan.detail == "autonomy: running=False reason=no-live-grants"
 
 
 @pytest.mark.asyncio

@@ -63,6 +63,10 @@ class GatewayDesiredState:
     ready: bool = True
     reason: str | None = None
     helpers: tuple[AuthHelper, ...] = ()
+    #: Why the reason holds, when something more specific is known: for
+    #: connector-unavailable, the serving supervisor's last reconcile
+    #: outcome for the publisher's scope.
+    detail: str | None = None
 
     def __post_init__(self) -> None:
         route_ids = [route.route_id for route in self.routes]
@@ -335,6 +339,7 @@ async def _build_desired_state() -> GatewayDesiredState:
     found_publication = False
     found_unready_connector = False
     found_missing_certificate = False
+    connector_detail: str | None = None
 
     # Discovery opens every org store (read-only, memoized in org_ops) — the
     # cold call belongs off the loop.
@@ -360,6 +365,8 @@ async def _build_desired_state() -> GatewayDesiredState:
         found_publication = True
         if not await _connector_ready(org):
             found_unready_connector = True
+            if connector_detail is None:
+                connector_detail = _connector_outcome(org)
             continue
         target_rows = {
             row["reservation_id"]: row
@@ -486,7 +493,26 @@ async def _build_desired_state() -> GatewayDesiredState:
             else "no-publications"
         )
     )
-    return GatewayDesiredState(caddyfile="", routes=(), ready=False, reason=reason)
+    return GatewayDesiredState(
+        caddyfile="", routes=(), ready=False, reason=reason,
+        detail=connector_detail if reason == "connector-unavailable" else None,
+    )
+
+
+def _connector_outcome(org: str) -> str | None:
+    """The serving supervisor's last reconcile outcome for *org*, as one
+    line: what a gateway reporting connector-unavailable must also say
+    (Windows run 5: the personal connector never started and the gateway
+    said only that it was unavailable)."""
+    try:
+        from tools.dashboard.link_serving_supervisor import get_supervisor
+
+        outcome = get_supervisor().last_outcome(org)
+    except Exception:
+        return None
+    if not outcome:
+        return f"{org}: the serving supervisor has not reconciled this scope"
+    return f"{org}: running={outcome['running']} reason={outcome['reason']}"
 
 
 class GatewayRuntimeError(RuntimeError):
@@ -773,6 +799,7 @@ class WebGatewaySupervisor:
         self._lock = asyncio.Lock()
         self._state = "stopped"
         self._reason = "no-publications"
+        self._detail: str | None = None
         self._last_error: str | None = None
         self._loaded_config: str | None = None
         self._loaded_routes: tuple[DesiredRoute, ...] = ()
@@ -799,12 +826,15 @@ class WebGatewaySupervisor:
             # The runtime could not read its own record of running helpers;
             # say so rather than reporting none.
             result["managed_helpers"] = "unknown"
+        if self._detail is not None:
+            result["detail"] = self._detail
         if self._last_error is not None:
             result["error"] = self._last_error
         return result
 
     async def reconcile(self, desired: GatewayDesiredState, force: bool = False) -> dict:
         async with self._lock:
+            self._detail = desired.detail if not desired.ready else None
             if not desired.routes or not desired.ready:
                 return await self._stop(
                     desired.reason

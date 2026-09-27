@@ -3267,7 +3267,18 @@ async def put_service_reservation_state(request: Request) -> JSONResponse:
         )
     except service_publication.ServicePublicationError as exc:
         return _service_publication_error(exc.code, exc.status_code)
+    if state == "active":
+        await _reconcile_serving_after_publication(org)
     return JSONResponse({"reservation": projection})
+
+
+async def _reconcile_serving_after_publication(org: str) -> None:
+    """A live publication is a reason for the scope's connector to serve:
+    reconcile it now, off the event loop (link_serving_supervisor.
+    reconcile_after_publication logs the outcome and never raises)."""
+    from tools.dashboard.link_serving_supervisor import reconcile_after_publication
+
+    await asyncio.to_thread(reconcile_after_publication, org)
 
 
 async def get_service_targets(request: Request) -> JSONResponse:
@@ -3492,6 +3503,7 @@ async def put_service_target(request: Request) -> JSONResponse:
         )
     except service_publication.ServicePublicationError as exc:
         return _service_publication_error(exc.code, exc.status_code)
+    await _reconcile_serving_after_publication(org)
     return JSONResponse(
         {"target": projection}, status_code=201 if created else 200
     )
