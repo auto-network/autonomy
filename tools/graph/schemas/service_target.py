@@ -22,8 +22,12 @@ from .registry import (
 
 
 SERVICE_TARGET_SET_ID = "autonomy.network.service-target"
-SERVICE_TARGET_REVISION = 1
+SERVICE_TARGET_REVISION = 2
 SERVICE_TARGET_KEY_STRATEGY = "reservation_id"
+
+SESSION_TARGET_KIND = "session"
+DASHBOARD_TARGET_KIND = "dashboard"
+TARGET_KINDS = (SESSION_TARGET_KIND, DASHBOARD_TARGET_KIND)
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -51,7 +55,7 @@ class ServiceTargetV1(SettingSchema):
     """One currently configured local target, keyed by reservation UUID."""
 
     set_id = SERVICE_TARGET_SET_ID
-    schema_revision = SERVICE_TARGET_REVISION
+    schema_revision = 1
 
     machine_id: str = field(required=True, description="Local enrolled machine ID.")
     session_id: str = field(required=True, description="Trusted Dashboard session name.")
@@ -70,28 +74,79 @@ class ServiceTargetV1(SettingSchema):
         super().validate(payload)
         if not isinstance(payload, dict):
             return
-        validate_access_mode(payload)
-        if not isinstance(payload.get("machine_id"), str) or not _HEX64_RE.fullmatch(
-            payload["machine_id"]
-        ):
+        _validate_target_fields(cls.__name__, payload)
+        _validate_session_id(cls.__name__, payload)
+
+
+def _validate_target_fields(name: str, payload: dict) -> None:
+    validate_access_mode(payload)
+    if not isinstance(payload.get("machine_id"), str) or not _HEX64_RE.fullmatch(
+        payload["machine_id"]
+    ):
+        raise SchemaValidationError(
+            f"{name}: machine_id must be exactly 64 lowercase hex characters"
+        )
+    if not isinstance(payload.get("container_id"), str) or not _HEX64_RE.fullmatch(
+        payload["container_id"]
+    ):
+        raise SchemaValidationError(
+            f"{name}: container_id must be exactly 64 lowercase hex characters"
+        )
+    port = payload.get("port")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise SchemaValidationError(f"{name}: port must be 1 through 65535")
+    for field_name in ("created_at", "updated_at"):
+        if not _is_rfc3339_millis(payload.get(field_name)):
             raise SchemaValidationError(
-                f"{cls.__name__}: machine_id must be exactly 64 lowercase hex characters"
+                f"{name}: {field_name} must be UTC RFC 3339 with milliseconds"
             )
-        if not isinstance(payload.get("container_id"), str) or not _HEX64_RE.fullmatch(
-            payload["container_id"]
-        ):
+
+
+def _validate_session_id(name: str, payload: dict) -> None:
+    if not isinstance(payload.get("session_id"), str) or not _SESSION_ID_RE.fullmatch(
+        payload["session_id"]
+    ):
+        raise SchemaValidationError(f"{name}: session_id is invalid")
+
+
+@publication_band(max="raw")
+@home("organization")
+@keyed_per_entity(key_strategy=SERVICE_TARGET_KEY_STRATEGY)
+class ServiceTargetV2(ServiceTargetV1):
+    """Revision 2 adds ``kind``.
+
+    ``session`` (the default; every revision-1 row upconverts to it) names a
+    trusted Dashboard session container exactly as before. ``dashboard`` is
+    the node's own dashboard container, published on its plain-HTTP listener:
+    no session backs it, so ``session_id`` is absent, and the frozen
+    ``container_id`` is the dashboard container's own incarnation.
+    """
+
+    set_id = SERVICE_TARGET_SET_ID
+    schema_revision = SERVICE_TARGET_REVISION
+
+    kind: str = field(required=False, description="session (default) or dashboard.")
+    session_id: str = field(
+        required=False,
+        description="Trusted Dashboard session name; required for kind session, absent for kind dashboard.",
+    )
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        return {**payload, "kind": SESSION_TARGET_KIND}
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        SettingSchema.validate.__func__(cls, payload)
+        if not isinstance(payload, dict):
+            return
+        kind = payload.get("kind", SESSION_TARGET_KIND)
+        if kind not in TARGET_KINDS:
+            raise SchemaValidationError(f"{cls.__name__}: kind must be session or dashboard")
+        _validate_target_fields(cls.__name__, payload)
+        if kind == SESSION_TARGET_KIND:
+            _validate_session_id(cls.__name__, payload)
+        elif "session_id" in payload:
             raise SchemaValidationError(
-                f"{cls.__name__}: container_id must be exactly 64 lowercase hex characters"
+                f"{cls.__name__}: session_id is not allowed for kind dashboard"
             )
-        if not isinstance(payload.get("session_id"), str) or not _SESSION_ID_RE.fullmatch(
-            payload["session_id"]
-        ):
-            raise SchemaValidationError(f"{cls.__name__}: session_id is invalid")
-        port = payload.get("port")
-        if type(port) is not int or not 1 <= port <= 65535:
-            raise SchemaValidationError(f"{cls.__name__}: port must be 1 through 65535")
-        for name in ("created_at", "updated_at"):
-            if not _is_rfc3339_millis(payload.get(name)):
-                raise SchemaValidationError(
-                    f"{cls.__name__}: {name} must be UTC RFC 3339 with milliseconds"
-                )

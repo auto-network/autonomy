@@ -404,7 +404,7 @@ async def service_status(
     else:
         try:
             await service_publication.resolve_service_target(org, reservation_id)
-            stages.append(_Stage("target", True, f"{target.get('session_id')}:{target.get('port')} reachable"))
+            stages.append(_Stage("target", True, f"{target.get('session_id') or target.get('kind')}:{target.get('port')} reachable"))
         except ServicePublicationError as exc:
             stages.append(_Stage("target", False, exc.code.replace("_", " ")))
 
@@ -462,7 +462,7 @@ async def refresh_service(
     else:
         try:
             await service_publication.resolve_service_target(org, reservation_id)
-            stages.append(_Stage("target", True, f"{target.get('session_id')}:{target.get('port')} reachable"))
+            stages.append(_Stage("target", True, f"{target.get('session_id') or target.get('kind')}:{target.get('port')} reachable"))
         except ServicePublicationError as exc:
             stages.append(_Stage("target", False, exc.code.replace("_", " ")))
 

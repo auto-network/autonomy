@@ -27,7 +27,10 @@ from tools.graph.db import GraphDB
 COOKIE = "test_dashboard_session"
 RESERVATION_SET_ID = "autonomy.network.namespace-reservation"
 TARGET_SET_ID = "autonomy.network.service-target"
-REVISION = 1
+REVISION = 1            # the reservation set, and the pre-kind target rows
+TARGET_REVISION = 2     # ServiceTargetV2: kind session | dashboard
+DASHBOARD_CID = "0d" * 32
+DASHBOARD_IP = "172.30.0.2"
 ACTIVE_ID = "11111111-1111-4111-8111-111111111111"
 PAUSED_ID = "22222222-2222-4222-8222-222222222222"
 RELEASED_ID = "33333333-3333-4333-8333-333333333333"
@@ -128,7 +131,9 @@ def target_api(tmp_path, monkeypatch):
         "session-b": service.ContainerInspection(CONTAINER_B, "172.30.0.12"),
         "other-session": service.ContainerInspection("ee" * 32, "172.30.0.13"),
     }
-    reachable = {("172.30.0.11", 8000), ("172.30.0.12", 8000)}
+    # The node's own dashboard container, under a key no session can carry.
+    containers["__dashboard__"] = service.ContainerInspection(DASHBOARD_CID, DASHBOARD_IP)
+    reachable = {("172.30.0.11", 8000), ("172.30.0.12", 8000), (DASHBOARD_IP, 8081)}
 
     monkeypatch.setattr(dashboard_db, "get_session", lambda name: sessions.get(name))
     monkeypatch.setattr(dashboard_db, "is_session_live", lambda name: name in live)
@@ -149,7 +154,15 @@ def target_api(tmp_path, monkeypatch):
     async def probe(ip, port):
         return (ip, port) in reachable
 
+    async def inspect_dashboard(network):
+        assert network == "autonomy_default"
+        inspection = containers.get("__dashboard__")
+        if inspection is None:
+            raise service.ServicePublicationError("dashboard_container_unavailable", 409)
+        return inspection
+
     monkeypatch.setattr(service, "_inspect_session_container", inspect)
+    monkeypatch.setattr(service, "_inspect_dashboard_container", inspect_dashboard)
     monkeypatch.setattr(service, "_probe_tcp", probe)
 
     tick = {"value": 0}
@@ -386,6 +399,7 @@ class TestServiceTargetApiContract:
         assert projection == {
             "access_mode": "public",
             "reservation_id": ACTIVE_ID,
+            "kind": "session",
             # Carried since 04e56c0d: the binding to a machine IS the row's
             # meaning (see target_projection).
             "machine_id": MACHINE_ID,
@@ -406,6 +420,7 @@ class TestServiceTargetApiContract:
             "ok": True,
             "target": {
                 "reservation_id": ACTIVE_ID,
+                "kind": "session",
                 "session_id": "session-a",
                 "port": 8000,
                 "checked_at": "2026-08-30T12:00:01.000Z",
@@ -460,6 +475,11 @@ class TestServiceTargetApiContract:
             (ACTIVE_ID, {"session_id": "session-a", "port": 0}, "invalid_port"),
             (ACTIVE_ID, {"session_id": "session-a", "port": True}, "invalid_port"),
             (ACTIVE_ID, {"session_id": "session-a", "port": 8000, "ip": "127.0.0.1"}, "unknown_fields"),
+            (ACTIVE_ID, {"kind": "session", "port": 8000}, "unknown_fields"),
+            (ACTIVE_ID, {"kind": "dashboard", "session_id": "session-a"}, "unknown_fields"),
+            (ACTIVE_ID, {"kind": "dashboard", "port": 8081, "ip": "127.0.0.1"}, "unknown_fields"),
+            (ACTIVE_ID, {"kind": "dashboard", "port": 0}, "invalid_port"),
+            (ACTIVE_ID, {"kind": "bogus", "port": 8081}, "invalid_kind"),
         ],
     )
     def test_request_refusals_are_exact(self, target_api, reservation_id, body, code):
@@ -555,7 +575,7 @@ class TestServiceTargetResolution:
         member = _target_members()[0]
         settings_ops.upsert_by_key(
             TARGET_SET_ID,
-            REVISION,
+            TARGET_REVISION,
             ACTIVE_ID,
             {**member.payload, "machine_id": "ff" * 32},
             org="acme",
@@ -590,10 +610,12 @@ def test_service_target_schema_is_organization_homed_and_keyed_by_reservation():
     from tools.graph import schemas
     from tools.graph.schemas import service_target
 
-    schema = schemas.get_schema(TARGET_SET_ID, REVISION)
-    assert schema is service_target.ServiceTargetV1
+    assert schemas.get_schema(TARGET_SET_ID, REVISION) is service_target.ServiceTargetV1
+    schema = schemas.get_schema(TARGET_SET_ID, TARGET_REVISION)
+    assert schema is service_target.ServiceTargetV2
+    assert service_target.SERVICE_TARGET_REVISION == TARGET_REVISION
     assert schemas.declared_home(TARGET_SET_ID) == "organization"
-    assert schemas.declared_band(TARGET_SET_ID, REVISION) == ("raw", "raw")
+    assert schemas.declared_band(TARGET_SET_ID, TARGET_REVISION) == ("raw", "raw")
     assert schema._access_pattern == "keyed_per_entity"
     assert schema._key_strategy == "reservation_id"
     payload = {
@@ -807,3 +829,117 @@ def test_a_grant_without_a_link_is_skipped_not_a_500(target_api, monkeypatch):
     assert response.status_code == 200
     assert [row["token"] for row in response.json()["shares"]] == [token]
     assert [g["token"] for g in design_shares.active_grants("acme")] == [token]
+
+
+def _put_dashboard(client, reservation_id=ACTIVE_ID, **body):
+    return client.put(
+        f"/api/network/service-targets/{reservation_id}",
+        json={"kind": "dashboard", **body},
+        headers=_headers(),
+    )
+
+
+class TestDashboardTarget:
+    """kind: dashboard — the node publishes its own dashboard on the plain
+    listener; no session backs the row (auto-e21gu)."""
+
+    def test_binds_without_a_session_and_defaults_to_the_plain_listener_port(self, target_api):
+        client, events, *_ = target_api
+        created = _put_dashboard(client)
+        assert created.status_code == 201, created.text
+        assert created.json()["target"] == {
+            "access_mode": "public",
+            "reservation_id": ACTIVE_ID,
+            "kind": "dashboard",
+            "machine_id": MACHINE_ID,
+            "session_id": None,
+            "port": 8081,
+            "created_at": "2026-08-30T12:00:00.000Z",
+            "updated_at": "2026-08-30T12:00:00.000Z",
+        }
+        stored = _target_members()[0].payload
+        assert stored["kind"] == "dashboard"
+        assert "session_id" not in stored
+        assert stored["container_id"] == DASHBOARD_CID
+        assert len(events) == 1
+        assert DASHBOARD_IP not in created.text and DASHBOARD_IP not in repr(stored)
+
+        listed = client.get("/api/network/service-targets", headers=_headers())
+        assert listed.json()["targets"][0]["kind"] == "dashboard"
+
+        # Exact re-bind is a no-op, as for sessions.
+        assert _put_dashboard(client).status_code == 200
+        assert len(events) == 1
+
+    def test_revalidates_on_serve_and_heals_a_recreated_container(self, target_api):
+        client, _events, _service, containers, _reachable = target_api
+        _put_dashboard(client)
+        checked = _check(client)
+        assert checked.status_code == 200, checked.text
+        assert checked.json()["target"] == {
+            "reservation_id": ACTIVE_ID,
+            "kind": "dashboard",
+            "session_id": "dashboard",
+            "port": 8081,
+            "checked_at": "2026-08-30T12:00:01.000Z",
+            "expires_at": "2026-08-30T12:00:06.000Z",
+        }
+        # A compose recreate gives the dashboard a new container: same machine
+        # and port, so the frozen id heals in place like a resumed session.
+        containers["__dashboard__"] = _service.ContainerInspection(CONTAINER_A_REPLACED, DASHBOARD_IP)
+        assert _check(client).status_code == 200
+        assert _target_members()[0].payload["container_id"] == CONTAINER_A_REPLACED
+
+    def test_stopped_dashboard_container_refuses_with_a_typed_error(self, target_api):
+        client, events, _service, containers, _reachable = target_api
+        _put_dashboard(client)
+        assert len(events) == 1
+        containers.pop("__dashboard__")
+        _error(_check(client), 409, "dashboard_container_unavailable")
+        _error(_put_dashboard(client), 409, "dashboard_container_unavailable")
+        assert len(events) == 1
+
+    def test_unreachable_plain_listener_refuses(self, target_api):
+        client, events, *_ = target_api
+        _error(_put_dashboard(client, port=9), 409, "target_port_unreachable")
+        assert events == []
+
+    def test_gateway_route_proxies_plain_http_to_the_dashboard_listener(self, target_api):
+        import asyncio
+
+        from tools.dashboard import service_gateway
+
+        client, *_ = target_api
+        _put_dashboard(client)
+        route = asyncio.run(service_gateway.resolve_gateway_route("acme", ACTIVE_ID))
+        assert (route.session_id, route.container_id, route.upstream_ip, route.port) == (
+            "dashboard", DASHBOARD_CID, DASHBOARD_IP, 8081)
+        rendered = service_gateway.render_caddyfile([route])
+        assert f"reverse_proxy {DASHBOARD_IP}:8081" in rendered
+
+    def test_published_links_names_this_dashboard_as_the_host(self, target_api):
+        client, *_ = target_api
+        _put_dashboard(client)
+        links = client.get("/api/network/published-links", headers=_headers())
+        assert links.status_code == 200, links.text
+        row = next(s for s in links.json()["services"] if s["reservation_id"] == ACTIVE_ID)
+        assert row["session_title"] == "This dashboard"
+        assert row["target"]["kind"] == "dashboard"
+        assert row["session_local"] is True and row["remote"] is False
+
+    def test_session_target_rows_written_before_kind_read_as_session(self, target_api):
+        client, _events, service, *_ = target_api
+        settings_ops.upsert_by_key(
+            TARGET_SET_ID, REVISION, ACTIVE_ID,
+            {
+                "machine_id": MACHINE_ID, "session_id": "session-a",
+                "container_id": CONTAINER_A, "port": 8000,
+                "created_at": "2026-08-30T11:00:00.000Z", "updated_at": "2026-08-30T11:00:00.000Z",
+            },
+            org="acme",
+        )
+        [row] = service.list_service_targets("acme")
+        assert row["kind"] == "session" and row["session_id"] == "session-a"
+        checked = _check(client)
+        assert checked.status_code == 200, checked.text
+        assert checked.json()["target"]["kind"] == "session"

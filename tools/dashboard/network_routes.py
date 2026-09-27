@@ -3322,12 +3322,15 @@ async def get_published_links(request: Request) -> JSONResponse:
         if reservation.get("state") == "released":
             continue
         target = targets.get(reservation["reservation_id"])
-        session = dashboard_db.get_session(target["session_id"]) if target else None
+        dashboard_target = bool(target) and target.get("kind") == "dashboard"
+        session = (dashboard_db.get_session(target["session_id"])
+                   if target and target.get("session_id") else None)
         serving_machine = (target or {}).get("machine_id")
         services.append({
             **reservation,
             "target": target,
-            "session_title": ((session or {}).get("label") or
+            "session_title": ("This dashboard" if dashboard_target else
+                              (session or {}).get("label") or
                               (target or {}).get("session_id") or "Target unavailable"),
             # Who published it (rows are organization-wide) and whether the
             # hosting session is on THIS dashboard, so the card can link to
@@ -3343,6 +3346,9 @@ async def get_published_links(request: Request) -> JSONResponse:
             "serving_machine": serving_machine,
             "remote": bool(serving_machine) and serving_machine != local_machine,
         })
+        if dashboard_target:
+            # No session hosts it; it is local exactly when this machine serves it.
+            services[-1]["session_local"] = serving_machine == local_machine
 
     shares = []
     now = datetime.now(timezone.utc)
@@ -3458,16 +3464,30 @@ async def put_service_target(request: Request) -> JSONResponse:
         return _service_publication_error("invalid_json")
     if not isinstance(body, dict):
         return _service_publication_error("invalid_json")
-    if not {"session_id", "port"} <= set(body) <= {"session_id", "port", "access_mode"}:
-        return _service_publication_error("unknown_fields")
     from tools.dashboard import service_publication
+
+    # {session_id, port[, access_mode]} binds a session container, as before;
+    # {kind: "dashboard"[, port][, access_mode]} binds this node's own dashboard
+    # on its plain-HTTP listener (port defaults to 8081). Nothing else.
+    kind = body.get("kind", service_publication.SESSION_TARGET_KIND)
+    if kind not in service_publication.TARGET_KINDS:
+        return _service_publication_error("invalid_kind")
+    if kind == service_publication.DASHBOARD_TARGET_KIND:
+        required, allowed = {"kind"}, {"kind", "port", "access_mode"}
+        port = body.get("port", service_publication.DASHBOARD_TARGET_DEFAULT_PORT)
+    else:
+        required, allowed = {"session_id", "port"}, {"kind", "session_id", "port", "access_mode"}
+        port = body.get("port")
+    if not required <= set(body) <= allowed:
+        return _service_publication_error("unknown_fields")
 
     try:
         projection, created = await service_publication.bind_service_target(
             org,
             request.path_params.get("reservation_id", ""),
             body.get("session_id"),
-            body.get("port"),
+            port,
+            kind=kind,
             **({"access_mode": body["access_mode"]} if "access_mode" in body else {}),
         )
     except service_publication.ServicePublicationError as exc:
@@ -3521,6 +3541,7 @@ async def check_service_target(request: Request) -> JSONResponse:
             "ok": True,
             "target": {
                 "reservation_id": request.path_params["reservation_id"],
+                "kind": descriptor.kind,
                 "session_id": descriptor.session_id,
                 "port": descriptor.port,
                 "checked_at": descriptor.checked_at,

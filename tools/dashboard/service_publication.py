@@ -36,6 +36,9 @@ from tools.graph.schemas.serve_zone import (
     validate_zone_value,
 )
 from tools.graph.schemas.service_target import (
+    DASHBOARD_TARGET_KIND,
+    SESSION_TARGET_KIND,
+    TARGET_KINDS,
     SERVICE_TARGET_REVISION,
     SERVICE_TARGET_SET_ID,
 )
@@ -64,6 +67,14 @@ class ContainerInspection:
     network_ip: str
 
 
+#: The dashboard target's plain-HTTP listener (tools/dashboard/plain_listener.py).
+DASHBOARD_TARGET_DEFAULT_PORT = 8081
+#: What a dashboard target's route carries where a session target carries its
+#: session name: the gateway route and its status line need a name, and no
+#: session backs the dashboard.
+DASHBOARD_TARGET_SESSION_LABEL = "dashboard"
+
+
 @dataclass(frozen=True)
 class ServiceTargetDescriptor:
     session_id: str
@@ -73,6 +84,7 @@ class ServiceTargetDescriptor:
     port: int
     checked_at: str
     expires_at: str
+    kind: str = SESSION_TARGET_KIND
 
 
 def _utc_now() -> str:
@@ -214,6 +226,12 @@ def _validate_port(value: object) -> int:
     return value
 
 
+def _validate_kind(value: object) -> str:
+    if value not in TARGET_KINDS:
+        raise ServicePublicationError("invalid_kind", 400)
+    return value
+
+
 def _read_local_machine_id() -> str | None:
     for member in settings_ops.read_owned_set(
         MACHINE_IDENTITY_SET_ID, org="machine"
@@ -227,9 +245,36 @@ def _read_local_machine_id() -> str | None:
 async def _inspect_session_container(
     session_id: str, network: str
 ) -> ContainerInspection:
+    return await _inspect_container(session_id, network, "target_session_unavailable")
+
+
+def _own_dashboard_container_id() -> str | None:
+    """This dashboard process's own container, or None as a host process."""
+    from agents.mount_plan import _own_container_id
+
+    return _own_container_id()
+
+
+async def _inspect_dashboard_container(network: str) -> ContainerInspection:
+    """The node's own dashboard container.
+
+    The process binding the target is the process being published, so the
+    container is this one: no name lookup, no compose project to guess. A
+    dashboard running as a host process has no container and cannot be a
+    Service target (the gateway proxies to a compose-network address).
+    """
+    reference = _own_dashboard_container_id()
+    if not reference:
+        raise ServicePublicationError("dashboard_container_unavailable", 409)
+    return await _inspect_container(reference, network, "dashboard_container_unavailable")
+
+
+async def _inspect_container(
+    reference: str, network: str, code: str
+) -> ContainerInspection:
     def inspect() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["docker", "inspect", session_id],
+            ["docker", "inspect", reference],
             capture_output=True,
             text=True,
             timeout=5,
@@ -240,15 +285,15 @@ async def _inspect_session_container(
         result = await asyncio.to_thread(inspect)
         documents = json.loads(result.stdout) if result.returncode == 0 else None
     except Exception as exc:
-        raise ServicePublicationError("target_session_unavailable", 409) from exc
+        raise ServicePublicationError(code, 409) from exc
     if not isinstance(documents, list) or len(documents) != 1:
-        raise ServicePublicationError("target_session_unavailable", 409)
+        raise ServicePublicationError(code, 409)
     document = documents[0]
     if not isinstance(document, dict) or document.get("State", {}).get("Running") is not True:
-        raise ServicePublicationError("target_session_unavailable", 409)
+        raise ServicePublicationError(code, 409)
     container_id = document.get("Id")
     if not isinstance(container_id, str) or not _HEX64_RE.fullmatch(container_id):
-        raise ServicePublicationError("target_session_unavailable", 409)
+        raise ServicePublicationError(code, 409)
     networks = document.get("NetworkSettings", {}).get("Networks", {})
     attached = networks.get(network) if isinstance(networks, dict) else None
     ip = attached.get("IPAddress") if isinstance(attached, dict) else None
@@ -354,6 +399,33 @@ async def _validated_live_target(
     return machine_id, network, inspection
 
 
+async def _validated_dashboard_target(
+    port: object,
+) -> tuple[str, str, ContainerInspection]:
+    """The dashboard-kind counterpart of ``_validated_live_target``: the same
+    machine pinning, compose-network and TCP-probe requirements, against this
+    node's own dashboard container instead of a session's."""
+    port = _validate_port(port)
+    machine_id = _read_local_machine_id()
+    if not machine_id:
+        raise ServicePublicationError("machine_identity_unavailable", 503)
+    network = discover_topology().network
+    if not isinstance(network, str) or not network:
+        raise ServicePublicationError("compose_network_unavailable", 503)
+    inspection = await _inspect_dashboard_container(network)
+    if not await _probe_tcp(inspection.network_ip, port):
+        raise ServicePublicationError("target_port_unreachable", 409)
+    return machine_id, network, inspection
+
+
+async def _validated_target(
+    org: str, kind: str, session_id: object, port: object
+) -> tuple[str, str, ContainerInspection]:
+    if kind == DASHBOARD_TARGET_KIND:
+        return await _validated_dashboard_target(port)
+    return await _validated_live_target(org, session_id, port)
+
+
 def target_projection(key: str, payload: dict) -> dict:
     """One target row, as every reader sees it.
 
@@ -376,8 +448,9 @@ def target_projection(key: str, payload: dict) -> dict:
     """
     return {
         "reservation_id": key,
+        "kind": payload.get("kind", SESSION_TARGET_KIND),
         "machine_id": payload["machine_id"],
-        "session_id": payload["session_id"],
+        "session_id": payload.get("session_id"),
         "port": payload["port"],
         "created_at": payload["created_at"],
         "updated_at": payload["updated_at"],
@@ -396,12 +469,16 @@ def list_service_targets(org: str) -> list[dict]:
 
 async def bind_service_target(
     org: str, key: str, session_id: object, port: object, access_mode: str | None = None,
+    kind: object = SESSION_TARGET_KIND,
 ) -> tuple[dict, bool]:
     _reservation_for_target(org, key)
-    machine_id, _network, inspection = await _validated_live_target(
-        org, session_id, port
+    kind = _validate_kind(kind)
+    if kind == DASHBOARD_TARGET_KIND and session_id is not None:
+        raise ServicePublicationError("unknown_fields", 400)
+    machine_id, _network, inspection = await _validated_target(
+        org, kind, session_id, port
     )
-    session_id = _validate_session_id(session_id)
+    session_id = _validate_session_id(session_id) if kind == SESSION_TARGET_KIND else None
     port = _validate_port(port)
     existing = _target_member_by_key(org, key)
     from tools.dashboard import service_auth
@@ -419,6 +496,7 @@ async def bind_service_target(
     if existing is not None and all(
         existing.payload.get(name) == value
         for name, value in (
+            ("kind", kind),
             ("machine_id", machine_id),
             ("session_id", session_id),
             ("container_id", inspection.container_id),
@@ -429,8 +507,9 @@ async def bind_service_target(
         return target_projection(key, existing.payload), False
     now = _utc_now()
     payload = {
+        "kind": kind,
         "machine_id": machine_id,
-        "session_id": session_id,
+        **({"session_id": session_id} if kind == SESSION_TARGET_KIND else {}),
         "container_id": inspection.container_id,
         "port": port,
         "access_mode": access_mode,
@@ -453,17 +532,20 @@ async def resolve_service_target(org: str, key: str) -> ServiceTargetDescriptor:
     if member is None:
         raise ServicePublicationError("target_not_found", 404)
     payload = member.payload
-    machine_id, network, inspection = await _validated_live_target(
-        org, payload.get("session_id"), payload.get("port")
+    kind = payload.get("kind", SESSION_TARGET_KIND)
+    machine_id, network, inspection = await _validated_target(
+        org, kind, payload.get("session_id"), payload.get("port")
     )
     if payload.get("machine_id") != machine_id:
         raise ServicePublicationError("target_machine_mismatch", 409)
     if payload.get("container_id") != inspection.container_id:
         # Same session_id + machine + port (all validated above); only the
         # container incarnation changed — that is exactly what a session RESUME
-        # does. Heal the frozen container id in place instead of refusing. A
-        # genuinely different target carries a different session_id and resolves
-        # to a different reservation key, so this never silently re-points.
+        # does (and, for a dashboard target, what every compose recreate of the
+        # node does). Heal the frozen container id in place instead of refusing.
+        # A genuinely different target carries a different session_id and
+        # resolves to a different reservation key, so this never silently
+        # re-points.
         payload = {**payload, "container_id": inspection.container_id,
                    "updated_at": _utc_now()}
         settings_ops.upsert_by_key(
@@ -478,13 +560,17 @@ async def resolve_service_target(org: str, key: str) -> ServiceTargetDescriptor:
         .replace("+00:00", "Z")
     )
     return ServiceTargetDescriptor(
-        session_id=payload["session_id"],
+        session_id=(
+            payload["session_id"] if kind == SESSION_TARGET_KIND
+            else DASHBOARD_TARGET_SESSION_LABEL
+        ),
         container_id=inspection.container_id,
         network=network,
         network_ip=inspection.network_ip,
         port=payload["port"],
         checked_at=checked_at,
         expires_at=expires_at,
+        kind=kind,
     )
 
 
