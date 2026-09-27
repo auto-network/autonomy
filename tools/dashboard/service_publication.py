@@ -381,6 +381,7 @@ def target_projection(key: str, payload: dict) -> dict:
         "port": payload["port"],
         "created_at": payload["created_at"],
         "updated_at": payload["updated_at"],
+        "access_mode": payload.get("access_mode", "public"),
     }
 
 
@@ -394,7 +395,7 @@ def list_service_targets(org: str) -> list[dict]:
 
 
 async def bind_service_target(
-    org: str, key: str, session_id: object, port: object
+    org: str, key: str, session_id: object, port: object, access_mode: str | None = None,
 ) -> tuple[dict, bool]:
     _reservation_for_target(org, key)
     machine_id, _network, inspection = await _validated_live_target(
@@ -403,6 +404,18 @@ async def bind_service_target(
     session_id = _validate_session_id(session_id)
     port = _validate_port(port)
     existing = _target_member_by_key(org, key)
+    from tools.dashboard import service_auth
+    from tools.graph.schemas.service_target import validate_access_mode
+
+    if access_mode is None:
+        access_mode = (
+            existing.payload.get("access_mode", "public") if existing is not None
+            else service_auth.configuration(org)["default_access"]
+        )
+    try:
+        validate_access_mode({"access_mode": access_mode})
+    except ValueError as exc:
+        raise ServicePublicationError("invalid_access_mode", 400) from exc
     if existing is not None and all(
         existing.payload.get(name) == value
         for name, value in (
@@ -410,6 +423,7 @@ async def bind_service_target(
             ("session_id", session_id),
             ("container_id", inspection.container_id),
             ("port", port),
+            ("access_mode", access_mode),
         )
     ):
         return target_projection(key, existing.payload), False
@@ -419,6 +433,7 @@ async def bind_service_target(
         "session_id": session_id,
         "container_id": inspection.container_id,
         "port": port,
+        "access_mode": access_mode,
         "created_at": existing.payload["created_at"] if existing is not None else now,
         "updated_at": now,
     }

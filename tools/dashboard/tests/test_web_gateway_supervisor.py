@@ -14,6 +14,7 @@ import pytest
 
 from tools.dashboard import web_gateway_supervisor as sup
 from tools.dashboard.service_gateway import ServiceGatewayRoute
+from dataclasses import replace
 
 
 class FakeRuntime:
@@ -23,6 +24,10 @@ class FakeRuntime:
         self.starts = 0
         self.stops = 0
         self.marker = "not-started"
+        self.helpers = ()
+
+    async def reconcile_helpers(self, helpers, marker):
+        self.helpers = helpers
 
     async def ensure_started(self):
         self.starts += 1
@@ -67,8 +72,26 @@ class NoopLeaseReconciler:
         pass
 
 
+@pytest.mark.asyncio
+async def test_supervisor_applies_helper_change_even_when_caddy_route_is_unchanged():
+    runtime, loader = FakeRuntime(), FakeLoader()
+    supervisor = sup.WebGatewaySupervisor(runtime=runtime, loader=loader)
+    first = sup.AuthHelper("org-oidc:anchore", "/run/auth/anchore", "v1")
+    plan = replace(desired(("r1", "gate")), helpers=(first,))
+    await supervisor.reconcile(plan)
+    assert runtime.helpers == (first,)
+    second = replace(first, revision="v2")
+    await supervisor.reconcile(replace(plan, helpers=(second,)))
+    assert runtime.helpers == (second,)
+    assert len(loader.configs) == 2
+    await supervisor.reconcile(replace(plan, helpers=()))
+    assert runtime.helpers == ()
+
+
 @pytest.fixture(autouse=True)
 def materialized_service_certificate(monkeypatch):
+    from tools.dashboard import service_auth
+    monkeypatch.setattr(service_auth, "configuration", lambda org: {"configured": False, "default_access": "public"})
     monkeypatch.setattr(
         sup.service_certificate,
         "active_gateway_pair",

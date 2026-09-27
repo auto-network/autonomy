@@ -40,21 +40,29 @@ class GateConfig:
         for host in self.hosts:
             if len(host) > 253 or not _HOST.fullmatch(host):
                 raise ValueError("hosts must be exact lowercase DNS names without ports")
-        issuer = urlsplit(self.issuer)
-        if (
-            issuer.scheme != "https" or not issuer.hostname
-            or not _HOST.fullmatch(issuer.hostname)
-            or issuer.netloc != issuer.hostname or issuer.query or issuer.fragment
-            or re.search(r"[\s\\]", self.issuer)
-        ):
-            raise ValueError("issuer must be an HTTPS discovery issuer without credentials/query")
-        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", self.client_id):
-            raise ValueError("invalid client ID")
+        validate_provider(self.issuer, self.client_id)
         if type(self.port) is not int or not 1024 <= self.port <= 65535:
             raise ValueError("port must be 1024..65535")
 
 
-def render_auth_config(config: GateConfig) -> str:
+def validate_provider(issuer_url: str, client_id: str) -> None:
+    """Shared by the existing proof configuration and organization Settings."""
+    issuer = urlsplit(issuer_url)
+    if (
+        issuer.scheme != "https" or not issuer.hostname
+        or not _HOST.fullmatch(issuer.hostname)
+        or issuer.netloc != issuer.hostname or issuer.query or issuer.fragment
+        or re.search(r"[\s\\]", issuer_url)
+    ):
+        raise ValueError("issuer must be an HTTPS discovery issuer without credentials/query")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", client_id):
+        raise ValueError("invalid client ID")
+
+
+def render_auth_config(
+    config: GateConfig, *, listener_port: int = 4180,
+    cookie_expire: str = "15m", cookie_refresh: str = "0",
+) -> str:
     """No tokens in the app, no database, no IdP call on ordinary checks."""
     settings = {
         "provider": "oidc",
@@ -62,7 +70,7 @@ def render_auth_config(config: GateConfig) -> str:
         "client_id": config.client_id,
         "client_secret_file": "/run/secrets/client-secret",
         "cookie_secret_file": "/run/secrets/cookie-secret",
-        "http_address": "127.0.0.1:4180",
+        "http_address": f"127.0.0.1:{listener_port}",
         "reverse_proxy": True,
         "trusted_proxy_ips": ["127.0.0.1/32", "::1/128"],
         "upstreams": ["static://202"],
@@ -74,8 +82,8 @@ def render_auth_config(config: GateConfig) -> str:
         "cookie_secure": True,
         "cookie_httponly": True,
         "cookie_samesite": "lax",
-        "cookie_expire": "15m",
-        "cookie_refresh": "0",
+        "cookie_expire": cookie_expire,
+        "cookie_refresh": cookie_refresh,
         "cookie_csrf_expire": "5m",
         "cookie_csrf_samesite": "none",
         "cookie_csrf_per_request": True,
@@ -136,6 +144,30 @@ def render_caddyfile(config: GateConfig) -> str:
 
 def _bind(source: Path, target: str) -> dict:
     return {"type": "bind", "source": str(source), "target": target, "read_only": True}
+
+
+def render_helper_service(runtime: Path, revision: str) -> dict:
+    """The same lightweight helper, beside the production gateway."""
+    return {
+        "image": AUTH_IMAGE,
+        "profiles": ["service-gateway"],
+        "restart": "unless-stopped",
+        "user": "1000:1000",
+        "read_only": True,
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
+        "network_mode": "service:service-gateway",
+        "depends_on": {"service-gateway": {"condition": "service_started"}},
+        "command": ["--config=/etc/oauth2-proxy.cfg"],
+        "environment": {"GOMEMLIMIT": "96MiB", "GOMAXPROCS": "1"},
+        "labels": {"autonomy.auth-config": revision},
+        "logging": {"driver": "json-file", "options": {"max-size": "1m", "max-file": "2"}},
+        "volumes": [
+            _bind(runtime / "oauth2-proxy.cfg", "/etc/oauth2-proxy.cfg"),
+            _bind(runtime / "client-secret", "/run/secrets/client-secret"),
+            _bind(runtime / "cookie-secret", "/run/secrets/cookie-secret"),
+        ],
+    }
 
 
 def render_compose(config: GateConfig, runtime: Path) -> dict:

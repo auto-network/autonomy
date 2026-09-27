@@ -93,6 +93,15 @@ class ServiceGatewayControlError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class GatedRoute:
+    """A helper declared by the supervisor, never a caller-supplied upstream."""
+
+    helper_id: str
+    auth_upstream: str
+    unlogged_paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ServiceGatewayRoute:
     reservation_id: str
     hostname: str
@@ -102,6 +111,7 @@ class ServiceGatewayRoute:
     upstream_ip: str
     port: int
     expires_at: str
+    gate: GatedRoute | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -251,11 +261,15 @@ def render_caddyfile(
             "\t\tformat json",
             "\t}",
             f"\ttls {cert_path} {key_path}",
-            f"\treverse_proxy {route.upstream_ip}:{route.port} {{",
-            "\t\tflush_interval -1",
-            "\t}",
-            "\thandle_errors {",
         ])
+        if route.gate is None:
+            lines.extend([
+                f"\treverse_proxy {route.upstream_ip}:{route.port} {{",
+                "\t\tflush_interval -1", "\t}",
+            ])
+        else:
+            lines.extend(render_gate(route))
+        lines.append("\thandle_errors {")
         _static_response(
             lines,
             "This service is temporarily unavailable",
@@ -288,6 +302,40 @@ def render_caddyfile(
         )
         lines.extend(["}", ""])
     return "\n".join(lines)
+
+
+def render_gate(route: ServiceGatewayRoute) -> list[str]:
+    """Production form of the proven service_auth Caddy route block."""
+    gate = route.gate
+    assert gate is not None
+    lines = [f"\tlog_skip {json.dumps(path)}" for path in gate.unlogged_paths]
+    lines.append("\troute {")
+    for header in (
+        "Authorization", "X-Auth-Request-*", "Remote-*", "X-Forwarded-*",
+        "X-Real-IP", "X-Original-URL", "X-Rewrite-URL",
+    ):
+        lines.append(f"\t\trequest_header -{header}")
+    lines.extend([
+        "\t\thandle /oauth2/* {",
+        f"\t\t\treverse_proxy {gate.auth_upstream} {{",
+        '\t\t\t\theader_up X-Forwarded-Proto "https"',
+        f'\t\t\t\theader_up X-Forwarded-Host "{route.hostname}"',
+        "\t\t\t\theader_up X-Forwarded-Uri {uri}",
+        "\t\t\t\theader_up X-Real-IP {remote_host}",
+        "\t\t\t}", "\t\t}", "\t\thandle {",
+        f"\t\t\tforward_auth {gate.auth_upstream} {{",
+        "\t\t\t\turi /oauth2/auth",
+        '\t\t\t\theader_up X-Forwarded-Proto "https"',
+        f'\t\t\t\theader_up X-Forwarded-Host "{route.hostname}"',
+        "\t\t\t\theader_up X-Real-IP {remote_host}",
+        "\t\t\t\t@unauthenticated status 401",
+        "\t\t\t\thandle_response @unauthenticated {",
+        f"\t\t\t\t\tredir * /oauth2/start?rd=https%3A%2F%2F{route.hostname}%2F 302",
+        "\t\t\t\t}", "\t\t\t}",
+        f"\t\t\treverse_proxy {route.upstream_ip}:{route.port} {{",
+        "\t\t\t\tflush_interval -1", "\t\t\t}", "\t\t}", "\t}",
+    ])
+    return lines
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):

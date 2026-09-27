@@ -86,7 +86,7 @@ async function main() {
   await settle(); await settle(); await settle(); await settle();
   assert.deepEqual(posts[0], { url: '/api/network/service-reservations', method: 'POST', body: { app_label: 'docs', zone: ZONE } });
   assert.equal(posts[1].url, '/api/network/service-targets/r-new');
-  assert.deepEqual(posts[1].body, { session_id: 's1', port: 8000 });
+  assert.deepEqual(posts[1].body, { session_id: 's1', port: 8000, access_mode: 'public' });
   assert.equal(posts[2].url, '/api/network/service-reservations/r-persona/state');
   posts.length = 0;
 

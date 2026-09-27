@@ -384,6 +384,7 @@ class TestServiceTargetApiContract:
         assert created.status_code == 201
         projection = created.json()["target"]
         assert projection == {
+            "access_mode": "public",
             "reservation_id": ACTIVE_ID,
             # Carried since 04e56c0d: the binding to a machine IS the row's
             # meaning (see target_projection).
@@ -570,6 +571,19 @@ class TestServiceTargetResolution:
         assert private_or_authority.isdisjoint(response.json()["target"])
         assert "172.30.0.11" not in repr(raw)
         assert "172.30.0.11" not in response.text
+
+
+def test_auth_default_is_copied_once_and_member_override_is_preserved(target_api, monkeypatch):
+    from tools.dashboard import service_auth
+    client, *_ = target_api
+    monkeypatch.setattr(service_auth, "configuration", lambda org: {"configured": True, "default_access": "oidc"})
+    created = _put(client)
+    assert created.json()["target"]["access_mode"] == "oidc"
+    changed = client.put(f"/api/network/service-targets/{ACTIVE_ID}", headers=_headers(),
+        json={"session_id": "session-a", "port": 8000, "access_mode": "public"})
+    assert changed.status_code == 200
+    assert changed.json()["target"]["access_mode"] == "public"
+    assert _put(client).json()["target"]["access_mode"] == "public"
 
 
 def test_service_target_schema_is_organization_homed_and_keyed_by_reservation():

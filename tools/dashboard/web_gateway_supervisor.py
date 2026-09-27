@@ -17,15 +17,33 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
 from tools.dashboard import service_certificate, service_gateway, service_publication
 from tools.graph.schemas.namespace_reservation import NAMESPACE_RESERVATION_SET_ID
 from tools.graph.schemas.service_target import SERVICE_TARGET_SET_ID
+from tools.graph.schemas.service_auth import SERVICE_AUTH_SET_ID, SERVICE_AUTH_SECRET_SET_ID
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AuthHelper:
+    helper_id: str
+    runtime_dir: str
+    revision: str
+
+    @property
+    def service_name(self) -> str:
+        return self.helper_id.replace(":", "-")
+
+
+def helper_listener_ports(helper_ids) -> dict[str, int]:
+    """One allocation table shared by organization and personal helpers."""
+    return {key: 4180 + index for index, key in enumerate(sorted(set(helper_ids)))}
 
 
 @dataclass(frozen=True, order=True)
@@ -44,6 +62,7 @@ class GatewayDesiredState:
     routes: tuple[DesiredRoute, ...]
     ready: bool = True
     reason: str | None = None
+    helpers: tuple[AuthHelper, ...] = ()
 
     def __post_init__(self) -> None:
         route_ids = [route.route_id for route in self.routes]
@@ -54,6 +73,8 @@ class GatewayDesiredState:
 
 
 class GatewayRuntime(Protocol):
+    async def reconcile_helpers(self, helpers: tuple[AuthHelper, ...], marker: str) -> None: ...
+
     async def ensure_started(self) -> None: ...
 
     async def is_healthy(self) -> bool: ...
@@ -287,18 +308,25 @@ async def build_desired_state() -> GatewayDesiredState:
 
 
 async def _build_desired_state() -> GatewayDesiredState:
+    from tools.dashboard import service_auth
+
     active_routes: list[service_gateway.ServiceGatewayRoute] = []
     paused_hosts: list[str] = []
     unavailable_hosts: list[str] = []
     certificates: dict[str, tuple[str, str]] = {}
     desired_routes: list[DesiredRoute] = []
+    helpers: dict[str, AuthHelper] = {}
     found_publication = False
     found_unready_connector = False
     found_missing_certificate = False
 
     # Discovery opens every org store (read-only, memoized in org_ops) — the
     # cold call belongs off the loop.
-    for org in await asyncio.to_thread(_discover_orgs):
+    orgs = await asyncio.to_thread(_discover_orgs)
+    ports = helper_listener_ports(
+        f"org-oidc:{org}" for org in orgs if service_auth.configuration(org)["configured"]
+    )
+    for org in orgs:
         reservations = service_publication.list_reservations(org)
         target_ids = _local_reservation_ids(org)
         candidates = sorted(
@@ -317,6 +345,10 @@ async def _build_desired_state() -> GatewayDesiredState:
         if not await _connector_ready(org):
             found_unready_connector = True
             continue
+        access_modes = {
+            row["reservation_id"]: row.get("access_mode", "public")
+            for row in service_publication.list_service_targets(org)
+        }
 
         for reservation in candidates:
             reservation_id = reservation["reservation_id"]
@@ -348,6 +380,20 @@ async def _build_desired_state() -> GatewayDesiredState:
                 route = await service_gateway.resolve_gateway_route(
                     org, reservation_id
                 )
+                access = access_modes.get(reservation_id, "public")
+                if access == "oidc":
+                    helper_id = f"org-oidc:{org}"
+                    if helper_id not in helpers:
+                        helpers[helper_id] = await asyncio.to_thread(
+                            service_auth.materialize_helper, org, route.hostname, ports[helper_id]
+                        )
+                    route = replace(route, gate=service_gateway.GatedRoute(
+                        helper_id, f"127.0.0.1:{ports[helper_id]}", ("/oauth2/callback",),
+                    ))
+                elif access == "personal":
+                    # The passkey provider is delivered by the coordinator's
+                    # separate feature; never interpret this selection as public.
+                    raise ValueError("Personal authentication is not configured")
             except Exception:
                 try:
                     hostname = service_gateway.reservation_hostname(
@@ -386,6 +432,10 @@ async def _build_desired_state() -> GatewayDesiredState:
                             "network": route.network,
                             "port": route.port,
                             "certificate": pair,
+                            "authentication": (
+                                (route.gate.helper_id, helpers[route.gate.helper_id].revision)
+                                if route.gate else None
+                            ),
                         }
                     ),
                 )
@@ -403,6 +453,7 @@ async def _build_desired_state() -> GatewayDesiredState:
                 certificates=certificates,
             ),
             routes=tuple(desired_routes),
+            helpers=tuple(helpers[key] for key in sorted(helpers)),
         )
     reason = (
         "connector-unavailable"
@@ -444,6 +495,7 @@ class ComposeGatewayRuntime:
         runner=None,
         sleep=None,
         now=None,
+        helper_override: str = "/run/autonomy-keycache/service-auth/compose.json",
     ) -> None:
         self._base = [
             "docker",
@@ -464,6 +516,53 @@ class ComposeGatewayRuntime:
         self._sleep = sleep or asyncio.sleep
         self._now = now or time.monotonic
         self._last_marker: str | None = None
+        self._helper_override = Path(helper_override)
+        # The dashboard hot-reloads while Docker containers keep running.
+        # The generated override is already the record of the managed helpers.
+        prior = json.loads(self._helper_override.read_text())["services"] if self._helper_override.exists() else {}
+        self._helpers = tuple(
+            AuthHelper(name.replace("org-oidc-", "org-oidc:", 1),
+                       str(Path(service["volumes"][0]["source"]).parent),
+                       service["labels"]["autonomy.auth-config"])
+            for name, service in prior.items()
+        )
+        self._helper_marker: str | None = None
+
+    async def reconcile_helpers(self, helpers: tuple[AuthHelper, ...], marker: str) -> None:
+        if helpers == self._helpers and marker == self._helper_marker:
+            return
+        if not helpers and not self._helpers:
+            self._helper_marker = marker
+            return
+        from tools.network.service_auth import render_helper_service
+
+        self._helper_override.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Include retiring definitions just long enough for Compose to remove
+        # those exact services. Never use --remove-orphans on the shared project.
+        combined = {h.helper_id: h for h in (*self._helpers, *helpers)}
+        services = {
+            h.service_name: render_helper_service(Path(h.runtime_dir), h.revision)
+            for h in combined.values()
+        }
+        self._helper_override.write_text(json.dumps({"services": services}))
+        os.chmod(self._helper_override, 0o600)
+        base = [*self._base, "-f", str(self._helper_override)]
+        retained = {h.helper_id for h in helpers}
+        removed = [h.service_name for h in self._helpers if h.helper_id not in retained]
+        if removed:
+            result = await self._run([*base, "rm", "-f", "-s", *removed], timeout=60.0)
+            self._require(result, "stop Service auth helpers")
+        if helpers:
+            argv = [*base, "up", "-d", "--no-deps", "--no-build"]
+            if marker != self._helper_marker:
+                argv.append("--force-recreate")
+            result = await self._run([*argv, *(h.service_name for h in helpers)], timeout=120.0)
+            self._require(result, "start Service auth helpers")
+        self._helpers = helpers
+        self._helper_marker = marker
+        self._helper_override.write_text(json.dumps({"services": {
+            helper.service_name: services[helper.service_name] for helper in helpers
+        }}))
 
     async def _run(self, argv: list[str], timeout: float = 30.0):
         return await self._runner(argv, timeout)
@@ -533,6 +632,7 @@ class ComposeGatewayRuntime:
         return self._last_marker
 
     async def stop(self) -> None:
+        await self.reconcile_helpers((), "")
         result = await self._run(
             [*self._base, "rm", "-f", "-s", "service-gateway"], timeout=60.0
         )
@@ -562,7 +662,7 @@ class GatewayReconcileWorker:
             topic == "setting.changed"
             and isinstance(data, dict)
             and data.get("set_id")
-            in {NAMESPACE_RESERVATION_SET_ID, SERVICE_TARGET_SET_ID}
+            in {NAMESPACE_RESERVATION_SET_ID, SERVICE_TARGET_SET_ID, SERVICE_AUTH_SET_ID, SERVICE_AUTH_SECRET_SET_ID}
         )
 
     async def reconcile_once(self, force: bool = False) -> dict:
@@ -649,6 +749,7 @@ class WebGatewaySupervisor:
         self._failure_count = 0
         self._retry_at = 0.0
         self._runtime_observed_stopped = False
+        self._loaded_helpers: tuple[AuthHelper, ...] = ()
 
     def status(self) -> dict:
         result = {
@@ -658,6 +759,7 @@ class WebGatewaySupervisor:
                 route.route_id for route in self._loaded_routes
             ),
             "config_revision": self._config_revision,
+            "auth_helpers": [helper.helper_id for helper in self._loaded_helpers],
         }
         if self._last_error is not None:
             result["error"] = self._last_error
@@ -671,7 +773,7 @@ class WebGatewaySupervisor:
                     or ("no-publications" if not desired.routes else "not-ready")
                 )
 
-            signature = (desired.caddyfile, desired.routes, desired.ready)
+            signature = (desired.caddyfile, desired.routes, desired.ready, desired.helpers)
             if signature != self._failed_signature:
                 self._failure_count = 0
                 self._retry_at = 0.0
@@ -700,6 +802,7 @@ class WebGatewaySupervisor:
                 and self._loaded_instance_marker == marker
                 and self._loaded_config == desired.caddyfile
                 and self._loaded_routes == desired.routes
+                and self._loaded_helpers == desired.helpers
             )
             if unchanged:
                 self._state = "healthy"
@@ -731,6 +834,7 @@ class WebGatewaySupervisor:
             self._state = "loading"
             self._reason = "loading"
             try:
+                await self._runtime.reconcile_helpers(desired.helpers, marker)
                 await self._loader(desired.caddyfile)
             except Exception as exc:
                 return await self._fail(desired, exc)
@@ -739,6 +843,7 @@ class WebGatewaySupervisor:
             # it and never visible during starting/loading.
             self._loaded_config = desired.caddyfile
             self._loaded_routes = desired.routes
+            self._loaded_helpers = desired.helpers
             self._loaded_instance_marker = marker
             self._config_revision += 1
             self._state = "healthy"
@@ -762,6 +867,7 @@ class WebGatewaySupervisor:
         self._loaded_routes = ()
         self._loaded_instance_marker = None
         self._state = "stopped"
+        self._loaded_helpers = ()
         self._reason = reason
         self._last_error = None
         self._failed_signature = None
@@ -773,7 +879,7 @@ class WebGatewaySupervisor:
         self._state = "failed"
         self._reason = "load-failed"
         self._last_error = str(exc)
-        signature = (desired.caddyfile, desired.routes, desired.ready)
+        signature = (desired.caddyfile, desired.routes, desired.ready, desired.helpers)
         if signature != self._failed_signature:
             self._failure_count = 0
         self._failed_signature = signature
@@ -796,6 +902,7 @@ class WebGatewaySupervisor:
             self._runtime_observed_stopped = True
             self._loaded_config = None
             self._loaded_routes = ()
+            self._loaded_helpers = ()
             self._loaded_instance_marker = None
         return self.status()
 

@@ -3303,7 +3303,7 @@ async def get_published_links(request: Request) -> JSONResponse:
         return refused
 
     from datetime import datetime, timezone
-    from tools.dashboard import link_approvals, service_publication
+    from tools.dashboard import link_approvals, service_publication, service_auth
     from tools.dashboard.link_channel_key import fragment_url
     from tools.dashboard.dao import dashboard_db
     from tools.graph.schemas.network_identity import (
@@ -3419,7 +3419,24 @@ async def get_published_links(request: Request) -> JSONResponse:
         "persona_domain": persona_domain,
         # The parent-zone TXT binding value a custom domain must carry.
         "org_uuid": (binding or {}).get("org_uuid"),
+        "authentication": service_auth.configuration(org),
     })
+
+
+async def put_service_auth(request: Request) -> JSONResponse:
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import service_auth, service_publication
+    try:
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) - {"provider", "issuer", "client_id", "client_secret", "default_access"}:
+            return _service_publication_error("unknown_fields")
+        return JSONResponse({"authentication": service_auth.save_config(org, body)})
+    except service_publication.ServicePublicationError as exc:
+        return _service_publication_error(exc.code, exc.status_code)
+    except ValueError as exc:
+        return _service_publication_error("invalid_configuration", 400, str(exc))
 
 
 async def get_service_gateway(request: Request) -> JSONResponse:
@@ -3441,7 +3458,7 @@ async def put_service_target(request: Request) -> JSONResponse:
         return _service_publication_error("invalid_json")
     if not isinstance(body, dict):
         return _service_publication_error("invalid_json")
-    if set(body) != {"session_id", "port"}:
+    if not {"session_id", "port"} <= set(body) <= {"session_id", "port", "access_mode"}:
         return _service_publication_error("unknown_fields")
     from tools.dashboard import service_publication
 
@@ -3451,6 +3468,7 @@ async def put_service_target(request: Request) -> JSONResponse:
             request.path_params.get("reservation_id", ""),
             body.get("session_id"),
             body.get("port"),
+            **({"access_mode": body["access_mode"]} if "access_mode" in body else {}),
         )
     except service_publication.ServicePublicationError as exc:
         return _service_publication_error(exc.code, exc.status_code)
@@ -3563,6 +3581,7 @@ ROUTES = [
     ),
     Route("/api/network/service-targets", get_service_targets, methods=["GET"]),
     Route("/api/network/published-links", get_published_links, methods=["GET"]),
+    Route("/api/network/service-auth", put_service_auth, methods=["PUT"]),
     Route("/api/network/service-gateway", get_service_gateway, methods=["GET"]),
     Route(
         "/api/network/service-targets/{reservation_id}",

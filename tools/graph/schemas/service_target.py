@@ -29,6 +29,11 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
+def validate_access_mode(payload: dict) -> None:
+    if payload.get("access_mode", "public") not in {"public", "personal", "oidc"}:
+        raise SchemaValidationError("access_mode must be public, personal or oidc")
+
+
 SYNOPSIS = {
     "summary": (
         "The current trusted machine/session/container/port target for one "
@@ -54,6 +59,7 @@ class ServiceTargetV1(SettingSchema):
     port: int = field(required=True, description="TCP port in the session container.")
     created_at: str = field(required=True, description="Binding creation time.")
     updated_at: str = field(required=True, description="Last reassignment time.")
+    access_mode: str = field(required=False, description="Public, personal passkey, or organization OIDC access.")
 
     @classmethod
     def validate_member_key(cls, key: str) -> None:
@@ -64,6 +70,7 @@ class ServiceTargetV1(SettingSchema):
         super().validate(payload)
         if not isinstance(payload, dict):
             return
+        validate_access_mode(payload)
         if not isinstance(payload.get("machine_id"), str) or not _HEX64_RE.fullmatch(
             payload["machine_id"]
         ):
@@ -88,4 +95,3 @@ class ServiceTargetV1(SettingSchema):
                 raise SchemaValidationError(
                     f"{cls.__name__}: {name} must be UTC RFC 3339 with milliseconds"
                 )
-

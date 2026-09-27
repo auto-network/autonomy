@@ -1,12 +1,71 @@
-# Local OIDC gate proof
+# Published Service authentication
+
+## Activate for an organization
+
+1. Open **Organization Settings → Published Services & Links → Services**.
+   Add a Custom Domain first if none is active.
+2. Under **Authentication**, choose **Set up OIDC → Okta**. Copy every displayed
+   **Sign-in redirect URI** into the Okta application. For Anchore the value is:
+
+   ```text
+   https://*.anchore.serve.auto.network/oauth2/callback
+   ```
+
+3. In Okta Admin: **Applications → Applications → Create App Integration**.
+   Choose **OIDC – OpenID Connect → Web Application**, name it **Autonomy**, and
+   select **Authorization Code**. Under **Sign-in redirect URIs**, add the copied
+   values and enable **Allow wildcard in sign-in redirect URI**. Under
+   **Assignments**, assign the users or groups allowed to access these services.
+   This is a private application: no catalog submission or Okta approval.
+4. Back in Autonomy, enter the issuer (for example
+   `https://your-tenant.okta.com`, without `-admin`), client ID and client
+   secret. Choose whether new services default to **Org (OIDC)**, then Save.
+5. On the published service card, choose **Access → Org (OIDC)**. Open its public
+   address in a fresh browser and complete the Okta login. **Public** removes
+   that service's gate. Changing the organization default never changes existing
+   services; members can always override it.
+
+One Okta application covers all listed domains and their services. No application
+registration per member, container or service is needed. The **Other OIDC provider**
+instructions describe Authorization Code, S256 PKCE, `form_post`, and
+`openid email profile`; only Okta is validated by this integration's acceptance.
+Wildcard support depends on the provider. Personal (passkey) is a separate provider
+and is unavailable until its implementation is installed.
+
+### Configuration and runtime state
+
+`autonomy.network.service-auth#1`, key `default`, holds the organization's
+`provider`, `issuer`, `client_id`, and `default_access` (`public` or `oidc`).
+`autonomy.network.service-auth-secret#1`, key `default`, holds the client secret
+in the existing organization audited vault. The setup API never returns it.
+Existing `autonomy.network.service-target#1` rows carry the service's `access_mode`;
+older rows without it remain public.
+
+The existing gateway supervisor starts one lightweight oauth2-proxy helper per
+organization on each serving node that has an OIDC-protected route. Helpers share
+Caddy's private network namespace and have no published ports. The same supervisor
+pass generates their Compose override and Caddy configuration from Settings.
+Sorted helper IDs get loopback ports from 4180; helpers are recreated with a new
+gateway instance. No relay or registry configuration change is needed.
+
+The local cookie key is a `service-auth-cookie:<org>` row in
+`autonomy.machine.vault.audited#1`. Secret files are materialized in the existing
+`/run/autonomy-keycache/service-auth` memory-backed directory. Visitor sessions live
+in encrypted host-only cookies, not a login database. The helper has no hard
+resource limits; the earlier proof measured about 24 MiB RSS.
+
+Implementation contract: graph://327842bf-6fb. Live acceptance is tracked by
+auto-tmxuo; a passing unit suite alone does not establish delivery.
+
+## Isolated proof harness
 
 Run the authentication helper **beside Caddy on the serving node**, not at the
 relay and not inside each application. The intended production unit is one
 helper per organization per serving node, reused across that node's protected
 Service hostnames. No central callback broker, Redis, or shared login database.
 
-This directory is an **isolated proof**, not production organization-policy or
-gateway-supervisor integration. Its extra Caddy sits behind the existing node
+The standalone commands below run an **isolated proof**, not the production
+supervisor path above. Its extra Caddy sits behind the existing node
 TLS gateway; the private example application only returns a marker. The relay
 continues forwarding TLS ciphertext. TLS terminates on the serving node, not
 inside the application container. Auth does not extend browser TLS through the
@@ -105,8 +164,8 @@ the leading-slash destination as a matcher and can fall through to the app!
 
 ## Boundaries and follow-up
 
-- Organization opt-in/required policy, secret delivery, production supervisor
-  lifecycle and dormant startup are not implemented here.
+- The standalone harness does not exercise the production Settings and supervisor
+  path above. Mandatory organization policy is not part of this feature.
 - Two instances on one host demonstrate isolated state, not two physical nodes.
 - Local cookie sessions have no immediate revocation; existing sessions can
   survive assignment removal until their 15-minute expiry.
