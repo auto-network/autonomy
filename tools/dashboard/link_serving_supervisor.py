@@ -831,16 +831,17 @@ def _connector_command(binding: dict, org: str, key_path: str,
 # ── the managed subprocess ────────────────────────────────────
 
 
-def _probe_ctl_status(ctl_path: str) -> dict | None:
+def _probe_ctl_status(ctl_path: str, args: dict | None = None) -> dict | None:
     """One authenticated connector-status round-trip via the control
-    descriptor. The full reply dict, or None on any failure — never raises."""
+    descriptor. The full reply dict, or None on any failure — never raises.
+    ``{"code_files": True}`` also asks for the loaded-code fingerprint."""
     try:
         with open(ctl_path) as fh:
             descriptor = json.load(fh)
         request = json.dumps({
             "auth": descriptor["auth"],
             "op": "connector-status",
-            "args": {},
+            "args": args or {},
         }) + "\n"
         # A connector under heavy serve load pegs the GIL and answers slowly;
         # 0.5s misread a busy, healthy process as unreachable (2026-09-06).
@@ -859,6 +860,19 @@ def _probe_ctl_status(ctl_path: str) -> dict | None:
         return reply if isinstance(reply, dict) else None
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def _code_changed(status: dict | None) -> list[str] | None:
+    """What changed in the code a connector loaded, from a status reply that
+    asked for ``code_files``: ``[]`` when nothing it loaded changed, the
+    changed repository paths otherwise, ``None`` when unknown (no reply or no
+    fingerprint — stale by definition). A commit that touches nothing a
+    connector loaded no longer restarts it (auto-j6ssc)."""
+    from tools.dashboard import connector_code
+
+    if status is None:
+        return None
+    return connector_code.changed_files(status.get("code_files"))
 
 
 def _probe_ctl_serving(ctl_path: str) -> bool:
@@ -1391,34 +1405,51 @@ class ServingSupervisor:
                     from tools.network import build_version
                     disk = build_version.disk_head()
                     if disk is not None and disk != booted:
+                        # The commit moved. Replace only if a file this
+                        # connector loaded changed (auto-j6ssc): most commits
+                        # touch nothing it runs, and each restart took the
+                        # org's public serving down for tens of seconds.
                         status = _probe_ctl_status(
-                            _control_path_for(state["work_base"]))
-                        streams = (status or {}).get("active_streams")
-                        # A failed probe is UNKNOWN, not idle: drain it
-                        # (bounded by the deadline) rather than kill a
-                        # possibly-busy connector.
-                        if status is None or _status_is_streaming(status):
-                            self._lame_duck_since[org] = now
-                            _log.warning(
-                                "serving connector for org=%s is on stale "
-                                "code (boot=%s, disk=%s) but mid-stream "
-                                "(active_streams=%s) — draining as a lame "
-                                "duck before replacement",
-                                org, booted[:12], disk[:12], streams,
+                            _control_path_for(state["work_base"]),
+                            {"code_files": True})
+                        changed = _code_changed(status)
+                        if changed == []:
+                            _log.info(
+                                "serving connector for org=%s keeps running: "
+                                "commit %s changed no code it loaded",
+                                org, disk[:12],
                             )
-                            return {"running": True,
-                                    "reason": "lame-duck-draining"}
-                        _log.warning(
-                            "replacing serving connector for org=%s: stale "
-                            "code (boot=%s, disk=%s), idle",
-                            org, booted[:12], disk[:12],
-                        )
-                        proc.stop()
-                        self._procs.pop(org, None)
-                        self._credentials.pop(org, None)
-                        self._last_served.pop(org, None)
-                        self._boot_commit.pop(org, None)
-                        return self._launch(org, state)
+                            self._boot_commit[org] = disk
+                        else:
+                            streams = (status or {}).get("active_streams")
+                            what = (", ".join(changed[:5]) if changed
+                                    else "no code fingerprint")
+                            # A failed probe is UNKNOWN, not idle: drain it
+                            # (bounded by the deadline) rather than kill a
+                            # possibly-busy connector.
+                            if status is None or _status_is_streaming(status):
+                                self._lame_duck_since[org] = now
+                                _log.warning(
+                                    "serving connector for org=%s is on stale "
+                                    "code (%s; boot=%s, disk=%s) but "
+                                    "mid-stream (active_streams=%s) — "
+                                    "draining as a lame duck before "
+                                    "replacement",
+                                    org, what, booted[:12], disk[:12], streams,
+                                )
+                                return {"running": True,
+                                        "reason": "lame-duck-draining"}
+                            _log.warning(
+                                "replacing serving connector for org=%s: stale "
+                                "code (%s; boot=%s, disk=%s), idle",
+                                org, what, booted[:12], disk[:12],
+                            )
+                            proc.stop()
+                            self._procs.pop(org, None)
+                            self._credentials.pop(org, None)
+                            self._last_served.pop(org, None)
+                            self._boot_commit.pop(org, None)
+                            return self._launch(org, state)
                 ducked = self._lame_duck_since.get(org)
                 if ducked is not None:
                     # A stale incumbent adopted mid-stream: replace it the
@@ -1647,7 +1678,7 @@ class ServingSupervisor:
             if not org_uuid:
                 return None
             ctl_path = _control_path_for(state["work_base"])
-            status = _probe_ctl_status(ctl_path)
+            status = _probe_ctl_status(ctl_path, {"code_files": True})
             if status is None and not os.path.exists(ctl_path):
                 # No control descriptor at all: an unmanageable orphan (a
                 # dead dashboard's leftover) — the reap path is right.
@@ -1694,7 +1725,11 @@ class ServingSupervisor:
 
             disk = build_version.disk_head()
             boot = status.get("boot_commit")
-            stale = disk is not None and boot != disk
+            # Stale means code it LOADED changed, not merely a new commit
+            # (auto-j6ssc). No fingerprint (a connector from before this
+            # check) is stale by definition.
+            stale = (disk is not None and boot != disk
+                     and _code_changed(status) != [])
             active_streams = status.get("active_streams")
             if stale and not _status_is_streaming(status):
                 _log.warning(
@@ -1711,7 +1746,9 @@ class ServingSupervisor:
             if pid is None or not _adopt_connector_credential(org_uuid, org, pid):
                 return None
             self._procs[org] = _AdoptedProc(pid, ctl_path=ctl_path)
-            self._boot_commit[org] = boot
+            # A current incumbent is stamped with the commit it was verified
+            # against, so the per-pass check does not re-verify it.
+            self._boot_commit[org] = boot if stale or disk is None else disk
             self._credentials[org] = (
                 state["cert"], state["viewer_cert"], state["child_pub"])
             self._started_at[org] = self._now()

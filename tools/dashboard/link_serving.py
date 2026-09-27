@@ -2045,6 +2045,7 @@ async def _serve_control_listener(connector, ctl_path: str,
                     # connector has completed the tunnel hello right now.
                     from tools.network.fleet_relay_sync import connector_runtime
                     from tools.network import build_version
+                    from tools.dashboard import connector_code
 
                     reply = {
                         "ok": True,
@@ -2121,6 +2122,11 @@ async def _serve_control_listener(connector, ctl_path: str,
                         # a fresh start from an hour of failed reconnects.
                         "tunnel": getattr(connector, "tunnel_state", None),
                     }
+                    # The loaded-code fingerprint, only when asked: it is a
+                    # few hundred entries, and most probes do not need it.
+                    if (request.get("args") or {}).get("code_files"):
+                        reply["code_files"] = connector_code.loaded_files(
+                            _CODE_STARTED_AT, _CODE_FILES)
                 elif request.get("op") == "serve-host":
                     # Dashboard-local desired-state seam. Unlike forwarding a
                     # one-shot host-register frame, serve_host records the
@@ -2334,6 +2340,13 @@ async def _run_connector_with_control(connector, ctl_path: str | None,
 #: survivors instead of adopting them.
 _BOOT_COMMIT: str | None = None
 
+#: The repository source files this process has loaded, with their SHA-256
+#: (tools.dashboard.connector_code). The supervisor replaces this connector
+#: only when one of them changes, not on every commit (auto-j6ssc). Filled at
+#: the end of startup and extended as later imports appear.
+_CODE_FILES: dict[str, str | None] = {}
+_CODE_STARTED_AT: float = 0.0
+
 
 #: CPU-gated stack sampler: every window, if this process burned more than
 #: the threshold share of one core, dump every thread's Python stack to the
@@ -2399,9 +2412,11 @@ def main() -> None:
         # stderr with no fileno (pytest capture, some launchers): the
         # dump-on-USR1 aid is optional, serving is not.
         pass
-    global _BOOT_COMMIT
+    global _BOOT_COMMIT, _CODE_STARTED_AT
     from tools.network import build_version
+    from tools.dashboard import connector_code
     _BOOT_COMMIT = build_version.disk_head()
+    _CODE_STARTED_AT = connector_code.process_start_time()
     # One banner per generation: the shared append-mode log needs each
     # process to self-identify (pid + code generation) at birth.
     logging.getLogger(__name__).warning(
@@ -2589,6 +2604,8 @@ def main() -> None:
     # between two processes on one machine the only part of that exchange
     # that had to pass the public gate -- and it broke silently the day
     # that gate closed.
+    # Fingerprint the code loaded so far, before a later commit can land.
+    connector_code.loaded_files(_CODE_STARTED_AT, _CODE_FILES)
     asyncio.run(_run_connector_with_control(
         connector, args.control_file, publisher,
         frontier_scope=args.graph_org,

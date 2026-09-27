@@ -198,7 +198,7 @@ def test_launch_adopts_a_healthy_incumbent_instead_of_reaping(env, monkeypatch):
     from tools.network import build_version
     monkeypatch.setattr(
         sup, "_probe_ctl_status",
-        lambda ctl: {"ok": True, "serving": True,
+        lambda ctl, *_a: {"ok": True, "serving": True,
                      "boot_commit": build_version.disk_head()},
     )
     monkeypatch.setattr(
@@ -236,7 +236,7 @@ def test_stale_incumbent_is_replaced_not_adopted(env, monkeypatch):
     supervisor = sup.ServingSupervisor(spawn=spawn)
     monkeypatch.setattr(
         sup, "_probe_ctl_status",
-        lambda ctl: {"ok": True, "serving": True, "boot_commit": "0" * 40},
+        lambda ctl, *_a: {"ok": True, "serving": True, "boot_commit": "0" * 40},
     )
     reaped = []
     monkeypatch.setattr(
@@ -1189,7 +1189,7 @@ def _lame_duck_fixture(env, monkeypatch, *, now=None):
     # re-launch after replacement would re-adopt the corpse forever.
     monkeypatch.setattr(
         sup, "_probe_ctl_status",
-        lambda ctl: dict(probe) if sleeper.poll() is None else None,
+        lambda ctl, *_a: dict(probe) if sleeper.poll() is None else None,
     )
     monkeypatch.setattr(
         sup, "_iter_connector_pids", lambda org_uuid: iter([sleeper.pid])
@@ -1294,7 +1294,7 @@ def test_watchdog_replaces_an_idle_connector_when_the_disk_head_moves(env, monke
     disk = {"head": "a" * 40}
     sup, supervisor, spawn = _running_connector(env, monkeypatch, disk=disk)
     monkeypatch.setattr(sup, "_probe_ctl_status",
-                        lambda ctl: {"ok": True, "serving": True, "active_streams": 0})
+                        lambda ctl, *_a: {"ok": True, "serving": True, "active_streams": 0})
     assert supervisor.ensure(ORG)["reason"] == "already-running"
     assert len(spawn.calls) == 1, "unchanged disk head: leave it alone"
     disk["head"] = "b" * 40
@@ -1309,7 +1309,7 @@ def test_watchdog_lame_ducks_a_streaming_connector_when_the_disk_head_moves(env,
     sup, supervisor, spawn = _running_connector(env, monkeypatch, disk=disk)
     probe = {"ok": True, "serving": True, "active_streams": 1,
              "stream_activity_age_s": 1.0}
-    monkeypatch.setattr(sup, "_probe_ctl_status", lambda ctl: dict(probe))
+    monkeypatch.setattr(sup, "_probe_ctl_status", lambda ctl, *_a: dict(probe))
     disk["head"] = "b" * 40
     assert supervisor.ensure(ORG)["reason"] == "lame-duck-draining"
     assert len(spawn.calls) == 1, "mid-stream: drained, not severed"
@@ -1331,7 +1331,7 @@ def test_stale_incumbent_with_a_stuck_stream_counter_is_replaced(env, monkeypatc
     supervisor = sup.ServingSupervisor(spawn=spawn)
     monkeypatch.setattr(
         sup, "_probe_ctl_status",
-        lambda ctl: {"ok": True, "serving": True, "boot_commit": "0" * 40,
+        lambda ctl, *_a: {"ok": True, "serving": True, "boot_commit": "0" * 40,
                      "active_streams": 1, "stream_activity_age_s": 900.0},
     )
     reaped = []
@@ -1607,3 +1607,85 @@ def test_reconcile_records_and_logs_its_outcome_once_per_change(env, caplog):
         launched = [r for r in caplog.records if "reason=launched" in r.getMessage()]
         assert len(launched) == 1 and launched[0].levelname == "INFO"
     assert supervisor.last_outcome("never-reconciled") is None
+
+
+# ── replace only when loaded code changed (auto-j6ssc) ──────────────────────
+
+
+def _fingerprinted(monkeypatch, tmp_path, text="X = 1\n"):
+    import hashlib
+    from tools.dashboard import connector_code
+    monkeypatch.setattr(connector_code, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(connector_code, "_DIGEST_CACHE", {})
+    (tmp_path / "loaded.py").write_text(text)
+    return [["loaded.py", hashlib.sha256(text.encode()).hexdigest()]]
+
+
+def test_watchdog_keeps_a_connector_when_the_commit_changed_none_of_its_code(
+        env, monkeypatch, tmp_path):
+    """A skill-only commit (2026-09-27 16:07Z) must not restart serving."""
+    disk = {"head": "a" * 40}
+    sup, supervisor, spawn = _running_connector(env, monkeypatch, disk=disk)
+    files = _fingerprinted(monkeypatch, tmp_path)
+    probes = []
+
+    def probe(ctl, args=None):
+        probes.append(args)
+        return {"ok": True, "serving": True, "active_streams": 0,
+                "code_files": files}
+    monkeypatch.setattr(sup, "_probe_ctl_status", probe)
+    disk["head"] = "b" * 40
+    assert supervisor.ensure(ORG)["reason"] == "already-running"
+    assert len(spawn.calls) == 1 and spawn.procs[0].alive() is True
+    assert supervisor._boot_commit[ORG] == "b" * 40
+    assert {"code_files": True} in probes
+    asked = len([a for a in probes if a == {"code_files": True}])
+    supervisor.ensure(ORG)
+    assert len([a for a in probes if a == {"code_files": True}]) == asked, \
+        "verified at this commit: not re-checked every pass"
+
+
+def test_watchdog_replaces_a_connector_when_code_it_loaded_changed(
+        env, monkeypatch, tmp_path):
+    disk = {"head": "a" * 40}
+    sup, supervisor, spawn = _running_connector(env, monkeypatch, disk=disk)
+    files = _fingerprinted(monkeypatch, tmp_path)
+    monkeypatch.setattr(sup, "_probe_ctl_status", lambda ctl, *_a: {
+        "ok": True, "serving": True, "active_streams": 0, "code_files": files})
+    (tmp_path / "loaded.py").write_text("X = 2\n")
+    disk["head"] = "b" * 40
+    assert supervisor.ensure(ORG)["reason"] == "launched"
+    assert len(spawn.calls) == 2 and spawn.procs[0].alive() is False
+
+
+def test_a_streaming_connector_with_changed_code_still_drains(env, monkeypatch, tmp_path):
+    disk = {"head": "a" * 40}
+    sup, supervisor, spawn = _running_connector(env, monkeypatch, disk=disk)
+    files = _fingerprinted(monkeypatch, tmp_path)
+    probe = {"ok": True, "serving": True, "active_streams": 1,
+             "stream_activity_age_s": 1.0, "code_files": files}
+    monkeypatch.setattr(sup, "_probe_ctl_status", lambda ctl, *_a: dict(probe))
+    (tmp_path / "loaded.py").write_text("X = 2\n")
+    disk["head"] = "b" * 40
+    assert supervisor.ensure(ORG)["reason"] == "lame-duck-draining"
+    assert len(spawn.calls) == 1
+
+
+def test_incumbent_on_an_older_commit_with_unchanged_code_is_adopted(env, monkeypatch, tmp_path):
+    """A hot reload after a commit that touched nothing the connector loaded
+    adopts it instead of replacing it (auto-j6ssc)."""
+    from tools.dashboard import link_serving_supervisor as sup
+    from tools.network import build_version
+
+    _provision_serve_cert(env)
+    state = sup.serve_cert_state(ORG)
+    files = _fingerprinted(monkeypatch, tmp_path)
+    monkeypatch.setattr(build_version, "disk_head", lambda: "b" * 40)
+    supervisor = sup.ServingSupervisor(spawn=_refusing_spawn)
+    monkeypatch.setattr(sup, "_adopt_connector_credential", lambda *args: True)
+    monkeypatch.setattr(sup, "_probe_ctl_status", lambda ctl, *_a: {
+        "ok": True, "serving": True, "boot_commit": "a" * 40, "code_files": files})
+    monkeypatch.setattr(sup, "_iter_connector_pids", lambda org_uuid: iter([os.getpid() + 100000]))
+    monkeypatch.setattr(supervisor, "_reap_strays", lambda org: None)
+    assert supervisor._launch(ORG, state) == {"running": True, "reason": "adopted"}
+    assert supervisor._boot_commit[ORG] == "b" * 40
