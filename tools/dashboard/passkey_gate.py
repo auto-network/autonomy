@@ -26,6 +26,7 @@ import logging
 import os
 import secrets
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -46,6 +47,11 @@ ENROLLMENT_TTL_S = 600
 COOKIE_VAULT_KEY = "dashboard-passkey-cookie"
 HELPER_VAULT_KEY = "dashboard-passkey-helper"
 TOKEN_VAULT_KEY = "dashboard-passkey-enrollment"
+
+#: Every read-check-write of the record runs under this lock and re-reads
+#: inside it: two registrations racing on one token must enroll exactly one
+#: passkey (F3), and the helper's callbacks arrive on worker threads.
+_record_lock = threading.RLock()
 
 
 def _utc_now() -> str:
@@ -97,25 +103,27 @@ def open_enrollment(*, opened_by: str, now: float | None = None) -> dict:
     now = time.time() if now is None else now
     token = secrets.token_urlsafe(32)
     expires_at = int(now + ENROLLMENT_TTL_S)
-    payload = record()
-    payload["enrollment"] = {
-        "open": True, "token_sha256": helper.token_sha256(token),
-        "expires_at": expires_at, "opened_by": opened_by,
-    }
-    _save(payload)
-    settings_ops.write_by_key(MACHINE_VAULT_AUDITED_SET_ID, 1, TOKEN_VAULT_KEY,
-                              {"value": json.dumps({"token": token, "expires_at": expires_at})}, org="machine")
-    _rematerialize()
+    with _record_lock:
+        payload = record()
+        payload["enrollment"] = {
+            "open": True, "token_sha256": helper.token_sha256(token),
+            "expires_at": expires_at, "opened_by": opened_by,
+        }
+        _save(payload)
+        settings_ops.write_by_key(MACHINE_VAULT_AUDITED_SET_ID, 1, TOKEN_VAULT_KEY,
+                                  {"value": json.dumps({"token": token, "expires_at": expires_at})}, org="machine")
+        _rematerialize()
     return {"token": token, "expires_at": expires_at}
 
 
 def close_enrollment() -> None:
-    payload = record()
-    if payload.get("enrollment"):
-        payload["enrollment"] = None
-        _save(payload)
-    _clear_token()
-    _rematerialize()
+    with _record_lock:
+        payload = record()
+        if payload.get("enrollment"):
+            payload["enrollment"] = None
+            _save(payload)
+        _clear_token()
+        _rematerialize()
 
 
 def open_token(now: float | None = None) -> dict | None:
@@ -162,10 +170,7 @@ class GateRefusal(Exception):
 def register_credential(body: dict, *, now: float | None = None) -> dict:
     """The helper verified a registration under the open token: record the
     credential and close enrollment. One passkey per token, by construction."""
-    payload = record()
     token = body.get("token") if isinstance(body, dict) else None
-    if not helper.enrollment_open(payload, token, now=now):
-        raise GateRefusal("enrollment_closed", 403)
     try:
         credential = {
             "credential_id": str(body["credential_id"]),
@@ -177,34 +182,45 @@ def register_credential(body: dict, *, now: float | None = None) -> dict:
         }
     except (KeyError, TypeError, ValueError) as exc:
         raise GateRefusal("invalid_credential", 400) from exc
-    if any(row.get("credential_id") == credential["credential_id"] for row in payload["credentials"]):
-        raise GateRefusal("credential_exists", 409)
-    payload["credentials"] = [*payload["credentials"], credential]
-    payload["enrollment"] = None
-    saved = _save(payload)
-    _clear_token()
-    _rematerialize()
+    with _record_lock:
+        payload = record()  # re-read under the lock: the token is spent by the first winner
+        if not helper.enrollment_open(payload, token, now=now):
+            raise GateRefusal("enrollment_closed", 403)
+        if any(row.get("credential_id") == credential["credential_id"] for row in payload["credentials"]):
+            raise GateRefusal("credential_exists", 409)
+        payload["credentials"] = [*payload["credentials"], credential]
+        payload["enrollment"] = None
+        saved = _save(payload)
+        _clear_token()
+        _rematerialize()
     return saved
 
 
 def update_sign_count(credential_id: str, sign_count: int) -> None:
-    payload = record()
-    for row in payload["credentials"]:
-        if row.get("credential_id") == credential_id and int(sign_count) > int(row.get("sign_count") or 0):
-            row["sign_count"] = int(sign_count)
-            _save(payload)
-            _rematerialize()
-            return
+    with _record_lock:
+        payload = record()
+        for row in payload["credentials"]:
+            if row.get("credential_id") == credential_id and int(sign_count) > int(row.get("sign_count") or 0):
+                row["sign_count"] = int(sign_count)
+                _save(payload)
+                _rematerialize()
+                return
 
 
 def revoke_credential(credential_id: str) -> dict:
-    payload = record()
-    kept = [row for row in payload["credentials"] if row.get("credential_id") != credential_id]
-    if len(kept) == len(payload["credentials"]):
-        raise GateRefusal("unknown_credential", 404)
-    payload["credentials"] = kept
-    saved = _save(payload)
-    _rematerialize()
+    """Drop the passkey AND rotate the gate cookie key: a gate cookie is not
+    bound to a credential, so a lost device's session (U4) would otherwise
+    keep access until its 12 hours ran out. Every existing cookie is refused
+    from the next request."""
+    with _record_lock:
+        payload = record()
+        kept = [row for row in payload["credentials"] if row.get("credential_id") != credential_id]
+        if len(kept) == len(payload["credentials"]):
+            raise GateRefusal("unknown_credential", 404)
+        payload["credentials"] = kept
+        saved = _save(payload)
+        rotate_cookie_secret()
+        _rematerialize()
     return saved
 
 
@@ -232,6 +248,12 @@ def _machine_secret(key: str) -> str:
 
 def cookie_secret() -> bytes:
     return bytes.fromhex(_machine_secret(COOKIE_VAULT_KEY))
+
+
+def rotate_cookie_secret() -> None:
+    """A fresh cookie key: every gate cookie minted so far stops verifying."""
+    settings_ops.write_by_key(MACHINE_VAULT_AUDITED_SET_ID, 1, COOKIE_VAULT_KEY,
+                              {"value": secrets.token_hex(32)}, org="machine")
 
 
 def helper_secret() -> str:

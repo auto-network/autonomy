@@ -56,7 +56,10 @@ COOKIE_NAME = "__Host-autonomy-gate"
 SESSION_TTL_S = 12 * 3600
 #: A ceremony (options → authenticator → verify) is a human gesture away.
 PENDING_TTL_S = 600
-PENDING_MAX = 64
+#: The unauthenticated options calls can create pending challenges; the
+#: bound is memory (a few hundred bytes each), so it is generous rather than
+#: a lever for evicting a real visitor's ceremony.
+PENDING_MAX = 4096
 RP_NAME = "Autonomy"
 #: The dashboard route this helper reports and calls back on.
 REGISTERED_PATH = "/api/network/remote-access/gate/registered"
@@ -193,33 +196,24 @@ class GateApp:
         record = self.runtime.record()
         credentials = record.get("credentials") or []
         rd = self._redirect_target(record, request.query_params.get("rd"))
-        return HTMLResponse(_login_page(rd, enrolled=bool(credentials)))
+        return _html(_login_page(rd, enrolled=bool(credentials)))
 
     async def login_options(self, request: Request) -> Response:
         from webauthn import generate_authentication_options, options_to_json
-        from webauthn.helpers.structs import (
-            AuthenticatorTransport, PublicKeyCredentialDescriptor, UserVerificationRequirement,
-        )
+        from webauthn.helpers.structs import UserVerificationRequirement
 
         record = self.runtime.record()
         rp_id, origin = record.get("rp_id"), record.get("origin")
         if not rp_id or not origin:
             return JSONResponse({"ok": False, "error": "gate is not configured"}, status_code=503)
-        allow = []
-        for row in record.get("credentials") or []:
-            try:
-                transports = [AuthenticatorTransport(t) for t in row.get("transports") or []]
-                allow.append(PublicKeyCredentialDescriptor(
-                    id=_b64url_decode(row["credential_id"]), transports=transports or None))
-            except Exception:
-                continue
-        if not allow:
+        if not (record.get("credentials") or []):
             return JSONResponse({"ok": False, "error": (
                 "no passkey is enrolled for this address; open enrollment from the "
                 "dashboard on the machine itself")}, status_code=409)
+        # Discoverable login: the passkeys are resident, so the browser offers
+        # them itself and this public page discloses no credential id.
         options = generate_authentication_options(
-            rp_id=rp_id, allow_credentials=allow,
-            user_verification=UserVerificationRequirement.REQUIRED,
+            rp_id=rp_id, user_verification=UserVerificationRequirement.REQUIRED,
         )
         self._prune(self._pending_login, reserve=1)
         self._pending_login[_b64url(options.challenge)] = {
@@ -281,8 +275,8 @@ class GateApp:
         record = self.runtime.record()
         token = request.query_params.get("token")
         if not enrollment_open(record, token):
-            return HTMLResponse(_closed_page(), status_code=403)
-        return HTMLResponse(_enroll_page(token))
+            return _html(_closed_page(), status_code=403)
+        return _html(_enroll_page(token))
 
     async def enroll_options(self, request: Request) -> Response:
         from webauthn import generate_registration_options, options_to_json
@@ -395,6 +389,14 @@ def build_app(runtime_dir: Path | str, *, post_dashboard=None) -> Starlette:
     return Starlette(routes=gate.routes())
 
 
+def _html(body: str, status_code: int = 200) -> HTMLResponse:
+    """Every page: no referrer leaves it (the enrollment URL carries the
+    token; a same-origin Referer would land in the gateway's log)."""
+    return HTMLResponse(body, status_code=status_code, headers={
+        "Referrer-Policy": "no-referrer", "Cache-Control": "no-store", "X-Frame-Options": "DENY",
+    })
+
+
 async def _json_body(request: Request):
     try:
         return await request.json()
@@ -484,6 +486,7 @@ def _page(title: str, body: str, script: str) -> str:
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<meta name=\"referrer\" content=\"no-referrer\">"
         f"<title>{title}</title><style>{_STYLE}</style></head><body><main>{body}"
         f"<div class=\"err\" id=\"err\"></div></main><script>{_JS_COMMON}{script}</script></body></html>"
     )

@@ -203,3 +203,48 @@ def test_gate_callbacks_take_only_the_helper_secret(gate_env):
         assert passkey_gate.record()["credentials"][0]["sign_count"] == 4
         bad = client.post("/api/network/remote-access/gate/sign-count", json={"sign_count": "x"}, headers=headers)
         assert bad.status_code == 400
+
+
+def test_two_registrations_racing_on_one_token_enroll_exactly_one_passkey(gate_env):
+    """F3: the token is single-use even under two concurrent callbacks. The
+    record lock re-reads inside the critical section, so the loser sees the
+    token spent."""
+    import threading
+
+    minted = passkey_gate.open_enrollment(opened_by="onboarding")
+    outcomes: list = []
+    barrier = threading.Barrier(2)
+
+    def attempt(credential_id):
+        barrier.wait()
+        try:
+            passkey_gate.register_credential(_credential(token=minted["token"], credential_id=credential_id))
+            outcomes.append("ok")
+        except passkey_gate.GateRefusal as exc:
+            outcomes.append(exc.code)
+
+    threads = [threading.Thread(target=attempt, args=(cid,)) for cid in ("Y3JlZC0x", "b3RoZXI")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert sorted(outcomes) == ["enrollment_closed", "ok"], outcomes
+    assert passkey_gate.enrolled_count() == 1
+
+
+def test_revoke_rotates_the_cookie_key_and_rewrites_the_projection(gate_env):
+    """A gate cookie is not bound to a credential: revoking a passkey must
+    end every session minted so far (U4, a lost device)."""
+    minted = passkey_gate.open_enrollment(opened_by="onboarding")
+    passkey_gate.register_credential(_credential(token=minted["token"]))
+    passkey_gate.materialize_helper(HOST, 4181, "172.16.0.9:8081")
+    directory = gate_env.runtime / "dashboard-passkey"
+    before = passkey_gate.cookie_secret()
+    assert bytes.fromhex((directory / "cookie-secret").read_text()) == before
+    old_cookie = helper.mint_cookie(before)
+    passkey_gate.revoke_credential("Y3JlZC0x")
+    after = passkey_gate.cookie_secret()
+    assert after != before
+    assert bytes.fromhex((directory / "cookie-secret").read_text()) == after
+    assert not helper.cookie_valid(after, old_cookie)
+    assert json.loads((directory / "gate.json").read_text())["credentials"] == []

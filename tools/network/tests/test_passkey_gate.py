@@ -207,7 +207,9 @@ def test_login_with_the_enrolled_passkey_sets_the_cookie_and_records_the_sign_co
     page = fresh.get("/oauth2/start", params={"rd": ORIGIN + "/beads"})
     assert "Continue with passkey" in page.text and ORIGIN + "/beads" in page.text
     options = fresh.post("/oauth2/login/options", json={}).json()["options"]
-    assert options["allowCredentials"][0]["id"] == gate._b64url(b"gate-credential-0001")
+    # Discoverable login: the public page names no credential id.
+    assert not options.get("allowCredentials")
+    assert options["userVerification"] == "required"
     verified = fresh.post("/oauth2/login/verify", json={
         "rd": ORIGIN + "/beads", "credential": _assertion(key, options["challenge"], sign_count=7)})
     assert verified.status_code == 200, verified.text
@@ -263,3 +265,29 @@ def test_helper_service_runs_the_dashboards_own_image_and_code_read_only(tmp_pat
     assert service["labels"] == {"autonomy.auth-config": "rev1"}
     bare = gate.render_helper_service(tmp_path, "rev1", image="autonomy-node:local", port=4181)
     assert len(bare["volumes"]) == 1
+
+
+def test_pages_send_no_referrer_and_no_cache(runtime, dashboard):
+    """The enrollment URL carries the token; the post-enroll redirect must
+    not hand it to the gateway's log as a Referer."""
+    client = _client(runtime, dashboard[1])
+    _open_enrollment(runtime)
+    for path, params in (("/oauth2/start", {}), ("/oauth2/enroll", {"token": TOKEN}), ("/oauth2/enroll", {"token": "x"})):
+        page = client.get(path, params=params)
+        assert page.headers["referrer-policy"] == "no-referrer"
+        assert page.headers["cache-control"] == "no-store"
+        assert '<meta name="referrer" content="no-referrer">' in page.text
+
+
+def test_a_rotated_cookie_key_refuses_every_earlier_cookie(runtime, dashboard):
+    """Revoking a passkey rotates the cookie key on the dashboard side; the
+    helper reads the key per request, so a session minted before the
+    rotation is refused at once (a lost phone, U4)."""
+    calls, post = dashboard
+    client = _client(runtime, post)
+    _open_enrollment(runtime)
+    key = ec.generate_private_key(ec.SECP256R1())
+    assert _enroll(client, runtime, key).status_code == 200
+    assert client.get("/oauth2/auth").status_code == 200
+    (runtime / "cookie-secret").write_text("22" * 32)
+    assert client.get("/oauth2/auth").status_code == 401
