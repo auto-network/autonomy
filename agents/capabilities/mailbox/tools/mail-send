@@ -3,9 +3,9 @@
 Send one plain-text email from the mailbox. The exact message is shown to the
 operator for approval; this command blocks until they decide. A decline exits 1:
 confirm intent with the user before retrying."""
-import argparse, json, os, sys
+import argparse, json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from _mail_lib import call, fail
+from _mail_lib import Transient, call, fail
 
 # The approval the operator reviews holds the whole message, so it is bounded;
 # these match MAX_BODY_BYTES / MAX_BODY_LINES in the dashboard's mailbox backend.
@@ -31,11 +31,25 @@ staged = call("POST", "/api/approvals", {"kind": "email_send", "request": {
     "to": a.to, "cc": a.cc, "subject": a.subject, "body": body}})
 rid = staged.get("id") or fail("mail-send: the dashboard did not accept the request")
 print(f"Waiting for operator approval (request {rid})...", file=sys.stderr)
+# The request lives in the dashboard, not in this process: a dashboard restart
+# or error while waiting must not end the wait, or a later approval would send
+# an email this command already reported as failed.
+delay = 5
 while True:
-    r = call("GET", f"/api/approvals/{rid}?wait=55").get("result")
+    try:
+        r = call("GET", f"/api/approvals/{rid}?wait=55", retry=True).get("result")
+    except Transient as e:
+        print(f"mail-send: {e}; still waiting on request {rid}", file=sys.stderr)
+        time.sleep(delay)
+        delay = min(delay * 2, 60)
+        continue
+    delay = 5
     if r is None:
         continue
     if not r.get("approved"):
+        outcome = r.get("outcome") or "declined"
+        if outcome != "declined":
+            fail(f"mail-send: the request was {outcome}; nothing was sent.")
         fail("Operator declined the email. Confirm intent with the user before retrying.")
     ex = r.get("execution") or {}
     if not ex.get("ok"):

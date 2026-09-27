@@ -28,7 +28,11 @@ def fail(message, code=1):
     sys.exit(code)
 
 
-def call(method, path, body=None, timeout=70):
+class Transient(Exception):
+    """The dashboard failed or was unreachable; the request may still be live."""
+
+
+def call(method, path, body=None, timeout=70, retry=False):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(DASH.rstrip("/") + path, data=data, method=method)
     req.add_header("Authorization", "Bearer " + os.environ.get("CROSSTALK_TOKEN", ""))
@@ -42,8 +46,12 @@ def call(method, path, body=None, timeout=70):
             detail = json.loads(e.read() or b"{}").get("error") or e.reason
         except ValueError:
             detail = e.reason
+        if retry and e.code >= 500:
+            raise Transient(f"{detail} (HTTP {e.code})")
         fail(f"mail: {detail} (HTTP {e.code})")
     except (urllib.error.URLError, OSError) as e:
+        if retry:
+            raise Transient(f"dashboard unreachable: {e}")
         fail(f"mail: dashboard unreachable at {DASH}: {e}")
 
 
