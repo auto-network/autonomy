@@ -23,7 +23,7 @@ import types
 import pytest
 
 from tools.dashboard import fleet_enrollment_routes
-from tools.network import fleet_relay_sync, fleet_roster, fleet_sync_scheduler
+from tools.network import fleet_relay_sync, fleet_roster, fleet_runtime, fleet_sync_scheduler
 from tools.network.idkit import KeyPair, Subject, issue_cert
 
 
@@ -342,3 +342,54 @@ class caplog_for:
     def __exit__(self, *exc):
         self._logger.removeHandler(self._handler)
         return False
+
+
+def test_a_fresh_node_arms_the_personal_connector_before_its_binding_exists(
+    tmp_path, monkeypatch,
+):
+    """Windows run 5 and the compose simulation, 2026-09-27: the first
+    activation runs at identity creation, before sign-on maintenance renews
+    the personal auto.network binding, so keying the personal cache off the
+    binding armed nothing and every connector launch exited UNARMED until an
+    org founding re-armed it. The personal org uuid derives from the root."""
+    root = KeyPair.from_private_hex("11" * 32)
+    machine = KeyPair.from_private_hex("22" * 32)
+    machine_id = "33" * 32
+    entry = fleet_roster.enroll(root, machine_id=machine_id, machine_pub=machine.public_hex)
+    _wire_runtime(tmp_path, monkeypatch, machine_id=machine_id, root=root,
+                  roster_entries=(entry,), expected_entry=entry)
+    monkeypatch.setattr(fleet_enrollment_routes, "_reachability_binding", lambda: None)
+    monkeypatch.setattr(fleet_enrollment_routes, "serving_org_targets", lambda: [])
+    monkeypatch.setattr(
+        fleet_enrollment_routes.fleet_relay_sync, "publish_connector_runtime",
+        lambda payload, org=None: None,
+    )
+    payload = _runtime_payload(machine_id, machine)
+    fleet_enrollment_routes._activate_runtime(payload, publish_connector=True)
+    expected = fleet_runtime.personal_org_uuid(root.public_hex)
+    assert (tmp_path / f"fleet-connector-runtime.{expected}.json").exists()
+    assert fleet_relay_sync.FleetRuntimeWarmCache(expected).load() == payload
+
+
+def test_reachability_material_without_a_binding_activates_sync_only(
+    tmp_path, monkeypatch, caplog,
+):
+    """The sign-on mints reachability material under the uuid it registers in
+    the same submission; when that registration did not land, the activation
+    installs the sync-only credential and says so instead of refusing."""
+    root = KeyPair.from_private_hex("11" * 32)
+    machine = KeyPair.from_private_hex("22" * 32)
+    machine_id = "33" * 32
+    entry = fleet_roster.enroll(root, machine_id=machine_id, machine_pub=machine.public_hex)
+    _wire_runtime(tmp_path, monkeypatch, machine_id=machine_id, root=root,
+                  roster_entries=(entry,), expected_entry=entry)
+    monkeypatch.setattr(fleet_enrollment_routes, "_reachability_binding", lambda: None)
+    monkeypatch.setattr(fleet_enrollment_routes, "serving_org_targets", lambda: [])
+    payload = _runtime_payload(machine_id, machine)
+    payload["machine_private_seed"] = machine.private_hex
+    payload["reachability_cert"] = {"never": "verified"}
+    with caplog.at_level(logging.WARNING, logger=fleet_enrollment_routes.__name__):
+        credential = fleet_enrollment_routes._activate_runtime(payload, publish_connector=False)
+    assert credential.machine_id == machine_id
+    assert credential.reachability_cert is None
+    assert any("activating sync-only" in r.getMessage() for r in caplog.records)

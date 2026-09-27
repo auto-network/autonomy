@@ -78,16 +78,28 @@ export async function prepareSignon(rootSeed, encrypted, signon) {
   posts.push(...await signon._internals.prepareRootMaintenance(rootSeed,
     organizations, fleetError || personalServeError ? null : runtime, inputs.personal_serve));
   if (!fleetError && runtime.enabled) {
-    // First completion registers this UUID in the preceding handoff. Reuse
-    // master's single runtime mint; ordinary sign-ins retain their binding.
-    const activation = inputs.completion
-      ? { ...runtime, org_uuid: runtime.personal_org_uuid } : runtime;
-    posts.push(await fleetRuntimePost(rootSeed, activation));
+    posts.push(await fleetRuntimePost(rootSeed,
+      runtimeActivation(runtime, { completion: inputs.completion, personalServeError })));
   }
   return { vault, posts, failures,
     ready: vault ? organizations.filter(org => !org.serve_cert.required
       && !failures.some(f => f.org === org.slug)).map(org => org.slug) : [],
     fleetEnabled: !fleetError && Boolean(inputs.completion || inputs.runtime.enabled) };
+}
+
+// The runtime to activate. The mint delivers the machine key and the
+// reachability cert only under a registered personal org uuid; without them
+// the serving connector exits UNARMED at every launch (compose simulation and
+// Windows run 5, 2026-09-27). A first completion registers the uuid in the
+// preceding handoff, and a fresh identity's first sign-on registers it in THIS
+// submission (prepareRootMaintenance posts the binding before the runtime),
+// so both activate under it. An ordinary sign-in retains its binding and
+// activates as it is; a sign-on whose personal serve step already failed does
+// not claim a registration it will not make.
+export function runtimeActivation(runtime, { completion = null, personalServeError = null } = {}) {
+  const registersBinding = Boolean(runtime.personal_org_uuid) && !runtime.org_uuid && !personalServeError;
+  return completion || registersBinding
+    ? { ...runtime, org_uuid: runtime.personal_org_uuid } : runtime;
 }
 
 export async function submitSignon(prepared, fetchImpl = fetch) {

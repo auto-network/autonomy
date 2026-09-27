@@ -2526,16 +2526,36 @@ def main() -> None:
         # (graph://1418ca10-588 D2). "scope is empty" alone sent an operator
         # to unlock a vault that was already warm (Home, 2026-09-17).
         try:
-            looked_for = str(FleetRuntimeWarmCache(args.org).path)
+            cache = FleetRuntimeWarmCache(args.org)
+            looked_for = str(cache.path)
+            present = cache.exists()
         except Exception:
             looked_for = f"<keycache>/fleet-connector-runtime.{args.org}.json"
+            present = False
+        # Two different faults share this exit, and the earlier text blamed
+        # the missing file for both: the compose simulation of 2026-09-27
+        # had the file, armed by the sign-on, carrying no machine key because
+        # the browser mints that key only under a registered personal org
+        # uuid. Say which one it is.
+        if present:
+            state = (
+                f"the warm runtime cache file {looked_for} exists but carries no "
+                "machine key: the sign-on that armed it minted a sync-only "
+                "credential (no machine_private_seed), which happens when the "
+                "runtime is activated without the personal org uuid. A fresh "
+                "sign-on with the personal org registered re-mints it"
+            )
+        else:
+            state = (
+                f"the warm runtime cache file {looked_for} is absent. The "
+                "dashboard has not armed this scope: an unlock or a runtime "
+                "re-arm writes that file"
+            )
         parser.error(
             f"UNARMED: no runtime machine key for scope "
-            f"{args.graph_org or 'personal'} ({args.org}); the warm runtime "
-            f"cache file {looked_for} is absent. The dashboard has not armed "
-            "this scope: an unlock or a runtime re-arm writes that file, and "
-            "the supervisor relaunches this connector every watchdog interval "
-            "until it exists. Not starting."
+            f"{args.graph_org or 'personal'} ({args.org}); {state}, and the "
+            "supervisor relaunches this connector every watchdog interval "
+            "until it is there. Not starting."
         )
 
     from tools.network.relaykit.connector import Publisher

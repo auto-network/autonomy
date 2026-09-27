@@ -654,7 +654,12 @@ def _arm_connector_caches(
     if arm_personal and personal_org_uuid:
         personal = connector_cache_payload(complete, org_uuid=None)
         try:
-            fleet_relay_sync.FleetRuntimeWarmCache(personal_org_uuid).store(personal)
+            cache = fleet_relay_sync.FleetRuntimeWarmCache(personal_org_uuid)
+            cache.store(personal)
+            # WARNING like the connector's own "re-armed from the warm cache":
+            # the file is what the next launch reads, and a node whose log
+            # shows connectors exiting UNARMED must show whether this ran.
+            logger.warning("personal serving connector cache armed at %s", cache.path)
         except Exception:
             logger.warning(
                 "could not arm the warm cache for the personal serving connector "
@@ -798,6 +803,22 @@ def _activate_runtime(
     if isinstance(payload, dict) and "org_sync_certs" in payload:
         payload = dict(payload)
         org_sync_certs = payload.pop("org_sync_certs") or {}
+    if org_uuid is None and isinstance(payload, dict) and (
+        "reachability_cert" in payload or "machine_private_seed" in payload
+    ):
+        # The sign-on mints reachability material under the personal org
+        # uuid it registers in the same submission (signon-phases.js); when
+        # that registration did not land (registry unreachable), the material
+        # cannot be verified against a binding. Activate sync-only rather
+        # than refuse the whole credential: the binding step reports its own
+        # failure, and the next sign-on re-mints once the org is registered.
+        payload = {k: v for k, v in payload.items()
+                   if k not in ("reachability_cert", "machine_private_seed")}
+        logging.getLogger(__name__).warning(
+            "activate_local_runtime: reachability credential delivered before the "
+            "personal org binding is registered; activating sync-only (the serving "
+            "connector stays UNARMED until a sign-on with the binding registered)",
+        )
     credential = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
         payload,
         personal_root_pub=root_pub,
@@ -921,8 +942,18 @@ def _activate_runtime(
     # complete payload cached above, written BEFORE any socket publish
     # (graph://1418ca10-588 D1, D4). Org caches arm regardless of
     # publish_connector; the personal one only where serving is permitted.
+    # The personal connector's cache is keyed by the personal org uuid, which
+    # is derived from the personal root and never needs the binding row: on a
+    # fresh node the first activation runs before the personal binding exists
+    # (sign-on maintenance renews it a moment later), and keying off the
+    # binding left the personal connector UNARMED at every launch until an
+    # org founding re-armed it (Windows run 5 and the compose simulation,
+    # 2026-09-27: no control listener for eight minutes behind a live
+    # publication).
     _arm_connector_caches(
-        cached, personal_org_uuid=org_uuid, arm_personal=bool(publish_connector),
+        cached,
+        personal_org_uuid=org_uuid or fleet_runtime.personal_org_uuid(root_pub),
+        arm_personal=bool(publish_connector),
     )
     if publish_connector:
         # Serve the fleet connector on the PERSONAL tunnel (the "personal"
