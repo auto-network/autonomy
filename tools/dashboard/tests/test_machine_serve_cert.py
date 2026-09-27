@@ -173,12 +173,12 @@ def _root_signed_personal_credential(root: KeyPair, org_uuid: str, subject_pub: 
     return delegate, cert, viewer
 
 
-@pytest.mark.parametrize("names", ["root", "persona"])
-def test_a_personal_delegate_naming_the_root_is_ok_but_flagged_for_remint(env, monkeypatch, names):
-    """auto-8sdrr: personal Services are reserved under the ledger persona, so
-    a personal delegate whose subject is still the root stays serving (fleet
-    sync must not stop) but reports remint_required; one naming the persona
-    does not."""
+@pytest.mark.parametrize("names", ["root", "other"])
+def test_a_personal_delegate_not_naming_the_root_is_ok_but_flagged_for_remint(env, monkeypatch, names):
+    """auto-8sdrr (decision 2026-09-27): personal Services are reserved under
+    the personal root, so a delegate naming the root is the correct one; a
+    delegate naming anything else stays serving (fleet sync must not stop)
+    but reports remint_required."""
     from tools.network import fleet_runtime
 
     root, persona = KeyPair.generate(), KeyPair.generate().public_hex
@@ -191,7 +191,7 @@ def test_a_personal_delegate_naming_the_root_is_ok_but_flagged_for_remint(env, m
          "binding_expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 86400))},
         org="personal",
     )
-    subject = root.public_hex if names == "root" else persona
+    subject = root.public_hex if names == "root" else persona     # "persona" here is just another key
     delegate, cert, viewer = _root_signed_personal_credential(root, org_uuid, subject)
     vault_kit.store_key(org_uuid, delegate.private_hex)
     vault_kit.store_row(org_uuid, cert=cert.to_json().decode("ascii"),
@@ -199,13 +199,13 @@ def test_a_personal_delegate_naming_the_root_is_ok_but_flagged_for_remint(env, m
                         child_pub=delegate.public_hex, not_after=cert.not_after,
                         root_pub=root.public_hex)
     vault_kit.cold()
-    monkeypatch.setattr(lss, "personal_persona_pub", lambda: persona)
+    monkeypatch.setattr(lss, "personal_persona_pub", lambda: root.public_hex)
 
     state = lss.serve_cert_state(None)
     assert state["status"] == "ok", state
-    if names == "root":
+    if names == "other":
         assert state["remint_required"] is True
-        assert "personal persona" in state["remint_reason"]
+        assert "personal root" in state["remint_reason"]
     else:
         assert "remint_required" not in state
 
@@ -214,26 +214,17 @@ def test_a_personal_delegate_naming_the_root_is_ok_but_flagged_for_remint(env, m
     assert "remint_required" not in lss.serve_cert_state(None)
 
 
-def test_personal_persona_lookup_never_creates_the_database_and_caches_the_genesis(env, monkeypatch, tmp_path):
-    """auto-8sdrr review: the genesis is immutable, read once, never folded;
-    and a fresh identity with no personal.db must not gain an empty one."""
-    import tools.network.ledger as ledger
+def test_personal_persona_is_the_root_and_none_without_an_identity(monkeypatch):
+    """The personal scope's persona is the root itself: deterministic across
+    the fleet, no ledger, no ceremony (decision 2026-09-27)."""
+    from tools.network import fleet_tunnel_server
 
-    empty = tmp_path / "no-identity-yet"
-    empty.mkdir()
-    path = empty / "personal.db"
-    monkeypatch.setattr(ledger, "org_ledger_db_path", lambda slug, root=None: path)
-    assert not path.exists()
-    lss._personal_genesis_cache.clear()
-    assert lss._personal_genesis_id() is None
-    assert not path.exists(), "the lookup must not create personal.db"
+    monkeypatch.setattr(fleet_tunnel_server, "_personal_root_pub", lambda: "ab" * 32)
+    assert lss.personal_persona_pub() == "ab" * 32
+    monkeypatch.setattr(fleet_tunnel_server, "_personal_root_pub", lambda: None)
+    assert lss.personal_persona_pub() is None
 
-    lss._personal_genesis_cache[str(path)] = "ab" * 32
-    calls = []
-    monkeypatch.setattr(lss, "_log", lss._log)
-    from tools.graph import org_ops
-    monkeypatch.setattr(org_ops, "persona_pub_for_org",
-                        lambda genesis: calls.append(genesis) or "cd" * 32)
-    assert lss.personal_persona_pub() == "cd" * 32
-    assert calls == ["ab" * 32]          # served from the cache, no ledger open
-    lss._personal_genesis_cache.clear()
+    def boom():
+        raise RuntimeError("store unreachable")
+    monkeypatch.setattr(fleet_tunnel_server, "_personal_root_pub", boom)
+    assert lss.personal_persona_pub() is None

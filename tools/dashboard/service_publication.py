@@ -158,6 +158,27 @@ def certificate_identity_for_payload(payload: dict) -> str | None:
 
 
 def _persona_for_org(org: str) -> tuple[str, str]:
+    """(persona_pub, display_name) of this node's publisher in *org*.
+
+    The PERSONAL scope publishes under the personal root itself (decision
+    2026-09-27, auto-4urxx/auto-8sdrr): every machine of one identity then
+    derives the same permanent label suffix with no ceremony, whereas a
+    per-machine personal ledger genesis would fork the label across the
+    fleet. The personal registry binding already publishes the root pub, so
+    nothing is disclosed that was not. Organizations keep their ledger-derived
+    personas, which is what keeps an operator's organizations unlinkable.
+    """
+    if org == "personal":
+        from tools.graph import org_ops as _org_ops
+
+        member = _org_ops._personal_identity_member()
+        payload = getattr(member, "payload", None) or {}
+        root_pub = payload.get("root_pub")
+        if not isinstance(root_pub, str) or not re.fullmatch(r"[0-9a-f]{64}", root_pub):
+            raise ServicePublicationError("persona_not_configured", 409)
+        display_name = payload.get("display_name")
+        return root_pub, display_name if isinstance(display_name, str) else ""
+
     from tools.graph.schemas.org_member_profile import MEMBER_PROFILE_SET_ID
     from tools.network.ledger import LedgerStore, org_ledger_db_path
 

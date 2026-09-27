@@ -587,10 +587,10 @@ var signRegistryRequestCore;
     var seed = opts.personalRootSeed;
     var orgUuid = opts.orgUuid;
     var rootPub = opts.rootPub;
-    // The subject the serving delegate names: the personal ledger's persona,
-    // which is what personal Services are reserved under, so the registry lets
-    // this tunnel register their hosts (auto-8sdrr). The root stands in until
-    // the ledger has a persona (a brand-new identity's first sign-on).
+    // The subject the serving delegate names: the personal scope's persona,
+    // which is the personal root itself (decision 2026-09-27: deterministic
+    // across every machine of one identity), so the registry lets this tunnel
+    // register personal Services' hosts (auto-8sdrr).
     var personaPub = opts.personaPub || rootPub;
     var serve = opts.serve !== false;   // a joiner registers but does not serve
     if (!(seed instanceof Uint8Array) || seed.length !== 32) {
@@ -868,9 +868,9 @@ var signRegistryRequestCore;
         });
         posts.push({ step: 'binding', url: '/api/network/register', body: { org: null, envelope: registration } });
         if (runtime.serves && (!personalServe || personalServe.status !== 'ok' || personalServe.remint_required)) {
-          // Subject = the personal ledger's persona (auto-8sdrr); the root only
-          // until the ledger has one. remint_required is the dashboard saying
-          // the stored delegate still names the root.
+          // Subject = the personal scope's persona, the root itself (auto-8sdrr);
+          // remint_required is the dashboard saying the stored delegate names
+          // something else.
           var credential = await _mintServeCredential(key, runtime.personal_org_uuid,
             runtime.personal_persona_pub || runtime.personal_root_pub);
           posts.push({ step: 'serve-cert', url: '/api/network/serve-cert', body: Object.assign({ org: null }, credential.body) });

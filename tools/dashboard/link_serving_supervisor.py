@@ -436,57 +436,31 @@ fresh serving credential iff the status is anything but ``ok``.
     state = _ok_state(row, org_uuid, not_after, viewer_cert=row.get("viewer_cert"))
     if state["status"] == "ok" and (org is None or org == PERSONAL_SCOPE):
         # auto-8sdrr: personal Services are reserved under the personal
-        # ledger's persona and the registry binds their labels to the tunnel's
-        # subject. A delegate that still names the root keeps fleet sync alive
-        # (so it stays "ok" and the connector keeps running) but cannot
-        # register a personal host; the next sign-on re-mints it for the
-        # persona, exactly as the checkpoint scope was re-minted.
+        # scope's persona (the root) and the registry binds their labels to
+        # the tunnel's subject. A delegate naming anything else keeps fleet
+        # sync alive (so it stays "ok" and the connector keeps running) but
+        # cannot register a personal host; the next sign-on re-mints it.
         persona = personal_persona_pub()
         if persona and cert.subject.id != persona:
             state["remint_required"] = True
             state["remint_reason"] = (
-                "the personal serving delegate names the root; personal "
-                "Services need it to name the personal persona")
+                "the personal serving delegate does not name the personal "
+                "root; personal Services need it to")
     return state
 
 
-#: The personal ledger's genesis, keyed by database path: immutable once set,
-#: so it is read from the ledger once and never folded (serve_cert_state runs
-#: on every status poll).
-_personal_genesis_cache: dict[str, str] = {}
-
-
-def _personal_genesis_id() -> str | None:
-    from tools.network.ledger import LedgerStore, org_ledger_db_path
-
-    path = org_ledger_db_path(PERSONAL_SCOPE)
-    cached = _personal_genesis_cache.get(str(path))
-    if cached:
-        return cached
-    if not path.exists():
-        # LedgerStore connects (and so creates) the file; a fresh identity
-        # with no personal database yet must not gain an empty one here.
-        return None
-    with LedgerStore(path) as store:
-        genesis_id = store.ledger.genesis_id
-    if genesis_id:
-        _personal_genesis_cache[str(path)] = genesis_id
-    return genesis_id or None
-
-
 def personal_persona_pub() -> str | None:
-    """The persona the personal ledger derives for this identity, or None
-    until that ledger has a genesis. Never raises."""
+    """The persona the personal scope publishes under: the personal ROOT pub
+    (decision 2026-09-27, auto-4urxx/auto-8sdrr: deterministic across every
+    machine of one identity, no ledger, no ceremony), or None before an
+    identity exists. Never raises."""
     try:
-        from tools.graph import org_ops
+        from tools.network import fleet_tunnel_server
 
-        genesis_id = _personal_genesis_id()
-        if not genesis_id:
-            return None
-        persona = org_ops.persona_pub_for_org(genesis_id)
-        return persona if isinstance(persona, str) and persona else None
+        root_pub = fleet_tunnel_server._personal_root_pub()
+        return root_pub if isinstance(root_pub, str) and root_pub else None
     except Exception:
-        _log.debug("personal persona unavailable", exc_info=True)
+        _log.debug("personal root unavailable", exc_info=True)
         return None
 
 

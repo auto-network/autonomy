@@ -567,3 +567,20 @@ def test_corrupt_ledger_is_unavailable_not_unfounded(real_persona_api):
         503,
         "organization_ledger_unavailable",
     )
+
+
+def test_the_personal_scope_publishes_under_the_personal_root(monkeypatch):
+    """No ledger, no ceremony: the personal persona is the root pub and the
+    display name is the identity's (decision 2026-09-27, auto-4urxx)."""
+    from types import SimpleNamespace
+
+    from tools.dashboard import service_publication as service
+    from tools.graph import org_ops
+
+    monkeypatch.setattr(org_ops, "_personal_identity_member",
+                        lambda: SimpleNamespace(payload={"root_pub": "cd" * 32, "display_name": "Jeremy"}))
+    assert service._persona_for_org("personal") == ("cd" * 32, "Jeremy")
+    monkeypatch.setattr(org_ops, "_personal_identity_member", lambda: None)
+    with pytest.raises(service.ServicePublicationError) as refused:
+        service._persona_for_org("personal")
+    assert refused.value.code == "persona_not_configured"
