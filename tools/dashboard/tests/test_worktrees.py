@@ -1251,7 +1251,8 @@ class TestWorktreePage:
         assert "approval.needsPassword = !approval.allowSessionApprovals;" not in js
         assert "needsPassword: false," in js
         assert "await import('../ceremony/open-root.js')" in js
-        assert "session.signOnWithRootSeed(opened.seed, opened.rootPub, { org: req.orgSlug })" in js
+        assert "session.signOnWithRootSeed(opened.seed, opened.rootPub, {\n" in js
+        assert "org: req.orgSlug, requireServingRuntime: true," in js
         assert "(isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl }" in js
         assert "req.gate2 || req.op === 'revoke'" in js
         assert 'data-testid="approval-revoke-password"' in template
@@ -1307,7 +1308,8 @@ class TestWorktreePage:
         # global toolbar (#app-topbar-slot) — the hard-reload anchor is gone.
         assert '@click="refresh(true)"' in template
         assert 'x-teleport="#app-topbar-slot"' in template
-        assert 'data-testid="worktrees-org-select"' in template
+        # The org select is the shared x-org-picker, carrying the test id.
+        assert "testId: 'worktrees-org-select'" in template
         assert template.lstrip().startswith('<div data-testid="worktrees-fragment-root">')
         assert '<style>' in template
         assert '<div x-data="worktreesPage()"' in template
@@ -1440,7 +1442,7 @@ class TestWorktreePage:
         # integrated diff into selectedCommit with prMode: true. Stack
         # support (auto-nrqbs) added an explicit ``pr`` arg so per-PR
         # navigator clicks can scope ``?review_id=`` to the right row.
-        assert "openReviewPr(row, pr)" in js
+        assert "openReviewPr(row, pr, options)" in js
         assert "'/pr-diff'" in js
         assert "prMode: true" in js
         assert "isPrReview()" in js
@@ -1624,7 +1626,7 @@ class TestWorktreePage:
         assert "rowPrChecks(row, pr)" in js
         assert "reviewCommitChecks(_commit)" in js  # Returns [] until per-commit data lands.
         assert "checkIconClass(status) {" in js
-        assert "openReviewPr(row, pr) {" in js
+        assert "openReviewPr(row, pr, options) {" in js
         assert "openReviewCommit(row, idx) {" in js
         assert "openReviewDefault(row) {" in js
         # Disc colors lifted from the design — emerald pass, amber running,
@@ -1688,8 +1690,10 @@ class TestWorktreePage:
 
         assert '@click="openReviewDefault(item.row)"' in template
         assert "async openReviewDefault(row) {" in js
-        assert "const withPrs = matches.find((row) => this.rowPrs(row).length > 0);" in js
-        assert "await this.openReviewDefault(withPrs);" in js
+        # The session-viewer overlay pages a row's items PR-first
+        # (auto-at5hz); the ?session= deeplink picks a row with PRs first.
+        assert "items.push({ kind: 'pr', row, pr: prs[0] });" in js
+        assert "await this.openReviewPr(item.row, item.pr, { preserveSessionContext: true });" in js
         assert "const withPrs = matches.find((r) => this.rowPrs(r).length > 0);" in js
         assert "await this.openReviewDefault(withPrs);" in js
 

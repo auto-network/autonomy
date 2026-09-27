@@ -56,11 +56,17 @@ signing) predate this table and were listed here in prose, with no version,
 source or checksum recorded, until they were added above.
 
 ## jsQR 1.4.0
+File: `jsQR-1.4.0.min.js`. **The sha256 below does not match this file**
+(actual 32214c74…9fcce, a jsDelivr-minified build); re-verification tracked
+in auto-619we.
 Pure-JS QR decoder for the recovery-code "scan" verify path. MIT (Cosmo Wolfe),
 version-pinned, sha256 bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859.
 Lazy-loaded only when the camera scanner opens.
 
 ## qrcode-generator 1.4.4
+File: `qrcode-generator-1.4.4.min.js`. **The sha256 below does not match this
+file** (actual bb2365e4…d1ef2, a jsDelivr-minified build); re-verification
+tracked in auto-619we.
 Compact pure-JS QR encoder (Kazuhiko Arase) for rendering the recovery code as
 a printable SVG QR. MIT, version-pinned, sha256
 18ae399f81182bc9de916e9c77b195df20cc58d6f2d55a62b085a299f1bf1780.

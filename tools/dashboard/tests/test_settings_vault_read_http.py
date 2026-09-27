@@ -22,6 +22,8 @@ import pytest
 import uvicorn
 
 from tools.graph import ops, schemas, settings_ops
+
+
 from tools.graph.client import HttpClient
 from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS
 from tools.graph.tests.vault_read_harness import VaultWorld, clear_seams
@@ -249,8 +251,41 @@ def _graph_set_read(set_id: str, key: str, base_url: str, monkeypatch, capsys):
     from tools.graph import set_cmd
 
     monkeypatch.setenv("GRAPH_API", base_url)
-    set_cmd.cmd_set_read(_Args(id_parts=[set_id, key], org=ORG))
-    return capsys.readouterr()
+    capsys.readouterr()  # the server's startup output is not the CLI's
+    code = 0
+    with _no_dashboard_stdout_logging():
+        try:
+            set_cmd.cmd_set_read(_Args(id_parts=[set_id, key], org=ORG))
+        except SystemExit as exc:
+            code = exc.code
+    # Read before the server's shutdown logging lands in the capture.
+    return capsys.readouterr(), code
+
+
+@contextmanager
+def _no_dashboard_stdout_logging():
+    """The in-process dashboard's log channels write to the current stdout,
+    which capsys also captures as the CLI's output (auto-pg8d2). The `graph`
+    CLI never installs them; detach the dashboard's tagged handlers from
+    every logger for the call and restore them after."""
+    import logging
+
+    from tools.dashboard import log_channels
+    loggers = [logging.getLogger()] + [
+        lg for lg in logging.Logger.manager.loggerDict.values()
+        if isinstance(lg, logging.Logger)]
+    detached = []
+    for lg in loggers:
+        for handler in list(lg.handlers):
+            if getattr(handler, log_channels._TAG, None) is not None:
+                lg.removeHandler(handler)
+                detached.append((lg, handler))
+    try:
+        yield
+    finally:
+        for lg, handler in detached:
+            if handler not in lg.handlers:
+                lg.addHandler(handler)
 
 
 def test_graph_set_read_prints_the_secret_through_the_dashboard(
@@ -260,7 +295,8 @@ def test_graph_set_read_prints_the_secret_through_the_dashboard(
     ops.add_setting(VAULT_SET, 1, "default", payload, org=ORG)
 
     with _live_server(test_app) as base_url:
-        out = _graph_set_read(VAULT_SET, "default", base_url, monkeypatch, capsys)
+        out, code = _graph_set_read(VAULT_SET, "default", base_url, monkeypatch, capsys)
+    assert code == 0
     assert json.loads(out.out) == payload
 
 
@@ -273,10 +309,8 @@ def test_graph_set_read_refuses_rather_than_printing_a_null_value(
     settings_ops.set_vault_key_holder(None)
 
     with _live_server(test_app) as base_url:
-        with pytest.raises(SystemExit) as exit_info:
-            _graph_set_read(VAULT_SET, "default", base_url, monkeypatch, capsys)
-    out = capsys.readouterr()
-    assert exit_info.value.code == 1
+        out, code = _graph_set_read(VAULT_SET, "default", base_url, monkeypatch, capsys)
+    assert code == 1
     assert out.out.strip() == ""
     assert settings_ops.VAULT_NO_KEY_HOLDER in out.err
     assert SECRET not in out.err

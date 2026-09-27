@@ -8,6 +8,7 @@ and the pymysql beads DAO on an unreachable Dolt server.
 from __future__ import annotations
 
 import asyncio
+import types
 
 import pytest
 
@@ -50,7 +51,9 @@ def test_api_beads_list_empty_when_bd_missing(monkeypatch):
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
 
     class _Req:
-        pass
+        # The beads routes read ?org= and the middleware-approved org scope.
+        query_params: dict = {}
+        state = types.SimpleNamespace()
 
     for endpoint in (server.api_beads_list, server.api_beads_ready):
         response = asyncio.run(endpoint(_Req()))
@@ -82,6 +85,7 @@ def test_beads_dao_degrades_to_empty_when_dolt_unreachable(_dead_dolt, caplog):
         assert dao_beads.get_bead_counts() == {}
         assert dao_beads.get_dispatch_beads() == {
             "approved_waiting": [],
+            "approved_waiting_total": 0,
             "approved_blocked": [],
         }
     # Logged once, not once per call.

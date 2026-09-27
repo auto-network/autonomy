@@ -23,7 +23,10 @@ CDN_HOSTS = re.compile(
 SCAN_ROOTS = ("templates", "static", "plugins", "server.py")
 
 # Documentation of the vendoring itself may name the source URLs.
-ALLOWED = {"static/vendor/VENDOR.md"}
+# jsPDF 2.5.2 carries a cdnjs pdfobject URL used only by its
+# output('pdfobjectnewwindow') mode; no dashboard code uses that mode, which
+# test_jspdf_cdn_output_modes_are_never_used pins, so the string is dormant.
+ALLOWED = {"static/vendor/VENDOR.md", "static/vendor/jspdf-2.5.2.min.js"}
 
 
 def _scan_files():
@@ -81,3 +84,18 @@ def test_csp_has_no_third_party_origins():
                 assert source.startswith("'") or source in ("data:",), (
                     f"third-party origin {source!r} in CSP directive {directive!r}"
                 )
+
+
+def test_jspdf_cdn_output_modes_are_never_used():
+    """The one CDN URL allowed in a vendored file is jsPDF's pdfobject
+    loader, reached only through output('pdfobjectnewwindow' / 'pdfjsnewwindow').
+    No dashboard surface may call those modes."""
+    offenders = []
+    for f in _scan_files():
+        rel = f.relative_to(DASHBOARD).as_posix()
+        if rel.startswith("static/vendor/") or rel == "tests" or "/tests/" in rel:
+            continue
+        text = f.read_text(errors="replace")
+        if re.search(r"pdfobjectnewwindow|pdfjsnewwindow", text):
+            offenders.append(rel)
+    assert not offenders, f"jsPDF CDN-loading output modes used in: {offenders}"
