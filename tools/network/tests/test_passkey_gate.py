@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
 
+from tools.network import clock
 from tools.network import passkey_gate as gate
 
 RP_ID = "dashboard.alice-25dacd12af16373e566c.serve.auto.network"
@@ -129,8 +130,8 @@ def test_auth_refuses_without_a_cookie_and_the_login_page_says_nothing_is_enroll
 def test_cookie_is_bound_to_the_key_and_its_expiry(runtime):
     key = bytes.fromhex("11" * 32)
     value = gate.mint_cookie(key, now=1000.0)
-    assert gate.cookie_valid(key, value, now=1000.0 + gate.SESSION_TTL_S - 1)
-    assert not gate.cookie_valid(key, value, now=1000.0 + gate.SESSION_TTL_S)
+    assert gate.cookie_valid(key, value, now=1000.0 + clock.PASSKEY_GATE_SESSION_TTL_S - 1)
+    assert not gate.cookie_valid(key, value, now=1000.0 + clock.PASSKEY_GATE_SESSION_TTL_S)
     assert not gate.cookie_valid(bytes.fromhex("22" * 32), value, now=1000.0)
     expiry, nonce, signature = value.split(".")
     assert not gate.cookie_valid(key, f"{int(expiry) + 1}.{nonce}.{signature}", now=1000.0)

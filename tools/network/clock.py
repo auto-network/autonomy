@@ -198,6 +198,17 @@ SESSION_TTL = 24 * 3600
 ANON_SESSION_TTL = 3600
 CHALLENGE_TTL = 60
 
+#: The dashboard's passkey gate (tools/network/passkey_gate.py), seconds.
+#: The gate cookie's lifetime: 12 h absolute, no refresh (graph://c9d72ea4-feb
+#: O5; a phone re-authenticating every 15 minutes defeats the purpose, and a
+#: passkey re-prompt is cheap). Revoking a passkey rotates the cookie key, so
+#: this bounds exposure of a session that was never revoked, nothing else.
+PASSKEY_GATE_SESSION_TTL_S = 12 * 3600
+#: How long a pending WebAuthn challenge (login or enrollment options) stays
+#: answerable, seconds: a ceremony is a human gesture away, and a stale
+#: challenge is refused rather than replayed.
+PASSKEY_GATE_CHALLENGE_TTL_S = 600
+
 #: TURN issuance quota window, seconds — an ELAPSED-TIME quota, which by the
 #: taxonomy above belongs on the monotonic clock; the issuer currently ages
 #: it against the wall clock it also stamps expires_at with (auto-wsnvj).

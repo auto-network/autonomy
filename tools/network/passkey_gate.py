@@ -40,7 +40,6 @@ import hashlib
 import hmac
 import json
 import secrets
-import time
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -49,13 +48,13 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
+from tools.network import clock
+
 HELPER_ID = "dashboard-passkey"
 COOKIE_NAME = "__Host-autonomy-gate"
-#: Gate session lifetime (graph://c9d72ea4-feb O5: 12 h absolute; a passkey
-#: re-prompt is cheap and a phone re-authenticating every 15 minutes is not).
-SESSION_TTL_S = 12 * 3600
-#: A ceremony (options → authenticator → verify) is a human gesture away.
-PENDING_TTL_S = 600
+#: The two refusal windows live in tools/network/clock.py with every other
+#: gate: clock.PASSKEY_GATE_SESSION_TTL_S (the cookie) and
+#: clock.PASSKEY_GATE_CHALLENGE_TTL_S (a pending WebAuthn challenge).
 #: The unauthenticated options calls can create pending challenges; the
 #: bound is memory (a few hundred bytes each), so it is generous rather than
 #: a lever for evicting a real visitor's ceremony.
@@ -79,7 +78,7 @@ def _b64url_decode(value: str) -> bytes:
 
 
 def _now() -> float:
-    return time.time()
+    return clock.now_s()
 
 
 class GateRuntime:
@@ -104,7 +103,8 @@ class GateRuntime:
 
 # ── gate cookie ─────────────────────────────────────────────────────────
 
-def mint_cookie(key: bytes, *, now: float | None = None, ttl: float = SESSION_TTL_S) -> str:
+def mint_cookie(key: bytes, *, now: float | None = None,
+                ttl: float = clock.PASSKEY_GATE_SESSION_TTL_S) -> str:
     expiry = int((now if now is not None else _now()) + ttl)
     nonce = secrets.token_hex(16)
     body = f"{expiry}.{nonce}"
@@ -125,7 +125,7 @@ def cookie_valid(key: bytes, value: str | None, *, now: float | None = None) -> 
 
 def _set_cookie(response: Response, key: bytes) -> None:
     response.set_cookie(
-        COOKIE_NAME, mint_cookie(key), max_age=SESSION_TTL_S, path="/",
+        COOKIE_NAME, mint_cookie(key), max_age=clock.PASSKEY_GATE_SESSION_TTL_S, path="/",
         secure=True, httponly=True, samesite="lax",
     )
 
@@ -217,7 +217,7 @@ class GateApp:
         )
         self._prune(self._pending_login, reserve=1)
         self._pending_login[_b64url(options.challenge)] = {
-            "rp_id": rp_id, "origin": origin, "expires": _now() + PENDING_TTL_S,
+            "rp_id": rp_id, "origin": origin, "expires": _now() + clock.PASSKEY_GATE_CHALLENGE_TTL_S,
         }
         return JSONResponse({"ok": True, "options": json.loads(options_to_json(options))})
 
@@ -312,7 +312,7 @@ class GateApp:
         )
         self._prune(self._pending_enroll, reserve=1)
         self._pending_enroll[_b64url(options.challenge)] = {
-            "rp_id": rp_id, "origin": origin, "expires": _now() + PENDING_TTL_S,
+            "rp_id": rp_id, "origin": origin, "expires": _now() + clock.PASSKEY_GATE_CHALLENGE_TTL_S,
         }
         return JSONResponse({"ok": True, "options": json.loads(options_to_json(options))})
 
