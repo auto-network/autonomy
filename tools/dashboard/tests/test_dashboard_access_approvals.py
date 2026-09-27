@@ -1,6 +1,7 @@
 """Headless dashboard access through a signed, one-time approval grant."""
 
 from __future__ import annotations
+from tools.vault.personal_object import derive_delegate_audited_recipient
 from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import asyncio
@@ -55,6 +56,9 @@ def grant_env(tmp_path, monkeypatch):
         "display_name": "Alex Operator",
         "armored_private_key": mint_password_armor(
             personal, PASSWORD, iterations=10_000),
+        # Required since 267c3e01: the audited recipient derived from the root.
+        "delegate_audited_public_key": derive_delegate_audited_recipient(
+            bytes.fromhex(personal.private_hex))[1],
     })
     assert stored.status_code == 200, stored.text
     yield client, personal
