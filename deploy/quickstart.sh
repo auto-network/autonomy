@@ -77,6 +77,25 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
         exit 1
     fi
 fi
+# The node's Compose files mount two directories of the autonomy-code volume by
+# subpath (volume: subpath:, auto-8pohz), which needs Docker Engine API 1.45
+# (Engine 26) or later. Name the floor here rather than let `compose up` fail
+# with an interpolation error on an older daemon.
+DOCKER_API_FLOOR=1.45
+docker_api_version() { docker version --format '{{.Server.APIVersion}}' 2>/dev/null; }
+require_docker_api() {  # require_docker_api <min-api> ; e.g. 1.45
+    local have
+    have="$(docker_api_version)"
+    if [[ -z "$have" ]]; then
+        echo "could not read the Docker Engine API version (is the daemon running and reachable?)" >&2
+        return 1
+    fi
+    if [[ "$(printf '%s\n%s\n' "$1" "$have" | sort -V | head -1)" != "$1" ]]; then
+        echo "Docker Engine API $have is too old: this node needs API $1 or later (Docker Engine 26+) for volume subpath mounts." >&2
+        return 1
+    fi
+}
+require_docker_api "$DOCKER_API_FLOOR" || exit 1
 
 # ── 1. Checkout ──────────────────────────────────────────────────────────────
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

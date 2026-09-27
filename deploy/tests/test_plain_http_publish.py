@@ -258,3 +258,39 @@ def test_wsl_without_reachable_powershell_says_the_checks_were_skipped_once(scri
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == str(free)
     assert result.stderr.count("NOTE: this is WSL but powershell.exe was not found") == 1
+
+
+# ── the Docker Engine API floor (volume subpath mounts, auto-8pohz) ──────
+
+def _fake_docker(bindir: Path, api_version: str) -> None:
+    bindir.mkdir(exist_ok=True)
+    script = bindir / "docker"
+    script.write_text("#!/usr/bin/env bash\n"
+                      f'if [[ "$1" == version ]]; then echo "{api_version}"; exit 0; fi\n'
+                      "exit 1\n")
+    script.chmod(0o755)
+
+
+@pytest.mark.parametrize("script", [QUICKSTART, INSTALL], ids=["quickstart", "install-published"])
+@pytest.mark.parametrize("api, ok", [("1.44", False), ("1.45", True), ("1.47", True), ("1.52", True)])
+def test_installers_name_the_engine_api_floor(script, tmp_path, api, ok):
+    _fake_docker(tmp_path / "bin", api)
+    body = _functions(script, ("docker_api_version", "require_docker_api")) + "\nrequire_docker_api 1.45\n"
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c", body], capture_output=True, text=True,
+                            timeout=30, env={**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}"})
+    assert (result.returncode == 0) is ok, result.stderr
+    if not ok:
+        assert "Docker Engine API 1.44 is too old" in result.stderr and "1.45" in result.stderr
+
+
+def test_compose_mounts_of_the_code_volume_are_read_only():
+    """The gateway is internet-facing and the dashboard hot-reloads from the
+    same volume: neither Caddy nor certbot may write to it (reviewer)."""
+    import yaml
+
+    compose = yaml.safe_load(COMPOSE.read_text())
+    for service in ("service-gateway", "service-certbot"):
+        mounts = [v for v in compose["services"][service]["volumes"]
+                  if isinstance(v, dict) and v.get("source") == "autonomy-code"]
+        assert mounts, service
+        assert all(m.get("read_only") is True and m.get("type") == "volume" for m in mounts), service

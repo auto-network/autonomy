@@ -42,7 +42,10 @@ def _run(tmp_path: Path, lock: Path, *extra: str,
     fake = tmp_path / "bin"
     fake.mkdir(exist_ok=True)
     log = tmp_path / "calls.log"
-    _exe(fake / "docker", '#!/usr/bin/env bash\necho "docker $*" >>"$T_LOG"\n')
+    # The stand-in daemon answers the engine API floor check (auto-8pohz) and
+    # records every other call.
+    _exe(fake / "docker", '#!/usr/bin/env bash\necho "docker $*" >>"$T_LOG"\n'
+         '[[ "$1" == version ]] && echo 1.47\nexit 0\n')
     _exe(
         fake / "cosign",
         f'#!/usr/bin/env bash\necho "cosign $*" >>"$T_LOG"\n'

@@ -79,7 +79,9 @@ that persists. That's the honest pitch, and §5 is how you check the rest.
 
 - Platform and resources: Linux, macOS, or WSL2; Docker present
   (`docker --version`, `docker compose version`); a few GB of disk.
-  Docker with Compose is the only host prerequisite: tmux, Claude Code and
+  Docker with Compose is the only host prerequisite (Docker Engine 26 or later,
+  API 1.45: the node mounts two directories of its code volume by subpath, and
+  both installers refuse an older daemon by name): tmux, Claude Code and
   every other session tool run inside the node's containers, including the
   operator's host terminal.
 - **Already installed?** Probe `https://localhost:8080` (accept a
