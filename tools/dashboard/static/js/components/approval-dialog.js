@@ -32,7 +32,7 @@ export function openApprovalDialog({review, authorize, execute, decline, result,
   const durationOptions = originalDuration ? [...originalDuration.options].map(o=>[o.value,o.textContent]) : undefined;
   const expiry = review.facts?.find(([label])=>/expir/i.test(label))?.[1];
   const input = {
-    kind,title:review.question===false||review.title.endsWith('?')?review.title:review.title+'?',
+    kind,title:review.title + (review.title.endsWith('?')?'':'?'),
     code:review.code,machineName:review.machineName,
     intro:kind==='link'?`Create a link to this ${review.target.type.toLowerCase()} for someone outside your workspace.`:review.intro,
     organization:{name:review.organization?.name||'Personal approval',image:review.organization?.image||''},
@@ -42,7 +42,7 @@ export function openApprovalDialog({review, authorize, execute, decline, result,
     duration:originalDuration?.value,durationOptions,
     showRetention:!!originalRetention,allowSessionApprovals:!!originalRetention?.checked,
     consequence:kind==='link'?'Anyone who has the link can open the shared content until it expires.':review.consequence||'',
-    reviewText:review.reviewText,reviewLabel:review.reviewLabel,actionLabel:review.actionLabel,pendingLabel:review.pendingLabel,
+    reviewText:review.reviewText,reviewLabel:review.reviewLabel,
     retained,canDecline:!!decline,reviewUnavailable:review.unavailable,
     working:result.working,success:result.success,result:result.copy,
     resultHref:localHref(result.fact.href),

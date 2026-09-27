@@ -28,8 +28,10 @@ export async function openEmailApproval(item, {onResolved = () => {}, onClose = 
   const cc = review.cc || '';
   const subject = review.subject || '(no subject)';
   const lines = Array.isArray(review.body_lines) ? review.body_lines : [];
+  // In the order every mail client shows a message header.
   const facts = [['From', review.from_addr || 'Unknown sender'], ['To', to]];
   if (cc) facts.push(['Cc', cc]);
+  facts.push(['Subject', subject]);
   const itemUrl = '/api/attention/items/' + encodeURIComponent(item.id);
 
   async function decide(outcome) {
@@ -57,14 +59,11 @@ export async function openEmailApproval(item, {onResolved = () => {}, onClose = 
     retained: true,
     review: {
       kind: 'operation',
-      title: subject,
-      question: false,
+      title: 'Send email',
       intro: '',
       organization: organization ? {name: organization.name, image: organization.favicon || organization.icon_data_uri || ''} : undefined,
       requester: {kind: 'Requesting session', name: session.name || label, byline: session.byline || '', href: session.href || localHref(item.requester?.href)},
       facts,
-      actionLabel: 'Send',
-      pendingLabel: 'Sending…',
       reviewLabel: 'Message',
       reviewText: lines.join('\n'),
       unavailable: !item.actions.includes('granted') ? 'This request is no longer available.' : '',

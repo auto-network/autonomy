@@ -27,7 +27,9 @@ const posts=()=>calls.filter(c=>c.options?.method==='POST').map(c=>JSON.parse(c.
 
 test('review shows exactly what will be sent, with no password step',async()=>{
   await openEmailApproval(item());
-  assert.equal(q('#title').textContent,'Your code');
+  assert.equal(q('#title').textContent,'Send email?');
+  assert.deepEqual([...q('#facts').querySelectorAll('.fact span:first-child')].map(e=>e.textContent),['From','To','Cc','Subject']);
+  assert.match(q('#facts').textContent,/SubjectYour code/);
   assert.equal(q('#intro').textContent,'');
   assert.match(q('#facts').textContent,/Fromagent@auto\.network/);
   assert.match(q('#facts').textContent,/Toa@example\.com/);
@@ -35,14 +37,14 @@ test('review shows exactly what will be sent, with no password step',async()=>{
   assert.equal(q('#request-detail pre').textContent,'Hello,\n\nThe code is 482913.');
   assert.equal(q('#consequence').textContent,'');
   assert.equal(q('#org-name').textContent,'Autonomy Network');
-  assert.equal(q('#primary').textContent,'Send');
+  assert.equal(q('#primary').textContent,'Authorize');
   assert.equal(q('#auth').hidden,true);
 });
 
 test('Send grants with an empty decision once and reports the sent email',async()=>{
   await openEmailApproval(item());
   q('#primary').click();
-  assert.equal(q('#primary').textContent,'Sending…');
+  assert.equal(q('#primary').textContent,'Authorizing…');
   await until(()=>q('#result-title').textContent==='Email sent');
   assert.deepEqual(posts(),[{outcome:'granted',decision:{}}]);
   assert.match(q('#receipt').textContent,/Your code/);
