@@ -121,12 +121,17 @@ def test_active_design_grants_filters_types_and_expiry(monkeypatch):
 
     from tools.graph import settings_ops
 
+    # Every row is published (token + url, link_approvals.is_published_grant):
+    # this test is about type and expiry.
     rows = [
         SimpleNamespace(payload={"target_type": "design", "target_uuid": "d1", "token": "a",
+                                 "url": "https://l.example/a",
                                  "issued_at": "2026-09-01T00:00:00Z", "meta": {"ttl": 3600}}),
         SimpleNamespace(payload={"target_type": "present", "target_uuid": "d2", "token": "b",
+                                 "url": "https://l.example/b",
                                  "issued_at": "2026-09-06T00:00:00Z", "meta": {"ttl": 30 * 86400, "label": "deck"}}),
         SimpleNamespace(payload={"target_type": "note", "target_uuid": "n1", "token": "c",
+                                 "url": "https://l.example/c",
                                  "issued_at": "2026-09-06T00:00:00Z", "meta": {}}),
         SimpleNamespace(payload="garbage"),
     ]

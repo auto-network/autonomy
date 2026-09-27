@@ -80,7 +80,7 @@ def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
                   may_serve=True, tunnel_serving=True):
     """Stub the serving-scope reads get_unlock_state makes.
 
-    scopes: list of org scopes (None == personal); cert_status: {scope: status};
+    scopes: list of org scopes ("personal" is the personal store, 8bd2fa2a); cert_status: {scope: status};
     replies: {scope: connector-status dict} — a scope absent from replies has no
     reachable connector. may_serve: whether this machine is permitted to serve
     at all. Since auto-clune.7 every authorized machine is, so False means the
@@ -141,12 +141,12 @@ def test_tunnel_degrades_when_only_an_org_connector_is_down(client, monkeypatch)
     """
     _stub_serving(
         monkeypatch,
-        scopes=[None, "autonomy", "dynbench"],
-        cert_status={None: "ok", "autonomy": "ok", "dynbench": "ok"},
-        replies={None: {"fleet_runtime_configured": True,
+        scopes=["personal", "autonomy", "dynbench"],
+        cert_status={"personal": "ok", "autonomy": "ok", "dynbench": "ok"},
+        replies={"personal": {"fleet_runtime_configured": True,
                         "process_commit": "c0ffee"}},
         may_serve=True,
-        tunnel_serving={None: True, "autonomy": False, "dynbench": False},
+        tunnel_serving={"personal": True, "autonomy": False, "dynbench": False},
     )
     tunnel = client.get("/api/identity/unlock-state").json()["tunnel"]
     assert tunnel["needs"] is True, "an org connector is down and nothing lit"
@@ -168,12 +168,12 @@ def test_tunnel_ignores_a_scope_never_provisioned_to_serve(client, monkeypatch):
     It must not light the tile just because it has no connector."""
     _stub_serving(
         monkeypatch,
-        scopes=[None, "blindhash"],
-        cert_status={None: "ok"},          # blindhash: no cert row at all
-        replies={None: {"fleet_runtime_configured": True,
+        scopes=["personal", "blindhash"],
+        cert_status={"personal": "ok"},          # blindhash: no cert row at all
+        replies={"personal": {"fleet_runtime_configured": True,
                         "process_commit": "c0ffee"}},
         may_serve=True,
-        tunnel_serving={None: True, "blindhash": False},
+        tunnel_serving={"personal": True, "blindhash": False},
     )
     tunnel = client.get("/api/identity/unlock-state").json()["tunnel"]
     assert tunnel["needs"] is False
@@ -203,10 +203,10 @@ def test_sync_lights_when_the_personal_connector_is_unarmed(client, monkeypatch)
     # Org connectors alongside it (armed or not) never contribute.
     _stub_serving(
         monkeypatch,
-        scopes=[None, "anchore"],
-        cert_status={None: "ok", "anchore": "ok"},
+        scopes=["personal", "anchore"],
+        cert_status={"personal": "ok", "anchore": "ok"},
         replies={
-            None: {"fleet_runtime_configured": False, "process_commit": "c0ffee",
+            "personal": {"fleet_runtime_configured": False, "process_commit": "c0ffee",
                    "locked_refusals": 764, "locked_refusal_since": 1_700_000_000},
             "anchore": {"fleet_runtime_configured": True, "process_commit": "c0ffee"},
         },
@@ -254,11 +254,11 @@ def test_stale_connector_code_does_NOT_light_the_user_sync_flag(client, monkeypa
     # incompatibility is the compatibility digest's job, not a commit compare).
     _stub_serving(
         monkeypatch,
-        scopes=[None],
-        cert_status={None: "ok"},
+        scopes=["personal"],
+        cert_status={"personal": "ok"},
         replies={
             # armed (has its credential), but running an older commit than disk
-            None: {"fleet_runtime_configured": True, "process_commit": "0ld"},
+            "personal": {"fleet_runtime_configured": True, "process_commit": "0ld"},
         },
         disk="c0ffee",
     )
@@ -272,8 +272,8 @@ def test_stale_connector_code_does_NOT_light_the_user_sync_flag(client, monkeypa
 def test_unreachable_personal_connector_counts_as_unarmed(client, monkeypatch):
     _stub_serving(
         monkeypatch,
-        scopes=[None],
-        cert_status={None: "ok"},
+        scopes=["personal"],
+        cert_status={"personal": "ok"},
         replies={},   # cert provisioned, but no connector answers
     )
     sync = client.get("/api/identity/unlock-state").json()["sync"]
@@ -306,9 +306,9 @@ def test_a_machine_not_permitted_to_serve_does_not_light_sync(client, monkeypatc
     # offered, because unlocking cannot make it eligible.
     _stub_serving(
         monkeypatch,
-        scopes=[None],
-        cert_status={None: "ok"},
-        replies={None: {"fleet_runtime_configured": False, "process_commit": "c0ffee"}},
+        scopes=["personal"],
+        cert_status={"personal": "ok"},
+        replies={"personal": {"fleet_runtime_configured": False, "process_commit": "c0ffee"}},
         may_serve=False,
     )
     sync = client.get("/api/identity/unlock-state").json()["sync"]
@@ -426,8 +426,8 @@ def test_tunnel_lights_down_when_a_serving_machine_is_not_serving(
     the operator hit: home serving nothing, UI must say so."""
     _stub_serving(
         monkeypatch,
-        scopes=[None],
-        cert_status={None: "ok"},
+        scopes=["personal"],
+        cert_status={"personal": "ok"},
         replies={},          # personal connector unreachable
         may_serve=True,
         tunnel_serving=False,  # ServingSupervisor.serving() -> False (dead)
@@ -441,9 +441,9 @@ def test_tunnel_lights_down_when_a_serving_machine_is_not_serving(
 def test_tunnel_up_when_a_serving_machine_is_serving(client, monkeypatch):
     _stub_serving(
         monkeypatch,
-        scopes=[None],
-        cert_status={None: "ok"},
-        replies={None: {"fleet_runtime_configured": True, "process_commit": "c0ffee"}},
+        scopes=["personal"],
+        cert_status={"personal": "ok"},
+        replies={"personal": {"fleet_runtime_configured": True, "process_commit": "c0ffee"}},
         may_serve=True,
         tunnel_serving=True,
     )
@@ -461,8 +461,8 @@ def test_tunnel_quiet_on_a_machine_not_permitted_to_serve(client, monkeypatch):
     a fault. Every authorized machine may, since auto-clune.7."""
     _stub_serving(
         monkeypatch,
-        scopes=[None],
-        cert_status={None: "ok"},
+        scopes=["personal"],
+        cert_status={"personal": "ok"},
         replies={},
         may_serve=False,
         tunnel_serving=False,

@@ -125,8 +125,9 @@ def test_a_browser_founds_an_organization_without_ever_sending_a_passphrase(
     }))
     proc = subprocess.run(
         ["node", str(DRIVER), str(fixture)],
-        cwd=REPO_ROOT, check=True, capture_output=True, text=True,
+        cwd=REPO_ROOT, capture_output=True, text=True,
     )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
     result = json.loads(proc.stdout)
 
     # ── The ceremony completed ────────────────────────────────────────────
@@ -191,8 +192,9 @@ def test_browser_founding_records_which_member_this_node_is(live, tmp_path):
     }))
     proc = subprocess.run(
         ["node", str(DRIVER), str(fixture)],
-        cwd=REPO_ROOT, check=True, capture_output=True, text=True,
+        cwd=REPO_ROOT, capture_output=True, text=True,
     )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
     result = json.loads(proc.stdout)
 
     # personal.db, not the org's database -- two members must never share a row.

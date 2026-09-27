@@ -62,6 +62,12 @@ def _run(root, backups, fakebin):
            "AUTONOMY_BACKUP_ROOT": str(backups),
            "PATH": f"{fakebin}:{os.environ['PATH']}"}
     env.pop("BEADS_DIR", None)
+    # A store's own variable outranks the data root; the dashboard test
+    # conftest exports one per store for its worker (auto-pg8d2).
+    from tools.data_paths import STORE_MANIFEST
+    for store in STORE_MANIFEST:
+        if store.env:
+            env.pop(store.env, None)
     return subprocess.run(["bash", str(SCRIPT), "hourly"],
                           capture_output=True, text=True, env=env,
                           timeout=300)

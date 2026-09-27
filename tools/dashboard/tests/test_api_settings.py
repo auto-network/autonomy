@@ -107,6 +107,15 @@ def client(test_app):
         yield c
 
 
+@pytest.fixture
+def operator_client(test_app):
+    """No org selected: the operator writing the personal store. A vault set
+    is personal-homed and org-partitioned, so naming an org without a bearer
+    that proves it is refused (auto-ha7se)."""
+    with TestClient(test_app) as c:
+        yield c
+
+
 # ── Read endpoints ─────────────────────────────────────────
 
 
@@ -148,7 +157,7 @@ def test_get_setting_by_id(graph_db_env, example_schema, client):
 
 
 def test_create_forwards_secured_policy_class_to_the_write_seam(
-    graph_db_env, client, monkeypatch,
+    graph_db_env, operator_client, monkeypatch,
 ):
     from tools.dashboard import server
 
@@ -161,7 +170,7 @@ def test_create_forwards_secured_policy_class_to_the_write_seam(
 
     monkeypatch.setattr(server.graph_ops, "write_by_key", write_by_key)
     monkeypatch.setattr(server.graph_ops, "take_shadowed_write", lambda *_: None)
-    response = client.post("/api/graph/setting", json={
+    response = operator_client.post("/api/graph/setting", json={
         "set_id": "autonomy.vault.secured",
         "schema_revision": 1,
         "key": "mac.ssh",
@@ -174,7 +183,7 @@ def test_create_forwards_secured_policy_class_to_the_write_seam(
 
 
 def test_secured_create_failure_never_echoes_the_secret(
-    graph_db_env, client, monkeypatch,
+    graph_db_env, operator_client, monkeypatch,
 ):
     from tools.dashboard import server
 
@@ -183,7 +192,7 @@ def test_secured_create_failure_never_echoes_the_secret(
 
     monkeypatch.setattr(server.graph_ops, "write_by_key", locked)
     secret = "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n"
-    response = client.post("/api/graph/setting", json={
+    response = operator_client.post("/api/graph/setting", json={
         "set_id": "autonomy.vault.secured",
         "schema_revision": 1,
         "key": "mac.ssh",

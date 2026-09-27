@@ -1,5 +1,9 @@
-/* prepareSignon must mint a SYNC-ONLY fleet credential when the personal
- * organization is not registered with the registry.
+/* prepareSignon's Fleet runtime credential and the personal registry binding.
+ *
+ * History: the paragraph below is the fa760a61 regression this file was
+ * written for. 088b3872 since made the registering sign-on activate under the
+ * uuid it registers in the same submission; the server activates sync-only,
+ * with a warning, if reachability material ever arrives before the binding.
  *
  * Onboarding does not require registering, so an enrolled fleet machine
  * whose personal org has no registry binding is a normal state. The runtime
@@ -82,7 +86,12 @@ async function fixture({ orgUuid, firstCompletion = false }) {
   const sealed = await sealToEncapsulationKey(enc.encode(JSON.stringify(inputs)), audited.publicKeyHex, PURPOSE);
   const encrypted = { sealed: typeof sealed === 'string' ? sealed : bytesToHex(sealed) };
   const signon = { _internals: { prepareRootMaintenance: async (_seed, _orgs, runtime) => {
-    if (!firstCompletion) return [];
+    // Mirrors network-signon.mjs: an enabled runtime with no registered
+    // binding posts the registration in this same submission.
+    if (!firstCompletion) {
+      return runtime && runtime.enabled && runtime.personal_org_uuid && !runtime.org_uuid
+        ? [{step: 'binding', url: '/api/network/register'}] : [];
+    }
     assert.equal(runtime.personal_root_pub, rootPub);
     assert.equal(runtime.machine_pub, machinePub);
     assert.equal(runtime.serves, true);
@@ -112,13 +121,20 @@ test('first completion prepares connection setup before full runtime activation'
   assert.match(body.machine_private_seed, /^[0-9a-f]{64}$/);
 });
 
-test('unregistered personal org → sync-only credential: no reachability material under an unbound org', async () => {
+test('unregistered personal org → the sign-on registers it, then activates under it', async () => {
+  // Since 088b3872 (Windows run 5, blocker 2) a sign-on that registers the
+  // personal binding activates under the uuid it registers, a post earlier in
+  // the same submission; minting sync-only here left the personal connector
+  // UNARMED on every fresh node until an organization was founded.
   const { rootSeed, encrypted, signon } = await fixture({ orgUuid: null });
   const prepared = await prepareSignon(rootSeed, encrypted, signon);
+  const urls = prepared.posts.map(p => p.url);
+  assert.ok(urls.indexOf('/api/network/register') >= 0, 'the binding is registered');
+  assert.ok(urls.indexOf('/api/network/register') < urls.indexOf('/api/fleet/runtime'),
+    'registration precedes the runtime that relies on it');
   const body = fleetPost(prepared).body;
-  assert.equal(body.reachability_cert, undefined,
-    'no reachability cert may be minted under personal_org_uuid — the registry has not bound it');
-  assert.equal(body.machine_private_seed, undefined);
+  assert.equal(body.reachability_cert.org, '7d8c2e1a-1111-4111-8111-111111111111');
+  assert.match(body.machine_private_seed, /^[0-9a-f]{64}$/);
 });
 
 test('registered personal org → reachability material is delivered (unchanged)', async () => {

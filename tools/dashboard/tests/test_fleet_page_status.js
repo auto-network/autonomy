@@ -19,8 +19,11 @@ function boot() {
   return dom.window.fleetPage();
 }
 
+// Roster rows as the projection sends them. Since the Design Studio redesign
+// (5a637e5a) one classifier, machineState(), drives the dot, the status
+// column and the card border; syncTrouble() is gone with the old derivation.
 const authorized = (extra) => Object.assign(
-  { standing: 'authorized', rowKind: 'machine', presence: 'connected' }, extra);
+  { standing: 'authorized', rowKind: 'roster_machine', presence: 'connected' }, extra);
 
 describe('fleet card status derivation', () => {
   it('a machine failing every sync with no pull ever completed is not healthy', () => {
@@ -29,24 +32,33 @@ describe('fleet card status derivation', () => {
     const machine = authorized({
       lastSuccessfulSyncAt: null, successfulIterations: 0, failedIterations: 24,
     });
-    assert.equal(page.syncTrouble(machine), true);
+    assert.equal(page.machineHealthy(machine), false);
     assert.equal(page.dotClass(machine), 'warn', 'dot leaves neutral/connected');
     assert.equal(page.statusTone(machine), 'warn', 'status column is toned');
     assert.equal(page.machineClass(machine), 'warn', 'card border is toned');
     assert.notEqual(page.dotClass(machine), 'connected');
-    assert.notEqual(page.dotClass(machine), '');
   });
 
-  it('a machine with no attempts at all is quiet, never marked failed', () => {
+  it('a machine that synced before and now fails is marked failing', () => {
+    const page = boot();
+    const machine = authorized({
+      lastSuccessfulSyncAt: Date.now() - 60000, lastOutcome: 'failed',
+      lastErrorCode: 'auth_denied',
+    });
+    const state = page.machineState(machine);
+    assert.equal(state.id, 'failing');
+    assert.equal(page.dotClass(machine), 'failed');
+    assert.equal(page.machineClass(machine), 'failed');
+  });
+
+  it('a machine with no attempts at all is waiting, never marked failed', () => {
     const page = boot();
     const machine = authorized({
       lastSuccessfulSyncAt: null, successfulIterations: 0, failedIterations: 0,
     });
-    assert.equal(page.syncTrouble(machine), false);
-    // Not failed/warn; its presence still drives the dot (here: connected).
-    assert.equal(page.machineClass(machine), '');
-    assert.equal(page.statusTone(machine), '');
-    assert.equal(page.dotClass(machine), 'connected');
+    assert.equal(page.machineState(machine).id, 'first');
+    assert.notEqual(page.statusTone(machine), 'failed');
+    assert.notEqual(page.dotClass(machine), 'failed');
   });
 
   it('a machine mid-first-sync (trying, no failures yet) is not marked failed', () => {
@@ -55,9 +67,8 @@ describe('fleet card status derivation', () => {
       lastSuccessfulSyncAt: null, successfulIterations: 0, failedIterations: 0,
       syncIterations: 1, presence: '',
     });
-    assert.equal(page.syncTrouble(machine), false);
-    assert.equal(page.dotClass(machine), '');
-    assert.equal(page.machineClass(machine), '');
+    assert.equal(page.machineState(machine).id, 'first');
+    assert.notEqual(page.machineClass(machine), 'failed');
   });
 
   it('a machine with a recent successful pull renders healthy', () => {
@@ -66,9 +77,9 @@ describe('fleet card status derivation', () => {
       lastSuccessfulSyncAt: Date.now() - 30000,
       successfulIterations: 12, failedIterations: 1,
     });
-    assert.equal(page.syncTrouble(machine), false);
+    assert.equal(page.machineState(machine).id, 'synced');
     assert.equal(page.dotClass(machine), 'connected');
-    assert.equal(page.statusTone(machine), '');
+    assert.equal(page.statusTone(machine), 'good');
     assert.equal(page.machineClass(machine), '');
   });
 
@@ -78,38 +89,40 @@ describe('fleet card status derivation', () => {
       isLocalMachine: true,
       lastSuccessfulSyncAt: null, successfulIterations: 0, failedIterations: 24,
     });
-    assert.equal(page.syncTrouble(machine), false);
+    const state = page.machineState(machine);
+    assert.notEqual(state.id, 'failing');
+    assert.notEqual(state.id, 'first');
   });
 
-  it('a pending-admission row is never marked as failing sync', () => {
+  it('a pending-admission row is an admission, never a machine with a sync state', () => {
     const page = boot();
-    const machine = {
+    page.view = { machines: [{
       standing: 'pending_approval', rowKind: 'pending_admission',
       lastSuccessfulSyncAt: null, successfulIterations: 0, failedIterations: 5,
-    };
-    assert.equal(page.syncTrouble(machine), false);
-    assert.equal(page.dotClass(machine), 'pending');
-    assert.equal(page.machineClass(machine), 'pending');
+    }] };
+    assert.equal(page.machines.length, 0);
+    assert.equal(page.admissions.length, 1);
+    assert.equal(page.admissionWord(page.admissions[0]), 'Awaiting approval');
   });
 
-  it('a hard standing failure (revoked/admission_failed) still wins over sync tone', () => {
+  it('a revoked tombstone is not a machine', () => {
     const page = boot();
-    const revoked = authorized({
+    page.view = { machines: [authorized({
       standing: 'revoked',
       lastSuccessfulSyncAt: null, successfulIterations: 0, failedIterations: 24,
-    });
-    assert.equal(page.dotClass(revoked), 'failed');
-    assert.equal(page.machineClass(revoked), 'failed');
+    })] };
+    assert.equal(page.machines.length, 0);
   });
 
-  it('the fleet summary counts machines in a failing state', () => {
+  it('the fleet summary counts the machines that are not healthy', () => {
     const page = boot();
     page.view = { machines: [
-      authorized({ lastSuccessfulSyncAt: null, successfulIterations: 0, failedIterations: 24 }),
+      authorized({ lastSuccessfulSyncAt: Date.now() - 60000, lastSyncOutcome: 'failed',
+                   lastErrorCode: 'auth_denied' }),
       authorized({ lastSuccessfulSyncAt: Date.now(), successfulIterations: 3, failedIterations: 0 }),
-      authorized({ lastSuccessfulSyncAt: null, successfulIterations: 0, failedIterations: 0 }),
     ] };
-    assert.equal(page.failingMachines, 1, 'only the failing machine is counted');
+    assert.equal(page.unhealthyMachines().length, 1, 'only the failing machine is counted');
+    assert.equal(page.fleetTone(), 'err');
   });
 });
 

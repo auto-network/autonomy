@@ -159,12 +159,19 @@ def test_not_installed_records_nothing(graph_db, monkeypatch):
 
 # ── Behavioral first-launch gate ──────────────────────────────────────
 
-def test_first_launch_gates_to_bootstrap(test_client, monkeypatch):
-    """No verified harness → GET / serves the walkthrough, not the session UI."""
+def test_no_verified_harness_does_not_gate_the_front_page(test_client, monkeypatch):
+    """No verified harness → GET / is NOT intercepted by the walkthrough.
+
+    The node never runs a harness (session containers do), so the probe is
+    permanently false on a containerized node and the gate served first-run
+    setup forever (72305dc4). The walkthrough stays at /bootstrap.
+    """
+    from tools.dashboard import server
     monkeypatch.setattr(hb, "has_verified_harness", lambda: False)
+    monkeypatch.setattr(server, "_welcome_gate_open", lambda: False)
     r = test_client.get("/", follow_redirects=False)
-    assert r.status_code == 200
-    assert "Set up your assistant" in r.text
+    assert r.status_code in (302, 307)
+    assert r.headers["location"] == "/beads"
 
 
 def test_verified_harness_does_not_block(test_client, monkeypatch):

@@ -145,7 +145,9 @@ def test_validation_and_unknown(client):
         "request": {"source_request_id": "00" * 32},
     })
     assert fleet.status_code == 400
-    assert "invitation channel" in fleet.json()["error"]
+    # The Central approval bridge answers with bounded codes only, never
+    # prose (d224ca0f).
+    assert fleet.json()["error"] == "invalid_request"
 
 
 def test_stable_source_id_is_idempotent_and_byte_bound(tmp_path):

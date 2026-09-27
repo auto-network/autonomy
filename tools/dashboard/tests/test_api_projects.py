@@ -18,7 +18,9 @@ def test_api_projects_lists_all_workspaces(shipped_settings_orgs, test_app):
 
     assert "projects" in body
     by_id = {p["id"]: p for p in body["projects"]}
-    assert set(by_id) == {"autonomy", "widgets-v5", "widgets-ng"}
+    # The Getting Started plugin ships two personal workspaces (5d6abff0).
+    assert set(by_id) == {"autonomy", "widgets-v5", "widgets-ng",
+                          "getting-started", "idea-board"}
 
     for entry in body["projects"]:
         assert set(entry) >= {
