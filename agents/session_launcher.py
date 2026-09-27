@@ -855,6 +855,18 @@ def _codex_git_root(worktree_host: Path) -> str | None:
         return None
 
 
+def _checkout_source_head(clone: Path) -> None:
+    """Detach-checkout ``REPO_ROOT``'s current HEAD commit in ``clone``."""
+    from agents import workspace_manager
+
+    workspace_manager._run_git(
+        ["fetch", "--quiet", "--no-tags", str(REPO_ROOT), "HEAD"], cwd=clone, timeout=600,
+    )
+    workspace_manager._run_git(
+        ["checkout", "--force", "--detach", "FETCH_HEAD"], cwd=clone, timeout=600,
+    )
+
+
 def _ensure_platform_snapshot() -> str | None:
     """The host path to mount at ``/workspace/repo`` when nothing else claims it.
 
@@ -873,7 +885,14 @@ def _ensure_platform_snapshot() -> str | None:
         from agents import workspace_manager
 
         clone = workspace_manager.ensure_managed_clone(str(REPO_ROOT))
-        workspace_manager._update_readonly_clone(clone)
+        try:
+            workspace_manager._update_readonly_clone(clone)
+        except Exception:
+            # A checkout on a detached HEAD (a release image built from a
+            # commit, not a branch) clones with no default branch and no
+            # origin/HEAD, so there is no integration tip to check out. The
+            # snapshot is then the exact commit this node runs.
+            _checkout_source_head(clone)
         return str(clone)
     except Exception as exc:
         print(
