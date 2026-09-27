@@ -450,3 +450,36 @@ def test_seams_are_installed_on_basereload():
     assert BaseReload.run is rwn._run_with_handoff
     assert BaseReload.shutdown is rwn._shutdown_with_handoff
     assert BaseReload.__next__ is rwn._next_capturing
+
+
+def test_startup_binds_the_plain_socket_before_the_first_spawn(sup, monkeypatch):
+    """The plain-HTTP socket is the supervisor's, bound once and inherited by
+    every worker, so a hand-off never leaves it accepting into a void."""
+    import socket
+
+    from tools.dashboard import plain_listener as pl
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setenv(pl.PORT_ENV, str(port))
+    monkeypatch.setenv(pl.HOST_ENV, "127.0.0.1")
+    monkeypatch.setattr(rwn.signal, "signal", lambda *_a, **_k: None)
+    sup.signal_handler = lambda *_a: None
+    order = []
+    original_attach = pl.attach_to_supervisor
+    monkeypatch.setattr(
+        pl, "attach_to_supervisor",
+        lambda supervisor, environ=None: order.append("bind") or original_attach(supervisor, environ),
+    )
+    original_spawn = sup.spawn
+    sup.spawn = lambda pid: order.append("spawn") or original_spawn(pid)
+
+    rwn._startup_with_handoff(sup)
+    try:
+        assert order == ["bind", "spawn"]
+        assert sup.sockets[-1].getsockname() == ("127.0.0.1", port)
+        assert isinstance(sup.target, pl.SplitTarget)
+    finally:
+        for sock in sup.sockets:
+            sock.close()

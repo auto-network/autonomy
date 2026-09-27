@@ -41,6 +41,12 @@ fi
 python3 -m tools.dashboard.scripts.build_relay_note_viewer >/app/data/note-viewer.log 2>&1 \
     || echo "note viewer page was not generated; shared notes will not serve (see /app/data/note-viewer.log)" >&2
 
+# The plain-HTTP listener beside the TLS one (tools/dashboard/plain_listener.py):
+# the first onboarding screen opens on http://localhost without a certificate
+# interstitial, and the service gateway proxies the published dashboard route to
+# it. docker-compose.yml publishes it as ${DASHBOARD_HTTP_PORT:-80}. "off" disables.
+export DASHBOARD_PLAIN_PORT="${DASHBOARD_PLAIN_PORT:-8081}"
+
 # Hot-reload the code from the autonomy-code volume, same as the dev box.
 export DASHBOARD_RESTART_TOKEN="${DASHBOARD_RESTART_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')}"
 set --

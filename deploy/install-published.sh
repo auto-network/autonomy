@@ -13,6 +13,8 @@
 #   --install-docker     install Docker Engine + Compose from docker.com when absent
 #                        (apt; runs as root when invoked as root, else through sudo)
 #   --yes                do not pause for confirmation before mutating steps
+#   --http-port N        plain-HTTP first-screen port on localhost (default: the first free
+#                        of 80, 8088, 8089; recorded in .env as DASHBOARD_HTTP_PORT)
 #
 # AUTONOMY_COSIGN_BIN=/path/to/cosign uses an existing cosign instead of the
 # pinned download (air-gapped hosts, tests); the embedded key is used either way.
@@ -32,12 +34,13 @@ COSIGN_VERSION=v3.1.3
 COSIGN_SHA256_AMD64=4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71
 COSIGN_SHA256_ARM64=c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a
 
-LOCK="" DIR="$HOME/autonomy" PORT=8080 INSTALL_DOCKER=0 YES=0 HOST_HOME=""
+LOCK="" DIR="$HOME/autonomy" PORT=8080 HTTP_PORT="" INSTALL_DOCKER=0 YES=0 HOST_HOME=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --lock) LOCK="$2"; shift 2 ;;
         --dir) DIR="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
+        --http-port) HTTP_PORT="$2"; shift 2 ;;
         --install-docker) INSTALL_DOCKER=1; shift ;;
         --yes) YES=1; shift ;;
         --host-home) HOST_HOME="$2"; shift 2 ;;
@@ -181,9 +184,26 @@ docker rm "$cid" >/dev/null
 cd "$DIR"
 touch .env
 set_env() { grep -q "^$1=" .env && sed -i "s|^$1=.*|$1=$2|" .env || echo "$1=$2" >>.env; }
+# The plain-HTTP first-screen port: the first free of the candidates, chosen once
+# and recorded in .env (docker-compose.yml publishes it on 127.0.0.1). A connect
+# probe on localhost is deterministic and needs no tool beyond bash.
+port_is_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+choose_http_port() {  # choose_http_port <requested-or-empty> <candidate>... ; echoes the port
+    local requested="$1" p; shift
+    if [[ -n "$requested" ]]; then set_env DASHBOARD_HTTP_PORT "$requested"; echo "$requested"; return 0; fi
+    if grep -q '^DASHBOARD_HTTP_PORT=' .env; then
+        sed -n 's/^DASHBOARD_HTTP_PORT=//p' .env | tail -1; return 0
+    fi
+    for p in "$@"; do
+        if port_is_free "$p"; then set_env DASHBOARD_HTTP_PORT "$p"; echo "$p"; return 0; fi
+    done
+    return 1
+}
 set_env AUTONOMY_IMAGE "${IMG[AUTONOMY_NODE_IMAGE]}"
 set_env AUTONOMY_HOST_HOME "$HOST_HOME"
 set_env DASHBOARD_PORT "$PORT"
+HTTP_PORT="$(choose_http_port "$HTTP_PORT" 80 8088 8089)" || {
+    echo "ports 80, 8088 and 8089 are all in use on localhost; pass --http-port N" >&2; exit 7; }
 if ! grep -q '^AUTONOMY_SUBNET=' .env; then
     step "network preflight (choosing a free subnet)"
     # Host network namespace for the host's routes; the Docker socket so the
@@ -207,7 +227,14 @@ for _ in $(seq 1 "${AUTONOMY_READY_TIMEOUT:-180}"); do
     sleep 1
 done
 [[ "${code:-}" == 200 ]] || { echo "the dashboard did not answer /api/ping with 200 (last: $code)" >&2; docker compose ps >&2; exit 5; }
+for _ in $(seq 1 30); do
+    plain="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://localhost:${HTTP_PORT}/api/ping" || true)"
+    [[ "$plain" == 200 ]] && break
+    sleep 1
+done
+[[ "${plain:-}" == 200 ]] || { echo "the plain-HTTP listener did not answer http://localhost:${HTTP_PORT}/api/ping with 200 (last: $plain)" >&2; docker compose ps >&2; exit 5; }
 step "dashboard is up"
 echo
-echo "Autonomy ${RELEASE_TAG} is running: open https://localhost:${PORT}/"
+echo "Autonomy ${RELEASE_TAG} is running: open http://localhost:${HTTP_PORT}/"
+echo "  (from another machine: https://<this-host>:${PORT}/ — self-signed certificate, accept once)"
 echo "Total time: $(( $(date +%s) - T0 )) s"

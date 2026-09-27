@@ -12,6 +12,8 @@
 #   --dir PATH               checkout/working directory (default: ~/autonomy, or this checkout)
 #   --data-root PATH         keep data at a host path (deploy/docker-compose.host-data.yml)
 #   --port N                 dashboard port (default 8080)
+#   --http-port N            plain-HTTP first-screen port on localhost (default: the first
+#                            free of 80, 8088, 8089; recorded in .env as DASHBOARD_HTTP_PORT)
 #   --direct-advertise URL   ws://<reachable-ip>:9410 — bind the fleet direct listener in the
 #                            connector, map the port, and advertise it (fleet machines)
 #   --claude-token-file F    long-lived Claude setup token; installed to ~/.claude/.setup-token
@@ -25,7 +27,7 @@
 # passphrase, recovery code, or root key.
 set -euo pipefail
 
-ROLE_KIND="" ROLE_VALUE="" SOURCE="" DIR="" DATA_ROOT="" PORT=8080 DIRECT="" TOKEN_FILE=""
+ROLE_KIND="" ROLE_VALUE="" SOURCE="" DIR="" DATA_ROOT="" PORT=8080 HTTP_PORT="" DIRECT="" TOKEN_FILE=""
 INSTALL_DOCKER=0 YES=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -37,6 +39,7 @@ while [[ $# -gt 0 ]]; do
         --dir) DIR="$2"; shift 2 ;;
         --data-root) DATA_ROOT="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
+        --http-port) HTTP_PORT="$2"; shift 2 ;;
         --direct-advertise) DIRECT="$2"; shift 2 ;;
         --claude-token-file) TOKEN_FILE="$2"; shift 2 ;;
         --install-docker) INSTALL_DOCKER=1; shift ;;
@@ -88,6 +91,26 @@ fi
 cd "$DIR"
 echo "==> checkout: $DIR @ $(git rev-parse --short HEAD 2>/dev/null || echo '?')"
 
+# The plain-HTTP first-screen port: the first free of the candidates, chosen once
+# and recorded in .env (docker-compose.yml publishes it on 127.0.0.1). A connect
+# probe on localhost is deterministic and needs no tool beyond bash.
+port_is_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+choose_http_port() {  # choose_http_port <requested-or-empty> <candidate>... ; echoes the port
+    local requested="$1" p; shift
+    if [[ -n "$requested" ]]; then
+        grep -q '^DASHBOARD_HTTP_PORT=' .env && sed -i "s|^DASHBOARD_HTTP_PORT=.*|DASHBOARD_HTTP_PORT=$requested|" .env \
+            || echo "DASHBOARD_HTTP_PORT=$requested" >> .env
+        echo "$requested"; return 0
+    fi
+    if grep -q '^DASHBOARD_HTTP_PORT=' .env; then
+        sed -n 's/^DASHBOARD_HTTP_PORT=//p' .env | tail -1; return 0
+    fi
+    for p in "$@"; do
+        if port_is_free "$p"; then echo "DASHBOARD_HTTP_PORT=$p" >> .env; echo "$p"; return 0; fi
+    done
+    return 1
+}
+
 # ── 2. Preflight + .env ──────────────────────────────────────────────────────
 touch .env
 grep -q '^AUTONOMY_SUBNET=' .env || {
@@ -97,6 +120,8 @@ grep -q '^AUTONOMY_SUBNET=' .env || {
 }
 grep -q '^AUTONOMY_HOST_HOME=' .env || echo "AUTONOMY_HOST_HOME=$HOME" >> .env
 grep -q '^DASHBOARD_PORT=' .env || echo "DASHBOARD_PORT=$PORT" >> .env
+HTTP_PORT="$(choose_http_port "$HTTP_PORT" 80 8088 8089)" || {
+    echo "ports 80, 8088 and 8089 are all in use on localhost; pass --http-port N" >&2; exit 1; }
 [[ -z "$DATA_ROOT" ]] || { grep -q '^AUTONOMY_HOST_DATA_ROOT=' .env || echo "AUTONOMY_HOST_DATA_ROOT=$DATA_ROOT" >> .env; }
 echo "==> .env:"; sed 's/^/    /' .env
 
@@ -139,6 +164,11 @@ for _ in $(seq 1 90); do
     if curl -sk --max-time 3 "https://localhost:${PORT}/healthz" >/dev/null 2>&1; then echo "up"; break; fi
     echo -n "."; sleep 2
 done
+echo -n "==> waiting for http://localhost:${HTTP_PORT}/healthz "
+for _ in $(seq 1 30); do
+    if curl -s --max-time 3 "http://localhost:${HTTP_PORT}/healthz" >/dev/null 2>&1; then echo "up"; break; fi
+    echo -n "."; sleep 2
+done
 
 # ── 7. Direct listener row (machine-local; the connector binds within 15 s of arming) ──
 if [[ -n "$DIRECT" ]]; then
@@ -151,7 +181,8 @@ fi
 
 cat <<TXT
 
-Node is up: https://<this-host>:${PORT}  (self-signed certificate; accept once)
+Node is up:  http://localhost:${HTTP_PORT}   (first screen; this machine only, no certificate warning)
+             https://<this-host>:${PORT}  (from other machines; self-signed certificate, accept once)
 Next, in the operator's browser:
 TXT
 case "$ROLE_KIND" in

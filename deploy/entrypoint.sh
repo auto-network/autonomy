@@ -11,6 +11,8 @@
 #   AUTONOMY_INVITE                               join an existing org
 #   AUTONOMY_FLEET_INVITE                         join an existing personal fleet
 #   DASHBOARD_HOST / DASHBOARD_PORT               bind address (default 0.0.0.0:8080)
+#   DASHBOARD_PLAIN_PORT                          plain-HTTP listener in the same worker
+#                                                 (serve.sh: 8081; "off" disables)
 #   DASHBOARD_TLS=off                             skip TLS keypair + serve plain HTTP
 #   DASHBOARD_DOMAIN                              CN/SAN for the self-signed cert
 set -e

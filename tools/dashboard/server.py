@@ -131,7 +131,7 @@ _log_channels.configure()
 
 from tools.dashboard.event_bus import event_bus, current_server_epoch
 from tools.dashboard import session_harness
-from tools.dashboard import worker_handoff
+from tools.dashboard import plain_listener, worker_handoff
 from tools.dashboard.session_harness import (
     CLAUDE_HARNESS,
     dedup_claude_entries,
@@ -21575,6 +21575,9 @@ _settings_mediator_started: bool = False
 # still alive, and runs the predecessor-exclusive startup steps only once the
 # supervisor confirms the old worker has exited.
 _activation_task: asyncio.Task | None = None
+#: The plain-HTTP listener (tools.dashboard.plain_listener) for the life of
+#: the worker; None when DASHBOARD_PLAIN_PORT is unset.
+_plain_listener: plain_listener.PlainListener | None = None
 _worker_activated: bool = False
 _org_warmup_task: asyncio.Task | None = None
 
@@ -22396,6 +22399,13 @@ async def _on_startup():
         "startup phase: TOTAL %.1fms", (time.monotonic() - _startup_t0) * 1000,
     )
 
+    # The plain-HTTP door to this same process (first onboarding screen on
+    # http://localhost, the gateway's upstream). Before readiness: a worker
+    # that is ready answers on both listeners.
+    global _plain_listener
+    _plain_listener = await plain_listener.start_configured(app)
+    _mark("plain_listener")
+
     # Hand-off: publish readiness so the supervisor stops the predecessor, then
     # run the predecessor-exclusive steps once it confirms the old worker has
     # exited. On a cold start (no predecessor) activation is immediate and the
@@ -22423,6 +22433,10 @@ async def _on_shutdown():
     # warn a browser, but still leave timing state for the next process.
     if _restart_notice_payload is None:
         _write_restart_notice({"started_at_ms": int(time.time() * 1000)})
+    global _plain_listener
+    if _plain_listener is not None:
+        listener, _plain_listener = _plain_listener, None
+        await listener.stop()
     try:
         await web_push_worker.stop_worker()
     except Exception:

@@ -56,7 +56,7 @@ from uvicorn._subprocess import get_subprocess
 from uvicorn.main import main as uvicorn_main
 from uvicorn.supervisors.basereload import HANDLED_SIGNALS, BaseReload
 
-from tools.dashboard import worker_handoff
+from tools.dashboard import plain_listener, worker_handoff
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -241,6 +241,9 @@ def _startup_with_handoff(self: BaseReload) -> None:
     )
     for sig in HANDLED_SIGNALS:
         signal.signal(sig, self.signal_handler)
+    # The plain-HTTP socket is bound here, once, and inherited by every worker
+    # like the TLS socket, so a hand-off never leaves it unanswered.
+    plain_listener.attach_to_supervisor(self)
     self.process, self._ready_marker = _spawn(self, None)
     self._last_respawn = time.monotonic()
 
