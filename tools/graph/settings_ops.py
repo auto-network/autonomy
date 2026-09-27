@@ -5351,6 +5351,28 @@ def contested_keys(
     return contested
 
 
+@dataclass(frozen=True)
+class PayloadPrefix:
+    """A ``where_payload`` value meaning "the field starts with ``value``".
+
+    Compiles to a half-open range over the same JSON expression the payload
+    index is built on (``expr >= prefix AND expr < prefix || U+10FFFF``), so a
+    declared expression index serves it — unlike ``LIKE``, which SQLite only
+    optimises on plain columns. A sequence of prefixes ORs the ranges. An
+    empty prefix is refused: it would match every row (auto-vzujx).
+    """
+
+    value: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, str) or not self.value:
+            raise ValueError("PayloadPrefix needs a non-empty string")
+
+
+#: Sorts after every character that can follow a prefix in UTF-8 byte order.
+_PREFIX_CEILING = "\U0010ffff"
+
+
 @dataclass
 class _PayloadPredicate:
     """A validated, schema-authorized payload predicate for an owned read.
@@ -5376,8 +5398,9 @@ class _PayloadPredicate:
     params: tuple[Any, ...]
     is_empty: bool
     #: [(field, frozenset|None, scalar|None)] — one entry per field. A
-    #: frozenset means IN membership; a scalar means equality.
-    _terms: list[tuple[str, "frozenset[str] | None", "str | None"]]
+    #: frozenset means IN membership; a scalar means equality; a tuple means
+    #: the value starts with one of those prefixes.
+    _terms: list[tuple[str, "frozenset[str] | tuple[str, ...] | None", "str | None"]]
 
     def matches(self, payload: Any) -> bool:
         if not isinstance(payload, dict):
@@ -5387,7 +5410,10 @@ class _PayloadPredicate:
             return False
         for field_name, allowed, scalar in self._terms:
             value = payload.get(field_name)
-            if allowed is not None:
+            if isinstance(allowed, tuple):
+                if not isinstance(value, str) or not value.startswith(allowed):
+                    return False
+            elif allowed is not None:
                 if value not in allowed:
                     return False
             elif value != scalar:
@@ -5462,6 +5488,20 @@ def _build_payload_predicate(
         # re-validates the field-name shape (belt-and-braces over the schema
         # allow-list check above); every VALUE stays a bound parameter.
         json_expr = schemas.payload_json_extract_sql(field_name)
+        prefixes = None
+        if isinstance(value, PayloadPrefix):
+            prefixes = [value]
+        elif (isinstance(value, _Sequence) and not isinstance(value, str)
+                and value and all(isinstance(v, PayloadPrefix) for v in value)):
+            prefixes = list(value)
+        if prefixes is not None:
+            ranges = " OR ".join(f"({json_expr} >= ? AND {json_expr} < ?)"
+                                 for _ in prefixes)
+            clauses.append(f" AND ({ranges})")
+            for prefix in prefixes:
+                params.extend((prefix.value, prefix.value + _PREFIX_CEILING))
+            terms.append((field_name, tuple(p.value for p in prefixes), None))
+            continue
         if isinstance(value, str):
             clauses.append(f" AND {json_expr} = ?")
             params.append(value)
@@ -5562,11 +5602,12 @@ def read_set(
     it out of the public collection API — it is an internal narrowing, not a
     query filter callers compose.
 
-    ``where_payload`` is a schema-authorized equality / finite-IN predicate on
-    the stored JSON ``payload``, available ONLY on an owned, non-vaulted read
-    (``peers=[]``; see :func:`read_owned_set`). A scalar string becomes
-    ``json_extract(payload,'$.<field>') = ?``; a non-string sequence becomes a
-    parameterized ``IN``; an empty sequence returns an empty ``SetMembers``
+    ``where_payload`` is a schema-authorized equality / finite-IN / prefix
+    predicate on the stored JSON ``payload``, available ONLY on an owned,
+    non-vaulted read (``peers=[]``; see :func:`read_owned_set`). A scalar
+    string becomes ``json_extract(payload,'$.<field>') = ?``; a non-string
+    sequence becomes a parameterized ``IN``; a :class:`PayloadPrefix` (or a
+    sequence of them) becomes an index-usable range per prefix; an empty sequence returns an empty ``SetMembers``
     without emitting ``IN ()``. Each requested field is validated against every
     applicable registered schema revision, and the value shape is validated,
     before any predicate SQL runs (:func:`_build_payload_predicate`).

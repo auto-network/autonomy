@@ -158,15 +158,18 @@ class AgentTestRunV1(SettingSchema):
 @home("organization")
 @publication_band(max="raw")
 @append_only_log(strict=True)
-@indexed_payload("run_id")
+@indexed_payload("run_id", "nodeid")
 class AgentTestObservationV1(SettingSchema):
     """One immutable test-node outcome and timing observation.
 
     ``run_id`` is declared indexed: the Tier 2 ``where_payload`` stale-run
     prune selects observations by a finite set of run ids, and ``run_id`` is
     the selective predicate over this append-only set (``repository`` is
-    low-cardinality and deliberately not indexed). ``reconcile_payload_indexes``
-    installs the matching ``(set_id, json_extract(payload,'$.run_id'))`` index.
+    low-cardinality and deliberately not indexed). ``nodeid`` is indexed so
+    estimates and pruning read only the nodes they concern — by exact id, or
+    by a selector prefix (``settings_ops.PayloadPrefix``) — instead of the
+    whole repository (auto-vzujx). ``reconcile_payload_indexes`` installs the
+    matching ``(set_id, json_extract(payload,'$.<field>'))`` indexes.
     """
 
     set_id = OBSERVATION_SET_ID

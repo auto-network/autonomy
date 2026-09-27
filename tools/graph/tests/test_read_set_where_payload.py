@@ -414,3 +414,44 @@ def test_owned_read_allows_the_predicate(acme):
         LOG_SET_ID, org="acme", peers=[],
         where_payload={"repository": "repoA"})
     assert [m.payload["repository"] for m in got.members] == ["repoA"]
+
+
+# ── prefix ranges (auto-vzujx) ────────────────────────────────
+
+
+def test_prefix_matches_full_then_startswith(acme):
+    for nodeid in ("tests/a.py::t1", "tests/a.py::t2", "tests/ab.py::t",
+                   "tests/b.py::t", "other/a.py::t", "tests/a.py"):
+        _log("repoA", "r1", nodeid)
+
+    got = _read(LOG_SET_ID, where_payload={
+        "repository": "repoA", "nodeid": settings_ops.PayloadPrefix("tests/a")})
+    expected = [m for m in _read(LOG_SET_ID)
+                if m.payload["nodeid"].startswith("tests/a")]
+
+    assert sorted(m.id for m in got) == sorted(m.id for m in expected)
+    assert {m.payload["nodeid"] for m in got} == {
+        "tests/a.py::t1", "tests/a.py::t2", "tests/ab.py::t", "tests/a.py"}
+
+
+def test_sequence_of_prefixes_ors_the_ranges(acme):
+    for nodeid in ("x/1", "y/2", "z/3"):
+        _log("repoA", "r1", nodeid)
+    got = _read(LOG_SET_ID, where_payload={"nodeid": [
+        settings_ops.PayloadPrefix("x/"), settings_ops.PayloadPrefix("z/")]})
+    assert {m.payload["nodeid"] for m in got} == {"x/1", "z/3"}
+
+
+def test_prefix_is_exact_on_the_override_fallback_path(acme):
+    """With an override present the read fetches the full set; the prefix
+    must still be applied to the resolved payloads."""
+    base = _log("repoA", "r1", "keep/a")
+    _log("repoA", "r1", "drop/b")
+    _amend(base, key=_read(LOG_SET_ID)[0].key, patch={"nodeid": "keep/a2"})
+    got = _read(LOG_SET_ID, where_payload={"nodeid": settings_ops.PayloadPrefix("keep/")})
+    assert all(m.payload["nodeid"].startswith("keep/") for m in got)
+
+
+def test_empty_prefix_is_refused():
+    with pytest.raises(ValueError):
+        settings_ops.PayloadPrefix("")

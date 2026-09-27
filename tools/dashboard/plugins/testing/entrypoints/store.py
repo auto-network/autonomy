@@ -1,6 +1,7 @@
 """Organization-scoped persistence and bounded aggregates for Testing."""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from datetime import datetime
@@ -23,15 +24,35 @@ from tools.dashboard import agent_test_leases
 from tools.dashboard.dao import dashboard_db
 
 
+logger = logging.getLogger(__name__)
+
 MAX_OBSERVATIONS_PER_TEST = 10
 MAX_RUNS_PER_REPOSITORY = 2_000
+#: Observations are kept only for a repository's newest runs, up to this many
+#: collected test executions. Without it the set grew to 108k rows, and every
+#: estimate read all of them (auto-vzujx).
+MAX_OBSERVATIONS_PER_REPOSITORY = 25_000
+#: Chunk size for exact ``nodeid IN (...)`` queries.
+_NODEID_QUERY_CHUNK = 500
+#: A capped log is pruned once it exceeds its cap by this fraction, so a
+#: telemetry event costs a COUNT, not a read and sort of the whole log.
+_PRUNE_SLACK = 0.1
 MAX_OBSERVATIONS_PER_REQUEST = 20_000
 MAX_SELECTORS = 200
 MAX_RECENT_RUNS = 100
 MAX_RANKED_TESTS = 50
 MAX_USAGE_EVENTS = 5_000
 MAX_ERROR_EVENTS = 2_000
+#: Deletions run at most this many ids per transaction. The org database is
+#: shared by every session and settings writer, and ``remove_raw_settings``
+#: holds one BEGIN IMMEDIATE per call; the first prune after auto-vzujx
+#: removes ~83k rows. A prune larger than one batch runs on a background
+#: thread, pausing between batches so other writers get the lock.
+PRUNE_BATCH = 2_000
+_PRUNE_PAUSE_S = 0.05
 _LOCK = threading.Lock()
+_PRUNE_LOCK = threading.Lock()
+_background_prunes: set[str] = set()
 
 
 def _session_title(session: str) -> str:
@@ -75,6 +96,109 @@ def _members(
     )
 
 
+def _log_order(member: Any) -> tuple:
+    return (float(member.payload.get("recorded_at") or 0), member.created_at, member.id)
+
+
+def _prune_capped_log(set_id: str, org: str, cap: int) -> int:
+    """Keep the newest *cap* entries of an append-only log. Reads the log
+    only when a COUNT shows it is past the cap plus slack (amortized)."""
+    if settings_ops.count_set_rows(set_id, org=org) <= cap + int(cap * _PRUNE_SLACK):
+        return 0
+    members = _members(set_id, org)
+    members.sort(key=_log_order, reverse=True)
+    return _prune([member.id for member in members[cap:]], org)
+
+
+def _chunks(values: list[str], size: int = _NODEID_QUERY_CHUNK):
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
+
+
+def _remove_batch(ids: list[str], org: str) -> int:
+    """Delete one batch in one transaction. An id another prune already
+    removed fails the whole transaction (``LookupError``), so the batch is
+    split until the missing id is isolated and skipped."""
+    if not ids:
+        return 0
+    try:
+        return settings_ops.remove_raw_settings(ids, org=org)
+    except LookupError:
+        if len(ids) == 1:
+            return 0
+        middle = len(ids) // 2
+        return _remove_batch(ids[:middle], org) + _remove_batch(ids[middle:], org)
+
+
+def _remove_in_batches(ids: list[str], org: str, *, pause: float | None = None) -> int:
+    pause = _PRUNE_PAUSE_S if pause is None else pause
+    removed = 0
+    for index, chunk in enumerate(_chunks(ids, PRUNE_BATCH)):
+        if index:
+            time.sleep(pause)  # let other writers take the database lock
+        removed += _remove_batch(chunk, org)
+    return removed
+
+
+def _prune(ids: list[str], org: str) -> int:
+    """Remove *ids*: inline when they fit one batch, else on a background
+    thread (one per org at a time; a call while one runs is dropped and the
+    next caller recomputes what is still stale). Returns the rows removed
+    inline; a background prune reports 0 here and logs its own result."""
+    ids = list(dict.fromkeys(ids))
+    if len(ids) <= PRUNE_BATCH:
+        return _remove_batch(ids, org)
+    with _PRUNE_LOCK:
+        if org in _background_prunes:
+            return 0
+        _background_prunes.add(org)
+
+    def run() -> None:
+        try:
+            removed = _remove_in_batches(ids, org)
+            logger.info("testing: background prune removed %d rows from %s", removed, org)
+        except Exception:
+            logger.exception("testing: background prune failed for %s", org)
+        finally:
+            with _PRUNE_LOCK:
+                _background_prunes.discard(org)
+
+    threading.Thread(target=run, name=f"testing-prune-{org}", daemon=True).start()
+    return 0
+
+
+def _observations_for_nodes(org: str, repository: str, nodeids: list[str]) -> list[Any]:
+    """The repository's observations of exactly these nodes, by the nodeid
+    index."""
+    found: list[Any] = []
+    for chunk in _chunks(list(dict.fromkeys(nodeids))):
+        found.extend(_members(
+            OBSERVATION_SET_ID, org,
+            where_payload={"repository": repository, "nodeid": chunk},
+        ))
+    return found
+
+
+def _observations_for_selectors(org: str, repository: str, selectors: list[str]) -> list[Any]:
+    """The repository's observations under these selectors (file, directory
+    or node ids), by an index range per selector; the caller still applies
+    :func:`_selector_matches` for the exact boundary rule."""
+    prefixes = list(dict.fromkeys(
+        normalized for normalized in (
+            selector.removeprefix("./").rstrip("/") for selector in selectors)
+        if normalized
+    ))
+    if not prefixes:
+        return []
+    return _members(
+        OBSERVATION_SET_ID, org,
+        where_payload={
+            "repository": repository,
+            "nodeid": [settings_ops.PayloadPrefix(prefix) for prefix in prefixes],
+        },
+    )
+
+
 def record_event(
     org: str,
     session: str,
@@ -94,18 +218,7 @@ def record_event(
             })],
             org=org,
         )
-        usage = _members(USAGE_SET_ID, org)
-        usage.sort(
-            key=lambda member: (
-                float(member.payload.get("recorded_at") or 0),
-                member.created_at,
-                member.id,
-            ),
-            reverse=True,
-        )
-        settings_ops.remove_raw_settings(
-            [member.id for member in usage[MAX_USAGE_EVENTS:]], org=org,
-        )
+        _prune_capped_log(USAGE_SET_ID, org, MAX_USAGE_EVENTS)
         row = settings_ops.read_set_key(
             TELEMETRY_SET_ID, session, org=org, peers=[],
         )
@@ -300,18 +413,7 @@ def record_error(
         settings_ops.append_log_entries(
             ERROR_SET_ID, SCHEMA_REVISION, [(str(uuid4()), payload)], org=org,
         )
-        events = _members(ERROR_SET_ID, org)
-        events.sort(
-            key=lambda member: (
-                float(member.payload.get("recorded_at") or 0),
-                member.created_at,
-                member.id,
-            ),
-            reverse=True,
-        )
-        pruned = settings_ops.remove_raw_settings(
-            [member.id for member in events[MAX_ERROR_EVENTS:]], org=org,
-        )
+        pruned = _prune_capped_log(ERROR_SET_ID, org, MAX_ERROR_EVENTS)
     return {"ok": True, "recorded": True, "pruned": pruned}
 
 
@@ -374,8 +476,18 @@ def record_run(org: str, run_id: str, payload: dict[str, Any]) -> dict[str, Any]
             reverse=True,
         )
         stale_runs = history[MAX_RUNS_PER_REPOSITORY:]
-        stale_run_ids = {member.key for member in stale_runs}
         stale = [member.id for member in stale_runs]
+        stale_run_ids = {member.key for member in stale_runs}
+        # Observations are kept only for the newest runs, up to
+        # MAX_OBSERVATIONS_PER_REPOSITORY collected tests; older kept runs
+        # lose their observations but keep their run record.
+        executions = 0
+        for member in history[:MAX_RUNS_PER_REPOSITORY]:
+            if member.payload.get("mode") == "collect":
+                continue  # a collect-only run records no observations
+            executions += int(member.payload.get("collected") or 0)
+            if executions > MAX_OBSERVATIONS_PER_REPOSITORY:
+                stale_run_ids.add(member.key)
         if stale_run_ids:
             stale.extend(
                 member.id for member in _members(
@@ -383,7 +495,7 @@ def record_run(org: str, run_id: str, payload: dict[str, Any]) -> dict[str, Any]
                     where_payload={"run_id": list(stale_run_ids)},
                 )
             )
-        pruned = settings_ops.remove_raw_settings(stale, org=org)
+        pruned = _prune(stale, org)
     return {
         "ok": True,
         "duplicate": False,
@@ -391,12 +503,6 @@ def record_run(org: str, run_id: str, payload: dict[str, Any]) -> dict[str, Any]
         "pruned": pruned,
         "history_limit": MAX_RUNS_PER_REPOSITORY,
     }
-
-
-def _observation_members(org: str, repository: str) -> list[Any]:
-    return _members(
-        OBSERVATION_SET_ID, org, where_payload={"repository": repository}
-    )
 
 
 def record_observations(
@@ -447,7 +553,10 @@ def record_observations(
         prepared.append(payload)
 
     with _LOCK:
-        existing = _observation_members(org, repository)
+        existing = _members(
+            OBSERVATION_SET_ID, org,
+            where_payload={"repository": repository, "run_id": run_id},
+        )
         seen = {
             (str(member.payload.get("run_id")), str(member.payload.get("nodeid")))
             for member in existing
@@ -470,7 +579,8 @@ def record_observations(
             return {"ok": False, "error": str(exc)[:1000]}
 
         by_node: dict[str, list[Any]] = {}
-        for member in _observation_members(org, repository):
+        for member in _observations_for_nodes(
+                org, repository, [payload["nodeid"] for payload in prepared]):
             by_node.setdefault(str(member.payload["nodeid"]), []).append(member)
         stale_ids: list[str] = []
         for history in by_node.values():
@@ -485,7 +595,7 @@ def record_observations(
             stale_ids.extend(
                 member.id for member in history[MAX_OBSERVATIONS_PER_TEST:]
             )
-        pruned = settings_ops.remove_raw_settings(stale_ids, org=org)
+        pruned = _prune(stale_ids, org)
     return {
         "ok": True,
         "repository": repository,
@@ -529,7 +639,7 @@ def duration_history(
     except (TypeError, ValueError):
         return {"ok": False, "error": "limit_tests must be an integer"}
     by_node: dict[str, list[Any]] = {}
-    for member in _observation_members(org, repository):
+    for member in _observations_for_selectors(org, repository, selectors):
         nodeid = str(member.payload.get("nodeid") or "")
         if any(_selector_matches(nodeid, selector) for selector in selectors):
             by_node.setdefault(nodeid, []).append(member)
@@ -592,7 +702,7 @@ def node_estimates(
         return {"ok": False, "error": "nodeids must contain non-empty strings"}
     wanted_set = set(wanted)
     histories: dict[str, list[Any]] = {}
-    for member in _observation_members(org, repository):
+    for member in _observations_for_nodes(org, repository, wanted):
         nodeid = str(member.payload.get("nodeid") or "")
         if nodeid in wanted_set:
             histories.setdefault(nodeid, []).append(member)
@@ -635,7 +745,7 @@ def estimate_duration(
         return error
     assert selectors is not None
     by_node: dict[str, list[tuple[float, float]]] = {}
-    for member in _observation_members(org, repository):
+    for member in _observations_for_selectors(org, repository, selectors):
         nodeid = str(member.payload.get("nodeid") or "")
         if any(_selector_matches(nodeid, selector) for selector in selectors):
             by_node.setdefault(nodeid, []).append((

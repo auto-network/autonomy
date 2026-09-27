@@ -73,6 +73,11 @@ REPO_A = "github.test/acme/a"
 REPO_B = "github.test/acme/b"
 
 
+def _repo_observations(org, repository):
+    return [m for m in settings_ops.read_owned_set(OBSERVATION_SET_ID, org=org).members
+            if m.payload["repository"] == repository]
+
+
 def _obs(org, repository, run_id, nodeid, *, duration=1.0, outcome="passed"):
     return store.record_observations(
         org, repository, run_id,
@@ -117,7 +122,7 @@ def test_observation_members_isolate_by_repository(org):
     _obs(org, REPO_A, "a-1", "tests/test.py::a")
     _obs(org, REPO_B, "b-1", "tests/test.py::b")
 
-    members = store._observation_members(org, REPO_A)
+    members = _repo_observations(org, REPO_A)
     assert {m.payload["repository"] for m in members} == {REPO_A}
     assert {m.payload["nodeid"] for m in members} == {"tests/test.py::a"}
 
@@ -132,7 +137,7 @@ def test_per_node_observation_retention_preserved(org, monkeypatch):
         assert _obs(org, REPO_A, f"a-run-{i}", node, duration=float(i))["ok"]
         clock[0] += 1
 
-    members = store._observation_members(org, REPO_A)
+    members = _repo_observations(org, REPO_A)
     # Only the newest 3 observations of the node are retained.
     assert len(members) == 3
     assert sorted(m.payload["duration_seconds"] for m in members) == [2.0, 3.0, 4.0]
