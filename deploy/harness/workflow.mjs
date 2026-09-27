@@ -1,9 +1,16 @@
 // Organization invitation scenario; shared environment and UI driver in ui-harness.mjs.
 import {randomBytes} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
+import {writeFileSync} from 'node:fs';
 import {createWorkflow} from './ui-harness.mjs';
 const onboardingOnly=process.argv.includes('--onboarding-only');
-createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'membership',output:process.argv.slice(2).find(arg=>!arg.startsWith('--'))}).runScenario(({browser,js,action,waitFor,waitValue,lockAndUnlock,memberRows,click,textOf,setPersonalProfile,openOrganizationSettings,save,withStep,evidence,directory,run,output,alicePort,bobPort,relayOrigin})=>{
+// --reach=autonomy: a diagnostic onboarding run that chooses the Autonomy Network
+// in step 2 and records what the product reports for the personal publication
+// (connector, certificate, gateway) once its own polling stops. The simulation's
+// relay issues no certificate, so the run ends there; it exists to witness the
+// personal connector behind a live publication (Windows run 5, 2026-09-27).
+const reachMode=(process.argv.find(arg=>arg.startsWith('--reach='))||'--reach=local').slice('--reach='.length);
+createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'membership',output:process.argv.slice(2).find(arg=>!arg.startsWith('--'))}).runScenario(({browser,js,action,waitFor,waitValue,lockAndUnlock,memberRows,click,textOf,setPersonalProfile,openOrganizationSettings,save,withStep,evidence,directory,run,output,alicePort,bobPort,relayOrigin,compose})=>{
   withStep('alice','open alice home',()=>{browser('alice','open','https://localhost:'+alicePort+'/');browser('alice','set','viewport','1280','900');});
   withStep('alice','save fresh start',()=>save('alice','fresh-start',browser('alice','snapshot','-i')));
   withStep('alice','begin alice onboarding',()=>action('alice','[data-testid="welcome-begin"]',{},'#onboarding-name'));
@@ -16,6 +23,27 @@ createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'mem
   // Step 2, reach this dashboard from anywhere (auto-1zjk8): the simulation's relay
   // issues no certificates, so it records Local only; the Autonomy Network path is
   // the Windows walkthrough's on a real node. Every transition is the product's own.
+  if(reachMode==='autonomy'){
+    withStep('alice','choose autonomy reach',()=>click('alice','[data-testid="welcome-reach-autonomy"]'));
+    withStep('alice','publish on the autonomy network',()=>action('alice','[data-testid="welcome-reach-submit"]',{},'[data-testid="welcome-reach-progress"]','[data-testid="welcome-reach-error"]',30000));
+    // The product polls its own status and stops (Check again appears) on a
+    // failed certificate, on the advertised route, or on the live origin. One
+    // browser evaluation is bounded at 40 s, so the wait is resumed, not polled.
+    withStep('alice','reach polling stops',()=>{let last;for(let i=0;i<8;i++){try{return waitFor('alice','[data-testid="welcome-reach-check"], [data-testid="welcome-reach-done"]','[data-testid="welcome-reach-error"]',35000);}catch(error){last=error;if(!/UI timeout/.test(error.message))throw error;}}throw last;});
+    // Two serving-watchdog periods (20 s each) after the product's own polling
+    // stops, so a connector the watchdog would start has had its chance.
+    withStep('alice','two watchdog periods',()=>spawnSync('sleep',['45']));
+    withStep('alice','save reach-autonomy',()=>save('alice','reach-autonomy',{snapshot:browser('alice','snapshot','-i'),
+      progress:js('alice',`Array.from(document.querySelectorAll('[data-testid="welcome-reach-progress"] li')).map(e=>e.className+' '+e.textContent.trim())`),
+      status:js('alice',`(async()=>{const status=await (await fetch('/api/network/remote-access/status',{cache:'no-store'})).json();const links=await (await fetch('/api/network/published-links',{headers:{'X-Graph-Org':'personal'}})).json();const gateway=await (await fetch('/api/network/service-gateway',{headers:{'X-Graph-Org':'personal'}})).json().catch(()=>null);return {status,links,gateway};})()`)}));
+    // The connector's own log and working directory, from inside the node:
+    // "launched" with no control listener is a connector that died or never
+    // got as far as its listener, and only its log says which.
+    withStep('alice','save connector log',()=>{const listing=compose('exec','-T','alice','sh','-c','ls -la /app/data/network/ /run/autonomy-keycache/ 2>&1; for f in /app/data/network/serve-*.log; do echo "== $f"; tail -n 60 "$f"; done 2>&1');evidence.connectorLog=listing;writeFileSync(output+'/connector.log',listing);});
+    withStep('alice','personal connector runs behind the publication',()=>{const st=evidence.checkpoints.at(-1).details.status.status.status;evidence.reachStatus=st;if(!st.connector||!st.connector.running)throw new Error('personal connector not running: '+JSON.stringify(st.connector));const stage=(st.stages||[]).find(s=>s.name==='connector');if(stage&&!stage.ok)throw new Error('connector stage not ok: '+stage.detail);});
+    evidence.status='passed';
+    return;
+  }
   withStep('alice','choose local reach',()=>click('alice','[data-testid="welcome-reach-local"]'));
   withStep('alice','record local reach',()=>action('alice','[data-testid="welcome-reach-submit"]',{},'[data-testid="welcome-reach-done"]','[data-testid="welcome-reach-error"]'));
   withStep('alice','reach summary names this machine',()=>{const summary=textOf('alice','[data-testid="welcome-reach-summary"]');if(!/^https?:\/\/(localhost|127\.0\.0\.1)/.test(summary))throw new Error('reach summary is not the local origin: '+summary);evidence.reachSummary=summary;});
