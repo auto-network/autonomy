@@ -364,6 +364,7 @@ services:
       AUTONOMY_HOST_DATA_ROOT: ${AUTONOMY_HOST_DATA_ROOT:-}
       AUTONOMY_HOST_HOME: ${AUTONOMY_HOST_HOME}
       AUTONOMY_SUBNET: ${AUTONOMY_SUBNET}
+      AUTONOMY_SERVICE_GATEWAY_IMAGE: ${AUTONOMY_SERVICE_GATEWAY_IMAGE:-autonomy-service-gateway:local}
       AUTONOMY_DATA_ROOT: /app/data
       TZ: ${TZ:-UTC}
       # No keycache mount; skip the entrypoint's ramfs provisioning.
