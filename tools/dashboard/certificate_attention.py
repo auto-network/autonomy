@@ -95,7 +95,9 @@ def source_version(facts, stage: int) -> int:
 
 
 def _on(facts) -> str:
-    return facts.not_after.strftime("%-d %b %Y")
+    # No %-d: that flag is glibc-only (the container is fine; native Windows
+    # Python is not).
+    return f"{facts.not_after.day} {facts.not_after:%b %Y}"
 
 
 def derive_condition(facts, *, machine_id: str, now: datetime | None = None) -> dict:

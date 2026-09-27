@@ -74,7 +74,7 @@ def test_derive_condition_escalates_through_stages_and_a_renewal_resolves(tmp_pa
     publish once, and any renewal is larger than every stage of the old one."""
     cert, _ = _pem_pair(tmp_path, ["node.tailabcd.ts.net"], days=20)
     facts = tls_certificate.read_certificate(cert)
-    on = facts.not_after.strftime("%-d %b %Y")
+    on = f"{facts.not_after.day} {facts.not_after:%b %Y}"
     at = lambda days_before: facts.not_after - dt.timedelta(days=days_before)
 
     warn = ca.derive_condition(facts, machine_id="ab" * 32, now=at(20))
