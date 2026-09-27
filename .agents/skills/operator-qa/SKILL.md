@@ -13,8 +13,9 @@ The operator has stated the core requirement several times: ask one question at 
 
 1. List every open decision, and name the note or bead that owns each one. That note or bead is where the answer is recorded.
 2. Remove any decision the operator has already made. Search `graph attention --search "<topic>"` and read the owning note's comments. If you find an answer, record it and do not ask it again.
-3. Order the remaining decisions so that a decision which changes the options of another decision comes first.
-4. For each decision, write the options, the consequence of each option in one sentence, and your recommendation with its reason in one sentence. Consequences describe what the option does or rules out, never how long it takes.
+3. Verify every premise of every remaining decision by direct observation before you write the question. A premise is any statement of fact the question rests on: "no UI exists for X", "Y has only run in simulation", "Z is blocked on W". For each one, open the code, the database, the log or the running system and confirm it now. A bead description, a graph note, a worklist, or another session's report is a claim, not an observation; it is stale the moment the code it describes changes, so check it against the current tree (`git log -S` on the relevant file shows whether a control landed after the claim was written). If a premise turns out false, the decision may shrink or vanish; rewrite or drop it. Note beside each question which observation backs each premise, so you can answer "how do you know?" without a second look.
+4. Order the remaining decisions so that a decision which changes the options of another decision comes first.
+5. For each decision, write the options, the consequence of each option in one sentence, and your recommendation with its reason in one sentence. Consequences describe what the option does or rules out, never how long it takes.
 
 ## Asking one question
 
@@ -36,7 +37,8 @@ Rules for the question:
 - Do not give time or effort estimates, in the question, the options or the recommendation.
 - Do not use bead IDs, section numbers, option codes from a design note, or any other label the operator would have to look up. The letters A, B and C are defined in the message itself.
 - Do not bundle two decisions into one question, and do not list the remaining questions.
-- The operator may answer with a letter, with their own words, or with a correction to the question. Treat all three as answers.
+- Every fact in the question and its options is one you observed yourself in this session. Never carry an unverified claim from a bead, note or peer session into a question; a false premise costs the operator a correction round that a single grep would have saved.
+- The operator may answer with a letter, with their own words, or with a correction to the question. Treat all three as answers. A correction that exposes a false premise is a defect in your preparation: fix the record that carried the false claim (close or amend the bead, comment on the note) before asking the corrected question.
 
 ## After each answer
 
