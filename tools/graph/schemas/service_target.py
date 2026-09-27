@@ -28,6 +28,8 @@ SERVICE_TARGET_KEY_STRATEGY = "reservation_id"
 SESSION_TARGET_KIND = "session"
 DASHBOARD_TARGET_KIND = "dashboard"
 TARGET_KINDS = (SESSION_TARGET_KIND, DASHBOARD_TARGET_KIND)
+#: The only access mode a dashboard target may carry.
+DASHBOARD_ACCESS_MODE = "personal"
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -137,7 +139,7 @@ class ServiceTargetV2(ServiceTargetV1):
 
     @classmethod
     def validate(cls, payload: Any) -> None:
-        SettingSchema.validate.__func__(cls, payload)
+        super(ServiceTargetV1, cls).validate(payload)
         if not isinstance(payload, dict):
             return
         kind = payload.get("kind", SESSION_TARGET_KIND)
@@ -146,7 +148,20 @@ class ServiceTargetV2(ServiceTargetV1):
         _validate_target_fields(cls.__name__, payload)
         if kind == SESSION_TARGET_KIND:
             _validate_session_id(cls.__name__, payload)
-        elif "session_id" in payload:
+            if payload["session_id"] == DASHBOARD_TARGET_KIND:
+                # The dashboard route's display name; a session may not wear it.
+                raise SchemaValidationError(
+                    f"{cls.__name__}: session_id 'dashboard' is reserved for kind dashboard"
+                )
+            return
+        if "session_id" in payload:
             raise SchemaValidationError(
                 f"{cls.__name__}: session_id is not allowed for kind dashboard"
+            )
+        if payload.get("access_mode", "public") != DASHBOARD_ACCESS_MODE:
+            # The dashboard's own gate is the personal passkey, always: a public
+            # dashboard route would expose the unlock screen and every open
+            # path to the internet (operator decision 2026-09-27).
+            raise SchemaValidationError(
+                f"{cls.__name__}: kind dashboard requires access_mode {DASHBOARD_ACCESS_MODE}"
             )

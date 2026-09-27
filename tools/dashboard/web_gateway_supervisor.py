@@ -131,6 +131,12 @@ def _local_reservation_ids(org: str) -> set:
     }
 
 
+def _dashboard_route_permitted(target_row: dict, access: str) -> bool:
+    """Belt and braces over the schema and bind refusals: the node's own
+    dashboard is never served without its personal passkey gate."""
+    return target_row.get("kind") != "dashboard" or access == "personal"
+
+
 def _discover_orgs() -> list[str]:
     from tools.graph import org_ops
 
@@ -345,9 +351,13 @@ async def _build_desired_state() -> GatewayDesiredState:
         if not await _connector_ready(org):
             found_unready_connector = True
             continue
-        access_modes = {
-            row["reservation_id"]: row.get("access_mode", "public")
+        target_rows = {
+            row["reservation_id"]: row
             for row in service_publication.list_service_targets(org)
+        }
+        access_modes = {
+            reservation_id: row.get("access_mode", "public")
+            for reservation_id, row in target_rows.items()
         }
 
         for reservation in candidates:
@@ -381,6 +391,8 @@ async def _build_desired_state() -> GatewayDesiredState:
                     org, reservation_id
                 )
                 access = access_modes.get(reservation_id, "public")
+                if not _dashboard_route_permitted(target_rows.get(reservation_id, {}), access):
+                    raise ValueError("A dashboard route requires the personal gate")
                 if access == "oidc":
                     helper_id = f"org-oidc:{org}"
                     if helper_id not in helpers:

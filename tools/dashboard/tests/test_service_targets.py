@@ -480,6 +480,9 @@ class TestServiceTargetApiContract:
             (ACTIVE_ID, {"kind": "dashboard", "port": 8081, "ip": "127.0.0.1"}, "unknown_fields"),
             (ACTIVE_ID, {"kind": "dashboard", "port": 0}, "invalid_port"),
             (ACTIVE_ID, {"kind": "bogus", "port": 8081}, "invalid_kind"),
+            (ACTIVE_ID, {"kind": "dashboard", "access_mode": "public"}, "dashboard_requires_personal"),
+            (ACTIVE_ID, {"kind": "dashboard", "access_mode": "oidc"}, "dashboard_requires_personal"),
+            (ACTIVE_ID, {"session_id": "dashboard", "port": 8000}, "invalid_session_id"),
         ],
     )
     def test_request_refusals_are_exact(self, target_api, reservation_id, body, code):
@@ -848,7 +851,7 @@ class TestDashboardTarget:
         created = _put_dashboard(client)
         assert created.status_code == 201, created.text
         assert created.json()["target"] == {
-            "access_mode": "public",
+            "access_mode": "personal",      # the dashboard's gate, never public
             "reservation_id": ACTIVE_ID,
             "kind": "dashboard",
             "machine_id": MACHINE_ID,
@@ -943,3 +946,31 @@ class TestDashboardTarget:
         checked = _check(client)
         assert checked.status_code == 200, checked.text
         assert checked.json()["target"]["kind"] == "session"
+
+    def test_dashboard_target_is_personal_at_every_layer(self, target_api, monkeypatch):
+        """Schema, bind and the gateway supervisor each refuse a public
+        dashboard route on their own (reviewer: belt and braces)."""
+        from tools.graph import schemas
+        from tools.dashboard import web_gateway_supervisor as gateway_sup
+
+        client, *_ = target_api
+        # bind: personal is the default and the only accepted value
+        assert _put_dashboard(client).json()["target"]["access_mode"] == "personal"
+        assert _put_dashboard(client, access_mode="personal").status_code == 200
+        _error(_put_dashboard(client, access_mode="public"), 400, "dashboard_requires_personal")
+        # schema: a hand-written public dashboard row is invalid
+        row = _target_members()[0].payload
+        with pytest.raises(schemas.SchemaValidationError):
+            schemas.validate_payload(TARGET_SET_ID, TARGET_REVISION, {**row, "access_mode": "public"})
+        # supervisor: even a row that slipped past both renders unavailable
+        monkeypatch.setattr(
+            gateway_sup.service_publication, "list_service_targets",
+            lambda org: [{"reservation_id": ACTIVE_ID, "kind": "dashboard", "access_mode": "public",
+                          "machine_id": MACHINE_ID}],
+        )
+        assert gateway_sup._dashboard_route_permitted(
+            {"reservation_id": ACTIVE_ID, "kind": "dashboard"}, "public") is False
+        assert gateway_sup._dashboard_route_permitted(
+            {"reservation_id": ACTIVE_ID, "kind": "dashboard"}, "personal") is True
+        assert gateway_sup._dashboard_route_permitted(
+            {"reservation_id": ACTIVE_ID, "kind": "session"}, "public") is True

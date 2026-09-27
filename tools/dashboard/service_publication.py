@@ -36,6 +36,7 @@ from tools.graph.schemas.serve_zone import (
     validate_zone_value,
 )
 from tools.graph.schemas.service_target import (
+    DASHBOARD_ACCESS_MODE,
     DASHBOARD_TARGET_KIND,
     SESSION_TARGET_KIND,
     TARGET_KINDS,
@@ -215,7 +216,8 @@ def _reservation_for_target(org: str, key: str, *, serving: bool = False):
 
 
 def _validate_session_id(value: object) -> str:
-    if not isinstance(value, str) or not _SESSION_ID_RE.fullmatch(value):
+    if not isinstance(value, str) or not _SESSION_ID_RE.fullmatch(value) \
+            or value == DASHBOARD_TARGET_SESSION_LABEL:
         raise ServicePublicationError("invalid_session_id", 400)
     return value
 
@@ -484,7 +486,15 @@ async def bind_service_target(
     from tools.dashboard import service_auth
     from tools.graph.schemas.service_target import validate_access_mode
 
-    if access_mode is None:
+    if kind == DASHBOARD_TARGET_KIND:
+        # The dashboard is gated by the personal passkey, never public or
+        # org-OIDC: until that gate serves, the route renders unavailable
+        # (fail closed) rather than exposing the unlock screen.
+        if access_mode is None:
+            access_mode = DASHBOARD_ACCESS_MODE
+        elif access_mode != DASHBOARD_ACCESS_MODE:
+            raise ServicePublicationError("dashboard_requires_personal", 400)
+    elif access_mode is None:
         access_mode = (
             existing.payload.get("access_mode", "public") if existing is not None
             else service_auth.configuration(org)["default_access"]
