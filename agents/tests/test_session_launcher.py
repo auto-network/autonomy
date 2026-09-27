@@ -106,6 +106,21 @@ def neutralize_launch_preflight(monkeypatch):
     monkeypatch.setattr(launch_preflight, "preflight", lambda **kw: [])
 
 
+@pytest.fixture(autouse=True)
+def signin_deliveries(monkeypatch):
+    """Record sign-in deliveries instead of running the nsenter helper (and
+    its wait for a real container)."""
+    got = {"now": [], "background": []}
+    monkeypatch.setattr(
+        session_launcher, "deliver_signins",
+        lambda name, payloads: got["now"].append((name, sorted(payloads))) or [])
+    monkeypatch.setattr(
+        session_launcher, "deliver_signins_in_background",
+        lambda name, payloads: payloads and got["background"].append(
+            (name, sorted(payloads))))
+    return got
+
+
 def _run(**kw):
     """Call launch_session with common defaults filled in.
 
@@ -1835,14 +1850,12 @@ def _codex_vault(monkeypatch, account_id="acct-UUID", **over):
     _stub_vault(monkeypatch, {"codex": [hv.Account("codex", account_id, parts)]})
 
 
-def test_materialize_codex_auth_json_reconstructs_file(tmp_path, monkeypatch):
-    """The account's vault rows are rebuilt into the on-disk auth.json shape Codex expects."""
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
+def test_codex_signin_is_the_auth_json_codex_expects(monkeypatch):
+    """The account's vault rows are rebuilt, in memory, into the auth.json
+    shape Codex expects."""
     _codex_vault(monkeypatch)
-    out = session_launcher._materialize_codex_auth_json(run_dir)
-    assert out is not None
-    doc = json.loads(Path(out).read_text())
+    payloads = session_launcher._signin_payloads(None)
+    doc = json.loads(payloads[session_launcher.CODEX_AUTH_FILENAME])
     assert doc["auth_mode"] == "chatgpt"
     assert doc["OPENAI_API_KEY"] is None
     assert doc["tokens"]["account_id"] == "acct-UUID"
@@ -1850,27 +1863,14 @@ def test_materialize_codex_auth_json_reconstructs_file(tmp_path, monkeypatch):
     assert doc["tokens"]["refresh_token"] == "rt-1"
     assert doc["tokens"]["id_token"] == "id-1"
     assert doc["last_refresh"] == "2026-08-14T00:00:00Z"
-    assert (Path(out).stat().st_mode & 0o777) == 0o600
 
 
-def test_materialize_codex_auth_json_missing_account_returns_none(tmp_path, monkeypatch):
-    """No Codex account in the vault → no file → Codex simply unavailable (truthful)."""
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    _stub_vault(monkeypatch, {})
-    assert session_launcher._materialize_codex_auth_json(run_dir) is None
-
-
-def test_materialize_codex_auth_json_missing_account_warns_with_remedy(
-    tmp_path, monkeypatch, caplog,
-):
-    """A None return must WARN with the remedy — a missing sign-in is an
-    operator-visible error, not a silent sign-in prompt at launch."""
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
+def test_no_codex_account_means_no_codex_signin_and_a_warning(monkeypatch, caplog):
+    """No Codex account → Codex simply unavailable (truthful), WARNED with the
+    remedy — a missing sign-in is operator-visible, not a silent prompt."""
     _stub_vault(monkeypatch, {})
     with caplog.at_level("INFO", logger=session_launcher.logger.name):
-        assert session_launcher._materialize_codex_auth_json(run_dir) is None
+        assert session_launcher._signin_payloads(None) == {}
     warns = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warns) == 1
     msg = warns[0].getMessage()
@@ -1894,36 +1894,20 @@ def test_pick_account_is_the_only_one_or_a_random_one(monkeypatch):
     assert session_launcher._pick_account("codex") is None
 
 
-def test_optional_tool_mounts_uses_substrate_not_host_auth_json(
-    tmp_path, monkeypatch,
-):
-    """The credential mount is the materialized substrate file, never ~/.codex/auth.json."""
+def test_optional_tool_mounts_carry_no_signin(tmp_path, monkeypatch):
+    """auto-1cc4q: with every harness account in the vault, no sign-in is
+    mounted — they reach the container only through its private ramfs."""
+    from tools.graph import harness_credentials as hv
+    _stub_vault(monkeypatch, {
+        "codex": [hv.Account("codex", "a", {"id": "i", "access": "a", "refresh": "r"})],
+        "grok": [hv.Account("grok", "default", {"auth": '{"t": 1}'})],
+    })
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    _codex_vault(monkeypatch)
     mounts = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir)
-    # Exactly one mount targets the container auth.json path...
-    auth_hosts = [
-        hp for hp, spec in mounts.items()
-        if spec.split(":")[0] == "/home/agent/.codex/auth.json"
-    ]
-    assert len(auth_hosts) == 1
-    # ...and it is the run_dir copy, NOT the operator's host file.
-    host_auth = str(Path.home() / ".codex" / "auth.json")
-    assert auth_hosts[0] != host_auth
-    assert auth_hosts[0].startswith(str(run_dir))
-
-
-def test_optional_tool_mounts_no_row_mounts_no_auth(tmp_path, monkeypatch):
-    """No Codex account in the vault leaves no auth.json mount at all."""
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    _stub_vault(monkeypatch, {})
-    mounts = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir)
-    assert not any(
-        spec.split(":")[0] == "/home/agent/.codex/auth.json"
-        for spec in mounts.values()
-    )
+    dests = {spec.split(":")[0] for spec in mounts.values()}
+    assert not dests & set(session_launcher.SIGNIN_CONTAINER_PATHS.values())
+    assert list(run_dir.iterdir()) == []
 
 
 def test_launcher_source_has_no_host_codex_auth_json_read():
@@ -1942,21 +1926,94 @@ def test_launcher_source_has_no_host_codex_auth_json_read():
     assert "host_codex_home / 'auth.json'" not in src
 
 
-def test_codex_auth_copy_cleanup_is_scheduled(
-    tmp_path, fake_crosstalk, captured_run, platform_snapshot, monkeypatch,
+def test_detached_launch_delivers_signins_and_mounts_none(
+    tmp_path, fake_crosstalk, captured_run, monkeypatch, signin_deliveries,
 ):
-    """The materialized Codex auth.json (live tokens) is cleaned up post-exit."""
+    """auto-1cc4q: the sign-ins go into the running container's private
+    ramfs, the harness argv waits for and links them, and nothing is
+    mounted from or written to the run dir."""
+    from tools.graph import harness_credentials as hv
+    _stub_vault(monkeypatch, {
+        "codex": [hv.Account("codex", "a", {"id": "i", "access": "a", "refresh": "r"})],
+        "grok": [hv.Account("grok", "default", {"auth": '{"t": 1}'})],
+    })
+    run_dir = tmp_path / "run"
+    _run(name="auto-s", output_dir=str(run_dir), harness="codex")
+    cmd = captured_run[0]
+    assert signin_deliveries["now"] == [
+        ("auto-s", [session_launcher.CODEX_AUTH_FILENAME,
+                    session_launcher.GROK_AUTH_FILENAME])]
+    assert signin_deliveries["background"] == []
+    joined = " ".join(cmd)
+    for dest in session_launcher.SIGNIN_CONTAINER_PATHS.values():
+        assert f"{dest}:ro" not in joined and f"dst={dest}" not in joined
+    i = cmd.index("session-widgets")
+    assert cmd[i + 1:i + 3] == ["sh", "-c"] and cmd[i + 4] == "autonomy-signin"
+    assert cmd[i + 5] == "codex"
+    assert not list(run_dir.rglob("*auth*.json"))
+
+
+def test_tmux_launch_delivers_signins_in_the_background(
+    tmp_path, fake_crosstalk, monkeypatch, signin_deliveries,
+):
     _codex_vault(monkeypatch)
-    scheduled: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        session_launcher, "_schedule_creds_cleanup",
-        lambda cid, path: scheduled.append((cid, path)),
-    )
-    _run(output_dir=str(tmp_path / "run"), harness="codex")
-    # exactly one cleanup, for the run_dir codex-auth.json copy
-    assert len(scheduled) == 1
-    assert scheduled[0][1].endswith("codex-auth.json")
-    assert str(tmp_path / "run") in scheduled[0][1]
+    out = _run(name="auto-t", detach=False, output_dir=str(tmp_path / "run"),
+               harness="codex")
+    assert isinstance(out, str) and "autonomy-signin" in out
+    assert signin_deliveries["background"] == [
+        ("auto-t", [session_launcher.CODEX_AUTH_FILENAME])]
+    assert signin_deliveries["now"] == []
+
+
+def test_detached_launch_with_undelivered_signin_is_removed(
+    tmp_path, fake_crosstalk, monkeypatch,
+):
+    _codex_vault(monkeypatch)
+    calls = []
+
+    class Done:
+        returncode, stdout, stderr = 0, "cid\n", ""
+
+    monkeypatch.setattr(session_launcher.subprocess, "run",
+                        lambda cmd, **kw: calls.append(cmd) or Done())
+    monkeypatch.setattr(session_launcher, "deliver_signins",
+                        lambda name, payloads: sorted(payloads))
+    assert _run(name="auto-u", output_dir=str(tmp_path / "run"),
+                harness="codex") is None
+    assert ["docker", "rm", "-f", "auto-u"] in calls
+
+
+def test_signin_prefix_waits_links_and_execs(tmp_path, monkeypatch):
+    """The in-container prefix, run for real with /run/secrets redirected:
+    a delivered file is linked where the harness reads it, a missing one is
+    reported, and the harness argv is exec'd either way."""
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "codex-auth.json").write_text("{}")
+    home = tmp_path / "home"
+    monkeypatch.setattr(session_launcher, "SIGNIN_WAIT_S", 0.3)
+    monkeypatch.setattr(session_launcher, "SIGNIN_CONTAINER_PATHS", {
+        "codex-auth.json": str(home / ".codex" / "auth.json"),
+        "grok-auth.json": str(home / ".grok" / "auth.json"),
+    })
+    argv = session_launcher.signin_argv_prefix(["codex-auth.json", "grok-auth.json"])
+    argv[2] = argv[2].replace("/run/secrets", str(secrets_dir))
+    r = subprocess.run([*argv, "echo", "harness-ran"],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and r.stdout.strip() == "harness-ran"
+    link = home / ".codex" / "auth.json"
+    assert link.is_symlink() and os.readlink(link) == str(secrets_dir / "codex-auth.json")
+    assert not (home / ".grok" / "auth.json").exists()
+    assert "grok-auth.json was not delivered" in r.stderr
+
+
+def test_launcher_source_has_no_signin_staging():
+    """auto-1cc4q: no run_dir staging and no post-exit cleanup thread."""
+    import inspect
+    src = inspect.getsource(session_launcher)
+    for gone in ("_schedule_creds_cleanup", "_write_private_json",
+                 "_materialize_codex_auth_json", "creds_copy"):
+        assert gone not in src
 
 
 def test_every_session_gets_the_bd_close_gate(
@@ -2184,7 +2241,7 @@ def test_build_mount_plan_socket_via_startup_is_refused_at_emit(tmp_path, monkey
     monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: None)
     monkeypatch.setattr(session_launcher, "_resolve_optional_tool_mounts", lambda **k: {})
     run_dir = tmp_path / "run"
-    plan, _se, _ca = session_launcher.build_mount_plan(
+    plan, _se = session_launcher.build_mount_plan(
         run_dir=run_dir, sessions_dir=run_dir / "sessions",
         harness="claude", working_dir="/workspace/repo",
         startup_script="/var/run/docker.sock",
@@ -2193,39 +2250,16 @@ def test_build_mount_plan_socket_via_startup_is_refused_at_emit(tmp_path, monkey
         mount_args(plan, NodeTopology(is_host_process=True))
 
 
-def _stub_usable_codex_row(monkeypatch):
-    """Make the vault hold a Codex account, so the auth mount is DECLARED —
-    without this the declare/materialize distinction has nothing to prove."""
-    _codex_vault(monkeypatch, account_id="acct")
-
-
-def test_declare_mode_declares_but_does_not_materialize_credential(tmp_path, monkeypatch):
-    """auto-vm8qh criterion 6: the REAL _resolve_optional_tool_mounts in declare
-    mode (materialize_auth=False) references the Codex auth path but writes NO
-    credential. Only the materializer + row-pick are stubbed."""
-    materialized = []
-    monkeypatch.setattr(session_launcher, "_materialize_codex_auth_json",
-                        lambda run_dir: materialized.append(run_dir))
-    _stub_usable_codex_row(monkeypatch)
-    run_dir = tmp_path / "run"; run_dir.mkdir()
-    mounts = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir, materialize_auth=False)
-    assert materialized == [], "declare mode must NOT write the credential"
-    target = str(run_dir / "codex-auth.json")
-    assert mounts.get(target) == "/home/agent/.codex/auth.json:ro", "auth mount is still declared"
-
-
-def test_mount_refusal_mints_no_token_and_materializes_no_credential(tmp_path, fake_creds, monkeypatch):
+def test_mount_refusal_mints_no_token_and_opens_no_signin(tmp_path, fake_creds, monkeypatch):
     """auto-vm8qh criterion 6: a mount refusal returns having minted NO session
-    token and materialized NO Codex credential — exercising the REAL declare path
-    (a usable row exists, so the auth mount is genuinely declared)."""
+    token and opened NO sign-in from the vault."""
     import types
-    minted, materialized = [], []
+    minted, opened = [], []
     fake_dao = types.SimpleNamespace(
         auth_db=types.SimpleNamespace(insert_token=lambda *a, **k: minted.append(a)))
     monkeypatch.setitem(__import__("sys").modules, "tools.dashboard.dao", fake_dao)
-    monkeypatch.setattr(session_launcher, "_materialize_codex_auth_json",
-                        lambda run_dir: materialized.append(run_dir))
-    _stub_usable_codex_row(monkeypatch)
+    monkeypatch.setattr(session_launcher, "_signin_payloads",
+                        lambda acct: opened.append(acct) or {})
     monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: None)
     result = session_launcher.launch_session(
         session_type="dispatch", name="t", prompt=None, detach=True,
@@ -2234,41 +2268,28 @@ def test_mount_refusal_mints_no_token_and_materializes_no_credential(tmp_path, f
     )
     assert result is None
     assert minted == [], "no session token may be minted on a refused launch"
-    assert materialized == [], "no credential may be materialized on a refused launch"
+    assert opened == [], "no sign-in may be opened on a refused launch"
 
 
-def test_declared_credential_failed_materialization_refuses_before_token(tmp_path, fake_creds, monkeypatch):
-    """auto-vm8qh criterion 6: a credential DECLARED at plan time but that fails to
-    materialize (write error, or the row expired/raced away) is a launch refusal —
-    taken BEFORE the session token is minted, leaving no partial credential file.
-    Otherwise the validated argv binds a path that doesn't exist: host-process -v
-    would fabricate a dir there, the fallback bind would fail only at docker-run,
-    both AFTER the token was minted."""
+def test_unopenable_claude_account_refuses_before_token(tmp_path, monkeypatch):
+    """A vault Claude account chosen for the launch that cannot be opened is a
+    refusal taken BEFORE the session token is minted — never a container that
+    starts signed out."""
     import types
-    from pathlib import Path
     minted = []
     fake_dao = types.SimpleNamespace(
         auth_db=types.SimpleNamespace(insert_token=lambda *a, **k: minted.append(a)))
     monkeypatch.setitem(__import__("sys").modules, "tools.dashboard.dao", fake_dao)
-    _stub_usable_codex_row(monkeypatch)                 # row exists -> auth mount DECLARED
+    monkeypatch.setattr(session_launcher, "_resolve_credentials",
+                        lambda: {"type": "vault", "harness_token": "org-1"})
+    _claude_vault(monkeypatch, setup="k", bundle=False)
     monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: None)
-
-    run_dir = tmp_path / "run"; run_dir.mkdir()
-    partial = run_dir / "codex-auth.json"
-    def failing_materialize(rd):
-        # Simulate a write that landed before failing (or a chmod failure): a file
-        # is on disk, but the materializer reports failure by returning None.
-        Path(rd).joinpath("codex-auth.json").write_text("partial-credential")
-        return None
-    monkeypatch.setattr(session_launcher, "_materialize_codex_auth_json", failing_materialize)
-
     result = session_launcher.launch_session(
         session_type="dispatch", name="t", prompt=None, detach=True,
-        image="x", metadata={"org": "o"}, output_dir=str(run_dir),
+        image="x", metadata={"org": "o"}, output_dir=str(tmp_path / "run"),
     )
-    assert result is None, "a declared credential that fails to materialize must refuse the launch"
-    assert minted == [], "no session token may be minted when materialization failed"
-    assert not partial.exists(), "the refusal path must leave no partial credential file behind"
+    assert result is None
+    assert minted == []
 
 
 def test_build_mount_plan_socket_via_global_claude_md_is_refused(tmp_path, monkeypatch):
@@ -2279,7 +2300,7 @@ def test_build_mount_plan_socket_via_global_claude_md_is_refused(tmp_path, monke
     monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: None)
     monkeypatch.setattr(session_launcher, "_resolve_optional_tool_mounts", lambda **k: {})
     run_dir = tmp_path / "run"
-    plan, _se, _ca = session_launcher.build_mount_plan(
+    plan, _se = session_launcher.build_mount_plan(
         run_dir=run_dir, sessions_dir=run_dir / "sessions", harness="claude",
         working_dir="/workspace/repo", global_claude_md="/var/run/docker.sock",
     )
@@ -2297,7 +2318,7 @@ def test_build_mount_plan_routes_org_beads_dir(tmp_path, monkeypatch):
     (org_dir / "metadata.json").write_text("{}")
 
     def beads_source(org):
-        plan, _env, _codex = session_launcher.build_mount_plan(
+        plan, _env = session_launcher.build_mount_plan(
             run_dir=tmp_path / "run", sessions_dir=tmp_path / "sess",
             harness="claude", working_dir="/workspace/repo", org=org)
         return next(sp.source for sp in plan.specs()
@@ -2351,18 +2372,17 @@ def _claude_vault(monkeypatch, *, setup=None, minted_at=None, bundle=True, accou
     _stub_vault(monkeypatch, {"claude": [hv.Account("claude", account_id, parts)]})
 
 
-def test_materialize_claude_bundle_writes_the_file_claude_reads(tmp_path, monkeypatch):
+def test_claude_signin_is_the_bundle_claude_reads(monkeypatch):
     _claude_vault(monkeypatch)
-    out = session_launcher._materialize_claude_bundle(tmp_path, "org-1")
-    doc = json.loads(Path(out).read_text())["claudeAiOauth"]
+    raw = session_launcher._signin_payloads("org-1")[session_launcher.CLAUDE_BUNDLE_FILENAME]
+    doc = json.loads(raw)["claudeAiOauth"]
     assert doc["accessToken"] == "at-v" and doc["refreshToken"] == "rt-v"
     assert doc["expiresAt"] == 9000 and doc["scopes"] == ["user:inference"]
-    assert (Path(out).stat().st_mode & 0o777) == 0o600
 
 
-def test_materialize_claude_bundle_without_bundle_returns_none(tmp_path, monkeypatch):
+def test_claude_account_without_bundle_refuses(monkeypatch):
     _claude_vault(monkeypatch, setup="k", bundle=False)
-    assert session_launcher._materialize_claude_bundle(tmp_path, "org-1") is None
+    assert session_launcher._signin_payloads("org-1") is None
 
 
 def test_picker_takes_the_bundle_when_the_setup_token_is_stale(monkeypatch):
@@ -2380,32 +2400,11 @@ def test_picker_takes_a_fresh_setup_token_first(monkeypatch):
     assert creds["type"] == "token" and creds["token"] == "sk-1"
 
 
-def test_optional_mounts_declare_the_vault_files_without_writing(tmp_path, monkeypatch):
-    from tools.graph import harness_credentials as hv
-    _stub_vault(monkeypatch, {
-        "claude": [hv.Account("claude", "org-1", {"access": "a", "refresh": "r"})],
-        "grok": [hv.Account("grok", "default", {"auth": '{"t": 1}'})],
-    })
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    without = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir, materialize_auth=False)
-    assert not any(v.startswith(session_launcher.CLAUDE_BUNDLE_CONTAINER_PATH) for v in without.values())
-    grok_target = str(run_dir / session_launcher.GROK_AUTH_FILENAME)
-    assert without[grok_target] == session_launcher.GROK_AUTH_CONTAINER_PATH + ":ro"
-    declared = session_launcher._resolve_optional_tool_mounts(
-        run_dir=run_dir, materialize_auth=False, claude_account="org-1",
-    )
-    target = str(run_dir / session_launcher.CLAUDE_BUNDLE_FILENAME)
-    assert declared[target] == session_launcher.CLAUDE_BUNDLE_CONTAINER_PATH + ":ro"
-    assert not Path(target).exists() and not Path(grok_target).exists()
-
-
-def test_materialize_grok_auth_writes_the_stored_sign_in(tmp_path, monkeypatch):
+def test_grok_signin_is_the_stored_sign_in(monkeypatch):
     from tools.graph import harness_credentials as hv
     _stub_vault(monkeypatch, {"grok": [hv.Account("grok", "default", {"auth": '{"access_token": "g"}'})]})
-    out = session_launcher._materialize_grok_auth(tmp_path)
-    assert Path(out).read_text() == '{"access_token": "g"}'
-    assert (Path(out).stat().st_mode & 0o777) == 0o600
+    payloads = session_launcher._signin_payloads(None)
+    assert payloads[session_launcher.GROK_AUTH_FILENAME] == b'{"access_token": "g"}'
 
 
 def test_launcher_source_reads_no_plaintext_credential_set():

@@ -810,27 +810,6 @@ def _setup_auth_docker_args(creds: dict, run_dir: Path) -> list[str] | None:
     return None
 
 
-def _schedule_creds_cleanup(container_id: str, creds_copy: str) -> None:
-    """Spawn a daemon thread that deletes the credentials copy after the container exits."""
-
-    def _wait_and_delete() -> None:
-        try:
-            subprocess.run(
-                ["docker", "wait", container_id],
-                capture_output=True,
-                timeout=7200,
-            )
-        except Exception:
-            pass
-        try:
-            Path(creds_copy).unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    t = threading.Thread(target=_wait_and_delete, daemon=True)
-    t.start()
-
-
 def _codex_git_root(worktree_host: Path) -> str | None:
     """Return the repository root Codex resolves trust to for a worktree.
 
@@ -928,21 +907,30 @@ def _generate_codex_config(base_config: Path, git_root: str, run_dir: Path) -> P
         return None
 
 
+# ── Harness sign-ins: delivered into the session's private ramfs ─────────────
+# A sign-in is opened from the operator's vault at launch, held in memory, and
+# written only into the container's own private ramfs at /run/secrets
+# (agents/secret_ramfs.deliver_secret_file) once the container is running. A
+# small prefix on the harness argv waits for the files and symlinks them to
+# where each harness reads them, so the harness starts signed in. Nothing is
+# staged on the data volume and there is nothing to clean up: the kernel frees
+# the mount with the container (auto-1cc4q; the old run_dir copies were served
+# by the output API and outlived their sessions by weeks).
 CLAUDE_BUNDLE_FILENAME = "claude-credentials.json"
 CLAUDE_BUNDLE_CONTAINER_PATH = "/home/agent/.claude/.credentials.json"
+CODEX_AUTH_FILENAME = "codex-auth.json"
+CODEX_AUTH_CONTAINER_PATH = "/home/agent/.codex/auth.json"
 GROK_AUTH_FILENAME = "grok-auth.json"
 GROK_AUTH_CONTAINER_PATH = f"{GROK_HOME}/auth.json"
-
-
-def _write_private_json(out: Path, text: str, what: str) -> Path | None:
-    try:
-        out.write_text(text)
-        out.chmod(0o600)
-    except OSError:
-        logger.exception("session_launcher: could not write the %s file", what)
-        _delete_if_present(str(out))
-        return None
-    return out
+SIGNIN_CONTAINER_PATHS = {
+    CODEX_AUTH_FILENAME: CODEX_AUTH_CONTAINER_PATH,
+    CLAUDE_BUNDLE_FILENAME: CLAUDE_BUNDLE_CONTAINER_PATH,
+    GROK_AUTH_FILENAME: GROK_AUTH_CONTAINER_PATH,
+}
+# How long the container waits for its sign-ins, and how long the launcher
+# waits for the container to be running before delivering them.
+SIGNIN_WAIT_S = 120
+SIGNIN_CONTAINER_WAIT_S = 300
 
 
 def _pick_account(harness: str, rng: random.Random | None = None) -> Any | None:
@@ -955,9 +943,9 @@ def _pick_account(harness: str, rng: random.Random | None = None) -> Any | None:
     return (rng or random).choice(accounts) if len(accounts) > 1 else accounts[0]
 
 
-def _materialize_claude_bundle(run_dir: Path, account_id: str) -> Path | None:
-    """Write ``~/.claude/.credentials.json`` for the chosen account from its
-    vault rows, opened at launch while the operator is unlocked."""
+def _claude_bundle_doc(account_id: str) -> bytes | None:
+    """``~/.claude/.credentials.json`` for the chosen account from its vault
+    rows, opened at launch while the operator is unlocked."""
     from tools.graph import harness_credentials as hv
     acct = hv.read_account("claude", account_id)
     if acct is None or not acct.has(*hv.CLAUDE_BUNDLE):
@@ -973,40 +961,12 @@ def _materialize_claude_bundle(run_dir: Path, account_id: str) -> Path | None:
         "expiresAt": acct.expires_ms(),
         "scopes": hv.scopes_list(acct.get("scopes")),
     }
-    return _write_private_json(
-        Path(run_dir) / CLAUDE_BUNDLE_FILENAME,
-        json.dumps({"claudeAiOauth": bundle}, indent=2), "Claude credentials",
-    )
+    return json.dumps({"claudeAiOauth": bundle}, indent=2).encode()
 
 
-def _claude_bundle_target(run_dir, account_id: str | None) -> "Path | None":
-    """The path _materialize_claude_bundle WOULD write: a declaration with
-    no write, so the mount plan carries it before validation."""
-    if run_dir is None or not account_id:
-        return None
-    return Path(run_dir) / CLAUDE_BUNDLE_FILENAME
-
-
-def _materialize_codex_auth_json(run_dir: Path) -> Path | None:
-    """Reconstruct ``~/.codex/auth.json`` into ``run_dir`` for this session.
-
-    The source is the operator's vault: the Codex account's rows
-    (tools/graph/harness_credentials.py), opened at launch while the
-    operator is unlocked. The host ``~/.codex/auth.json`` is never read
-    (bead auto-l1h3f) and no plaintext set exists any more.
-
-    Returns the host path to the written file, or ``None`` when the vault
-    holds no launchable Codex account; a None is WARNED with the remedy so
-    a missing sign-in is an operator-visible error, not a silent prompt.
-    """
-    acct = _pick_account("codex")
-    if acct is None:
-        logger.warning(
-            "session_launcher: no Codex account in the vault — the session "
-            "will launch WITHOUT mounted Codex auth and will prompt for "
-            "sign-in. Remedy: run `graph credentials import`.",
-        )
-        return None
+def _codex_auth_doc(acct) -> bytes:
+    """``~/.codex/auth.json`` for a Codex vault account. The host
+    ``~/.codex/auth.json`` is never read (bead auto-l1h3f)."""
     now_iso = (
         datetime.now(timezone.utc)
         .replace(microsecond=0)
@@ -1024,40 +984,118 @@ def _materialize_codex_auth_json(run_dir: Path) -> Path | None:
         },
         "last_refresh": acct.get("refreshed_at") or now_iso,
     }
-    return _write_private_json(
-        Path(run_dir) / "codex-auth.json", json.dumps(auth_doc, indent=2), "Codex auth.json",
-    )
+    return json.dumps(auth_doc, indent=2).encode()
 
 
-def _materialize_grok_auth(run_dir: Path) -> Path | None:
-    """Write ``~/.grok/auth.json`` for this session from the Grok account's
-    stored sign-in, sealed verbatim in the vault."""
-    acct = _pick_account("grok")
-    if acct is None:
+def _signin_payloads(claude_account: str | None) -> dict[str, bytes] | None:
+    """Every sign-in this launch delivers, ``{filename: content}``.
+
+    Codex and Grok ride along whenever the vault holds a launchable account
+    for them (any harness may shell out to either CLI); a missing account is
+    WARNED with the remedy and simply absent — the truthful "not signed in".
+    The Claude bundle is included when the session's Claude credential is a
+    vault account. Returns None when a vault account that WAS chosen cannot
+    be opened: the launch is refused rather than started half signed in."""
+    payloads: dict[str, bytes] = {}
+    codex = _pick_account("codex")
+    if codex is None:
         logger.warning(
-            "session_launcher: no Grok account in the vault; remedy: unlock, "
-            "or run `graph credentials import`",
+            "session_launcher: no Codex account in the vault — the session "
+            "will launch WITHOUT Codex sign-in and will prompt for it. "
+            "Remedy: run `graph credentials import`.",
         )
-        return None
-    return _write_private_json(
-        Path(run_dir) / GROK_AUTH_FILENAME, acct.get("auth") or "", "Grok sign-in",
+    else:
+        payloads[CODEX_AUTH_FILENAME] = _codex_auth_doc(codex)
+    if claude_account:
+        bundle = _claude_bundle_doc(claude_account)
+        if bundle is None:
+            return None
+        payloads[CLAUDE_BUNDLE_FILENAME] = bundle
+    grok = _pick_account("grok")
+    if grok is not None:
+        auth = grok.get("auth")
+        if auth:
+            payloads[GROK_AUTH_FILENAME] = auth.encode()
+        else:
+            logger.warning(
+                "session_launcher: the Grok account has no stored sign-in; "
+                "remedy: unlock, or run `graph credentials import`",
+            )
+    return payloads
+
+
+def signin_argv_prefix(filenames) -> list[str]:
+    """argv placed before the harness command: wait (bounded) for each
+    delivered sign-in, symlink it where its harness reads it, then exec the
+    harness. Empty when nothing is delivered. It runs inside the shared
+    entrypoint's exec, so no image carries it and no image rebuild is
+    needed. A sign-in that never arrives is reported and the harness starts
+    anyway — it prompts, the truthful state.
+
+    Known limit: a harness that saves a refreshed sign-in by replacing the
+    file (rename) swaps the symlink for a regular file in the container's
+    writable layer, where it stays for the session's life. That is not the
+    data volume, and the container is removed when the session ends."""
+    pairs = [f"{f}:{SIGNIN_CONTAINER_PATHS[f]}" for f in sorted(filenames)]
+    if not pairs:
+        return []
+    from agents.secret_ramfs import SESSION_SECRET_DST
+    script = (
+        f"n=0; for p in {' '.join(shlex.quote(p) for p in pairs)}; do "
+        f'f="{SESSION_SECRET_DST}/${{p%%:*}}"; d="${{p#*:}}"; '
+        f'while [ ! -s "$f" ] && [ "$n" -lt {int(SIGNIN_WAIT_S * 10)} ]; do '
+        f"sleep 0.1; n=$((n+1)); done; "
+        f'if [ -s "$f" ]; then mkdir -p "${{d%/*}}" && ln -sfn "$f" "$d"; '
+        f'else echo "autonomy: sign-in $f was not delivered; the harness '
+        f'will ask you to sign in" >&2; fi; done; exec "$@"'
     )
+    return ["sh", "-c", script, "autonomy-signin"]
 
 
-def _grok_auth_target(run_dir) -> "Path | None":
-    if run_dir is None or _pick_account("grok") is None:
-        return None
-    return Path(run_dir) / GROK_AUTH_FILENAME
+def deliver_signins(container: str, payloads: dict[str, bytes], *,
+                    wait_s: float = SIGNIN_CONTAINER_WAIT_S) -> list[str]:
+    """Wait for *container* to be running, then write each sign-in into its
+    private ramfs. Returns the filenames that could not be delivered (empty
+    on success). The buffers are wiped as each helper returns."""
+    from agents.secret_ramfs import ProvisionError, deliver_secret_file
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            r = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", container],
+                capture_output=True, text=True, timeout=15)
+            if r.returncode == 0 and r.stdout.strip() == "true":
+                break
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if time.monotonic() >= deadline:
+            logger.error("session_launcher: %s never started; its sign-ins "
+                         "were not delivered", container)
+            return sorted(payloads)
+        time.sleep(0.5)
+    failed = []
+    for filename, content in payloads.items():
+        buf = bytearray(content)
+        try:
+            deliver_secret_file(container, filename, bytes(buf))
+        except (ProvisionError, OSError, subprocess.TimeoutExpired) as exc:
+            logger.error("session_launcher: sign-in %s not delivered into "
+                         "%s: %s", filename, container, exc)
+            failed.append(filename)
+        finally:
+            buf[:] = b"\x00" * len(buf)
+    return failed
 
 
-def _codex_auth_target(run_dir) -> "Path | None":
-    """The path _materialize_codex_auth_json WOULD write, iff a launchable
-    Codex account exists — a DECLARE with no write, so the plan can reference the
-    credential's future location before mount validation has succeeded (auto-vm8qh
-    criterion 6: no credential is written until resolve/emit has passed)."""
-    if run_dir is None or _pick_account("codex") is None:
-        return None
-    return Path(run_dir) / "codex-auth.json"
+def deliver_signins_in_background(container: str,
+                                  payloads: dict[str, bytes]) -> None:
+    """Deliver from a daemon thread, for launches whose container is started
+    by someone else after this returns (tmux, the foreground CLI). The
+    thread lives only until delivery (bounded by SIGNIN_CONTAINER_WAIT_S)."""
+    if not payloads:
+        return
+    threading.Thread(target=deliver_signins, args=(container, payloads),
+                     name=f"signin-{container}", daemon=True).start()
 
 
 class GrokLaunchProfile:
@@ -1296,15 +1334,11 @@ def grok_launch_script(
 def _resolve_optional_tool_mounts(
     worktree_host: Path | None = None,
     run_dir: Path | None = None,
-    materialize_auth: bool = True,
-    claude_account: str | None = None,
 ) -> dict[str, str]:
     """Return optional host mounts that make Codex usable inside containers.
 
-    Claude is already handled via dedicated credential resolution plus the
-    mounted sessions directory. Codex's *credentials* are now resolved the
-    same way — from the ``dashboard.codex.credentials`` substrate row, NOT
-    the host ``~/.codex/auth.json`` (retired in bead auto-l1h3f). Its
+    No sign-in is mounted: every harness credential is delivered into the
+    session's private ramfs (:func:`_signin_payloads`). Codex's
     config/skills/rules are ordinary host content (not credentials) and are
     still mounted from ``~/.codex`` read-only.
 
@@ -1330,7 +1364,7 @@ def _resolve_optional_tool_mounts(
                 config_source = generated
 
     # Non-credential host content only. The credential (auth.json) is
-    # materialized from substrate below — this table deliberately omits it
+    # delivered into the private ramfs — this table deliberately omits it
     # so no launcher code path reads the host ~/.codex/auth.json.
     codex_mounts = {
         config_source: "/home/agent/.codex/config.toml:ro",
@@ -1341,34 +1375,6 @@ def _resolve_optional_tool_mounts(
         if host_path.exists():
             mounts[str(host_path)] = container_spec
 
-    # Codex credentials: materialize a per-session auth.json from the
-    # substrate row and mount it read-only. Missing row → no auth mount →
-    # Codex unavailable (the truthful state). This is the ONLY credential
-    # path; the host ~/.codex/auth.json mount is retired.
-    if run_dir is not None:
-        # DECLARE the target path (no write) when materialize_auth is False, so the
-        # plan can reference the credential's future location before mount
-        # validation succeeds; write it only when True (auto-vm8qh criterion 6).
-        codex_auth = (
-            _materialize_codex_auth_json(run_dir) if materialize_auth
-            else _codex_auth_target(run_dir)
-        )
-        if codex_auth is not None:
-            mounts[str(codex_auth)] = "/home/agent/.codex/auth.json:ro"
-        if claude_account:
-            claude_auth = (
-                _materialize_claude_bundle(run_dir, claude_account) if materialize_auth
-                else _claude_bundle_target(run_dir, claude_account)
-            )
-            if claude_auth is not None:
-                mounts[str(claude_auth)] = f"{CLAUDE_BUNDLE_CONTAINER_PATH}:ro"
-        grok_auth = (
-            _materialize_grok_auth(run_dir) if materialize_auth
-            else _grok_auth_target(run_dir)
-        )
-        if grok_auth is not None:
-            mounts[str(grok_auth)] = f"{GROK_AUTH_CONTAINER_PATH}:ro"
-
     agents_home = Path.home() / ".agents"
     if agents_home.exists():
         mounts[str(agents_home)] = "/home/agent/.agents:ro"
@@ -1377,18 +1383,6 @@ def _resolve_optional_tool_mounts(
 
 
 # ── Shared mount plan builder ─────────────────────────────────────────────────
-
-def _delete_if_present(path) -> None:
-    """Best-effort delete of a materialized per-session credential copy on an
-    early-return (mount validation) failure path, where no container exists yet
-    to schedule the normal post-exit cleanup against."""
-    if not path:
-        return
-    try:
-        Path(path).unlink(missing_ok=True)
-    except OSError:
-        pass
-
 
 # A privileged session's nested dockerd keeps its store on a per-session named
 # volume instead of the container's writable layer (auto-ipq3l). overlay2
@@ -1460,7 +1454,6 @@ def build_mount_plan(
     capabilities=(),
     global_claude_md=None,
     startup_script=None,
-    claude_account: str | None = None,
     allow_docker_socket: bool = False,
 ):
     """The one dest-keyed MountPlan both entry points build and emit (auto-vm8qh).
@@ -1469,7 +1462,8 @@ def build_mount_plan(
     paths under REPO_ROOT/DATA_ROOT are NODE, external workspace-declared host
     paths are HOST, /dev/null is DEVICE — so a platform worktree/clone in the
     caller dict can never be mislabelled HOST and fabricate raw -v /app/... on a
-    containerized node. Returns (plan, shim_env, codex_auth_copy).
+    containerized node. Returns (plan, shim_env). No sign-in is mounted; they
+    are delivered into the private ramfs (:func:`deliver_signins`).
 
     include_capabilities gates the capability/shim/skill block (launch_session
     only; the CLI does not mount capabilities). global_claude_md/startup_script
@@ -1588,17 +1582,10 @@ def build_mount_plan(
             working_mounts.append((len(cp), Path(s.source)))
     worktree_host = max(working_mounts, default=(0, None), key=lambda i: i[0])[1]
 
-    # DECLARE the optional tool mounts, including the Codex auth.json at the path
-    # it WILL occupy — materialize_auth=False writes no credential here. The caller
-    # writes it only after mount validation succeeds (criterion 6).
-    codex_auth_target = None
     for host_path, container_spec in _resolve_optional_tool_mounts(
-        worktree_host=worktree_host, run_dir=run_dir, materialize_auth=False,
-        claude_account=claude_account,
+        worktree_host=worktree_host, run_dir=run_dir,
     ).items():
         plan.set(mount_spec(host_path, container_spec))
-        if container_spec.split(":")[0] == "/home/agent/.codex/auth.json":
-            codex_auth_target = host_path
 
     if global_claude_md is not None:
         plan.set(mount_spec(global_claude_md, "/home/agent/.claude/CLAUDE.md:ro"))
@@ -1607,7 +1594,7 @@ def build_mount_plan(
     if startup_script is not None:
         plan.set(mount_spec(startup_script, "/startup.sh:ro"))
 
-    return plan, shim_env, codex_auth_target
+    return plan, shim_env
 
 
 def _host_terminal_profile() -> tuple[dict, list[str]]:
@@ -1961,7 +1948,7 @@ def launch_session(
     # per-session host subdir under /run/autonomy-secrets is retired
     # (2026-08-30, fourth shared-root incident).
     mounts = dict(mounts or {})
-    plan, shim_env, codex_auth_target = build_mount_plan(
+    plan, shim_env = build_mount_plan(
         run_dir=run_dir,
         sessions_dir=sessions_dir,
         harness=harness,
@@ -1974,18 +1961,8 @@ def launch_session(
         capabilities=capabilities,
         global_claude_md=global_claude_md,
         startup_script=startup_script,
-        claude_account=(
-            creds.get("harness_token") if creds and creds.get("type") == "vault" else None
-        ),
         allow_docker_socket=host_terminal,
     )
-    claude_bundle_target = None
-    grok_auth_target = None
-    for _s in plan.specs():
-        if _s.dest == CLAUDE_BUNDLE_CONTAINER_PATH:
-            claude_bundle_target = str(_s.source)
-        elif _s.dest == GROK_AUTH_CONTAINER_PATH:
-            grok_auth_target = str(_s.source)
 
     # Resolve+validate the DECLARED plan into argv NOW — before any authority is
     # minted below (the session token, the materialized Codex credential). A
@@ -2003,28 +1980,21 @@ def launch_session(
         print(f"  ERROR: {_exc}", file=sys.stderr)
         return None
 
-    # Validation passed — NOW it is safe to materialize the Codex credential the
-    # plan declared (at codex_auth_target). Nothing above this line wrote a
-    # credential or minted a token.
-    codex_auth_copy = None
-    if codex_auth_target is not None:
-        # A credential was DECLARED (a usable row existed at plan time, so the
-        # validated argv already binds codex_auth_target). If materialization
-        # fails HERE (write error, or the row expired/raced away between declare
-        # and now), the file the argv references does not exist: host-process -v
-        # would fabricate a directory there, and the fallback bind would fail at
-        # docker-run — but only AFTER the token below is minted. So a declared
-        # credential that fails to materialize is a launch refusal, taken before
-        # any authority is minted, leaving no partial file behind.
-        if _materialize_codex_auth_json(run_dir) is None:
-            _delete_if_present(codex_auth_target)
-            print(
-                f"  ERROR: refusing to launch session '{name}': a Codex "
-                "credential was declared but failed to materialize",
-                file=sys.stderr,
-            )
-            return None
-        codex_auth_copy = codex_auth_target  # str path, for post-exit cleanup
+    # Validation passed — NOW open the sign-ins from the vault, in memory only.
+    # They are written nowhere on the host: delivery into the container's
+    # private ramfs happens once it is running (auto-1cc4q). A vault account
+    # that was chosen but cannot be opened refuses the launch before any
+    # authority is minted below.
+    signins = _signin_payloads(
+        creds.get("harness_token")
+        if creds is not None and creds.get("type") == "vault" else None)
+    if signins is None:
+        print(
+            f"  ERROR: refusing to launch session '{name}': a sign-in "
+            "account in the vault was chosen but could not be opened",
+            file=sys.stderr,
+        )
+        return None
 
     # Preflight EVERY input the docker run depends on that could be missing —
     # the image, the runtime, and every mount source (host binds AND
@@ -2032,33 +2002,9 @@ def launch_session(
     # the token below. `docker run` with any of these missing creates NO
     # container and reports only a nameless failure (an hour lost to a missing
     # image; the wjzh4/qk4ip class for mounts). Discover what is missing first,
-    # do not hand docker a doomed command. Runs HERE (after the codex credential
-    # is materialized above) so every declared source already exists and nothing
-    # needs excluding. Each check fails OPEN if it cannot run: docker stays the
-    # backstop, we lose only the naming, never a good launch.
-    if creds is not None and creds.get("type") == "vault":
-        if claude_bundle_target is None or \
-                _materialize_claude_bundle(run_dir, creds["harness_token"]) is None:
-            if claude_bundle_target is not None:
-                _delete_if_present(claude_bundle_target)
-            print(
-                f"  ERROR: refusing to launch session '{name}': the Claude "
-                "account in the vault was declared but could not be opened",
-                file=sys.stderr,
-            )
-            return None
-        creds["creds_copy"] = claude_bundle_target  # post-exit cleanup
-    grok_auth_copy = None
-    if grok_auth_target is not None:
-        if _materialize_grok_auth(run_dir) is None:
-            _delete_if_present(grok_auth_target)
-            print(
-                f"  ERROR: refusing to launch session '{name}': the Grok "
-                "account in the vault was declared but could not be opened",
-                file=sys.stderr,
-            )
-            return None
-        grok_auth_copy = grok_auth_target
+    # do not hand docker a doomed command. Each check fails OPEN if it cannot
+    # run: docker stays the backstop, we lose only the naming, never a good
+    # launch.
     from agents import launch_preflight
     _problems = launch_preflight.preflight(
         image=image, runtime_args=runtime_args, plan=plan, topo=_topo,
@@ -2073,16 +2019,12 @@ def launch_session(
             + "\n".join(p.line() for p in _problems),
             file=sys.stderr,
         )
-        if codex_auth_copy is not None:
-            _delete_if_present(codex_auth_copy)
         return None
 
     dind_args: list[str] = []
     if resolved_runtime == "privileged":
         dind_volume = _ensure_dind_volume(name, (metadata or {}).get("org"))
         if dind_volume is None:
-            if codex_auth_copy is not None:
-                _delete_if_present(codex_auth_copy)
             return None
         dind_args = ["--mount",
                      f"type=volume,src={dind_volume},dst=/var/lib/docker"]
@@ -2253,7 +2195,10 @@ def launch_session(
         cmd.insert(2, "--rm")
         cmd.insert(2, "-it")
 
-    # Entrypoint, image, and arguments.
+    # Entrypoint, image, and arguments. With sign-ins to deliver, a prefix
+    # after the image waits for them in /run/secrets and links them into
+    # place before exec'ing the harness argv (signin_argv_prefix).
+    image_head = [image, *signin_argv_prefix(signins)]
     # Base images have ENTRYPOINT=["claude", "--dangerously-skip-permissions"];
     # dind-based images have a shell wrapper that does `exec "$@"` so the
     # caller must pass the full command starting with `claude`.
@@ -2310,11 +2255,11 @@ def launch_session(
         # dashboard waits on, and execs this full argv. Whether setup runs
         # must never depend on image family, so there is exactly one
         # command shape per harness.
-        cmd += [image, "sh", "-c", shell_cmd]
+        cmd += [*image_head, "sh", "-c", shell_cmd]
     else:
         if harness == "claude":
             cmd += [
-                image,
+                *image_head,
                 "claude",
                 "--dangerously-skip-permissions",
                 "--model",
@@ -2326,7 +2271,7 @@ def launch_session(
             assert grok_profile is not None
             # One shared entrypoint execs this argv; the script installs the
             # config, signs in (gateway mode) and execs the TUI.
-            cmd += [image, "sh", "-c", grok_launch_script(
+            cmd += [*image_head, "sh", "-c", grok_launch_script(
                 grok_profile,
                 prompt_file=None,
                 resume_uuid=resume_uuid,
@@ -2349,7 +2294,7 @@ def launch_session(
                     resume_uuid,
                 )
                 codex_args += ["resume", m.group(1) if m else resume_uuid]
-            cmd += [image, *codex_args]
+            cmd += [*image_head, *codex_args]
 
     _lap("docker_cmd_assembled")
 
@@ -2379,17 +2324,25 @@ def launch_session(
             )
             return None
 
-        # Schedule credential cleanup after container exits
-        creds_copy = creds.get("creds_copy") if creds else None
-        if creds_copy:
-            _schedule_creds_cleanup(container_id, creds_copy)
-        if codex_auth_copy:
-            _schedule_creds_cleanup(container_id, codex_auth_copy)
-        if grok_auth_copy:
-            _schedule_creds_cleanup(container_id, grok_auth_copy)
+        # The container is running: deliver its sign-ins into its private
+        # ramfs now. One that cannot be delivered leaves a container that
+        # would start its harness signed out, so the launch fails instead.
+        failed = deliver_signins(name, signins) if signins else []
+        if failed:
+            print(
+                f"  ERROR: sign-in delivery into {session_type} '{name}' "
+                f"failed ({', '.join(failed)}); removing the container",
+                file=sys.stderr,
+            )
+            subprocess.run(["docker", "rm", "-f", name],
+                           capture_output=True, timeout=60)
+            return None
 
         return container_id
 
     else:
-        # For tmux-based sessions: return a shell-safe command string
+        # For tmux-based sessions: return a shell-safe command string. The
+        # caller starts the container; the sign-ins follow it from a thread
+        # that waits for it to be running.
+        deliver_signins_in_background(name, signins)
         return shlex.join(cmd)

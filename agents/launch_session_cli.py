@@ -243,8 +243,8 @@ def main() -> int:
         import subprocess
         from agents.session_launcher import (
             _resolve_credentials, _setup_auth_docker_args,
-            _resolve_optional_tool_mounts,
-            _schedule_creds_cleanup,
+            _signin_payloads, signin_argv_prefix,
+            deliver_signins_in_background,
         )
         from datetime import datetime, timezone
 
@@ -311,7 +311,7 @@ def main() -> int:
             caller_mounts[str(args.worktree)] = "/workspace/repo"
         if args.git_dir:
             caller_mounts[str(args.git_dir)] = str(args.git_dir)
-        plan, _shim_env, _codex_auth = build_mount_plan(
+        plan, _shim_env = build_mount_plan(
             run_dir=run_dir,
             sessions_dir=sessions_dir,
             harness=args.harness,
@@ -390,21 +390,16 @@ def main() -> int:
         except (MountUnresolvable, VolumeSubpathUnsupported) as _exc:
             print(f"ERROR: {_exc}", file=sys.stderr)
             return 1
-        if _codex_auth is not None:
-            # The plan DECLARED the Codex auth mount, so _mount_argv already binds
-            # _codex_auth. If materialization fails here (write error, or the row
-            # expired/raced away since declare), the bound path was never written:
-            # host-process -v would fabricate a dir there, the fallback bind would
-            # fail only at docker-run. Refuse instead — delete any partial file and
-            # return before Docker runs (auto-vm8qh criterion 6, foreground path).
-            from agents.session_launcher import (
-                _materialize_codex_auth_json, _delete_if_present,
-            )
-            if _materialize_codex_auth_json(run_dir) is None:
-                _delete_if_present(_codex_auth)
-                print("ERROR: a Codex credential was declared but failed to "
-                      "materialize", file=sys.stderr)
-                return 1
+        # Sign-ins are opened in memory and delivered into the container's
+        # private ramfs once it runs (auto-1cc4q); a chosen vault account
+        # that cannot be opened refuses the launch before Docker runs.
+        signins = _signin_payloads(
+            creds.get("harness_token")
+            if creds is not None and creds.get("type") == "vault" else None)
+        if signins is None:
+            print("ERROR: a sign-in account in the vault could not be opened",
+                  file=sys.stderr)
+            return 1
         cmd.extend(_mount_argv)
         cmd.extend(["-w", "/workspace/repo"])
 
@@ -425,7 +420,7 @@ def main() -> int:
             prompt_in_output = run_dir / ".prompt.md"
             prompt_in_output.write_text(prompt)
             if args.harness == "grok":
-                cmd += [args.image, "sh", "-c", grok_launch_script(
+                cmd += [args.image, *signin_argv_prefix(signins), "sh", "-c", grok_launch_script(
                     grok_profile, prompt_file="/workspace/output/.prompt.md",
                     resume_uuid=None, session_id=None,
                 )]
@@ -436,7 +431,7 @@ def main() -> int:
                     f"{shlex.quote(resolved_model)} -p"
                 )
                 # One shared image entrypoint everywhere; it execs this argv.
-                cmd += [args.image, "sh", "-c", shell_cmd]
+                cmd += [args.image, *signin_argv_prefix(signins), "sh", "-c", shell_cmd]
             else:
                 codex_cmd = [
                     "codex",
@@ -447,16 +442,17 @@ def main() -> int:
                     codex_cmd += ["--model", resolved_model]
                 codex_cmd += ["-"]
                 shell_cmd = "cat /workspace/output/.prompt.md | " + shlex.join(codex_cmd)
-                cmd += [args.image, "sh", "-c", shell_cmd]
+                cmd += [args.image, *signin_argv_prefix(signins), "sh", "-c", shell_cmd]
         else:
             if args.harness == "grok":
-                cmd += [args.image, "sh", "-c", grok_launch_script(
+                cmd += [args.image, *signin_argv_prefix(signins), "sh", "-c", grok_launch_script(
                     grok_profile, prompt_file=None, resume_uuid=None,
                     session_id=None,
                 )]
             elif args.harness == "claude":
                 cmd += [
                     args.image,
+                    *signin_argv_prefix(signins),
                     "claude",
                     "--dangerously-skip-permissions",
                     "--model",
@@ -465,6 +461,7 @@ def main() -> int:
             else:
                 cmd += [
                     args.image,
+                    *signin_argv_prefix(signins),
                     "codex",
                     "--no-alt-screen",
                     "--dangerously-bypass-approvals-and-sandbox",
@@ -472,13 +469,10 @@ def main() -> int:
                 if resolved_model:
                     cmd += ["--model", resolved_model]
 
+        # docker run blocks until the session ends, so the sign-ins follow
+        # the container from a thread that waits for it to be running.
+        deliver_signins_in_background(args.name, signins)
         result = subprocess.run(cmd)
-
-        # Cleanup credentials copy if used
-        creds_copy = creds.get("creds_copy")
-        if creds_copy:
-            from pathlib import Path as _Path
-            _Path(creds_copy).unlink(missing_ok=True)
 
         print(f"OUTPUT_DIR={run_dir}")
         return result.returncode
