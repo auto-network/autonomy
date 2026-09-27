@@ -7,6 +7,9 @@
 #   --lock URL|PATH      the release's image lock (required): image@sha256 digests
 #   --dir PATH           working directory for compose files and .env (default ~/autonomy)
 #   --port N             dashboard port (default 8080)
+#   --host-home PATH     the operator's home, where existing Claude/Codex/Grok
+#                        sign-ins are found (default: the invoking user's home,
+#                        also under sudo; never /root unless root is the user)
 #   --install-docker     install Docker Engine + Compose from docker.com when absent
 #                        (apt; runs as root when invoked as root, else through sudo)
 #   --yes                do not pause for confirmation before mutating steps
@@ -29,7 +32,7 @@ COSIGN_VERSION=v3.1.3
 COSIGN_SHA256_AMD64=4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71
 COSIGN_SHA256_ARM64=c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a
 
-LOCK="" DIR="$HOME/autonomy" PORT=8080 INSTALL_DOCKER=0 YES=0
+LOCK="" DIR="$HOME/autonomy" PORT=8080 INSTALL_DOCKER=0 YES=0 HOST_HOME=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --lock) LOCK="$2"; shift 2 ;;
@@ -37,11 +40,33 @@ while [[ $# -gt 0 ]]; do
         --port) PORT="$2"; shift 2 ;;
         --install-docker) INSTALL_DOCKER=1; shift ;;
         --yes) YES=1; shift ;;
-        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+        --host-home) HOST_HOME="$2"; shift 2 ;;
+        -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 [[ -n "$LOCK" ]] || { echo "--lock is required" >&2; exit 2; }
+
+# The operator's home is where the Welcome page's sign-in scan looks for an
+# existing Claude, Codex or Grok sign-in. Under sudo, $HOME is root's home,
+# which holds none of the operator's sign-ins and which the dashboard (uid
+# 1000 in its container) cannot read, so the invoking user's home is used.
+operator_home() {
+    if [[ -n "$HOST_HOME" ]]; then printf '%s\n' "$HOST_HOME"; return; fi
+    if [[ $(id -u) -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]]; then
+        getent passwd "$SUDO_USER" | cut -d: -f6; return
+    fi
+    printf '%s\n' "$HOME"
+}
+HOST_HOME="$(operator_home)"
+[[ -d "$HOST_HOME" ]] || { echo "operator home $HOST_HOME does not exist (use --host-home)" >&2; exit 2; }
+# The dashboard reads the home as uid 1000. Say so now when it cannot, instead
+# of the Welcome page later reporting that no sign-in exists.
+home_uid="$(stat -c %u "$HOST_HOME")"; home_mode="$(stat -c %a "$HOST_HOME")"
+if [[ "$home_uid" != 1000 && $(( 8#$home_mode & 5 )) -ne 5 ]]; then
+    echo "warning: the dashboard runs as uid 1000 and cannot read $HOST_HOME (owner uid $home_uid, mode $home_mode);" >&2
+    echo "         sign-ins there will not be found. Use --host-home with your own home." >&2
+fi
 
 T0=$(date +%s)
 step() { printf '==> [%4ss] %s\n' "$(( $(date +%s) - T0 ))" "$*"; }
@@ -157,7 +182,7 @@ cd "$DIR"
 touch .env
 set_env() { grep -q "^$1=" .env && sed -i "s|^$1=.*|$1=$2|" .env || echo "$1=$2" >>.env; }
 set_env AUTONOMY_IMAGE "${IMG[AUTONOMY_NODE_IMAGE]}"
-set_env AUTONOMY_HOST_HOME "$HOME"
+set_env AUTONOMY_HOST_HOME "$HOST_HOME"
 set_env DASHBOARD_PORT "$PORT"
 if ! grep -q '^AUTONOMY_SUBNET=' .env; then
     step "network preflight (choosing a free subnet)"
