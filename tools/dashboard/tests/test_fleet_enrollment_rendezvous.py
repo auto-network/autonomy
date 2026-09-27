@@ -431,7 +431,7 @@ async def test_real_grant_handler_keeps_channel_state(
     monkeypatch.setattr(
         link_serving,
         "check_grant",
-        lambda token, org=None, now=None: full_grant if token == TOKEN else None,
+        lambda token, org=None, now=None, grant_id=None: full_grant if token == TOKEN else None,
     )
     monkeypatch.setattr(
         fleet_enrollment_service, "FleetEnrollmentStore", lambda: store

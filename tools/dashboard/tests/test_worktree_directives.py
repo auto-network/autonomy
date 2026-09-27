@@ -214,7 +214,9 @@ async def test_rebase_directive_dispatched_via_settings_mediator(
             WORKTREE_REBASE_DIRECTIVE_REVISION,
             "11111111-1111-4111-8111-111111111111",
             {"target_session": "auto-x", "repo": "autonomy"},
-            org=ops.CALLER_ORG,
+            # The directive set is @home("organization"): a write names its
+            # org (no default scope since 01427b24).
+            org="autonomy",
         )
         await asyncio.wait_for(delivered.wait(), timeout=2.0)
         assert sent == [("auto-x", render_rebase_prompt({

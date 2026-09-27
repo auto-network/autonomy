@@ -19,10 +19,12 @@ class ServiceAuthV1(SettingSchema):
     set_id = SERVICE_AUTH_SET_ID
     schema_revision = 1
 
-    provider: str = field(required=True, enum=["okta", "other"])
-    issuer: str = field(required=True)
-    client_id: str = field(required=True)
-    default_access: str = field(required=True, enum=["public", "oidc"])
+    provider: str = field(required=True, enum=["okta", "other"],
+                          description="The OIDC provider family: okta, or other (any conforming issuer).")
+    issuer: str = field(required=True, description="The provider's OIDC issuer URL (discovery is read from it).")
+    client_id: str = field(required=True, description="The OIDC client id registered for this organization's Services.")
+    default_access: str = field(required=True, enum=["public", "oidc"],
+                                description="Access a newly published Service gets unless its target overrides it.")
 
     @classmethod
     def validate(cls, payload):
@@ -38,4 +40,4 @@ class ServiceAuthSecretV1(SettingSchema):
     set_id = SERVICE_AUTH_SECRET_SET_ID
     schema_revision = 1
 
-    client_secret: str = field(required=True)
+    client_secret: str = field(required=True, description="The OIDC client secret; held in the org vault (audited), never in a plaintext row.")

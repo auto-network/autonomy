@@ -28,7 +28,7 @@ async def test_active_agentic_card_joins_monitored_provider_and_stats(monkeypatc
         "tool_count": 31,
         "turn_count": 14,
     }
-    monkeypatch.setattr(server.dao_beads, "get_dispatch_beads", lambda: {
+    monkeypatch.setattr(server.dao_beads, "get_dispatch_beads", lambda *_a, **_k: {
         "approved_waiting": [], "approved_blocked": [],
     })
     monkeypatch.setattr(server.dao_dispatch, "get_running_with_stats", lambda: [run])

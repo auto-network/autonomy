@@ -60,7 +60,7 @@ def grants(monkeypatch):
         },
     }
     monkeypatch.setattr(
-        link_serving, "check_grant", lambda token, org=None, now=None: rows.get(token)
+        link_serving, "check_grant", lambda token, org=None, now=None, grant_id=None: rows.get(token)
     )
     return rows
 
@@ -107,7 +107,7 @@ def test_revoked_grant_yields_no_key(monkeypatch):
     """check_grant runs BEFORE the key is handed over, which is what
     makes revocation work with no key machinery at all."""
     monkeypatch.setattr(
-        link_serving, "check_grant", lambda token, org=None, now=None: None
+        link_serving, "check_grant", lambda token, org=None, now=None, grant_id=None: None
     )
     assert call(TOKEN, {"v": 1, "op": "subscribe"}) == link_serving.REFUSED
     assert link_serving._STREAM_KEYS == {}

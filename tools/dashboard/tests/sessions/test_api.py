@@ -257,15 +257,17 @@ class TestSessionsPageHTML:
         assert resp.status_code == 200
 
     def test_shell_stamps_default_graph_org_for_schema_reads(self, test_client):
+        # A node with no shared organization has no shell default (D7, ffac0470):
+        # the shell stamps an empty org, meaning "send no X-Graph-Org".
         resp = test_client.get("/beads")
         assert resp.status_code == 200
-        assert '<meta name="autonomy-shell-org" content="autonomy">' in resp.text
+        assert '<meta name="autonomy-shell-org" content="">' in resp.text
 
-    def test_shell_graph_org_falls_back_to_autonomy_without_env(self, test_client, monkeypatch):
+    def test_shell_graph_org_has_no_literal_autonomy_fallback(self, test_client, monkeypatch):
         monkeypatch.delenv("GRAPH_SCOPE", raising=False)
         resp = test_client.get("/beads")
         assert resp.status_code == 200
-        assert '<meta name="autonomy-shell-org" content="autonomy">' in resp.text
+        assert 'content="autonomy"' not in resp.text.split('name="autonomy-shell-org"', 1)[1][:40]
 
     def test_has_alpine_component(self, test_client):
         resp = test_client.get("/pages/sessions")

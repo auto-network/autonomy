@@ -258,9 +258,18 @@ def test_post_invite_email_scopes_org_and_never_returns_secret(
         headers={"X-Graph-Org": "acme"},
         json={"org": "acme", "join_link": link, "expiry": 1},
     ).status_code == 400
+    # Scope comes from the caller's token, never a header (778f22bf,
+    # 965225e5): a credential-less caller is the local operator and may name
+    # any org. The cross-org refusal applies to an ORG-BOUND caller, so the
+    # widening attempt is made as an org session bound to acme.
+    from tools.dashboard import api_auth
+    monkeypatch.setattr(
+        api_auth, "principal_from_request",
+        lambda _request: api_auth.ApiPrincipal(
+            api_auth.ApiPrincipalKind.ORG_SESSION, subject="auto-acme", org="acme"),
+    )
     assert client.post(
         "/api/network/invite/email",
-        headers={"X-Graph-Org": "acme"},
         json={
             "org": "other",
             "to": "invitee@example",
@@ -268,6 +277,8 @@ def test_post_invite_email_scopes_org_and_never_returns_secret(
             "expiry": 1,
         },
     ).status_code == 403
+    monkeypatch.undo()
+    monkeypatch.setenv("GRAPH_ORG", "acme")
 
     def fail_send(*_args):
         raise InviteEmailError("SMTP delivery failed")

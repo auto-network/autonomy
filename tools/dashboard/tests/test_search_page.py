@@ -248,7 +248,7 @@ def test_search_page_mock_mode_groups_fixture_rows(test_app):
             with patch.object(
                 server.dao_beads, "search",
                 staticmethod(lambda q, limit=20, project=None,
-                             order="relevance", session_type=None: rows),
+                             order="relevance", session_type=None, source_ids=None: rows),
                 create=True,
             ):
                 r = client.get("/api/search?q=mock&group=1")

@@ -229,8 +229,11 @@ def test_every_secret_bearing_set_is_band_pinned():
         "autonomy.vault.audited",
         "autonomy.vault.secured",
         "autonomy.vault.policy-class",
-        "dashboard.claude.credentials",
-        "dashboard.claude.setup_tokens",
+        # dashboard.claude.credentials / dashboard.claude.setup_tokens were
+        # retired by bcb2d029 (harness accounts now live in
+        # autonomy.vault.audited, pinned above); an unregistered set has no
+        # band. tools/graph/tests/test_personal_sets_declare_a_band pins that
+        # they stay unregistered or raw.
     ):
         band = next(
             (b for rev in range(1, 6)

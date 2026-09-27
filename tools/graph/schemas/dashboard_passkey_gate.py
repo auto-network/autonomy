@@ -19,6 +19,12 @@ from .namespace_reservation import _is_rfc3339_millis
 from .registry import SchemaValidationError, SettingSchema, field, home, publication_band, singleton
 
 PASSKEY_GATE_SET_ID = "autonomy.dashboard.passkey-gate"
+
+SYNOPSIS = {
+    "summary": "The dashboard's passkey gate: enrolled gate passkeys (public keys and sign counts) and the one-time enrollment state (a token hash and expiry, never the token).",
+    "nouns": ["passkey gate", "WebAuthn", "forward auth", "enrollment token", "remote access"],
+    "related_set_ids": ["autonomy.dashboard.remote-access#1"],
+}
 PASSKEY_GATE_REVISION = 1
 PASSKEY_GATE_KEY = "default"
 

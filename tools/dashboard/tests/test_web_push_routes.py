@@ -133,6 +133,9 @@ class TestWebPushSubscriptionRoutes:
         assert {item["application"] for item in config["applications"]} == {
             "worktrees", "jira", "links", "sessions", "mission_control",
             "vault", "relay", "fleet", "dropbox",
+            # Added since this pin was written: backup attention, the
+            # mailbox, and machine (TLS expiry / vault hand-off).
+            "backup", "mailbox", "machine",
         }
         assert set(config["preferences"].values()) == {"off"}
         assert "operator_subject" not in json.dumps(config)

@@ -59,7 +59,7 @@ def test_api_search_attaches_org_and_date(test_app):
                 server.dao_beads,
                 "search",
                 staticmethod(lambda q, limit=20, project=None,
-                             order="relevance", session_type=None:
+                             order="relevance", session_type=None, source_ids=None:
                              _mock_search_results()),
                 create=True,
             ):
