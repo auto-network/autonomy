@@ -36,7 +36,7 @@ _PERSONA_SUFFIX_RE = re.compile(r"-[0-9a-f]{20}$")
 class LabelCheck:
     ok: bool
     label: str
-    code: str = ""        # malformed | already_bound | platform_name | reserved_name | existing_label
+    code: str = ""        # malformed | unavailable | already_bound | platform_name | reserved_name | existing_label
     against: str = ""     # the protected or bound name the candidate reads as, or is
     reason: str = ""      # one sentence for the screen
     bound: bool = False   # the persona already has its permanent label (the screen skips the question)
@@ -45,20 +45,35 @@ class LabelCheck:
         return asdict(self)
 
 
+class LabelCheckUnavailable(Exception):
+    """The binding could not be read right now (not: there is none)."""
+
+
 def bound_slug(org: str) -> str | None:
-    """The slug this node's personal persona is already bound to, or None.
+    """The slug this node's personal persona is already bound to, or None
+    when the persona has no label yet (or no personal ledger yet).
 
     The registry binds ONE label per persona at its first host registration
     and refuses every other with label-invalid; the local reservations are
     the only record of it (the registry has no read of a persona's label).
+    The personal persona is the default publisher; an organization publisher
+    resolves its own persona when organization publishing lands. A read
+    failure raises LabelCheckUnavailable rather than reading as "not bound".
     """
     from tools.dashboard import service_publication
 
     try:
         persona_pub, _display = service_publication._persona_for_org("personal")
+    except service_publication.ServicePublicationError as exc:
+        if exc.code in ("organization_not_founded", "persona_not_configured"):
+            return None
+        raise LabelCheckUnavailable(exc.code) from exc
+    except Exception as exc:
+        raise LabelCheckUnavailable(str(exc)) from exc
+    try:
         label = service_publication.bound_persona_label("personal", persona_pub)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise LabelCheckUnavailable(str(exc)) from exc
     if not isinstance(label, str) or not label:
         return None
     slug = _PERSONA_SUFFIX_RE.sub("", label)
@@ -106,7 +121,12 @@ def check_label(org: str, candidate: object, *, existing: list[str] | None = Non
             f"Use 1 to {SLUG_MAX} lowercase letters, digits and hyphens, starting and ending "
             "with a letter or digit.",
         )
-    bound = bound if bound is not None else bound_slug(org)
+    if bound is None:
+        try:
+            bound = bound_slug(org)
+        except LabelCheckUnavailable:
+            return LabelCheck(False, label, "unavailable", "",
+                              "The label cannot be checked right now; try again in a moment.")
     if bound:
         if label == bound:
             return LabelCheck(True, label, bound=True)

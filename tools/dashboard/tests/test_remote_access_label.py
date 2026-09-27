@@ -85,3 +85,22 @@ def test_route_is_registered_under_remote_access():
 
     paths = {route.path for route in network_routes.ROUTES}
     assert "/api/network/remote-access/label/check" in paths
+
+
+def test_a_read_failure_is_unavailable_never_ok(monkeypatch):
+    """Reviewer: a transient read error must not answer ok for any slug."""
+    from tools.dashboard import service_publication
+
+    def boom(org):
+        raise RuntimeError("settings store unreachable")
+    monkeypatch.setattr(service_publication, "_persona_for_org", boom)
+    with pytest.raises(ra.LabelCheckUnavailable):
+        ra.bound_slug("acme")
+    result = ra.check_label("acme", "boat-lore")
+    assert (result.ok, result.code) == (False, "unavailable")
+    assert "right now" in result.reason
+
+    # No personal ledger yet reads as "no binding", not as a failure.
+    monkeypatch.setattr(service_publication, "_persona_for_org",
+                        lambda org: (_ for _ in ()).throw(service_publication.ServicePublicationError("organization_not_founded", 409)))
+    assert ra.bound_slug("acme") is None
