@@ -171,8 +171,9 @@ def _fake_powershell(bindir: Path, busy_port: int | None, ping_code: str) -> Non
 
 
 def _run_functions(script: Path, workdir: Path, body: str, env: dict[str, str]) -> subprocess.CompletedProcess:
-    names = ("set_env", "port_is_free", "choose_http_port", "windows_first_screen_check") if script is INSTALL \
-        else ("port_is_free", "choose_http_port", "windows_first_screen_check")
+    names = ("is_wsl", "wsl_powershell", "port_is_free", "choose_http_port", "windows_first_screen_check")
+    if script is INSTALL:
+        names = ("set_env", *names)
     full = _functions(script, names) + "\n" + body + "\n"
     return subprocess.run(["bash", "-euo", "pipefail", "-c", full], cwd=str(workdir),
                           capture_output=True, text=True, timeout=30, env={**os.environ, **env})
@@ -197,7 +198,8 @@ def test_under_wsl_a_port_windows_holds_is_busy_even_when_the_distro_is_free(scr
     elsewhere = tmp_path / "plain"
     elsewhere.mkdir()
     (elsewhere / ".env").write_text("")
-    plain = _run_functions(script, elsewhere, f'choose_http_port "" {free_a} {free_b}', {"PATH": env["PATH"]})
+    plain = _run_functions(script, elsewhere, f'choose_http_port "" {free_a} {free_b}',
+                           {"PATH": env["PATH"], "WSL_OSRELEASE_FILE": "/dev/null"})
     assert plain.returncode == 0, plain.stderr
     assert plain.stdout.strip() == str(free_a)
 
@@ -215,5 +217,44 @@ def test_under_wsl_the_final_check_runs_from_windows(script, tmp_path):
     assert "WARNING: Windows could not reach http://localhost:80/api/ping" in warned.stderr
     assert "https://localhost:8080/" in warned.stderr
 
-    quiet = _run_functions(script, tmp_path, "windows_first_screen_check 80 8080", {"PATH": env["PATH"]})
+    quiet = _run_functions(script, tmp_path, "windows_first_screen_check 80 8080",
+                           {"PATH": env["PATH"], "WSL_OSRELEASE_FILE": "/dev/null"})
     assert quiet.stdout == "" and quiet.stderr == ""
+
+
+@pytest.mark.parametrize("script", [QUICKSTART, INSTALL], ids=["quickstart", "install-published"])
+def test_under_sudo_wsl_is_detected_from_the_kernel_release(script, tmp_path):
+    """sudo's env_reset drops WSL_DISTRO_NAME and secure_path drops /mnt/c; the
+    kernel release still says microsoft, and powershell is still consulted."""
+    osrelease = tmp_path / "osrelease"
+    osrelease.write_text("6.6.87.2-microsoft-standard-WSL2\n")
+    _holder, _busy, free_a = _busy_and_free_ports()
+    _holder.close()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_b = probe.getsockname()[1]
+    (tmp_path / ".env").write_text("")
+    _fake_powershell(tmp_path / "bin", busy_port=free_a, ping_code="200")
+    env = {"WSL_OSRELEASE_FILE": str(osrelease), "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}"}
+    result = _run_functions(script, tmp_path, f'choose_http_port "" {free_a} {free_b}', env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(free_b)
+    assert "WSL_DISTRO_NAME" not in env
+
+
+@pytest.mark.parametrize("script", [QUICKSTART, INSTALL], ids=["quickstart", "install-published"])
+def test_wsl_without_reachable_powershell_says_the_checks_were_skipped_once(script, tmp_path):
+    osrelease = tmp_path / "osrelease"
+    osrelease.write_text("6.6.87.2-microsoft-standard-WSL2\n")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    (tmp_path / ".env").write_text("")
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    env = {"WSL_OSRELEASE_FILE": str(osrelease), "PATH": f"{empty_bin}:/usr/bin:/bin"}
+    body = f'choose_http_port "" {free}; windows_first_screen_check {free} 8080'
+    result = _run_functions(script, tmp_path, body, env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(free)
+    assert result.stderr.count("NOTE: this is WSL but powershell.exe was not found") == 1

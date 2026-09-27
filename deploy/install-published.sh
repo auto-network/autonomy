@@ -187,13 +187,27 @@ set_env() { grep -q "^$1=" .env && sed -i "s|^$1=.*|$1=$2|" .env || echo "$1=$2"
 # The plain-HTTP first-screen port: the first free of the candidates, chosen once
 # and recorded in .env (docker-compose.yml publishes it on 127.0.0.1). A connect
 # probe on localhost is deterministic and needs no tool beyond bash.
+# WSL detection that survives sudo: env_reset drops WSL_DISTRO_NAME and secure_path
+# drops /mnt/c from PATH, so the kernel release and the absolute powershell path are
+# consulted too. wsl_powershell prints the powershell.exe path; rc 1 means the
+# Windows-side checks are skipped (the final check says so when this IS WSL).
+is_wsl() { [[ -n "${WSL_DISTRO_NAME:-}" ]] || grep -qi microsoft "${WSL_OSRELEASE_FILE:-/proc/sys/kernel/osrelease}" 2>/dev/null; }
+wsl_powershell() {
+    is_wsl || return 1
+    local candidate
+    for candidate in "$(command -v powershell.exe 2>/dev/null || true)" \
+                     /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe; do
+        [[ -n "$candidate" && -x "$candidate" ]] && { echo "$candidate"; return 0; }
+    done
+    return 1
+}
 port_is_free() {
     ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null || return 1
     # Under WSL the distro's localhost is relayed from Windows, and a port Windows
     # itself holds (HTTP.sys on 80) is busy there while nothing answers in here.
-    if [[ -n "${WSL_DISTRO_NAME:-}" ]] && command -v powershell.exe >/dev/null 2>&1; then
-        local win
-        win="$(powershell.exe -NoProfile -NonInteractive -Command \
+    local ps win
+    if ps="$(wsl_powershell)"; then
+        win="$("$ps" -NoProfile -NonInteractive -Command \
             "if (Get-NetTCPConnection -State Listen -LocalPort $1 -ErrorAction SilentlyContinue) { 'busy' } else { 'free' }" \
             2>/dev/null | tr -d '\r')"
         [[ "$win" == busy ]] && return 1
@@ -201,9 +215,14 @@ port_is_free() {
     return 0
 }
 windows_first_screen_check() {  # windows_first_screen_check <http-port> <https-port>
-    [[ -n "${WSL_DISTRO_NAME:-}" ]] && command -v powershell.exe >/dev/null 2>&1 || return 0
-    local code
-    code="$(powershell.exe -NoProfile -NonInteractive -Command \
+    local ps code
+    is_wsl || return 0
+    if ! ps="$(wsl_powershell)"; then
+        echo "NOTE: this is WSL but powershell.exe was not found (sudo drops /mnt/c from PATH), so the Windows-side" >&2
+        echo "      port checks were skipped. Confirm http://localhost:$1/ opens from a Windows browser." >&2
+        return 0
+    fi
+    code="$("$ps" -NoProfile -NonInteractive -Command \
         "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://localhost:$1/api/ping).StatusCode } catch { 0 }" \
         2>/dev/null | tr -d '\r')"
     if [[ "$code" == 200 ]]; then
