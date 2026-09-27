@@ -1070,24 +1070,47 @@ def _auth(token: str = _QUERY_TOKEN) -> dict:
 
 
 def _stub_workspace(monkeypatch, tmp_path, overrides=QUERY_OVERRIDES,
-                    session: str = _QUERY_SESSION, token: str = _QUERY_TOKEN):
-    """Stamp a launcher token → session in a fresh auth DB and pin the
-    session→workspace half (already proven in test_repl_auth) to
-    widgets-ng with the given issue_tracker workspace_overrides. Captures
-    the session the route derived so callers can assert it was never
-    caller-supplied."""
-    from tools.dashboard.dao import auth_db
+                    session: str = _QUERY_SESSION, token: str = _QUERY_TOKEN,
+                    grant: bool | None = True, project: str = "widgets-ng"):
+    """Real bearer/session/grant state; only the workspace directory is fake."""
+    from types import SimpleNamespace
+    from agents import workspace_settings
+    from tools.dashboard.dao import auth_db, dashboard_db
+    from tools.graph.db import GraphDB
+    from tools.graph import settings_ops
+    from tools.graph.schemas.workspace_capability_enable import SET_ID, SCHEMA_REVISION
 
+    GraphDB.close_all_pooled()
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    GraphDB(orgs_dir / "widgets-ng.db").close()
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     auth_db.init_db(tmp_path / "auth.db")
+    dashboard_db.init_db(tmp_path / "dashboard.db")
     auth_db.insert_token(
         hashlib.sha256(token.encode()).hexdigest(), session, "widgets-ng")
+    dashboard_db.upsert_session(session, "agent", project)
     seen = {}
+    get_session = dashboard_db.get_session
 
-    def resolve(s):
+    def observe_session(s):
         seen["session"] = s
-        return ("widgets-ng", overrides)
+        return get_session(s)
 
-    monkeypatch.setattr(jira_routes, "_workspace_overrides", resolve)
+    def get_workspace(workspace):
+        if workspace != "widgets-ng":
+            raise KeyError(workspace)
+        return SimpleNamespace(id=workspace, graph_project="widgets-ng")
+
+    monkeypatch.setattr(dashboard_db, "get_session", observe_session)
+    monkeypatch.setattr(workspace_settings, "get_workspace", get_workspace)
+    monkeypatch.setattr(workspace_settings, "invalidate_caches", lambda: None)
+    if grant is not None:
+        settings_ops.upsert_by_key(
+            SET_ID, SCHEMA_REVISION, "widgets-ng:issue_tracker",
+            {"contract": "issue_tracker", "enabled": grant,
+             "workspace_overrides": overrides}, org="widgets-ng")
     return seen
 
 
@@ -1186,20 +1209,20 @@ def test_named_query_session_query_param_is_ignored(jira_env, monkeypatch,
 
 def test_named_query_unresolvable_session_is_403(jira_env, monkeypatch,
                                                  tmp_path):
-    from tools.dashboard.dao import auth_db
-
-    auth_db.init_db(tmp_path / "auth.db")
-    auth_db.insert_token(
-        hashlib.sha256(_QUERY_TOKEN.encode()).hexdigest(), "auto-ghost",
-        "widgets-ng")
-
-    def boom(session):
-        raise LookupError(f"session {session!r} does not map to a workspace")
-
-    monkeypatch.setattr(jira_routes, "_workspace_overrides", boom)
+    _stub_workspace(monkeypatch, tmp_path, session="auto-ghost", project="")
     client = TestClient(_app())
     r = client.get("/api/jira/query", headers=_auth())
     assert r.status_code == 403 and "does not map" in r.json()["error"]
+
+
+@pytest.mark.parametrize("grant", [None, False])
+def test_named_query_requires_enabled_capability(jira_env, monkeypatch, tmp_path, grant):
+    _stub_workspace(monkeypatch, tmp_path, grant=grant)
+    client = TestClient(_app())
+    for path in ("/api/jira/query", "/api/jira/query/mine"):
+        response = client.get(path, headers=_auth())
+        assert response.status_code == 403
+        assert "does not enable issue_tracker" in response.json()["error"]
 
 
 def test_transitions_read_route(jira_env, monkeypatch):

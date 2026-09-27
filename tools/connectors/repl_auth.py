@@ -29,7 +29,6 @@ the dashboard's ``setting.changed`` invalidation hook.
 
 from __future__ import annotations
 
-import hashlib
 import sys
 import time
 from dataclasses import dataclass
@@ -100,45 +99,11 @@ def authenticate(*, autonomy_root: Path | None,
             "caller authentication requires --autonomy-root", status=503)
     _ensure_root(autonomy_root)
 
-    auth = authorization or ""
-    if not auth.startswith("Bearer ") or not auth[7:]:
-        raise ReplAuthError(
-            "missing bearer token: send Authorization: Bearer "
-            "$CROSSTALK_TOKEN", status=401)
-    token_hash = hashlib.sha256(auth[7:].encode()).hexdigest()
+    from tools.dashboard.capability_gate import CapabilityRefused, require_capability
 
-    from tools.dashboard.dao import auth_db, dashboard_db
-
-    resolved = auth_db.resolve_token(token_hash)
-    if resolved is None:
-        raise ReplAuthError("invalid or revoked token", status=401)
-    # resolve_token now returns (session, org); the REPL gates on the derived
-    # WORKSPACE (below), not the token's org, so the org is intentionally
-    # unused here.
-    session, _org = resolved
-
-    row = dashboard_db.get_session(session)
-    project = ((row or {}).get("project") or "").strip()
-    if not project:
-        raise ReplAuthError(
-            f"session {session!r} does not map to a workspace")
     try:
-        ws = _fresh_workspace(project)
-    except KeyError:
-        raise ReplAuthError(
-            f"session {session!r} maps to unknown workspace {project!r}")
-
-    from agents.workspace_settings import WORKSPACE_CAPABILITY_ENABLE_SET_ID
-    from tools.graph import ops as graph_ops
-
-    members = graph_ops.read_set(
-        WORKSPACE_CAPABILITY_ENABLE_SET_ID, org=ws.graph_project, peers=[])
-    wanted = f"{ws.id}:{REPL_LOGIN_CONTRACT}"
-    for member in members.members:
-        if member.key == wanted:
-            if member.payload.get("enabled", True) is True:
-                return ReplCaller(session=session, workspace_id=ws.id,
-                                  org=ws.graph_project)
-            break
-    raise ReplAuthError(
-        f"workspace {ws.id!r} does not enable {REPL_LOGIN_CONTRACT}")
+        scope = require_capability(authorization, REPL_LOGIN_CONTRACT)
+    except CapabilityRefused as exc:
+        raise ReplAuthError(exc.detail, status=exc.status) from exc
+    return ReplCaller(session=scope.session, workspace_id=scope.workspace,
+                      org=scope.org)

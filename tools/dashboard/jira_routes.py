@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -227,30 +226,6 @@ class _JiraAuthError(Exception):
         self.status = status
 
 
-def _resolve_session(authorization: str | None) -> str:
-    """Resolve the calling session from ``Authorization: Bearer
-    $CROSSTALK_TOKEN`` — never from a caller-supplied name.
-
-    The launcher stamped ``sha256(token) -> tmux_name`` into the auth DB at
-    container start; we resolve the hash there (mirroring
-    ``tools/connectors/repl_auth.py``). Read fresh per request so revoking a
-    token cuts access immediately with no dashboard restart. Bearer
-    missing/malformed or token unknown/revoked -> 401."""
-    auth = authorization or ""
-    if not auth.startswith("Bearer ") or not auth[7:]:
-        raise _JiraAuthError(
-            "missing bearer token: send Authorization: Bearer "
-            "$CROSSTALK_TOKEN", status=401)
-    from tools.dashboard.dao import auth_db
-
-    token_hash = hashlib.sha256(auth[7:].encode()).hexdigest()
-    resolved = auth_db.resolve_token(token_hash)
-    if resolved is None:
-        raise _JiraAuthError("invalid or revoked token", status=401)
-    tmux_name, _org = resolved
-    return tmux_name
-
-
 def _authorized_workspace(authorization: str | None) -> tuple[str, dict]:
     """Authenticate the caller from the bearer token and resolve their
     workspace's ``issue_tracker`` query overrides. Blocking (DB + graph
@@ -258,10 +233,15 @@ def _authorized_workspace(authorization: str | None) -> tuple[str, dict]:
 
     The caller asserts no session and no workspace — both derive host-side
     from launcher-stamped state — so there is nothing to forge. A token
-    whose session doesn't map to a workspace -> 403."""
-    session = _resolve_session(authorization)
+    whose session doesn't map to a workspace, or whose workspace does not
+    enable issue_tracker, receives 403."""
+    from tools.dashboard.capability_gate import CapabilityRefused, require_capability
+
     try:
-        return _workspace_overrides(session)
+        scope = require_capability(authorization, "issue_tracker")
+        return _workspace_overrides(scope.session)
+    except CapabilityRefused as e:
+        raise _JiraAuthError(e.detail, status=e.status) from e
     except LookupError as e:
         raise _JiraAuthError(str(e), status=403) from e
 
