@@ -224,14 +224,17 @@ def validate_request_origin(mode: str, origin: object) -> str:
                                              or address.is_link_local)))
     elif mode == "tailscale":
         fits = host.endswith(".ts.net") or (
-            address is not None and address.version == 4
-            and address in ipaddress.ip_network("100.64.0.0/10"))
+            address is not None and (
+                address in ipaddress.ip_network("100.64.0.0/10")
+                or address in ipaddress.ip_network("fd7a:115c:a1e0::/48")))
     else:
         fits = False
     if not fits:
         raise service_publication.ServicePublicationError("origin_invalid", 400)
     port = f":{parts.port}" if parts.port else ""
-    return f"{parts.scheme}://{host}{port}"
+    # An IPv6 literal keeps its brackets: this string becomes every link's base.
+    shown = f"[{host}]" if address is not None and address.version == 6 else host
+    return f"{parts.scheme}://{shown}{port}"
 
 
 def request_came_through_gateway(headers, relay_origin: str | None) -> bool:
@@ -415,3 +418,69 @@ async def _status_uncached() -> dict:
     result["gate"] = "up" if "dashboard-passkey" in (gateway.get("auth_helpers") or []) else "pending"
     result["enrollment"] = "closed"
     return result
+
+
+# ── the origin every link uses (auto-w622e) ───────────────────────────────
+
+def dashboard_public_origin() -> str | None:
+    """The dashboard's public origin for every operator-facing link, from the
+    recorded remote-access row; None only on a node not yet onboarded (links
+    then stay paths). Never derives a hostname and never raises."""
+    try:
+        row = current()
+    except Exception:
+        return None
+    origin = (row or {}).get("origin")
+    return origin if isinstance(origin, str) and origin else None
+
+
+def _tailnet_name_from_certificate(cert_path) -> str | None:
+    """The .ts.net DNS name in the dashboard's local TLS certificate, if any.
+    A file read; no network call."""
+    from pathlib import Path
+
+    path = Path(cert_path)
+    if not path.is_file():
+        return None
+    try:
+        from cryptography import x509
+
+        cert = x509.load_pem_x509_certificate(path.read_bytes())
+        names = cert.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
+    except Exception:
+        return None
+    for name in names:
+        name = name.rstrip(".").lower()
+        if name.endswith(".ts.net"):
+            return name
+    return None
+
+
+def seed_origin_from_certificate(*, environ=None, cert_path=None) -> dict | None:
+    """Once at startup, on a node onboarded before the remote-access step
+    existed: when no row is recorded, take the Tailnet name from
+    DASHBOARD_DOMAIN or from the local certificate's .ts.net SAN and record
+    the Tailscale origin (https://<name>:8080), so links become absolute.
+    Returns the row written, or None when nothing was seeded."""
+    import os
+    from pathlib import Path
+
+    env = os.environ if environ is None else environ
+    try:
+        if current() is not None:
+            return None
+    except Exception:
+        return None
+    name = (env.get("DASHBOARD_DOMAIN") or "").strip().rstrip(".").lower()
+    if not name:
+        if cert_path is None:
+            cert_path = env.get("AUTONOMY_TLS_CERT") or str(
+                Path(env.get("AUTONOMY_DATA_ROOT", "data")) / "tls.crt")
+        name = _tailnet_name_from_certificate(cert_path) or ""
+    if not name or not name.endswith(".ts.net"):
+        return None
+    try:
+        return record({"mode": "tailscale", "origin": f"https://{name}:8080", "published_at": _utc_now()})
+    except Exception:
+        return None

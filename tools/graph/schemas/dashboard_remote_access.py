@@ -29,7 +29,8 @@ REMOTE_ACCESS_KEY = "default"
 
 REACH_MODES = ("autonomy", "tailscale", "local")
 
-_ORIGIN_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(?::\d{1,5})?$")
+# scheme://host[:port], the host a DNS name, an IPv4 literal or a bracketed IPv6 literal.
+_ORIGIN_RE = re.compile(r"^https?://(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.\-]+)(?::\d{1,5})?$")
 _APP_LABEL_RE = re.compile(r"^(?![a-z0-9]{2}--)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 

@@ -80,9 +80,13 @@ def remote_api(tmp_path, monkeypatch):
     monkeypatch.setattr(service_certificate_manager, "request_reconcile",
                         lambda: converged.__setitem__("reconcile", converged["reconcile"] + 1))
 
-    async def reload():
+    def reload():
+        # Counted when requested (the task itself runs later on the loop).
         converged["reload"] += 1
-        return {"ok": True}
+
+        async def done():
+            return {"ok": True}
+        return done()
     monkeypatch.setattr(web_gateway_supervisor, "request_reload", reload)
     gateway = {"state": "healthy", "advertised_routes": [], "auth_helpers": []}
     monkeypatch.setattr(web_gateway_supervisor, "status", lambda: dict(gateway))
@@ -165,12 +169,15 @@ def test_local_and_tailscale_record_the_origin_the_operator_used(remote_api):
     ("local", "desktop.local", True), ("local", "dash.example.com", False), ("local", "100.101.1.1", False),
     ("tailscale", "desktop.tail1234.ts.net:8080", True), ("tailscale", "100.101.1.1", True),
     ("tailscale", "localhost", False), ("tailscale", "dash.example.com", False),
+    ("local", "[::1]:80", True), ("local", "[fd00::5]:8081", True), ("tailscale", "[fd7a:115c:a1e0::1]", True),
+    ("tailscale", "[2001:db8::1]", False),
 ])
 def test_the_recorded_origin_must_fit_the_mode(remote_api, mode, host, ok):
     r = remote_api.client.post("/api/network/remote-access/publish", json={"mode": mode},
                                headers={**_headers(), "Host": host})
     if ok:
         assert r.status_code == 200, r.text
+        # IPv6 literals keep their brackets (reviewer): the origin is a link base.
         assert r.json()["remote_access"]["origin"] == f"http://{host.rstrip('.')}"
     else:
         assert r.status_code == 400 and r.json()["error"] == "origin_invalid"
