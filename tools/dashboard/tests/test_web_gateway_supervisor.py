@@ -1236,3 +1236,46 @@ def test_helper_reconciliation_uses_the_helpers_own_service_and_recovers_its_run
     assert by_id["dashboard-passkey"].service["image"] == "node"
     assert by_id["org-oidc:acme"].runtime_dir == str(tmp_path / "org-oidc-acme")
     assert runtime is not None
+
+
+@pytest.mark.asyncio
+async def test_planner_renders_a_personal_session_service_unavailable_not_gated_under_another_name(monkeypatch, tmp_path):
+    """The passkey gate is bound to the dashboard route's hostname (the
+    relying party); a session Service under the personal mode has no gate
+    of its own name yet and renders the unavailable page, never a gate for
+    another hostname."""
+    from tools.dashboard import passkey_gate, service_auth
+
+    monkeypatch.setattr(sup, "_discover_orgs", lambda: ["personal"])
+    monkeypatch.setattr(service_auth, "configuration", lambda org: {"configured": False})
+    rid = "6b5ef2c1-1b41-5f7a-9c7d-2f0b6a3d4e55"
+    host = "docs.alice-x.serve.auto.network"
+    monkeypatch.setattr(sup.service_publication, "list_reservations",
+                        lambda _org: [{"reservation_id": rid, "state": "active", "persona_label": "alice-x"}])
+    monkeypatch.setattr(sup.service_publication, "_read_local_machine_id", lambda: LOCAL_MACHINE)
+    monkeypatch.setattr(sup.service_publication, "list_service_targets",
+                        lambda _org: [{"reservation_id": rid, "machine_id": LOCAL_MACHINE, "access_mode": "personal"}])
+    monkeypatch.setattr(sup.service_certificate, "active_gateway_pair", lambda _org, _persona: (
+        "/run/autonomy-service-gateway-certs/personas/alice-x/tls.crt",
+        "/run/autonomy-service-gateway-certs/personas/alice-x/tls.key"))
+
+    async def connector_ready(_org):
+        return True
+
+    monkeypatch.setattr(sup, "_connector_ready", connector_ready)
+
+    async def resolve(org, reservation_id):
+        return ServiceGatewayRoute(reservation_id=rid, hostname=host, session_id="auto-0831-171125",
+                                   container_id="a" * 64, network="autonomy_default", upstream_ip="172.16.0.42",
+                                   port=8000, expires_at="2026-08-31T21:12:00.000Z")
+
+    monkeypatch.setattr(sup.service_gateway, "resolve_gateway_route", resolve)
+    monkeypatch.setattr(sup.service_gateway, "reservation_hostname", lambda org, reservation_id: host)
+    monkeypatch.setattr(passkey_gate, "materialize_helper",
+                        lambda *a: pytest.fail("no gate may be materialized for a session Service"))
+
+    plan = await sup.build_desired_state()
+
+    assert plan.ready is True and plan.helpers == ()
+    assert "not currently available" in plan.caddyfile
+    assert "forward_auth" not in plan.caddyfile

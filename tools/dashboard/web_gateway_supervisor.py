@@ -439,8 +439,14 @@ async def _build_desired_state() -> GatewayDesiredState:
                     ))
                 elif access == "personal":
                     # The dashboard's own passkey gate (operator decision
-                    # 2026-09-27): one helper for the personal route, the
-                    # enrollment path unlogged because it carries the token.
+                    # 2026-09-27): one helper, bound to the dashboard route's
+                    # hostname (the passkey's relying party), the enrollment
+                    # path unlogged because it carries the token. A session
+                    # Service under the personal mode would need a gate of
+                    # its own hostname; until one exists it is unavailable,
+                    # never served under a gate for another name.
+                    if target_rows.get(reservation_id, {}).get("kind") != "dashboard":
+                        raise ValueError("the personal passkey gate serves the dashboard route only")
                     helper_id = passkey_gate.HELPER_ID
                     if helper_id not in helpers:
                         helpers[helper_id] = await asyncio.to_thread(

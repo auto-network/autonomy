@@ -29,8 +29,9 @@ One Okta application covers all listed domains and their services. No applicatio
 registration per member, container or service is needed. The **Other OIDC provider**
 instructions describe Authorization Code, S256 PKCE, `form_post`, and
 `openid email profile`; only Okta is validated by this integration's acceptance.
-Wildcard support depends on the provider. Personal (passkey) is a separate provider
-and is unavailable until its implementation is installed.
+Wildcard support depends on the provider. Personal (passkey) is the dashboard's own
+gate helper (tools/network/passkey_gate.py), run from the node image beside the gateway
+for the dashboard's relay route; it uses no identity provider.
 
 ### Configuration and runtime state
 
