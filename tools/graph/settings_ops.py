@@ -35,7 +35,7 @@ from collections import Counter
 from dataclasses import dataclass, field as dataclass_field, asdict, replace
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Generic, Iterator, TypeVar
+from typing import Any, Callable, Generic, Iterable, Iterator, TypeVar
 from uuid import uuid4
 
 from .db import GraphDB, GraphDBNotReady, _org_db_path, resolve_caller_db_path
@@ -4019,6 +4019,139 @@ def deprecate_setting(
         db.close()
     if snapshot is not None:
         _call_emit_hook(operation="deprecate", snapshot=snapshot, org=org)
+
+
+def rows_including_deprecated(
+    set_id: str,
+    *,
+    org: "str | None | _CallerOrgSentinel",
+) -> list[dict[str, Any]]:
+    """Every stored row of *set_id* in *org*'s own database, deprecated ones
+    included, as ``{id, key, payload, deprecated, signed}``.
+
+    :func:`read_set` resolves live members and never returns a deprecated
+    row. A caller that must act on retired rows themselves -- erasing
+    secrets a migration left behind (auto-se3e2) -- reads them here. The
+    payload is parsed JSON, or ``None`` when it does not parse.
+    """
+    org = _resolve_org_arg(org)
+    db = _open(org)
+    try:
+        rows = db.conn.execute(
+            "SELECT id, key, payload, deprecated, signature FROM settings "
+            "WHERE set_id = ? ORDER BY created_at, id",
+            (set_id,),
+        ).fetchall()
+    finally:
+        db.close()
+    out = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            payload = None
+        out.append({
+            "id": row["id"], "key": row["key"], "payload": payload,
+            "deprecated": bool(row["deprecated"]),
+            "signed": row["signature"] is not None,
+        })
+    return out
+
+
+def erase_payload_fields(
+    setting_id: str,
+    fields: "Iterable[str]",
+    *,
+    org: "str | None | _CallerOrgSentinel",
+) -> str:
+    """Erase *fields* from one stored row's payload, in place.
+
+    Returns ``"erased"``, ``"absent"`` (no listed field holds a value: a
+    no-op, so a repeat run changes nothing) or ``"removed"``.
+
+    For secrets a retired row must stop holding (auto-se3e2). The row keeps
+    its identity, deprecation and every other payload field, so a later
+    diagnosis still reads which account it was. ``secure_delete`` is on for
+    the write, so SQLite zeroes the cell space the old payload occupied
+    instead of leaving the plaintext in a free block of the page. A SIGNED
+    row cannot be edited under its signature, so it is removed instead.
+    Fleet sync serves the live row, so peers receive the erased payload (or
+    the tombstone) as an ordinary last-writer-wins change.
+    """
+    org = _resolve_org_arg(org)
+    _guard_protected_setting_id(setting_id, org)
+    names = [str(f) for f in fields]
+    db = _open(org)
+    snapshot = operation = outcome = None
+    # Per connection, and the connection may be pooled: restore it after.
+    prior_secure_delete = db.conn.execute("PRAGMA secure_delete").fetchone()[0]
+    try:
+        db.conn.execute("PRAGMA secure_delete = ON")
+        db.conn.execute("BEGIN IMMEDIATE")
+        row = db.conn.execute(
+            "SELECT set_id, schema_revision, key, publication_state, deprecated, "
+            "payload, signature FROM settings WHERE id = ?",
+            (setting_id,),
+        ).fetchone()
+        if row is None:
+            db.conn.rollback()
+            raise LookupError(f"setting not found: {setting_id!r}")
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            payload = None
+        if not isinstance(payload, dict) or not any(payload.get(n) for n in names):
+            db.conn.rollback()
+            return "absent"
+        snapshot = _make_snapshot(
+            row["set_id"], row["schema_revision"], row["key"],
+            row["publication_state"], row["deprecated"],
+        )
+        if row["signature"] is not None:
+            db.conn.execute("DELETE FROM settings WHERE id = ?", (setting_id,))
+            operation, outcome = "delete", "removed"
+        else:
+            kept = {k: v for k, v in payload.items() if k not in names}
+            db.conn.execute(
+                "UPDATE settings SET payload = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(kept), _now_iso(), setting_id),
+            )
+            operation, outcome = "write", "erased"
+        db.conn.commit()
+        try:
+            # The WAL still holds the page image with the old payload until
+            # it is checkpointed; fold it in and truncate the log.
+            db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            logger.debug("erase_payload_fields: checkpoint skipped", exc_info=True)
+    finally:
+        try:
+            db.conn.execute(f"PRAGMA secure_delete = {int(prior_secure_delete)}")
+        except Exception:
+            pass
+        db.close()
+    _call_emit_hook(operation=operation, snapshot=snapshot, org=org)
+    return outcome
+
+
+def compact_store(org: "str | None | _CallerOrgSentinel") -> None:
+    """``VACUUM`` *org*'s database, then truncate its WAL.
+
+    SQLite reuses the space of a rewritten row without zeroing it, so a row
+    once written with a secret leaves copies of it in free space after
+    every later UPDATE of that row (deprecate_setting rewrites the cell too).
+    ``secure_delete`` covers only the write it is on; a VACUUM rebuilds every
+    page, so no earlier copy survives. For the one-time erasure of retired
+    secrets (auto-se3e2), not for routine use: it takes the write lock for
+    the length of the rebuild.
+    """
+    org = _resolve_org_arg(org)
+    db = _open(org)
+    try:
+        db.conn.execute("VACUUM")
+        db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        db.close()
 
 
 def undeprecate_setting(

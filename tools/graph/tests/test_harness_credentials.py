@@ -136,7 +136,8 @@ def test_migration_seals_pre_vault_rows_and_deprecates_them(warm_vault):
         "access_token": "ct-9", "refresh_token": "cr-9", "expires_at_ms": 7000,
     })
     counts = hv.migrate_plaintext_accounts()
-    assert counts == {"claude": 1, "setup_tokens": 1, "codex": 1, "deprecated": 3}
+    assert counts == {"claude": 1, "setup_tokens": 1, "codex": 1, "deprecated": 3,
+                      "scrubbed": 3, "failed": 0}
     claude = hv.read_account("claude", "org-A")
     assert claude.get("setup") == "sk-ant-oat01-A"
     assert claude.get("setup_minted_at") == "2026-09-05T00:00:00Z"
@@ -145,6 +146,104 @@ def test_migration_seals_pre_vault_rows_and_deprecates_them(warm_vault):
     codex = hv.read_account("codex", "acct-9")
     assert codex.launchable and codex.get("email") == "dev@example.com"
     # a second run finds nothing left
-    assert hv.migrate_plaintext_accounts() == {"claude": 0, "setup_tokens": 0, "codex": 0, "deprecated": 0}
+    assert hv.migrate_plaintext_accounts() == {"claude": 0, "setup_tokens": 0, "codex": 0,
+                                               "deprecated": 0, "scrubbed": 0, "failed": 0}
     from tools.graph import ops
     assert ops.read_set("dashboard.claude.credentials", org="personal", peers=[]).members == []
+
+
+# ── erasing the migrated rows' secrets (auto-se3e2) ──────────
+
+
+def _stored(db, set_id):
+    import json, sqlite3
+    conn = sqlite3.connect(str(db))
+    try:
+        return [(json.loads(p), d) for p, d in conn.execute(
+            "SELECT payload, deprecated FROM settings WHERE set_id = ?", (set_id,))]
+    finally:
+        conn.close()
+
+
+def _seed_all(db):
+    _insert_plaintext(db, "dashboard.claude.credentials", "org-A", {
+        "alias": "gmail", "organization_name": "Org A", "account_email": "a@example.com",
+        "access_token": "sec.access.claude", "refresh_token": "sec.refresh.claude", "expires_at_ms": 9000,
+    })
+    _insert_plaintext(db, "dashboard.claude.setup_tokens", "org-A",
+                      {"raw_key": "sec.setup.claude"})
+    _insert_plaintext(db, "dashboard.codex.credentials", "acct-9", {
+        "email": "dev@example.com", "id_token": "sec.id.codex",
+        "access_token": "sec.access.codex", "refresh_token": "sec.refresh.codex", "expires_at_ms": 7000,
+    })
+
+
+def test_a_migrated_row_keeps_no_secret_and_its_diagnosis(warm_vault):
+    _seed_all(warm_vault)
+    hv.migrate_plaintext_accounts()
+    for set_id in ("dashboard.claude.credentials", "dashboard.claude.setup_tokens",
+                   "dashboard.codex.credentials"):
+        [(payload, deprecated)] = _stored(warm_vault, set_id)
+        assert deprecated == 1
+        assert not any(payload.get(f) for f in hv.RETIRED_SECRET_FIELDS), payload
+    [(claude, _)] = _stored(warm_vault, "dashboard.claude.credentials")
+    assert claude == {"alias": "gmail", "organization_name": "Org A",
+                      "account_email": "a@example.com", "expires_at_ms": 9000}
+    # ... and every account still reads from the vault.
+    assert hv.read_account("claude", "org-A").get("refresh") == "sec.refresh.claude"
+    assert hv.read_account("claude", "org-A").get("setup") == "sec.setup.claude"
+    assert hv.read_account("codex", "acct-9").get("refresh") == "sec.refresh.codex"
+    # No plaintext left anywhere in the file, free space included. The
+    # secrets contain '.', which no base64url ciphertext does, so a hit is
+    # a real copy and never a coincidence.
+    wal = warm_vault.with_name(warm_vault.name + "-wal")
+    raw = warm_vault.read_bytes() + (wal.read_bytes() if wal.exists() else b"")
+    for secret in (b"sec.refresh.claude", b"sec.access.claude", b"sec.setup.claude", b"sec.refresh.codex", b"sec.access.codex", b"sec.id.codex"):
+        assert secret not in raw, secret
+
+
+def test_a_row_whose_vault_write_fails_keeps_its_secrets(warm_vault, monkeypatch):
+    _seed_all(warm_vault)
+    real = hv.write_account
+
+    def fail_codex(harness, account_id, parts):
+        if harness == "codex":
+            raise RuntimeError("vault sealer unavailable")
+        return real(harness, account_id, parts)
+
+    monkeypatch.setattr(hv, "write_account", fail_codex)
+    counts = hv.migrate_plaintext_accounts()
+    assert counts["failed"] == 1 and counts["claude"] == 1 and counts["setup_tokens"] == 1
+    [(codex, deprecated)] = _stored(warm_vault, "dashboard.codex.credentials")
+    assert deprecated == 0
+    assert codex["refresh_token"] == "sec.refresh.codex" and codex["access_token"] == "sec.access.codex"
+    # The others were migrated and erased regardless.
+    [(claude, _)] = _stored(warm_vault, "dashboard.claude.credentials")
+    assert "refresh_token" not in claude
+
+
+def test_rows_migrated_before_the_erasure_are_scrubbed_once_confirmed(warm_vault):
+    """A node migrated by the previous code holds deprecated rows with their
+    secrets; the next startup erases them, but only once the vault copy is
+    confirmed, and a second startup changes nothing."""
+    _seed_all(warm_vault)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(hv, "scrub_migrated_secrets", lambda: 0)
+        hv.migrate_plaintext_accounts()                 # the old behaviour
+    [(before, _)] = _stored(warm_vault, "dashboard.claude.credentials")
+    assert before["refresh_token"] == "sec.refresh.claude"
+
+    # Vault copy unconfirmed (cold): nothing is erased.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(hv, "read_account", lambda *a, **k: None)
+        assert hv.migrate_plaintext_accounts()["scrubbed"] == 0
+    [(still, _)] = _stored(warm_vault, "dashboard.claude.credentials")
+    assert still["refresh_token"] == "sec.refresh.claude"
+
+    assert hv.migrate_plaintext_accounts()["scrubbed"] == 3
+    snapshot = {s: _stored(warm_vault, s) for s in (
+        "dashboard.claude.credentials", "dashboard.claude.setup_tokens",
+        "dashboard.codex.credentials")}
+    assert hv.migrate_plaintext_accounts() == {"claude": 0, "setup_tokens": 0, "codex": 0,
+                                               "deprecated": 0, "scrubbed": 0, "failed": 0}
+    assert snapshot == {s: _stored(warm_vault, s) for s in snapshot}

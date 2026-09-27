@@ -372,28 +372,61 @@ PLAINTEXT_SETS = (
 )
 
 
+#: The fields of a retired pre-vault row that are credentials. Everything
+#: else (alias, account_email, organization_name, expires_at_ms, ...) stays
+#: for diagnosis. ``id_token`` is a signed identity token, so it goes too.
+RETIRED_SECRET_FIELDS = ("access_token", "refresh_token", "raw_key", "id_token")
+
+#: Each retired set, the account harness it migrated into, and the account
+#: part whose presence in the vault confirms the copy.
+_RETIRED_SETS = (
+    ("dashboard.claude.credentials", "claude", "refresh"),
+    ("dashboard.claude.setup_tokens", "claude", "setup"),
+    ("dashboard.codex.credentials", "codex", "refresh"),
+)
+
+
 def migrate_plaintext_accounts() -> dict[str, int]:
     """Seal every pre-vault credential row into its account record and
-    deprecate the row (record v16 §10.9). Runs at every dashboard startup
-    and is a no-op once the rows are gone; a node that never held them
-    reports zeros. The three sets have no registered schema any more, so
-    their rows are read as they are and never written again.
+    deprecate the row (record v16 §10.9), then erase the secrets of every
+    migrated row whose vault copy is confirmed (auto-se3e2).
+
+    Runs at every dashboard startup. A row is sealed and deprecated once;
+    its secrets are erased on the same run or, for rows migrated before the
+    erasure existed, on the next. A row whose vault write fails is left
+    exactly as it was, secrets included, and is retried next startup; one
+    failure does not stop the others. A second run changes nothing. The
+    three sets have no registered schema any more, so their rows are read
+    as they are and never written through the schema path again.
     """
     from tools.graph import ops as graph_ops
 
-    counts = {"claude": 0, "setup_tokens": 0, "codex": 0, "deprecated": 0}
+    counts = {"claude": 0, "setup_tokens": 0, "codex": 0, "deprecated": 0,
+              "scrubbed": 0, "failed": 0}
     def _rows(set_id: str) -> list[Any]:
         try:
             return list(getattr(graph_ops.read_set(set_id, org="personal", peers=[]), "members", []) or [])
         except Exception:
             return []
 
+    def _migrate(row: Any, harness: str, parts: dict[str, str | None], counter: str) -> None:
+        try:
+            write_account(harness, str(row.key), parts)
+        except Exception:
+            logger.exception("harness accounts: vault write for pre-vault row %s "
+                             "failed; the row is kept as it was", row.id)
+            counts["failed"] += 1
+            return
+        counts[counter] += 1
+        graph_ops.deprecate_setting(row.id, org="personal")
+        counts["deprecated"] += 1
+
     for row in _rows("dashboard.claude.credentials"):
         payload = getattr(row, "payload", None) or {}
         if not isinstance(payload, dict) or not payload.get("refresh_token"):
             continue
         expires = payload.get("expires_at_ms")
-        write_account("claude", str(row.key), {
+        _migrate(row, "claude", {
             "alias": payload.get("alias"),
             "org_name": payload.get("organization_name"),
             "email": payload.get("account_email"),
@@ -403,28 +436,22 @@ def migrate_plaintext_accounts() -> dict[str, int]:
             "scopes": scopes_text(payload.get("scopes") or []),
             "refreshed_at": payload.get("last_refresh_at"),
             "error": payload.get("last_refresh_error"),
-        })
-        counts["claude"] += 1
-        graph_ops.deprecate_setting(row.id, org="personal")
-        counts["deprecated"] += 1
+        }, "claude")
     for row in _rows("dashboard.claude.setup_tokens"):
         payload = getattr(row, "payload", None) or {}
         raw_key = payload.get("raw_key") if isinstance(payload, dict) else None
         if not raw_key:
             continue
-        write_account("claude", str(row.key), {
+        _migrate(row, "claude", {
             "setup": raw_key,
             "setup_minted_at": str(getattr(row, "created_at", None) or NONE),
-        })
-        counts["setup_tokens"] += 1
-        graph_ops.deprecate_setting(row.id, org="personal")
-        counts["deprecated"] += 1
+        }, "setup_tokens")
     for row in _rows("dashboard.codex.credentials"):
         payload = getattr(row, "payload", None) or {}
         if not isinstance(payload, dict) or not payload.get("refresh_token"):
             continue
         expires = payload.get("expires_at_ms")
-        write_account("codex", str(row.key), {
+        _migrate(row, "codex", {
             "id": payload.get("id_token"),
             "access": payload.get("access_token"),
             "refresh": payload.get("refresh_token"),
@@ -432,8 +459,60 @@ def migrate_plaintext_accounts() -> dict[str, int]:
             "email": payload.get("email"),
             "refreshed_at": payload.get("last_refresh_at"),
             "error": payload.get("last_refresh_error"),
-        })
-        counts["codex"] += 1
-        graph_ops.deprecate_setting(row.id, org="personal")
-        counts["deprecated"] += 1
+        }, "codex")
+    counts["scrubbed"] = scrub_migrated_secrets()
     return counts
+
+
+def scrub_migrated_secrets() -> int:
+    """Erase the credential fields of every retired row whose migration is
+    done: the row is deprecated (the migration's mark that its vault write
+    succeeded) AND the vault account holds that credential now. Returns how
+    many rows were erased; a row already erased is a no-op.
+
+    The erase overwrites the payload in place rather than deleting the row:
+    the non-secret fields (alias, account email, organization, expiry) stay
+    for a later diagnosis of which account a node once held, the deprecation
+    stays as the audit mark of the migration, and fleet sync carries the
+    erased payload to every peer as an ordinary update
+    (settings_ops.erase_payload_fields; a signed row is removed instead).
+    """
+    from tools.graph import settings_ops as _so
+
+    erased = 0
+    for set_id, harness, part in _RETIRED_SETS:
+        try:
+            rows = _so.rows_including_deprecated(set_id, org="personal")
+        except Exception:
+            logger.exception("harness accounts: cannot read retired set %s", set_id)
+            continue
+        for row in rows:
+            payload = row["payload"]
+            if not row["deprecated"] or not isinstance(payload, dict):
+                continue
+            if not any(payload.get(f) for f in RETIRED_SECRET_FIELDS):
+                continue
+            try:
+                account = read_account(harness, str(row["key"]))
+            except Exception:
+                account = None
+            if account is None or account.get(part) is None:
+                # Not confirmed (vault cold, or no copy): keep it, retry later.
+                continue
+            try:
+                if _so.erase_payload_fields(row["id"], RETIRED_SECRET_FIELDS,
+                                            org="personal") != "absent":
+                    erased += 1
+            except Exception:
+                logger.exception("harness accounts: erasing the secrets of "
+                                 "retired row %s failed", row["id"])
+    if erased:
+        # Every earlier rewrite of these rows (the deprecation included) left
+        # a copy of the old payload in free space; rebuild the file so none
+        # survives. Once per node: a later run erases nothing and skips this.
+        try:
+            _so.compact_store("personal")
+        except Exception:
+            logger.exception("harness accounts: compacting the personal store "
+                             "after erasing retired secrets failed")
+    return erased

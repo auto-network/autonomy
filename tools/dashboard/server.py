@@ -21944,7 +21944,7 @@ async def _on_startup():
         try:
             from tools.graph import harness_credentials as _hv
             _migrated = await asyncio.to_thread(_hv.migrate_plaintext_accounts)
-            if _migrated.get("deprecated"):
+            if _migrated.get("deprecated") or _migrated.get("scrubbed") or _migrated.get("failed"):
                 logger.info("harness accounts: migrated pre-vault rows %s", _migrated)
         except Exception:
             logger.exception("harness accounts: pre-vault migration failed; continuing startup")
