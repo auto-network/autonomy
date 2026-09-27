@@ -22,12 +22,13 @@ from tools.dashboard import feature_flags as ff
 def graph_db_env(tmp_path, monkeypatch):
     """Hermetic stores whose resolutions AGREE (test_surface.py's recipe):
     flag reads resolve at explicit org='personal', so the pin points AT
-    the orgs tree's personal.db — explicit, pin, and caller scope all
-    converge on one hermetic file."""
+    the personal store — explicit, pin, and caller scope all converge on
+    one hermetic file. The personal store lives BESIDE the orgs directory
+    (auto-35kmy), not inside it."""
     orgs = tmp_path / "orgs"
     orgs.mkdir()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
-    db_path = orgs / "personal.db"
+    db_path = tmp_path / "personal.db"
     monkeypatch.setenv("GRAPH_DB", str(db_path))
     monkeypatch.delenv("GRAPH_API", raising=False)
     ff.invalidate_cache(all_orgs=True)

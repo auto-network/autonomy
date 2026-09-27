@@ -316,13 +316,28 @@ def get_bead_counts() -> dict[str, int]:
     }
 
 
-def get_dispatch_beads() -> dict[str, list[dict]]:
+def get_dispatch_beads(
+    waiting_limit: int | None = None,
+    exclude_ids: "list[str] | tuple[str, ...] | None" = None,
+) -> dict:
+    """Mock of dao.beads.get_dispatch_beads, same signature and semantics:
+    *exclude_ids* drops beads from the list, the count and the blocked set
+    alike; *waiting_limit* truncates only the list (the total stays exact)."""
     data = _load()
+    excluded = set(exclude_ids or ())
     if "dispatch_beads" in data:
-        return data["dispatch_beads"]
-    beads = _beads()
-    approved = [b for b in beads if "readiness:approved" in (b.get("labels") or []) and b["status"] == "open"]
-    return {"approved_waiting": approved, "approved_blocked": []}
+        fixture = dict(data["dispatch_beads"])
+        waiting = [b for b in fixture.get("approved_waiting", []) if b.get("id") not in excluded]
+        fixture["approved_blocked"] = [
+            b for b in fixture.get("approved_blocked", []) if b.get("id") not in excluded]
+    else:
+        beads = _beads()
+        waiting = [b for b in beads if "readiness:approved" in (b.get("labels") or [])
+                   and b["status"] == "open" and b["id"] not in excluded]
+        fixture = {"approved_blocked": []}
+    fixture["approved_waiting_total"] = len(waiting)
+    fixture["approved_waiting"] = waiting[:waiting_limit] if waiting_limit is not None else waiting
+    return fixture
 
 
 def get_bead_title_priority(bead_ids: list[str]) -> dict[str, dict]:

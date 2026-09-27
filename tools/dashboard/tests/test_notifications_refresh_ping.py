@@ -38,7 +38,6 @@ from tools.dashboard.notifications_actions import (
 from tools.dashboard.settings_mediator import Row, Services
 from tools.dashboard.settings_mediator.loop import _HANDLERS, _dispatch_event
 from tools.graph import settings_ops
-from tools.graph import db as graph_db_mod
 from tools.graph.db import GraphDB
 from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS
 
@@ -339,11 +338,10 @@ def orgs_root(tmp_path, monkeypatch):
     isolation we're trying to verify.
     """
     root = tmp_path / "orgs"
-    legacy = tmp_path / "legacy.db"
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
-    monkeypatch.setattr(graph_db_mod, "DEFAULT_DB", legacy)
+    # (the legacy graph.db and its DEFAULT_DB were deleted in 01427b24)
     GraphDB.close_all_pooled()
     try:
         yield root
@@ -384,16 +382,22 @@ async def test_refresh_ping_in_one_org_does_not_read_session_ask_from_another(
         },
         org="alpha",
     )
-    settings_ops.upsert_by_key(
-        ns.SESSION_ASK_SET_ID, ns.SCHEMA_REVISION, "auto-shared",
-        {
-            "session_id": "auto-shared",
-            "text": "SCOPELESS_LEAK_TEXT",
-            "revision_seq": 1,
-            "created_at": "2026-05-04T12:00:00Z",
-        },
-        org=None,
-    )
+    # A scopeless copy used to be planted here to prove it could not leak
+    # into the alpha envelope. Since 01427b24 a write with no org to a set
+    # with no single home is refused, so that leak source cannot exist at
+    # all — pin the refusal, the stronger guarantee.
+    from tools.graph.schemas.registry import SchemaValidationError
+    with pytest.raises(SchemaValidationError, match="no single home"):
+        settings_ops.upsert_by_key(
+            ns.SESSION_ASK_SET_ID, ns.SCHEMA_REVISION, "auto-shared",
+            {
+                "session_id": "auto-shared",
+                "text": "SCOPELESS_LEAK_TEXT",
+                "revision_seq": 1,
+                "created_at": "2026-05-04T12:00:00Z",
+            },
+            org=None,
+        )
 
     payload = {
         "ask_id": "auto-shared",

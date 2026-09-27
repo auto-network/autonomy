@@ -33,7 +33,6 @@ from unittest.mock import patch
 import pytest
 
 from tools.graph import cli as graph_cli
-from tools.graph import db as graph_db_mod
 from tools.graph import ops as graph_ops
 from tools.graph.db import GraphDB
 
@@ -45,12 +44,11 @@ from tools.graph.db import GraphDB
 def orgs_root(tmp_path, monkeypatch):
     """Per-test orgs directory; mirrors tools/graph tests."""
     root = tmp_path / "orgs"
-    legacy = tmp_path / "legacy.db"
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     monkeypatch.delenv("GRAPH_SCOPE", raising=False)
-    monkeypatch.setattr(graph_db_mod, "DEFAULT_DB", legacy)
+    # (the legacy graph.db and its DEFAULT_DB were deleted in 01427b24)
     GraphDB.close_all_pooled()
     GraphDB.create_org_db("personal", type_="personal").close()
     try:
@@ -81,7 +79,7 @@ def test_substrate_persists_source_session_id(orgs_root):
     sid = result["source_id"]
 
     # The metadata column carries the field exactly as written.
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))  # beside orgs/ (auto-35kmy)
     try:
         row = conn.execute(
             "SELECT metadata FROM sources WHERE id = ?", (sid,),
@@ -98,7 +96,7 @@ def test_substrate_omits_field_when_unset(orgs_root):
     result = graph_ops.write_journal_entry(payload)
     sid = result["source_id"]
 
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))  # beside orgs/ (auto-35kmy)
     try:
         row = conn.execute(
             "SELECT metadata FROM sources WHERE id = ?", (sid,),
