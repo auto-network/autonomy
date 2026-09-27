@@ -331,4 +331,7 @@ def test_collect_returns_queued_replies_in_order_and_is_idempotent(client):
 def test_collect_unknown_session_is_empty_not_an_error(client):
     r = client.post("/api/mcp/crosstalk/collect", headers=AUTH,
                     json={"openai_session": "v1/never-helloed"})
-    assert r.status_code == 200 and r.json()["messages"] == []
+    # Not an error, and nothing drains: a chat never linked (not even helloed)
+    # reads as not linked, like the sibling resolve/relay routes.
+    assert r.status_code == 200
+    assert r.json() == {"status": "peer_not_linked"}

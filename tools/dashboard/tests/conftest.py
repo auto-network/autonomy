@@ -55,13 +55,32 @@ def _isolate_restart_state(tmp_path, monkeypatch):
     seq != buffer_last_seq assertions flaky. Paths are read at server import,
     so fixtures that reload the server module pick these up.
     """
-    for env, name in (
-        ("DASHBOARD_RESTART_NOTICE_STATE", "restart_notice.state"),
-        ("DASHBOARD_RESOURCE_MONITOR_STATE", "resource_monitor.state"),
-        ("DASHBOARD_WORKTREE_ROW_CACHE_STATE", "worktree_row_cache.state"),
+    import sys as _sys
+
+    server = _sys.modules.get("tools.dashboard.server")
+    for env, name, attr in (
+        ("DASHBOARD_RESTART_NOTICE_STATE", "restart_notice.state",
+         "RESTART_NOTICE_STATE_PATH"),
+        ("DASHBOARD_RESOURCE_MONITOR_STATE", "resource_monitor.state",
+         "RESOURCE_MONITOR_STATE_PATH"),
+        ("DASHBOARD_WORKTREE_ROW_CACHE_STATE", "worktree_row_cache.state",
+         "WORKTREE_ROW_CACHE_PATH"),
     ):
         if not os.environ.get(env):
             monkeypatch.setenv(env, str(tmp_path / name))
+        # A module that imported the server at collection time fixed these
+        # paths BEFORE this fixture ran -- at the checkout's real data/. A
+        # lifespan then consumed and unlinked the operator's own
+        # restart_notice.state (test_volume_contract caught it, auto-pg8d2).
+        # Repoint the already-imported module too.
+        if server is not None and hasattr(server, attr):
+            monkeypatch.setattr(server, attr, Path(os.environ[env]))
+    # The dispatcher token has no env override; a lifespan startup REWRITES
+    # it, which on a host running tests from the live checkout rotates the
+    # running dispatcher's credential (the volume contract saw it change).
+    if server is not None and hasattr(server, "DISPATCHER_TOKEN_FILE"):
+        monkeypatch.setattr(server, "DISPATCHER_TOKEN_FILE",
+                            tmp_path / ".dispatch_token")
 
 
 @pytest.fixture(autouse=True)
@@ -642,6 +661,10 @@ def test_app(test_db, mock_tmux, tmp_path):
     snapshot = _logging_snapshot()
     from tools.dashboard import server
     importlib.reload(server)
+    # The reload re-derived this from the real DATA_ROOT (it has no env
+    # override), and the lifespan REWRITES it: keep the checkout's live
+    # dispatcher token out of reach (auto-pg8d2).
+    server.DISPATCHER_TOKEN_FILE = tmp_path / ".dispatch_token"
     try:
         yield server.app
     finally:

@@ -319,6 +319,23 @@ def test_client(mock_fixture, resume_env, monkeypatch):
 
     monkeypatch.setattr(graph_db_mod.GraphDB, "__init__", patched_init)
 
+    # That shim routes every org to one file, so a Setting read through it has
+    # no originating org and its workspace resolves graph_project="" -- which
+    # the launch path rightly refuses as an org slug (auto-pg8d2). The row the
+    # fixture seeds IS the autonomy org's workspace; say so, as production
+    # resolves it from orgs/autonomy.db.
+    import dataclasses as _dc
+
+    from agents import workspace_settings as _ws
+    _load = _ws.load_workspaces
+
+    def load_workspaces_in_autonomy(*a, **k):
+        return {wid: (_dc.replace(ws, graph_project="autonomy")
+                      if not ws.graph_project else ws)
+                for wid, ws in _load(*a, **k).items()}
+
+    monkeypatch.setattr(_ws, "load_workspaces", load_workspaces_in_autonomy)
+
     # Patch tmux to always succeed
     def fake_subprocess_run(cmd, **kwargs):
         class FakeResult:

@@ -2044,17 +2044,22 @@ def test_create_worktree_recreates_empty_husk(tmp_path):
     assert (worktree / ".git").exists()
 
 
-def test_create_worktree_refuses_nonempty_husk(tmp_path):
-    """A gutted dir that still has content needs a human — recreating could
-    bury data and git worktree add refuses non-empty dirs anyway."""
+def test_create_worktree_quarantines_nonempty_husk(tmp_path):
+    """A gutted dir that still has content is moved aside, not refused
+    (764df645): refusing blocked every future launch of the session, and
+    renaming buries nothing -- the content stays beside its replacement."""
     upstream = _make_upstream(tmp_path)
     clone = wm.ensure_managed_clone(str(upstream), repos_dir=tmp_path / "repos")
     worktree = tmp_path / "worktrees" / "sess-husk2" / "upstream"
     worktree.mkdir(parents=True)
     (worktree / "leftover.txt").write_text("data\n")
 
-    with pytest.raises(wm.WorkspaceError, match="without .git"):
-        wm.create_worktree(clone, worktree, "session/sess-husk2")
+    wm.create_worktree(clone, worktree, "session/sess-husk2")
+
+    assert (worktree / ".git").exists()
+    assert not (worktree / "leftover.txt").exists()
+    [husk] = list(worktree.parent.glob("upstream.husk-*"))
+    assert (husk / "leftover.txt").read_text() == "data\n"
 
 
 # ── Session-unique worktree basenames (bead auto-jbz67) ────────────────

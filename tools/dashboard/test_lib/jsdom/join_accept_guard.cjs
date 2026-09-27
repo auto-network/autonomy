@@ -1,8 +1,12 @@
-// JoinSession must never replace a staged claim that already carries
-// approvals (auto-ixd9m). Admission is a SECOND submit: countersigning only
-// marks a claim ready, and the joiner re-mints at the pinned position
-// carrying the signatures. Calling accept() to do that discarded them — it
-// cost a real operator approval during the live join on 2026-09-08.
+// JoinSession.accept(): the invitee signs its claim ONCE and submits it.
+//
+// History (auto-ixd9m): a second, joiner-side submit to carry approvals once
+// discarded a real operator approval (2026-09-08), and this script pinned the
+// client guard against it. Since 8038f999 (auto-qrmlg.3, rule P3) the approver
+// admits the staged claim with a member.admission event carrying it unchanged,
+// so the joiner never submits again (finalize() is gone), and the guard that
+// keeps a staged row's approvals is the ledger store's
+// (store.stage_pending_claim; tools/network/ledger/tests/test_member_claim_flow.py).
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { resolve } = require('node:path');
@@ -57,84 +61,22 @@ function session(JoinSession, calls, { approvals = [], position = null } = {}) {
 }
 
 async function main() {
-  // 1. THE REGRESSION. A staged claim carrying the operator's approval must
-  //    not be submitted over. Before the fix this minted and submitted a
-  //    fresh empty-approvals claim, silently discarding the signature.
-  {
-    const staged = {
-      status: 'pending', approvals: [{ key: 'e'.repeat(64), sig: 'f'.repeat(128) }],
-      have: 1, need: 1, position: { parents: ['a'.repeat(64)], hlc: [1, 0] },
-    };
-    const { JoinSession, calls } = loadController({ status: staged, submitted: { status: 'pending' } });
-    const s = session(JoinSession, calls);
-    const result = await s.accept('pw');
-    assert.equal(result.state, 'already-approved', 'accept() must refuse over an approved claim');
-    assert.equal(calls.submits.length, 0, 'nothing may be submitted');
-    assert.equal(calls.mints.length, 0, 'nothing may even be minted');
-  }
-
-  // 2. accept() still works normally when nothing is staged yet.
+  // A first accept mints once and submits once; the ledger's reply decides.
   {
     const staged = { status: 'pending', approvals: [], have: 0, need: 1, position: null };
     const { JoinSession, calls } = loadController({ status: staged, submitted: { status: 'pending' } });
     const s = session(JoinSession, calls);
     const result = await s.accept('pw');
     assert.equal(result.state, 'pending');
-    assert.equal(calls.submits.length, 1, 'a first accept still submits');
+    assert.equal(calls.mints.length, 1, 'the claim is signed once');
+    assert.equal(calls.submits.length, 1, 'and submitted once');
   }
 
-  // 3. finalize() carries the approvals AND the pinned position.
+  // The controller has no second submit path to carry approvals.
   {
-    const position = { parents: ['a'.repeat(64)], hlc: [7, 0] };
-    const approvals = [{ key: 'e'.repeat(64), sig: 'f'.repeat(128) }];
-    const staged = { status: 'pending', approvals, have: 1, need: 1, position };
-    const { JoinSession, calls } = loadController({ status: staged, submitted: { status: 'admitted' } });
-    const s = session(JoinSession, calls);
-    const result = await s.finalize('pw');
-    assert.equal(result.state, 'admitted');
-    assert.equal(calls.mints.length, 1);
-    assert.deepEqual(calls.mints[0].approvals, approvals, 'the mint must carry the approvals');
-    assert.deepEqual(calls.mints[0].position, position, 'the mint must carry the pinned position');
-  }
-
-  // 4. finalize() refuses when there is nothing to carry, rather than
-  //    submitting an empty claim over the staged row.
-  {
-    const staged = { status: 'pending', approvals: [], have: 0, need: 1, position: null };
-    const { JoinSession, calls } = loadController({ status: staged, submitted: { status: 'pending' } });
-    const s = session(JoinSession, calls);
-    const result = await s.finalize('pw');
-    assert.equal(result.state, 'pending');
-    assert.match(result.reason, /no approvals staged/);
-    assert.equal(calls.submits.length, 0);
-  }
-
-  // 5. finalize() refuses if the minted event dropped the approvals — the
-  //    verification that stops a faulty ceremony from destroying the row.
-  {
-    const approvals = [{ key: 'e'.repeat(64), sig: 'f'.repeat(128) }];
-    const staged = {
-      status: 'pending', approvals, have: 1, need: 1,
-      position: { parents: ['a'.repeat(64)], hlc: [1, 0] },
-    };
-    const { JoinSession, calls } = loadController({ status: staged, submitted: { status: 'admitted' } });
-    const s = session(JoinSession, calls);
-    s.runCeremony = async () => ({
-      event: JSON.stringify({ payload: { approvals: [] } }),
-      personaPub: 'c'.repeat(64), claimKey: 'd'.repeat(64),
-    });
-    const result = await s.finalize('pw');
-    assert.match(result.reason, /did not carry the approvals/);
-    assert.equal(calls.submits.length, 0, 'an unverified claim is never submitted');
-  }
-
-  // 6. An already-admitted claim finalizes idempotently.
-  {
-    const staged = { status: 'admitted', approvals: [], have: 1, need: 1, position: null };
-    const { JoinSession, calls } = loadController({ status: staged, submitted: { status: 'admitted' } });
-    const s = session(JoinSession, calls);
-    assert.equal((await s.finalize('pw')).state, 'admitted');
-    assert.equal(calls.submits.length, 0);
+    const { JoinSession } = loadController({ status: null, submitted: null });
+    assert.equal(typeof JoinSession.prototype.finalize, 'undefined',
+      'the joiner never re-submits; the approver admits the staged claim');
   }
 
   console.log('PASS join accept guard');
