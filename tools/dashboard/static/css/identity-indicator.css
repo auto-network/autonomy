@@ -340,6 +340,25 @@ header[data-app-chrome] .identity-avatar {
   line-height: 0.875rem;
 }
 
+/* The software tile (design dc8b737b): the update role is accented, a check's
+   result colours its detail line, and an in-flight action spins inline. */
+.identity-panel-action--update .identity-panel-action-icon { color: #a5b4fc; }
+.identity-panel-action--update .identity-panel-action-label { color: #f9fafb; }
+.identity-panel-action-detail--ok { color: #6ee7b7; }
+.identity-panel-action-detail--error { color: #fca5a5; }
+.identity-update-spinner {
+  display: inline-block;
+  width: 0.625rem;
+  height: 0.625rem;
+  margin-right: 0.35rem;
+  vertical-align: -0.05rem;
+  border: 1.5px solid #4b5563;
+  border-top-color: #a5b4fc;
+  border-radius: 9999px;
+  animation: identity-update-spin 0.8s linear infinite;
+}
+@keyframes identity-update-spin { to { transform: rotate(360deg); } }
+
 .identity-panel-notice,
 .identity-panel-error {
   margin: 0.5rem;

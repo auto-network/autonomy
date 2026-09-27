@@ -50,6 +50,14 @@
   .welcome .reach-progress li { display:flex; gap:.5rem; align-items:center; padding:.15rem 0; color:var(--dim); }
   .welcome .reach-progress li.ok { color:var(--ok); } .welcome .reach-progress li.bad { color:#fca5a5; }
   .welcome .reach-error { color:#fca5a5; font-size:.88rem; margin-top:.4rem; }
+  .welcome .pref { display:flex; align-items:flex-start; gap:.65rem; margin-top:.75rem; cursor:pointer; }
+  .welcome .pref + .pref { margin-top:.6rem; }
+  .welcome .pref input { flex:0 0 auto; width:1.05rem; height:1.05rem; margin-top:.12rem; accent-color:var(--accent-hover); cursor:pointer; }
+  .welcome .pref .pref-copy { min-width:0; }
+  .welcome .pref .pref-label { display:block; font-size:.92rem; font-weight:500; color:var(--ink); }
+  .welcome .pref .pref-detail { display:block; margin-top:.1rem; color:var(--dim); font-size:.8rem; line-height:1.15rem; }
+  .welcome .pref.nested { margin-left:1.7rem; }
+  .welcome .pref-error { margin:.6rem 0 0; color:#fca5a5; font-size:.8rem; }
   .welcome button:hover { background:var(--accent-hover); }
   .welcome button.secondary:hover { background:#4b5563; }
 </style>
@@ -257,6 +265,29 @@
       <div class="step current" data-testid="welcome-step-workspace"><div class="n">4</div><div class="body">
         <h2>Open your first workspace</h2>
         <p>Your assistant starts in Getting Started.</p></div></div>
+      <div class="step" style="display:block" data-testid="welcome-software-updates">
+        <h2>Software updates</h2>
+        <p>New versions come from the public Autonomy repository on GitHub.</p>
+        <label class="pref">
+          <input type="checkbox" data-testid="welcome-update-auto-check"
+                 :checked="updatePref.auto_check" :disabled="updatePrefSaving"
+                 @change="saveUpdatePref({ auto_check: $event.target.checked, auto_install: $event.target.checked ? updatePref.auto_install : false })">
+          <span class="pref-copy">
+            <span class="pref-label">Automatically check for and notify me of updates</span>
+            <span class="pref-detail">Checks GitHub every few hours and shows the update in your profile menu.</span>
+          </span>
+        </label>
+        <label class="pref nested" x-show="updatePref.auto_check">
+          <input type="checkbox" data-testid="welcome-update-auto-install"
+                 :checked="updatePref.auto_install" :disabled="updatePrefSaving"
+                 @change="saveUpdatePref({ auto_check: true, auto_install: $event.target.checked })">
+          <span class="pref-copy">
+            <span class="pref-label">Automatically install updates when available</span>
+            <span class="pref-detail">Pulls the latest code. The dashboard reloads; your sessions keep running.</span>
+          </span>
+        </label>
+        <p class="pref-error" x-show="updatePrefError" x-text="updatePrefError" data-testid="welcome-update-pref-error"></p>
+      </div>
       <button style="margin-top:.6rem" data-testid="welcome-open-workspace" :disabled="startBusy" @click="goToWorkspace()" x-text="startBusy ? 'Starting your first session…' : 'Go to your workspace'"></button>
       <p class="sub" x-show="startError" x-text="startError" data-testid="welcome-start-error" style="color:#fca5a5"></p>
       <ul class="sub" x-show="startDetails.length" data-testid="welcome-start-details" style="margin:.3rem 0 0 1.1rem;font-size:.85em;opacity:.85">

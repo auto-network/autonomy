@@ -57,6 +57,13 @@ function welcomeApp() {
     reachLabelTimer: null,
     reachPolls: 0,             // polls so far: 2 s for two minutes, then 10 s, then stops at the gate
     reachPollingStopped: false,
+    // Software updates (design c35fe726; operator decision D8): check and
+    // notify, on by default; install automatically, off by default and only
+    // offered while checking is on. Read from / saved to the operator's
+    // preference (GET / PUT /api/software/preference).
+    updatePref: { auto_check: true, auto_install: false },
+    updatePrefSaving: false,
+    updatePrefError: '',
 
     get step() {
       if (!this.hasIdentity) return 1;
@@ -78,6 +85,7 @@ function welcomeApp() {
       this.inviteName = org;
       this.inviteInitial = (org.charAt(0) || '?').toUpperCase();
       await this.refresh();
+      this.loadUpdatePref();
       if (this.fleetEnrollment) {
         await this.resumeFleetEnrollment();
         this.fleetResumeTimer = setInterval(
@@ -370,6 +378,39 @@ function welcomeApp() {
     // Getting Started workspace through the ordinary session-create path
     // and lands on it (design of record graph://5f2f5a49-00d v11 §10.6).
     // This step runs once, so nothing records that the session started.
+    async loadUpdatePref() {
+      try {
+        var res = await fetch('/api/software/preference', { cache: 'no-store' });
+        if (!res.ok) return;
+        var body = await res.json();
+        this.updatePref = { auto_check: !!body.auto_check, auto_install: !!body.auto_install };
+      } catch (e) { /* the defaults shown stay the server's defaults */ }
+    },
+
+    async saveUpdatePref(next) {
+      var before = Object.assign({}, this.updatePref);
+      this.updatePref = Object.assign({}, this.updatePref, next);
+      this.updatePrefSaving = true;
+      this.updatePrefError = '';
+      try {
+        var res = await fetch('/api/software/preference', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin', body: JSON.stringify(next),
+        });
+        if (!res.ok) {
+          throw new Error('Could not save the update preference (HTTP ' + res.status
+            + '). Your previous choice stays in effect.');
+        }
+        var body = await res.json();
+        this.updatePref = { auto_check: !!body.auto_check, auto_install: !!body.auto_install };
+      } catch (e) {
+        this.updatePref = before;
+        this.updatePrefError = (e && e.message) || String(e);
+      } finally {
+        this.updatePrefSaving = false;
+      }
+    },
+
     startError: '',
     // One line per harness when the sign-in scan found nothing usable: what
     // was looked for and why it cannot be used, from the scan's own report.

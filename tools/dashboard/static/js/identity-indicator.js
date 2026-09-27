@@ -44,7 +44,10 @@
   // An author machine reports mode=author/can_update=false, so the action
   // never renders there — the guard is git history, surfaced by the server.
   var updateStatus = null;
-  var updateBusy = false;
+  // null | 'check' | 'update': the one software tile's in-flight action.
+  var updateBusy = null;
+  var updateCheckError = null;   // a manual check that could not reach GitHub
+  var updateResult = null;       // the last update's outcome line
   var FLAG_NS = 'http://www.w3.org/2000/svg';
   // id -> {key on the unlock-state payload, title, plain-language detail, icon shapes}.
   // Order = tray order. Icons are the design's outline glyphs (placeholders to refine).
@@ -151,6 +154,7 @@
       // invitation LINK, so a link mark reads truer than a padlock.
       link: ['M9 17H7a5 5 0 0 1 0-10h2', 'M15 7h2a5 5 0 0 1 0 10h-2', 'M8 12h8'],
       retry: ['M20 11a8 8 0 1 0-2.3 5.7', 'M20 4v7h-7'],
+      download: ['M12 4v11', 'M7 10l5 5 5-5', 'M5 20h14'],
       machines: ['M4 5h16v11H4z', 'M8 20h8', 'M12 16v4'],
     };
     (paths[kind] || []).forEach(function (d) {
@@ -439,46 +443,56 @@
   }
 
   function loadUpdateStatus() {
-    // TWO reads, and both are load-bearing.
-    //
-    // The cheap cached one (fetch=0) renders instantly, because opening the
-    // panel must never block on a GitHub round-trip.
-    //
-    // But `behind` is computed against this checkout's LOCAL origin/master
-    // ref, which is a cached pointer that only moves when git actually
-    // fetches. With only the cached read, a follower node could never
-    // discover it was behind: the button renders only when can_update is
-    // true, can_update needs behind > 0, behind needs a fresh ref, and the
-    // sole fetch=1 caller was perform_update — reachable only by clicking the
-    // button that had not rendered. sjc-2 sat at 8 commits behind showing no
-    // option for exactly this reason (2026-09-08).
-    //
-    // So follow up with a real fetch and re-render when it lands. Slow is
-    // fine here; it is off the render path and the panel is already drawn.
-    var opts = {
+    // ONE cheap read (fetch=0): opening the panel never reaches GitHub
+    // (graph://89d3c8df-544 §6). The comparison is against the origin ref as
+    // of the last fetch — the dashboard's scheduled check keeps it fresh when
+    // "Automatically check" is on; otherwise the operator's "Check for
+    // updates" click fetches. The preference rides along (auto_check).
+    return fetch('/api/software/update-status?fetch=0', {
       credentials: 'same-origin', headers: { 'Accept': 'application/json' },
-    };
-    var apply = function (body) {
-      if (!body) return;
-      updateStatus = body;
-      if (panelOpen) render();
-    };
-    fetch('/api/software/update-status?fetch=0', opts)
+    })
       .then(function (res) { return res.ok ? res.json() : null; })
-      .then(apply)
-      .catch(function () { /* absent badge is fine — never block the panel */ })
-      .then(function () {
-        return fetch('/api/software/update-status', opts)
-          .then(function (res) { return res.ok ? res.json() : null; })
-          .then(apply)
-          .catch(function () { /* the cached answer still stands */ });
+      .then(function (body) {
+        if (!body) return;
+        updateStatus = body;
+        if (panelOpen) render();
+      })
+      .catch(function () { /* no tile is fine — never block the panel */ });
+  }
+
+  function onSoftwareUpdateEvent() {
+    // The scheduled check saw `behind` change (or installed an update):
+    // re-read the cached status so an open panel shows it.
+    if (updateBusy) return;
+    loadUpdateStatus();
+  }
+
+  async function runCheck() {
+    if (updateBusy) return;
+    updateBusy = 'check';
+    updateCheckError = null;
+    updateResult = null;
+    render();
+    try {
+      var res = await root.fetch('/api/software/update-status', {
+        credentials: 'same-origin', headers: { 'Accept': 'application/json' },
       });
+      var body = await res.json().catch(function () { return null; });
+      if (!res.ok || !body) throw new Error('HTTP ' + res.status);
+      if (body.error && !body.fetched) updateCheckError = body.error;
+      else updateStatus = body;
+    } catch (error) {
+      updateCheckError = (error && error.message) || String(error);
+    } finally {
+      updateBusy = null;
+      render();
+    }
   }
 
   async function runUpdate() {
     if (updateBusy) return;
-    updateBusy = true;
-    loadError = null;
+    updateBusy = 'update';
+    updateResult = null;
     render();
     try {
       var res = await root.fetch('/api/software/update', {
@@ -489,23 +503,88 @@
       if (!res.ok) throw new Error(body.error || ('Update failed (HTTP ' + res.status + ')'));
       if (body.updated) {
         // The code hot-reloads on its own; a deploy/ change needs a recreate.
-        loadError = 'Updated ' + body.count + ' commit' + (body.count === 1 ? '' : 's')
-          + ' (' + body.from + '→' + body.to + '). '
+        updateResult = 'Updated ' + body.count + ' commit' + (body.count === 1 ? '' : 's')
+          + ' (' + String(body.from).slice(0, 7) + '→' + String(body.to).slice(0, 7) + '). '
           + (body.deploy_changed
               ? 'Deploy files changed — a container recreate is needed to fully apply.'
               : 'Reloading…');
       } else {
-        loadError = body.reason || 'Already up to date.';
+        updateResult = body.reason || 'Already up to date.';
       }
-      updateStatus = await (await root.fetch('/api/software/update-status?fetch=0', {
-        credentials: 'same-origin', headers: { 'Accept': 'application/json' },
-      })).json().catch(function () { return null; });
+      updateBusy = null;
+      await loadUpdateStatus();
     } catch (error) {
-      loadError = (error && error.message) || String(error);
+      updateResult = (error && error.message) || String(error);
     } finally {
-      updateBusy = false;
+      updateBusy = null;
       render();
     }
+  }
+
+  function updateTileRole() {
+    if (!updateStatus) return null;
+    if (updateStatus.can_update) return 'update';
+    if (updateStatus.auto_check === false) return 'check';
+    return null;
+  }
+
+  function updateTime(iso) {
+    if (!iso) return null;
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  // The one software tile (design dc8b737b): auto_check on — present only
+  // when an update is available; auto_check off — always "Check for updates",
+  // rewritten in place by the check's result. The panel stays open throughout.
+  function softwareTile(role) {
+    var s = updateStatus;
+    var label, detail, detailClass = '';
+    if (role === 'update') {
+      label = updateBusy === 'update' ? 'Updating…' : 'Software update available';
+      detail = updateBusy === 'update' ? 'Pulling the latest code'
+        : (s.behind + ' commit' + (s.behind === 1 ? '' : 's') + ' behind — click to update');
+    } else {
+      label = updateBusy === 'check' ? 'Checking for updates…' : 'Check for updates';
+      if (updateBusy === 'check') detail = 'Asking GitHub';
+      else if (updateCheckError) {
+        detail = 'Could not reach GitHub — click to try again';
+        detailClass = ' identity-panel-action-detail--error';
+      } else if (s.fetched && s.checked_at) {
+        detail = 'Up to date as of ' + updateTime(s.checked_at);
+        detailClass = ' identity-panel-action-detail--ok';
+      } else {
+        detail = s.checked_at ? 'Last checked ' + updateTime(s.checked_at) : 'Not checked yet';
+      }
+    }
+    var button = el('button', 'identity-panel-action'
+      + (role === 'update' ? ' identity-panel-action--update' : ''));
+    button.type = 'button';
+    button.disabled = !!updateBusy;
+    button.setAttribute('data-testid', 'identity-action-software');
+    var iconHost = el('span', 'identity-panel-action-icon');
+    iconHost.appendChild(icon(role === 'update' ? 'download' : 'retry'));
+    button.appendChild(iconHost);
+    var copy = el('span', 'identity-panel-action-copy');
+    copy.appendChild(el('span', 'identity-panel-action-label', label));
+    var detailEl = el('span', 'identity-panel-action-detail' + detailClass);
+    if (updateBusy) detailEl.appendChild(el('span', 'identity-update-spinner'));
+    detailEl.appendChild(el('span', '', detail));
+    copy.appendChild(detailEl);
+    button.appendChild(copy);
+    button.addEventListener('click', role === 'update' ? runUpdate : runCheck);
+    return button;
+  }
+
+  function autoUpdateNotice() {
+    var u = updateStatus && updateStatus.last_update;
+    if (!u || !u.automatic) return null;
+    var line = el('div', 'identity-panel-notice',
+      'Updated automatically to ' + String(u.to).slice(0, 7) + ' (' + u.count + ' commit'
+      + (u.count === 1 ? '' : 's') + ') at ' + updateTime(u.at) + '.');
+    line.setAttribute('data-testid', 'identity-software-auto-updated');
+    return line;
   }
 
   function flagNeeds(f) {
@@ -889,17 +968,8 @@
       actions.appendChild(actionButton('lock', lockBusy ? 'Locking...' : 'Lock dashboard',
         'This session only', lockDashboard));
     }
-    // Update software — only when this machine can cleanly fast-forward onto
-    // origin (behind, not ahead, clean tree). An author machine never sees it.
-    if (updateStatus && updateStatus.can_update) {
-      var behind = updateStatus.behind || 0;
-      actions.appendChild(actionButton(
-        'update-software',
-        updateBusy ? 'Updating…' : 'Update software',
-        updateBusy ? 'Fast-forwarding onto origin'
-          : (behind + ' commit' + (behind === 1 ? '' : 's') + ' behind — click to update'),
-        runUpdate));
-    }
+    var softwareRole = updateTileRole();
+    if (softwareRole) actions.appendChild(softwareTile(softwareRole));
     // Accept invitation (auto-a1xq3): opens the full-page flow — the
     // paste screen at /network/join owns the input and everything after.
     actions.appendChild(actionButton('accept-invite', 'Accept invitation',
@@ -907,6 +977,13 @@
         root.location.assign('/network/join');
       }));
     if (actions.childNodes.length) panel.appendChild(actions);
+    var notice = autoUpdateNotice();
+    if (notice) panel.appendChild(notice);
+    if (updateResult) {
+      var result = el('div', 'identity-panel-error', updateResult);
+      result.setAttribute('data-testid', 'identity-software-result');
+      panel.appendChild(result);
+    }
     if (loadError) panel.appendChild(el('div', 'identity-panel-error', loadError));
     return panel;
   }
@@ -1067,6 +1144,20 @@
     root.document.addEventListener('keydown', function (event) {
       if (event.key === 'Escape') closePanel();
     });
+    // SSE `software_update` (the dashboard's scheduled check). events.js may
+    // load after this module, so subscribe once it is there.
+    (function subscribeSoftwareUpdate() {
+      if (typeof root.registerHandler === 'function') {
+        root.registerHandler('software_update', onSoftwareUpdateEvent);
+      } else {
+        root.addEventListener('load', function onLoad() {
+          root.removeEventListener('load', onLoad);
+          if (typeof root.registerHandler === 'function') {
+            root.registerHandler('software_update', onSoftwareUpdateEvent);
+          }
+        });
+      }
+    })();
     root.document.addEventListener('click', function (event) {
       if (!panelOpen) return;
       var host = root.document.getElementById('identity-indicator');
