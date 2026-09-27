@@ -15450,7 +15450,14 @@ _CREATE_ORG_JS = r"""
                     return new Response(JSON.stringify({error: 'org exists'}),
                         {status: 409, headers: {'Content-Type': 'application/json'}});
                 }
-                return new Response(JSON.stringify({slug: r.posted_body.slug}),
+                // The shell reply as POST /api/orgs sends it now: the client
+                // reads shell.org.id and, when founded is false, runs the
+                // browser founding ceremony (auto-2vseu). This class tests
+                // the screen, so the shell arrives founded; the ceremony is
+                // the founding e2e's (auto-i15c4).
+                return new Response(JSON.stringify({
+                        slug: r.posted_body.slug, founded: true,
+                        org: {id: 'org-sweep-0001', slug: r.posted_body.slug}}),
                     {status: 201, headers: {'Content-Type': 'application/json'}});
             }
             return origFetch.call(this, url, opts);
@@ -15565,6 +15572,9 @@ class TestCreateOrgScreen:
     def test_surface_ran(self):
         c = self._checks
         assert c and not c.get("fatal"), f"create-org eval failed: {c}"
+        # A script that threw, or returned early, still yields a non-empty
+        # dict; name what it returned instead of eleven bare KeyErrors.
+        assert "title" in c and "_eval_error" not in c, f"create-org eval returned: {c}"
 
     def test_form_copy_and_structure(self):
         c = self._checks
