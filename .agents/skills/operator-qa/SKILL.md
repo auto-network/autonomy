@@ -36,7 +36,8 @@ Rules for the question:
 - Give only the background the choice needs. If the operator needs more, they will ask.
 - Do not give time or effort estimates, in the question, the options or the recommendation.
 - Do not use bead IDs, section numbers, option codes from a design note, or any other label the operator would have to look up. The letters A, B and C are defined in the message itself.
-- Do not bundle two decisions into one question, and do not list the remaining questions.
+- Do not bundle two decisions into one question, and do not list the remaining questions — not in the question, not as a footer on any other message, not as a "still with you" summary. The operator sees exactly one question at a time and nothing about the queue.
+- Ask only decisions that unblock work. Rank the open decisions by how much work each unblocks and ask from the top; a decision that unblocks nothing significant is yours to make within the record, not the operator's.
 - Every fact in the question and its options is one you observed yourself in this session. Never carry an unverified claim from a bead, note or peer session into a question; a false premise costs the operator a correction round that a single grep would have saved.
 - The operator may answer with a letter, with their own words, or with a correction to the question. Treat all three as answers. A correction that exposes a false premise is a defect in your preparation: fix the record that carried the false claim (close or amend the bead, comment on the note) before asking the corrected question.
 
