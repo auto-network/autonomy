@@ -313,12 +313,15 @@ def test_status_reports_the_stages_certificate_gate_and_advertisement(remote_api
     # the first attempt raced the connector and the second succeeded).
     assert status["certificate"] == "retrying" and "boom" in status["certificate_detail"]
 
+    # Without a scheduled next attempt the manager still retries on its
+    # interval (Windows run 9 stopped the step on exactly this reading), so
+    # every issuance failure reads as retrying with its last reason carried.
     remote_api.certificates[0]["reason"] = "Certificate issuance failed: boom"
     remote_api.gateway["advertised_routes"] = [row["reservation_id"]]
     remote_api.gateway["auth_helpers"] = ["dashboard-passkey"]
     remote_api.remote_access._invalidate_status()
     status = remote_api.client.get("/api/network/remote-access/status", headers=_headers()).json()["status"]
-    assert status["certificate"] == "failed" and "boom" in status["certificate_detail"]
+    assert status["certificate"] == "retrying" and "boom" in status["certificate_detail"]
     assert status["advertised"] is True and status["gate"] == "up"
 
 

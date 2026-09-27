@@ -3719,11 +3719,12 @@ async def post_remote_access_enrollment_close(request: Request) -> JSONResponse:
 
 
 def _gate_helper_refused(request: Request) -> JSONResponse | None:
-    """The gate helper's callbacks: authenticated with the helper secret
-    materialized into its runtime directory, nothing else."""
+    """The gate helper's callbacks: only the helper's own scoped service
+    token (minted by passkey_gate.helper_secret, materialized into its
+    runtime directory) may call them."""
     from tools.dashboard import passkey_gate
 
-    if not passkey_gate.helper_authorized(request.headers):
+    if not passkey_gate.helper_authorized(request):
         return JSONResponse({"ok": False, "error": "helper_unauthorized"}, status_code=403)
     return None
 

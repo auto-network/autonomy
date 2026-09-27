@@ -522,9 +522,12 @@ async def _status_uncached() -> dict:
                            "missing": "pending"}.get(state.get("state"), "failed")
             if certificate == "failed":
                 result["certificate_detail"] = state.get("reason", "")
-                # A failed attempt the manager will retry (its first try often
-                # races the connector, Windows run 6) is not a failure yet.
-                if "next attempt at" in result["certificate_detail"]:
+                # The manager retries a failed issuance on its own interval
+                # (its first try often races the connector, Windows runs 6
+                # and 9), so a failure is "retrying" until the route is
+                # advertised; the detail carries the last reason. Only a
+                # state the manager has given up on reads as failed.
+                if state.get("state") == "issuance_failed":
                     certificate = "retrying"
             break
     result["certificate"] = certificate

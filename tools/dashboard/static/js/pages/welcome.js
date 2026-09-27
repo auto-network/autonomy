@@ -305,7 +305,7 @@ function welcomeApp() {
       if (st.mode !== 'autonomy') return st.origin;
       if (this.reachLive()) return st.origin;
       if (st.certificate === 'failed') return st.origin + ' — certificate issuance failed; see Published Links.';
-      if (st.certificate === 'retrying') return st.origin + ' — setting up (certificate, retrying)…';
+      if (st.certificate === 'retrying') return st.origin + ' — setting up (certificate; the last attempt failed, retrying)…';
       if (st.gate !== 'up' && st.advertised) return st.origin + ' — waiting for the passkey gate.';
       return st.origin + ' — setting up (' + (st.certificate === 'ok' ? 'route' : 'certificate') + ')…';
     },

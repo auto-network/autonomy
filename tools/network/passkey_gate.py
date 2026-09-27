@@ -362,8 +362,10 @@ class GateApp:
         try:
             reply = self._post_dashboard(record, self.runtime.helper_secret(), REGISTERED_PATH, registered)
         except Exception as exc:  # noqa: BLE001
+            _log(f"registration callback to the dashboard failed: {exc}")
             return JSONResponse({"ok": False, "error": f"the dashboard did not record the passkey: {exc}"},
                                 status_code=502)
+        _log(f"registration callback answered: {reply!r}"[:300])
         if not isinstance(reply, dict) or reply.get("ok") is not True:
             return JSONResponse({"ok": False, "error": (
                 (reply or {}).get("error") if isinstance(reply, dict) else None)
@@ -412,6 +414,12 @@ def _challenge_of(credential: dict) -> str | None:
         return challenge if isinstance(challenge, str) else None
     except Exception:
         return None
+
+
+def _log(message: str) -> None:
+    import sys
+
+    print(f"passkey gate: {message}", file=sys.stderr, flush=True)
 
 
 def _post_dashboard(record: dict, helper_secret: str, path: str, payload: dict) -> dict:
@@ -563,8 +571,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime", required=True, help="the gate runtime directory")
     parser.add_argument("--port", type=int, required=True, help="loopback listener port")
     args = parser.parse_args(argv)
+    import sys
+
     import uvicorn
 
+    runtime = GateRuntime(args.runtime)
+    record = runtime.record()
+    # One line at start, so the container's log proves what it serves for
+    # (Windows run 9: an empty log left the helper's state unknowable).
+    print(f"passkey gate: listening on 127.0.0.1:{args.port}; runtime {runtime.directory}; "
+          f"rp_id={record.get('rp_id')!r} credentials={len(record.get('credentials') or [])} "
+          f"enrollment={'open' if (record.get('enrollment') or {}).get('open') else 'closed'} "
+          f"dashboard_upstream={record.get('dashboard_upstream')!r}", file=sys.stderr, flush=True)
     uvicorn.run(build_app(args.runtime), host="127.0.0.1", port=args.port,
                 log_level="warning", lifespan="off", access_log=False, proxy_headers=True)
     return 0

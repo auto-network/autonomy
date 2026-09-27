@@ -13,8 +13,11 @@ gateway and checks passkeys; this module owns the state it checks against:
   secret, rewritten whenever the record changes, read by the helper on
   every request (no restart);
 * the two callbacks the helper makes over the dashboard's plain listener,
-  authenticated with the helper secret: a verified registration (which
-  closes enrollment) and a new sign count.
+  authenticated with a scoped service token minted for exactly those two
+  routes (the dashboard's existing machine-credential primitive, as the
+  voice gateway and the dispatcher use): a verified registration (which
+  closes enrollment) and a new sign count. The plaintext token is the
+  ``helper-secret`` file in the helper's runtime directory.
 """
 
 from __future__ import annotations
@@ -30,6 +33,8 @@ import threading
 import time
 from pathlib import Path
 
+from tools.dashboard.api_auth import ApiPrincipalKind, principal_from_request
+from tools.dashboard.dao import auth_db
 from tools.dashboard.service_auth import RUNTIME_ROOT
 from tools.graph import settings_ops
 from tools.graph.schemas.dashboard_passkey_gate import (
@@ -47,6 +52,15 @@ ENROLLMENT_TTL_S = 600
 COOKIE_VAULT_KEY = "dashboard-passkey-cookie"
 HELPER_VAULT_KEY = "dashboard-passkey-helper"
 TOKEN_VAULT_KEY = "dashboard-passkey-enrollment"
+#: The helper's service credential: a scoped service token good for exactly
+#: its two callback routes, named so the routes can recognise its principal.
+HELPER_TOKEN_NAME = "dashboard-passkey"
+HELPER_TOKEN_TTL_S = 7 * 86400
+HELPER_TOKEN_REMINT_S = 86400
+HELPER_CAPABILITIES = (
+    {"method": "POST", "path": helper.REGISTERED_PATH},
+    {"method": "POST", "path": helper.SIGN_COUNT_PATH},
+)
 
 #: Every read-check-write of the record runs under this lock and re-reads
 #: inside it: two registrations racing on one token must enroll exactly one
@@ -224,15 +238,13 @@ def revoke_credential(credential_id: str) -> dict:
     return saved
 
 
-def helper_authorized(headers) -> bool:
-    """The helper's callbacks carry ``Authorization: Bearer <helper secret>``."""
-    value = headers.get("authorization") or ""
-    if not value.startswith("Bearer "):
-        return False
-    try:
-        return hmac.compare_digest(value[len("Bearer "):].strip(), helper_secret())
-    except Exception:
-        return False
+def helper_authorized(request) -> bool:
+    """The helper's callbacks are authenticated by the API identity
+    middleware as the helper's own scoped service token (an external-service
+    principal named HELPER_TOKEN_NAME); nothing else may call them."""
+    principal = principal_from_request(request)
+    return (principal.kind is ApiPrincipalKind.EXTERNAL_SERVICE
+            and principal.subject == HELPER_TOKEN_NAME)
 
 
 # ── secrets ───────────────────────────────────────────────────────────────
@@ -256,8 +268,32 @@ def rotate_cookie_secret() -> None:
                               {"value": secrets.token_hex(32)}, org="machine")
 
 
-def helper_secret() -> str:
-    return _machine_secret(HELPER_VAULT_KEY)
+def helper_secret(now: float | None = None) -> str:
+    """The helper's bearer: a scoped service token for its two callback
+    routes, kept (plaintext + expiry) in the machine vault so every
+    materialization hands the helper the same one; re-minted a day before it
+    expires, and the store keeps only its hash."""
+    now = time.time() if now is None else now
+    row = settings_ops.read_set_key(MACHINE_VAULT_AUDITED_SET_ID, HELPER_VAULT_KEY, org="machine", peers=[])
+    current = None
+    try:
+        current = json.loads(row["payload"]["value"]) if row else None
+    except Exception:
+        current = None
+    if (isinstance(current, dict) and current.get("value")
+            and float(current.get("expires_at") or 0) - now > HELPER_TOKEN_REMINT_S):
+        return str(current["value"])
+    token = secrets.token_urlsafe(32)
+    expires_at = now + HELPER_TOKEN_TTL_S
+    auth_db.insert_scoped_service_token(
+        hashlib.sha256(token.encode()).hexdigest(), HELPER_TOKEN_NAME,
+        capabilities=[dict(c) for c in HELPER_CAPABILITIES],
+        application_scope="passkey-gate", resource_audience="dashboard-local",
+        source_approval_id="gateway-supervisor", expires_at=expires_at,
+    )
+    settings_ops.write_by_key(MACHINE_VAULT_AUDITED_SET_ID, 1, HELPER_VAULT_KEY,
+                              {"value": json.dumps({"value": token, "expires_at": expires_at})}, org="machine")
+    return token
 
 
 # ── the helper's runtime directory ────────────────────────────────────────

@@ -58,7 +58,10 @@ def gate_env(tmp_path, monkeypatch):
     monkeypatch.setattr(passkey_gate, "_last_materialization", None)
     monkeypatch.setattr(passkey_gate, "own_runtime",
                         lambda: ("autonomy-node:local", {"type": "volume", "source": "autonomy_autonomy-code"}))
-    yield SimpleNamespace(vault=store, runtime=runtime)
+    minted: list[dict] = []
+    monkeypatch.setattr(passkey_gate.auth_db, "insert_scoped_service_token",
+                        lambda token_hash, name, **kw: minted.append({"hash": token_hash, "name": name, **kw}))
+    yield SimpleNamespace(vault=store, runtime=runtime, minted=minted)
     GraphDB.close_all_pooled()
 
 
@@ -167,21 +170,67 @@ def test_materialize_writes_the_projection_and_describes_the_helper_container(ga
     assert [c["credential_id"] for c in passkey_gate.projection(HOST, "x:1")["credentials"]] == ["Y3JlZC0x"]
 
 
-def test_helper_authorization_is_the_materialized_secret(gate_env):
-    secret = passkey_gate.helper_secret()
-    assert passkey_gate.helper_authorized({"authorization": f"Bearer {secret}"})
-    assert not passkey_gate.helper_authorized({"authorization": "Bearer nope"})
-    assert not passkey_gate.helper_authorized({"authorization": secret})
-    assert not passkey_gate.helper_authorized({})
+def test_helper_credential_is_a_scoped_service_token_for_its_two_routes(gate_env):
+    """Windows run 9: a bespoke secret was refused by the API's default-deny
+    gate (policy=authenticated). The helper now holds the dashboard's own
+    machine credential, scoped to exactly its two callback routes."""
+    import hashlib
+
+    token = passkey_gate.helper_secret(now=1_000_000)
+    assert len(gate_env.minted) == 1
+    mint = gate_env.minted[0]
+    assert mint["hash"] == hashlib.sha256(token.encode()).hexdigest()
+    assert mint["name"] == "dashboard-passkey"
+    assert mint["capabilities"] == [
+        {"method": "POST", "path": "/api/network/remote-access/gate/registered"},
+        {"method": "POST", "path": "/api/network/remote-access/gate/sign-count"},
+    ]
+    assert mint["expires_at"] == 1_000_000 + passkey_gate.HELPER_TOKEN_TTL_S
+    # Reused while it has more than a day left; re-minted when it does not.
+    assert passkey_gate.helper_secret(now=1_000_000 + 5 * 86400) == token
+    assert len(gate_env.minted) == 1
+    fresh = passkey_gate.helper_secret(now=1_000_000 + passkey_gate.HELPER_TOKEN_TTL_S - 3600)
+    assert fresh != token and len(gate_env.minted) == 2
+    # The routes recognise the token's principal, nothing else.
+    from tools.dashboard.api_auth import ApiPrincipal, ApiPrincipalKind
+
+    def request_as(principal):
+        return SimpleNamespace(state=SimpleNamespace(api_principal=principal))
+
+    assert passkey_gate.helper_authorized(request_as(
+        ApiPrincipal(ApiPrincipalKind.EXTERNAL_SERVICE, subject="dashboard-passkey")))
+    assert not passkey_gate.helper_authorized(request_as(
+        ApiPrincipal(ApiPrincipalKind.EXTERNAL_SERVICE, subject="voice-gateway")))
+    assert not passkey_gate.helper_authorized(request_as(
+        ApiPrincipal(ApiPrincipalKind.OPERATOR_COOKIE, subject="browser")))
+    assert not passkey_gate.helper_authorized(SimpleNamespace(state=SimpleNamespace()))
 
 
 # ── the callbacks over the routes ──────────────────────────────────────
 
 def _app():
-    return Starlette(routes=[
-        Route("/api/network/remote-access/gate/registered", network_routes.post_remote_access_gate_registered, methods=["POST"]),
-        Route("/api/network/remote-access/gate/sign-count", network_routes.post_remote_access_gate_sign_count, methods=["POST"]),
-    ])
+    """The two callback routes behind the real identity middleware, with the
+    service-token verifier standing in for auth.db: the helper's bearer
+    classifies as its external-service principal, any other bearer as nothing."""
+    from starlette.middleware import Middleware
+
+    from tools.dashboard import api_auth
+
+    def authenticate_service(request):
+        value = request.headers.get("authorization", "")
+        if value == f"Bearer {passkey_gate.helper_secret()}":
+            return api_auth.ApiPrincipal(api_auth.ApiPrincipalKind.EXTERNAL_SERVICE, subject="dashboard-passkey")
+        return None
+
+    return Starlette(
+        routes=[
+            Route("/api/network/remote-access/gate/registered", network_routes.post_remote_access_gate_registered, methods=["POST"]),
+            Route("/api/network/remote-access/gate/sign-count", network_routes.post_remote_access_gate_sign_count, methods=["POST"]),
+        ],
+        middleware=[Middleware(api_auth.ApiIdentityMiddleware, authenticate_bearer=lambda request: (None, None),
+                               verify_cookie=lambda value: None, cookie_name="dash",
+                               authenticate_service=authenticate_service)],
+    )
 
 
 def test_gate_callbacks_take_only_the_helper_secret(gate_env):
