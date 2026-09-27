@@ -27,13 +27,13 @@ const posts=()=>calls.filter(c=>c.options?.method==='POST').map(c=>JSON.parse(c.
 
 test('review shows exactly what will be sent, with no password step',async()=>{
   await openEmailApproval(item());
-  assert.equal(q('#title').textContent,'Send this email?');
-  assert.equal(q('#resource').textContent,'Your code');
+  assert.equal(q('#title').textContent,'Your code');
+  assert.equal(q('#intro').textContent,'');
   assert.match(q('#facts').textContent,/Fromagent@auto\.network/);
   assert.match(q('#facts').textContent,/Toa@example\.com/);
   assert.match(q('#facts').textContent,/Ccb@example\.com/);
   assert.equal(q('#request-detail pre').textContent,'Hello,\n\nThe code is 482913.');
-  assert.equal(q('#consequence').textContent,'A sent email cannot be recalled.');
+  assert.equal(q('#consequence').textContent,'');
   assert.equal(q('#org-name').textContent,'Autonomy Network');
   assert.equal(q('#primary').textContent,'Send');
   assert.equal(q('#auth').hidden,true);

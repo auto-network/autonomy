@@ -32,7 +32,7 @@ export function openApprovalDialog({review, authorize, execute, decline, result,
   const durationOptions = originalDuration ? [...originalDuration.options].map(o=>[o.value,o.textContent]) : undefined;
   const expiry = review.facts?.find(([label])=>/expir/i.test(label))?.[1];
   const input = {
-    kind,title:review.title + (review.title.endsWith('?')?'':'?'),
+    kind,title:review.question===false||review.title.endsWith('?')?review.title:review.title+'?',
     code:review.code,machineName:review.machineName,
     intro:kind==='link'?`Create a link to this ${review.target.type.toLowerCase()} for someone outside your workspace.`:review.intro,
     organization:{name:review.organization?.name||'Personal approval',image:review.organization?.image||''},
