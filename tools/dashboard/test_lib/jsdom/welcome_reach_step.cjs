@@ -10,7 +10,8 @@ const wait=(ms)=>new Promise(r=>setTimeout(r,ms));
 
 async function main(){
   const calls=[];let navigated=null;
-  const state={status:{mode:null,origin:null,recorded:false},labelChecks:{},publish:null};
+  const unrecorded=()=>({mode:null,origin:null,recorded:false,bound_label:null,tailnet_origin:'https://desktop.tail1234.ts.net:8080'});
+  const state={status:unrecorded(),labelChecks:{},publish:null};
   const sandbox={
     window:{addEventListener(){},dispatchEvent(){}},
     document:{addEventListener(){},visibilityState:'visible'},
@@ -43,9 +44,13 @@ async function main(){
   const app=factory();
   app.$root={dataset:{}};
   await app.init();
-  // 1. identity done, nothing recorded: the reach step is current with the default choice
+  // 1. identity done, nothing recorded: the reach step is current with the default choice;
+  //    the status carried what the question needs (no throwaway label probe).
   assert.equal(app.step,2);
   assert.equal(app.reachChoice,'autonomy');
+  assert.equal(app.reachLabelBound,'');
+  assert.equal(app.reachOrigin,'https://desktop.tail1234.ts.net:8080');       // prefilled from the certificate
+  assert.equal(calls.filter(c=>c.url.includes('/label/check')).length,0);
   assert.equal(app.reachCanSubmit(),true);                     // no label is fine (random name)
   assert.equal(app.reachSubmitText(),'Publish on the Autonomy Network');
   // 2. the label question: a look-alike is refused with its reason, a good one is available
@@ -65,18 +70,23 @@ async function main(){
   assert.equal(app.reachTitle(),'Reachable on the Autonomy Network');
   assert.match(app.reachSummary(),/setting up \(certificate\)/);
   await settle();
-  // 4. status drives the summary: certificate ok + advertised but gate pending
+  // 4. status drives the summary: certificate ok + advertised but gate pending -> polling STOPS
+  //    (that state waits on the passkey helper, not on time) and Check again is offered
   state.status={...state.status,certificate:'ok',advertised:true,failed_stage:null};
   await app.pollReach();
   assert.match(app.reachSummary(),/waiting for the passkey gate/);
   assert.equal(app.reachProgress().map(r=>r.tone).join(','),'ok,ok,ok,');
-  // 5. gate up with an enrollment URL: the page lands on it, polling stops
+  assert.equal(app.reachTimer,null);
+  assert.equal(app.reachPollingStopped,true);
+  // 5. Check again with the gate up and an enrollment URL: the page lands on it
   state.status={...state.status,gate:'up',enrollment_url:'https://dashboard.alice-0123456789abcdef0123.serve.auto.network/oauth2/enroll?token=abc'};
-  await app.pollReach();
+  app.checkReachAgain();await settle();await settle();
   assert.equal(navigated,state.status.enrollment_url);
   assert.equal(app.reachTimer,null);
+  // 5b. destroy() clears every timer
+  app.reachTimer=setInterval(()=>{},60000);app.destroy();assert.equal(app.reachTimer,null);
   // 6. errors are exact and the step stays current
-  const app2=factory();app2.$root={dataset:{}};state.status={mode:null,origin:null,recorded:false};
+  const app2=factory();app2.$root={dataset:{}};state.status=unrecorded();
   await app2.init();
   state.publish=async(body)=>({ok:false,status:409,json:async()=>({ok:false,error:'dashboard_container_unavailable'})});
   await app2.submitReach();
@@ -84,13 +94,13 @@ async function main(){
   assert.equal(app2.step,2);
   // 7. Tailscale needs an origin; Local only records at once
   state.publish=null;
-  app2.reachChoice='tailscale';assert.equal(app2.reachCanSubmit(),false);
+  app2.reachChoice='tailscale';app2.reachOrigin='';assert.equal(app2.reachCanSubmit(),false);
   app2.reachOrigin='https://desktop.tail1234.ts.net:8080';assert.equal(app2.reachCanSubmit(),true);
   await app2.submitReach();
   assert.deepEqual(calls[calls.length-1].body,{mode:'tailscale',origin:'https://desktop.tail1234.ts.net:8080'});
   assert.equal(app2.step,3);assert.equal(app2.reachTitle(),'Reachable on your Tailnet');
   assert.equal(app2.reachSummary(),'https://desktop.tail1234.ts.net:8080');
-  const app3=factory();app3.$root={dataset:{}};state.status={mode:null,origin:null,recorded:false};
+  const app3=factory();app3.$root={dataset:{}};state.status=unrecorded();
   await app3.init();app3.reachChoice='local';await app3.submitReach();
   assert.deepEqual(calls[calls.length-1].body,{mode:'local'});
   assert.equal(app3.reachTitle(),'This machine only');

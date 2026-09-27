@@ -177,7 +177,8 @@
           <div class="reach-field">
             <label for="welcome-reach-origin">This dashboard's Tailnet address</label>
             <input id="welcome-reach-origin" data-testid="welcome-reach-origin" x-model="reachOrigin" placeholder="https://this-machine.tailNNNN.ts.net:8080" autocomplete="off" spellcheck="false">
-            <p>Renew its certificate monthly with <code>tools/dashboard/renew-tls-cert.sh</code>; the address comes from <code>tailscale status</code> on this machine.</p>
+            <p x-show="reach && reach.tailnet_origin">Filled in from this node's certificate.</p>
+            <p x-show="!(reach && reach.tailnet_origin)">This node's certificate names no Tailnet address, so the name you type cannot be confirmed here; it comes from <code>tailscale status</code> on this machine. Renew its certificate monthly with <code>tools/dashboard/renew-tls-cert.sh</code>.</p>
           </div>
         </template>
         <template x-if="reachBusy && reachChoice === 'autonomy'">
@@ -210,7 +211,8 @@
         <p x-text="userName ? ('You’re ' + userName + ' on this machine.') : 'Your identity is set on this machine.'"></p></div></div>
       <div class="step done" data-testid="welcome-reach-done"><div class="n">&check;</div><div class="body">
         <h2 x-text="reachTitle()"></h2>
-        <p x-text="reachSummary()" data-testid="welcome-reach-summary"></p></div></div>
+        <p x-text="reachSummary()" data-testid="welcome-reach-summary"></p></div>
+        <button class="secondary" x-show="reachPollingStopped && !reachLive()" data-testid="welcome-reach-check" @click="checkReachAgain()">Check again</button></div>
       <div class="step current"><div class="n">3</div><div class="body">
         <h2>Create or join an organization</h2>
         <template x-if="invited">

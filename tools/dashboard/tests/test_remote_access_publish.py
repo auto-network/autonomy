@@ -73,6 +73,8 @@ def remote_api(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_inspect_dashboard_container", inspect_dashboard)
     monkeypatch.setattr(service, "_probe_tcp", probe)
     monkeypatch.setattr(unlock_routes, "gate_enforced", lambda: True)
+    from tools.dashboard import tls_certificate
+    monkeypatch.setattr(tls_certificate, "read_certificate", lambda *a, **k: None)   # no served certificate
 
     converged = {"reconcile": 0, "reload": 0}
     from tools.dashboard import service_certificate_manager, web_gateway_supervisor, service_status
@@ -265,7 +267,7 @@ def test_a_stopped_dashboard_container_refuses_and_records_nothing(remote_api):
 
 def test_status_reports_the_stages_certificate_gate_and_advertisement(remote_api):
     before = remote_api.client.get("/api/network/remote-access/status", headers=_headers()).json()["status"]
-    assert before == {"mode": None, "origin": None, "recorded": False}
+    assert before["recorded"] is False and before["mode"] is None and before["tailnet_origin"] is None
 
     row = _publish(remote_api.client, mode="autonomy").json()["remote_access"]
     status = remote_api.client.get("/api/network/remote-access/status", headers=_headers()).json()["status"]
@@ -290,13 +292,49 @@ def test_requires_operator_authority(remote_api):
     assert r.status_code in (401, 403)
 
 
-def test_tailscale_may_name_its_tailnet_origin_explicitly(remote_api):
+def test_tailscale_may_name_its_tailnet_origin_explicitly(remote_api, monkeypatch):
     """Chosen from the local address, the request's own origin is localhost;
-    the operator names the Tailnet origin, validated as Tailscale."""
+    the operator names the Tailnet origin, validated as Tailscale. Without a
+    Tailnet name in the served certificate it is recorded unverified."""
+    from tools.dashboard import tls_certificate
+
+    monkeypatch.setattr(tls_certificate, "read_certificate", lambda *a, **k: None)
     r = _publish(remote_api.client, mode="tailscale", origin="https://desktop.tail1234.ts.net:8080")
     assert r.status_code == 200, r.text
-    assert r.json()["remote_access"]["origin"] == "https://desktop.tail1234.ts.net:8080"
+    row = r.json()["remote_access"]
+    assert row["origin"] == "https://desktop.tail1234.ts.net:8080" and row["origin_verified"] is False
+    status = remote_api.client.get("/api/network/remote-access/status", headers=_headers()).json()["status"]
+    assert status["origin_verified"] is False
     bad = _publish(remote_api.client, mode="tailscale", origin="https://dash.example.com")
     assert bad.status_code == 400 and bad.json()["error"] == "origin_invalid"
     other_mode = _publish(remote_api.client, mode="local", origin="http://localhost")
     assert other_mode.status_code == 400 and other_mode.json()["error"] == "unknown_fields"
+
+
+def test_a_typed_tailnet_name_must_be_this_nodes_certificate(remote_api, monkeypatch):
+    """Reviewer: a typo or another node's name would silently become every
+    link's base. With a Tailnet name in the served certificate, only that
+    name is accepted, and it is recorded verified."""
+    from tools.dashboard import tls_certificate
+
+    facts = SimpleNamespace(names=("localhost", "desktop.tail1234.ts.net"), tailnet_name="desktop.tail1234.ts.net")
+    monkeypatch.setattr(tls_certificate, "read_certificate", lambda *a, **k: facts)
+    wrong = _publish(remote_api.client, mode="tailscale", origin="https://other.tail9999.ts.net:8080")
+    assert wrong.status_code == 400 and wrong.json()["error"] == "origin_not_this_node"
+    assert "desktop.tail1234.ts.net" in wrong.json().get("detail", "")
+    assert remote_api.remote_access.current() is None
+    right = _publish(remote_api.client, mode="tailscale", origin="https://desktop.tail1234.ts.net:8080")
+    assert right.status_code == 200, right.text
+    assert right.json()["remote_access"]["origin_verified"] is True
+
+
+def test_status_before_recording_carries_what_the_question_needs(remote_api, monkeypatch):
+    from tools.dashboard import tls_certificate
+
+    facts = SimpleNamespace(names=("desktop.tail1234.ts.net",), tailnet_name="desktop.tail1234.ts.net")
+    monkeypatch.setattr(tls_certificate, "read_certificate", lambda *a, **k: facts)
+    monkeypatch.setattr(remote_api.remote_access, "bound_slug", lambda org: "jeremy")
+    monkeypatch.setenv("DASHBOARD_PORT", "8080")
+    status = remote_api.client.get("/api/network/remote-access/status", headers=_headers()).json()["status"]
+    assert status == {"mode": None, "origin": None, "recorded": False,
+                      "bound_label": "jeremy", "tailnet_origin": "https://desktop.tail1234.ts.net:8080"}

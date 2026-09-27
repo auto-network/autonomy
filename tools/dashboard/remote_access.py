@@ -274,11 +274,15 @@ async def publish(mode: str, *, org: str = DEFAULT_PUBLISHER, app_label: str | N
     if mode != "autonomy":
         # Tailscale: the operator may name the Tailnet origin explicitly (they
         # usually choose from the local address, where the request's own
-        # origin is not the Tailnet one); it is validated like any other.
+        # origin is not the Tailnet one). A typed name becomes every link's
+        # base, so it must be a name in the certificate this node serves;
+        # with no such name in the certificate it is recorded as unverified.
         origin = validate_request_origin(
             mode, origin if (mode == "tailscale" and origin) else request_origin)
-        paused = _pause_relay_publication(previous)
         row = {"mode": mode, "origin": origin, "published_at": _utc_now()}
+        if mode == "tailscale":
+            row["origin_verified"] = _tailnet_origin_verified(origin)
+        paused = _pause_relay_publication(previous)
         if paused is not None:
             row["paused_relay"] = paused
         return record(row)
@@ -310,6 +314,41 @@ async def publish(mode: str, *, org: str = DEFAULT_PUBLISHER, app_label: str | N
     if local_origin:
         row["local_origin"] = local_origin
     return record(row)
+
+
+def _tailnet_origin_verified(origin: str) -> bool:
+    """True when the origin's host is a .ts.net name in the served certificate.
+    Raises origin_not_this_node when the certificate names Tailnet hosts and
+    this is not one of them (a typo, or another node's name); False when the
+    certificate names none (nothing to check against: recorded unverified)."""
+    from tools.dashboard import service_publication, tls_certificate
+
+    facts = tls_certificate.read_certificate()
+    tailnet_names = [name for name in (facts.names if facts else ()) if name.endswith(".ts.net")]
+    host = _host_of(origin)
+    if not tailnet_names:
+        return False
+    if host in tailnet_names:
+        return True
+    raise service_publication.ServicePublicationError(
+        "origin_not_this_node", 400,
+        f"this node's certificate is for {', '.join(tailnet_names)}")
+
+
+def suggested_tailnet_origin(environ=None) -> str | None:
+    """The Tailnet origin this node would serve on, from the served
+    certificate's .ts.net name and the published TLS port; None without one."""
+    import os
+
+    from tools.dashboard import tls_certificate
+
+    env = os.environ if environ is None else environ
+    facts = tls_certificate.read_certificate(environ=env)
+    name = facts.tailnet_name if facts else None
+    if not name:
+        return None
+    port = (env.get("DASHBOARD_PORT") or "8080").strip()
+    return f"https://{name}" if port == "443" else f"https://{name}:{port}"
 
 
 def _local_origin_of(request_origin: str | None) -> str | None:
@@ -391,10 +430,18 @@ async def status() -> dict:
 async def _status_uncached() -> dict:
     row = current()
     if row is None:
-        return {"mode": None, "origin": None, "recorded": False}
+        # Not recorded yet: what onboarding needs to ask well, and nothing else.
+        try:
+            bound = bound_slug(DEFAULT_PUBLISHER)
+        except LabelCheckUnavailable:
+            bound = None
+        return {"mode": None, "origin": None, "recorded": False,
+                "bound_label": bound, "tailnet_origin": suggested_tailnet_origin()}
     result = {"mode": row["mode"], "origin": row["origin"], "recorded": True,
               "published_at": row.get("published_at")}
     if row["mode"] != "autonomy":
+        if row["mode"] == "tailscale":
+            result["origin_verified"] = bool(row.get("origin_verified"))
         paused = row.get("paused_relay")
         if paused:
             result["relay_publication"] = "paused"

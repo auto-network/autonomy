@@ -55,6 +55,8 @@ function welcomeApp() {
     reachStatus: null,         // live status while the relay publish converges
     reachTimer: null,
     reachLabelTimer: null,
+    reachPolls: 0,             // polls so far: 2 s for two minutes, then 10 s, then stops at the gate
+    reachPollingStopped: false,
 
     get step() {
       if (!this.hasIdentity) return 1;
@@ -126,16 +128,21 @@ function welcomeApp() {
           this.reachStatus = body.status;
         }
       } catch (e) { /* unreadable → the step stays current; the operator chooses */ }
-      if (!(this.reach && this.reach.recorded)) await this.refreshReachLabelBound();
-      if (this.reach && this.reach.mode === 'autonomy' && !this.reachLive()) this.startReachPolling();
+      if (this.reach && !this.reach.recorded) {
+        // Not recorded yet: the status carries what the question needs.
+        this.reachLabelBound = this.reach.bound_label || '';
+        if (!this.reachOrigin && this.reach.tailnet_origin) this.reachOrigin = this.reach.tailnet_origin;
+      }
+      if (this.reach && this.reach.recorded && this.reach.mode === 'autonomy' && !this.reachLive()) this.startReachPolling();
     },
-    async refreshReachLabelBound() {
-      try {
-        var response = await fetch('/api/network/remote-access/label/check?label=x', { cache: 'no-store' });
-        var body = await response.json().catch(function () { return {}; });
-        var check = (body && body.label) || {};
-        this.reachLabelBound = check.bound ? (check.against || check.label || '') : '';
-      } catch (e) { this.reachLabelBound = ''; }
+    destroy() {
+      // Alpine calls this when the component leaves the page: no interval
+      // may outlive the welcome rail.
+      if (this.reachTimer) clearInterval(this.reachTimer);
+      this.reachTimer = null;
+      if (this.reachLabelTimer) clearTimeout(this.reachLabelTimer);
+      if (this.fleetSyncTimer) clearInterval(this.fleetSyncTimer);
+      if (this.fleetResumeTimer) clearInterval(this.fleetResumeTimer);
     },
     reachCanSubmit() {
       if (this.reachChoice === 'autonomy') {
@@ -203,12 +210,14 @@ function welcomeApp() {
     reachErrorText(code, detail, status) {
       var texts = {
         origin_invalid: 'That address does not fit the choice: a Tailscale address ends in .ts.net, a local one is this machine.',
+        origin_not_this_node: 'That is not this node\u2019s Tailnet name.',
         through_gateway: 'Choose this from the dashboard itself, not through its published address.',
         dashboard_container_unavailable: 'This dashboard is not running as a node container, so it cannot be published yet.',
         persona_not_configured: 'Create your identity first.',
         invalid_app_label: 'That name is not a valid address part.',
       };
       if (code && code.indexOf('label_') === 0) return detail || 'That name cannot be used.';
+      if (code === 'origin_not_this_node' && detail) return texts[code] + ' ' + detail + '.';
       return texts[code] || (code ? code.replace(/_/g, ' ') : ('The request failed (' + status + ').'));
     },
     reachLive() {
@@ -218,10 +227,27 @@ function welcomeApp() {
     startReachPolling() {
       var self = this;
       if (this.reachTimer) return;
+      this.reachPollingStopped = false;
+      this.reachPolls = 0;
       this.reachTimer = setInterval(function () { self.pollReach(); }, 2000);
       this.pollReach();
     },
+    stopReachPolling(stopped) {
+      if (this.reachTimer) clearInterval(this.reachTimer);
+      this.reachTimer = null;
+      this.reachPollingStopped = !!stopped;
+    },
+    // The status polls while the publish converges: every 2 s for two
+    // minutes (the note's Q3 budget), then every 10 s, and it STOPS once the
+    // route is advertised with the gate still pending, the state that waits on
+    // the passkey helper, not on time. "Check again" polls once more.
     async pollReach() {
+      this.reachPolls += 1;
+      if (this.reachPolls === 60 && this.reachTimer) {
+        var self = this;
+        clearInterval(this.reachTimer);
+        this.reachTimer = setInterval(function () { self.pollReach(); }, 10000);
+      }
       try {
         var response = await fetch('/api/network/remote-access/status', { cache: 'no-store' });
         var body = await response.json().catch(function () { return {}; });
@@ -229,16 +255,19 @@ function welcomeApp() {
         this.reachStatus = body.status;
         if (body.status.enrollment_url && this.reachLive()) {
           // The gate is up: enrol the gate passkey on the live address.
-          if (this.reachTimer) clearInterval(this.reachTimer);
-          this.reachTimer = null;
+          this.stopReachPolling(false);
           location.assign(body.status.enrollment_url);
           return;
         }
-        if (body.status.mode !== 'autonomy' || (this.reachLive() && !body.status.enrollment_url)) {
-          if (this.reachTimer) clearInterval(this.reachTimer);
-          this.reachTimer = null;
+        if (body.status.mode !== 'autonomy' || this.reachLive() ||
+            (body.status.advertised && body.status.gate !== 'up') ||
+            body.status.certificate === 'failed') {
+          this.stopReachPolling(true);
         }
       } catch (e) { /* keep polling; the next tick may answer */ }
+    },
+    checkReachAgain() {
+      this.pollReach();
     },
     reachProgress() {
       var st = this.reachStatus || {};
@@ -261,6 +290,7 @@ function welcomeApp() {
     reachSummary() {
       var st = this.reachStatus || this.reach || {};
       if (!st.origin) return '';
+      if (st.mode === 'tailscale') return st.origin + (st.origin_verified === false ? ' — not confirmed by this node\u2019s certificate.' : '');
       if (st.mode !== 'autonomy') return st.origin;
       if (this.reachLive()) return st.origin;
       if (st.certificate === 'failed') return st.origin + ' — certificate issuance failed; see Published Links.';

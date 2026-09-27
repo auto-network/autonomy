@@ -3598,7 +3598,17 @@ async def get_remote_access_label_check(request: Request) -> JSONResponse:
         return refused
     from tools.dashboard import remote_access
 
-    result = remote_access.check_label(org, request.query_params.get("label"))
+    label = request.query_params.get("label")
+    if label is None or label == "":
+        # No candidate: just whether this persona already has its permanent label.
+        try:
+            bound = remote_access.bound_slug(org)
+        except remote_access.LabelCheckUnavailable:
+            return JSONResponse({"ok": False, "error": "unavailable"}, status_code=503,
+                                headers={"Cache-Control": "no-store"})
+        return JSONResponse({"ok": True, "bound": bool(bound), "bound_label": bound},
+                            headers={"Cache-Control": "no-store"})
+    result = remote_access.check_label(org, label)
     return JSONResponse({"ok": True, "label": result.as_dict()},
                         headers={"Cache-Control": "no-store"})
 

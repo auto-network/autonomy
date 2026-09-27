@@ -57,6 +57,11 @@ class DashboardRemoteAccessV1(SettingSchema):
         description="Relay mode: the local or Tailnet origin the operator published from; links use it "
                     "until the relay route is advertised with its gate up.",
     )
+    origin_verified: bool = field(
+        required=False,
+        description="Tailscale mode: whether the recorded origin is a name in the served certificate's "
+                    "subjectAltName; false means the operator typed a name this node could not confirm.",
+    )
     published_at: str = field(required=True, description="When this mode was recorded (UTC RFC 3339, milliseconds).")
     paused_relay: dict = field(
         required=False,
@@ -87,6 +92,8 @@ class DashboardRemoteAccessV1(SettingSchema):
                 raise SchemaValidationError(f"{cls.__name__}: publisher must name the personal scope or an organization slug")
             if "paused_relay" in payload:
                 raise SchemaValidationError(f"{cls.__name__}: paused_relay belongs to the local and tailscale modes")
+            if "origin_verified" in payload:
+                raise SchemaValidationError(f"{cls.__name__}: origin_verified belongs to the tailscale mode")
             local_origin = payload.get("local_origin")
             if local_origin is not None and (not isinstance(local_origin, str) or not _ORIGIN_RE.fullmatch(local_origin)):
                 raise SchemaValidationError(f"{cls.__name__}: local_origin must be an http(s) origin with no path")
@@ -94,6 +101,8 @@ class DashboardRemoteAccessV1(SettingSchema):
             for name in ("reservation_id", "app_label", "publisher", "local_origin"):
                 if name in payload:
                     raise SchemaValidationError(f"{cls.__name__}: {name} belongs to the relay mode only")
+            if "origin_verified" in payload and (mode != "tailscale" or not isinstance(payload["origin_verified"], bool)):
+                raise SchemaValidationError(f"{cls.__name__}: origin_verified is a boolean of the tailscale mode")
             paused = payload.get("paused_relay")
             if paused is not None:
                 if not isinstance(paused, dict) or set(paused) != {"publisher", "reservation_id", "origin"}:

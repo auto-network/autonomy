@@ -104,3 +104,27 @@ def test_a_read_failure_is_unavailable_never_ok(monkeypatch):
     monkeypatch.setattr(service_publication, "_persona_for_org",
                         lambda org: (_ for _ in ()).throw(service_publication.ServicePublicationError("organization_not_founded", 409)))
     assert ra.bound_slug("acme") is None
+
+
+def test_the_route_without_a_label_answers_the_binding_only(monkeypatch):
+    """Reviewer: onboarding learns whether a label is bound without probing
+    with a throwaway candidate."""
+    import asyncio
+
+    from starlette.requests import Request
+    from tools.dashboard import network_routes
+
+    monkeypatch.setattr(network_routes, "_service_publication_org", lambda request: ("personal", None))
+    monkeypatch.setattr(ra, "bound_slug", lambda org: "jeremy")
+
+    def request(query: str) -> Request:
+        return Request({"type": "http", "method": "GET", "path": "/api/network/remote-access/label/check",
+                        "query_string": query.encode(), "headers": []})
+    import json
+    bound = asyncio.run(network_routes.get_remote_access_label_check(request("")))
+    assert json.loads(bound.body) == {"ok": True, "bound": True, "bound_label": "jeremy"}
+    monkeypatch.setattr(ra, "bound_slug", lambda org: None)
+    unbound = asyncio.run(network_routes.get_remote_access_label_check(request("")))
+    assert json.loads(unbound.body) == {"ok": True, "bound": False, "bound_label": None}
+    checked = asyncio.run(network_routes.get_remote_access_label_check(request("label=boat-lore")))
+    assert json.loads(checked.body)["label"]["ok"] is True
