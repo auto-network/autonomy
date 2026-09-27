@@ -95,3 +95,22 @@ def test_an_unfounded_shell_is_a_retryable_target(client):
 
 def test_invalid_slug_is_400(client):
     assert client.post("/api/orgs", json={"slug": "Not A Slug"}).status_code == 400
+
+
+def test_typed_name_resolves_after_create_even_if_resolved_before(client):
+    """Windows walkthrough, 2026-09-26: the Welcome tile showed the slug
+    ``windows-test-org`` for an org typed as "Windows Test Org". The Welcome
+    page polls the org list before the org exists, which caches "no
+    override"; the shell route writes the identity row outside the Settings
+    API, so nothing dropped that cache. The route now invalidates it."""
+    from agents import workspace_settings
+    from tools.dashboard.org_identity import resolve_org_identity
+
+    workspace_settings.invalidate_caches()
+    assert resolve_org_identity("windows-test-org")["name"] == "windows-test-org"
+    r = client.post("/api/orgs", json={
+        "slug": "windows-test-org", "type": "shared",
+        "identity": {"name": "Windows Test Org", "color": "#6C63FF", "type": "shared"},
+    })
+    assert r.status_code == 201, r.text
+    assert resolve_org_identity("windows-test-org")["name"] == "Windows Test Org"

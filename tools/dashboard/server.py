@@ -20330,6 +20330,15 @@ async def api_orgs_create(request):
         return JSONResponse({"error": str(e)}, status_code=409)
     except org_ops.OrgError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    if identity_payload is not None:
+        # create_org_shell writes the org's autonomy.org identity row
+        # directly, outside the Settings API, so no post-commit hook drops
+        # the process-wide override cache. Without this the typed display
+        # name never resolves: a Welcome poll made before the org existed
+        # has cached "no override", and the org renders as its slug.
+        _invalidate_setting_caches(
+            workspace_settings.ORG_SET_ID, key=slug, org=slug,
+        )
     from tools.dashboard.org_storage_delegate import TTL_MS, REMINT_BELOW_MS
     return JSONResponse({"org": ref.to_dict(), "founded": False,
                          "storage_delegate_policy": {
