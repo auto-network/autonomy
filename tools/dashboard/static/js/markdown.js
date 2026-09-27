@@ -368,12 +368,18 @@ document.addEventListener('alpine:init', () => {
         }
       });
 
-      // Wrap tables in horizontally-scrollable containers for mobile
+      // Tables: content-aware column widths, sideways scroll when a table is
+      // wider than its column, stacked cards for prose tables on a phone
+      // (lib/table-fit.js). Without it, the plain scroll wrapper.
       el.querySelectorAll('table').forEach(function(t) {
+        if (window.TableFit) { window.TableFit.attach(t); return; }
+        var box = document.createElement('div');
+        box.className = 'md-table';
         var wrapper = document.createElement('div');
         wrapper.className = 'md-table-scroll';
-        t.parentNode.insertBefore(wrapper, t);
+        t.parentNode.insertBefore(box, t);
         wrapper.appendChild(t);
+        box.appendChild(wrapper);
       });
       // $nextTick not available in directive context — use queueMicrotask
       queueMicrotask(() => {

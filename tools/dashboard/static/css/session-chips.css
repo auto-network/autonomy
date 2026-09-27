@@ -674,19 +674,28 @@
 .sc-va-shortcut-cancel:hover { color: #e2e8f0; }
 
 /* ── Markdown lightbox panel (auto-g41xg) ────────────────────────────────────
-   Fullscreen viewer for text/markdown attachments. The panel is a fixed-size
-   flex column; the × close button is pinned to its top-right so it stays put
-   while the prose body scrolls. All prose selectors are scoped under
-   .sc-va-lightbox-md so they never leak into the rest of the chat UI. Tokens
-   match the surrounding lightbox aesthetic — dark cool grays (#0f1a2b /
-   #172232 / #25364c) with the accent purple (#5638f3). */
+   Fullscreen viewer for text/markdown attachments. The overlay's --doc
+   modifier reserves the top safe area plus the Save / Share and close bar's
+   row, so the bar never covers the document and the panel never sits under
+   the status bar or the Dynamic Island. On a phone the panel takes the whole
+   width below that row: no gutters, a 14px text inset, 15px text. All prose
+   selectors are scoped under .sc-va-lightbox-md so they never leak into the
+   rest of the chat UI. Tokens match the surrounding lightbox aesthetic: dark
+   cool grays (#0f1a2b / #172232 / #25364c) with the accent purple (#5638f3). */
+.sc-va-lightbox.sc-va-lightbox--doc {
+  align-items: flex-start;
+  padding: calc(max(12px, env(safe-area-inset-top)) + 48px) 24px 24px;
+  background: #0b1220;
+  cursor: auto;
+}
 .sc-va-lightbox-md-panel {
   position: relative;
   display: flex;
   flex-direction: column;
   width: 92vw;
   max-width: 900px;
-  max-height: 90vh;
+  max-height: 100%;
+  margin: 0 auto;
   background: #0f1a2b;
   color: #e2e8f0;
   border: 1px solid #25364c;
@@ -694,38 +703,30 @@
   overflow: hidden;
   cursor: auto;
 }
-
-.sc-va-lightbox-md-close {
+/* The document continues below: a short fade over the last lines. The body's
+   bottom padding lets the final line scroll clear of it. */
+.sc-va-lightbox-md-panel::after {
+  content: "";
   position: absolute;
-  top: 10px;
-  right: 12px;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  font-size: 22px;
-  line-height: 1;
-  color: #cbd5e1;
-  background: rgba(23, 34, 50, 0.85);
-  border: 1px solid #25364c;
-  border-radius: 8px;
-  cursor: pointer;
-}
-.sc-va-lightbox-md-close:hover {
-  background: #273548;
-  color: #fff;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 28px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(15, 26, 43, 0), #0f1a2b);
 }
 
 .sc-va-lightbox-md {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 32px 40px;
+  padding: 28px 32px 40px;
   font-family: system-ui, -apple-system, sans-serif;
+  font-size: 16px;
   line-height: 1.6;
+  --md-table-sticky-bg: #0f1a2b;
+  --md-table-head-bg: #172232;
+  --md-table-fade: rgba(15, 26, 43, 0.95);
 }
 
 /* ── Scoped prose ──────────────────────────────────────────────────────────*/
@@ -738,10 +739,10 @@
   line-height: 1.3;
   color: #f1f5f9;
 }
-.sc-va-lightbox-md h1 { font-size: 1.9rem; }
-.sc-va-lightbox-md h2 { font-size: 1.5rem; }
-.sc-va-lightbox-md h3 { font-size: 1.25rem; }
-.sc-va-lightbox-md h4 { font-size: 1.05rem; }
+.sc-va-lightbox-md h1 { font-size: 1.6em; }
+.sc-va-lightbox-md h2 { font-size: 1.35em; }
+.sc-va-lightbox-md h3 { font-size: 1.15em; }
+.sc-va-lightbox-md h4 { font-size: 1.05em; }
 .sc-va-lightbox-md h1,
 .sc-va-lightbox-md h2 {
   padding-bottom: 6px;
@@ -754,12 +755,20 @@
 .sc-va-lightbox-md ul,
 .sc-va-lightbox-md ol {
   margin: 0 0 12px;
-  padding-left: 24px;
+  padding-left: 1.3em;
 }
+/* The page's base reset removes list markers; a list without them reads as
+   an unexplained indent. */
+.sc-va-lightbox-md ul { list-style: disc outside; }
+.sc-va-lightbox-md ol { list-style: decimal outside; }
+.sc-va-lightbox-md ul ul { list-style-type: circle; }
 .sc-va-lightbox-md li { margin: 2px 0; }
 
+/* A code name split across lines keeps its chip on both pieces. */
 .sc-va-lightbox-md code {
-  padding: 1px 5px;
+  padding: 0 0.3em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.875em;
   background: #1e293b;
@@ -781,14 +790,10 @@
 }
 
 .sc-va-lightbox-md table {
-  width: 100%;
-  margin: 0 0 12px;
   border-collapse: collapse;
-  font-size: 0.9em;
 }
 .sc-va-lightbox-md th,
 .sc-va-lightbox-md td {
-  padding: 6px 10px;
   border: 1px solid #25364c;
   text-align: left;
 }
@@ -906,3 +911,35 @@
 }
 .sv-dismiss:hover { background: rgba(71, 85, 105, 0.55); border-color: rgba(148, 163, 184, 0.5); }
 .sv-dismiss svg { width: 12px; height: 12px; }
+
+/* ── Markdown lightbox on a phone ──────────────────────────────────────────
+   The whole width below the bar row, square corners, a 14px inset, 15px
+   text, smaller headings: a 402pt screen gets a ~370pt text column instead
+   of the 266pt the centered card left. */
+@media (max-width: 640px) {
+  .sc-va-lightbox.sc-va-lightbox--doc {
+    padding: calc(max(12px, env(safe-area-inset-top)) + 48px) 0 0;
+  }
+  .sc-va-lightbox--doc .sc-va-lightbox-md-panel {
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    max-height: none;
+    border: 0;
+    border-top: 1px solid #25364c;
+    border-radius: 0;
+  }
+  .sc-va-lightbox--doc .sc-va-lightbox-md {
+    padding: 14px 14px calc(36px + env(safe-area-inset-bottom));
+    font-size: 15px;
+    line-height: 1.55;
+  }
+  .sc-va-lightbox--doc .sc-va-lightbox-md h1 { font-size: 1.4em; }
+  .sc-va-lightbox--doc .sc-va-lightbox-md h2 { font-size: 1.22em; }
+  .sc-va-lightbox--doc .sc-va-lightbox-md h3 { font-size: 1.1em; }
+  .sc-va-lightbox--doc .sc-va-lightbox-md h1,
+  .sc-va-lightbox--doc .sc-va-lightbox-md h2,
+  .sc-va-lightbox--doc .sc-va-lightbox-md h3 { margin: 18px 0 8px; }
+  .sc-va-lightbox--doc .sc-va-lightbox-md ul,
+  .sc-va-lightbox--doc .sc-va-lightbox-md ol { padding-left: 1.15em; }
+}

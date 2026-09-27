@@ -5,6 +5,7 @@
       <template x-if="lightboxSrc">
         <template x-teleport="body">
         <div class="sc-va-lightbox"
+             :class="lightboxKind === 'markdown' ? 'sc-va-lightbox--doc' : ''"
              data-testid="viewer-attachment-lightbox"
              @click="lightboxKind !== 'video' && closeLightbox()"
              @keydown.escape.window="closeLightbox()"
@@ -45,16 +46,12 @@
                     style="width:92vw;height:88vh;border:none;border-radius:8px;background:#fff"></iframe>
           </template>
           <template x-if="lightboxKind === 'markdown'">
-            <!-- Panel is a fixed-size flex column; the × button is pinned to its
-                 top-right so it stays visible while the prose body scrolls.
-                 @click.stop keeps clicks inside the panel from reaching the
-                 overlay's backdrop-close handler. -->
-            <div @click.stop class="sc-va-lightbox-md-panel">
-              <button type="button"
-                      class="sc-va-lightbox-md-close"
-                      data-testid="lightbox-md-close"
-                      @click="closeLightbox()"
-                      aria-label="Close">&times;</button>
+            <!-- A document: the panel sits below the Save / Share and close
+                 bar (the overlay's --doc padding reserves its row and the top
+                 safe area), and on a phone it takes the full width. The bar's
+                 × is the only close control. @click.stop keeps clicks inside
+                 the panel from reaching the overlay's backdrop-close handler. -->
+            <div @click.stop class="sc-va-lightbox-md-panel" data-testid="lightbox-md-panel">
               <div class="sc-va-lightbox-md" x-markdown="lightboxMarkdown"></div>
             </div>
           </template>

@@ -551,12 +551,110 @@ body.zoom-expanded .sc-card-list { gap: 8px; }
 .sc-zoom-btn:hover { color: #94a3b8; }
 .sc-zoom-btn.active { background: #334155; color: #e2e8f0; }
 
-/* Markdown table horizontal scroll (iOS Safari needs CSS class, not inline styles) */
-.md-table-scroll {
-    overflow-x: auto;
-    max-width: 100%;
-    -webkit-overflow-scrolling: touch;
+/* ── Markdown tables, every surface (chat, attachment viewer, graph notes) ──
+   markdown.js wraps each rendered table as
+     .md-table > [.md-table-tools] .md-table-scroll > table, .md-table-fade, [.md-table-cards]
+   and lib/table-fit.js sizes its columns. The rules here are what a table
+   gets before or without that: its natural width (never forced to the
+   column's width), breaks only between words (a chat message's
+   break-anywhere rule collapsed short columns to one character), and compact
+   top-aligned cells. The class prefix outranks .markdown-body and the
+   attachment viewer's own table rules. iOS Safari needs the scroll on a
+   class, not an inline style. */
+.md-table {
+  position: relative;
+  max-width: 100%;
+  margin: 0.5rem 0 0.75rem;
 }
+.md-table .md-table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+.md-table .md-table-scroll > table {
+  width: auto;
+  max-width: none;
+  margin: 0;
+  border-collapse: collapse;
+  font-size: 0.875em;
+  line-height: 1.4;
+}
+.md-table .md-table-scroll > table th,
+.md-table .md-table-scroll > table td {
+  padding: 4px 8px;
+  vertical-align: top;
+  text-align: left;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.md-table .md-table-scroll > table th { background: var(--md-table-head-bg, #1f2937); }
+/* Fitted widths: a word longer than its column's cap may break, nothing else. */
+.md-table .md-table-scroll > table.tf-fixed { table-layout: fixed; }
+.md-table .md-table-scroll > table.tf-fixed th,
+.md-table .md-table-scroll > table.tf-fixed td { overflow-wrap: break-word; }
+/* The first column stays in view while a wide table scrolls sideways. */
+.md-table .md-table-scroll > table.tf-sticky tr > :first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--md-table-sticky-bg, #111827);
+}
+.md-table .md-table-scroll > table.tf-sticky tr > th:first-child {
+  background: var(--md-table-head-bg, #1f2937);
+}
+/* A fade at the right edge says the table continues. */
+.md-table .md-table-fade {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 28px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  background: linear-gradient(to right, transparent, var(--md-table-fade, rgba(17, 24, 39, 0.95)));
+}
+.md-table.tf-more-right .md-table-fade { opacity: 1; }
+/* Table / Cards toggle, offered for prose tables on a narrow screen. */
+.md-table .md-table-tools {
+  display: none;
+  justify-content: flex-end;
+  gap: 4px;
+  margin: 0 0 4px;
+}
+.md-table.tf-cards-offered .md-table-tools { display: flex; }
+.md-table .md-table-tools button {
+  padding: 2px 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #94a3b8;
+  background: transparent;
+  border: 1px solid #334155;
+  border-radius: 6px;
+}
+.md-table .md-table-tools button[aria-pressed="true"] { color: #e2e8f0; background: #1e293b; }
+.md-table .md-table-cards { display: none; }
+.md-table.tf-cards .md-table-cards { display: block; }
+.md-table.tf-cards .md-table-scroll,
+.md-table.tf-cards .md-table-fade { display: none; }
+.md-table .md-card {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  font-size: 0.875em;
+  line-height: 1.45;
+  border: 1px solid #334155;
+  border-radius: 8px;
+}
+.md-table .md-card-title { margin: 0 0 4px; font-weight: 600; }
+.md-table .md-card-fields {
+  display: grid;
+  grid-template-columns: fit-content(7.5em) minmax(0, 1fr);
+  gap: 2px 10px;
+  margin: 0;
+}
+.md-table .md-card-fields dt { color: #94a3b8; }
+.md-table .md-card-fields dd { margin: 0; min-width: 0; overflow-wrap: break-word; }
 
 /* ── Startup-phase UI (auto-yfcoc, design rev 63542418-40f2-40cd-972b-7ae1a50f41a3) ──
  *
