@@ -5727,51 +5727,61 @@ DASHBOARD_ACCESS_APPROVAL_CHECKS = """(async () => {
     };
     var origFetch = window.fetch;
     var origSession = window.AutonomyNetworkSession;
-    var origIdentity = window.AutonomyNetworkIdentity;
-    var posted = [], waitGets = 0, openedSeed = null, approvalGets = 0;
+    var posted = [], waitGets = 0, approvalGets = 0;
+    // Approve opens the ONE shared factor-aware unlock (ceremony/open-root.js
+    // via dashboard-access.js): serve it a real v3 password armor of this
+    // key pair, so the signature below is the production signature.
     var keyPair = await crypto.subtle.generateKey({name: 'Ed25519'}, true, ['sign', 'verify']);
+    var pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey));
+    var seed = pkcs8.slice(-32);
+    var rootPub = bytesToHex(new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey)));
+    var factorPolicy = await import('/static/js/ceremony/root-factor-policy.js');
+    var armor = await factorPolicy.mintPasswordArmor({
+        rootSeed: seed, rootPub: rootPub, password: 'personal password',
+        factorId: 'pw', iterations: 10000});
+    seed.fill(0); pkcs8.fill(0);
+    var rootDialog = function() { return q('open-root'); };
+    var waitFor = async function(fn, ms) {
+        var t0 = Date.now();
+        while (Date.now() - t0 < (ms || 4000)) { if (fn()) return true; await sleep(40); }
+        return !!fn();
+    };
+    var typePassword = function(value) {
+        var input = rootDialog().querySelector('input[type="password"]');
+        input.value = value;
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        rootDialog().querySelector('.or-ok').click();
+    };
     try {
-        window.AutonomyNetworkSession = {_internals: {
+        window.AutonomyNetworkSession = {...(origSession || {}), _internals: {
+            ...((origSession && origSession._internals) || {}),
             canonicalJson: canonical,
             bytesToHex: bytesToHex,
-            decryptArmor: async function(armor, password) {
-                if (password !== 'personal password') throw new Error('wrong password');
-                openedSeed = new Uint8Array([9, 8, 7, 6]);
-                return {seed: openedSeed, rootPub: '34'.repeat(32)};
-            },
-        }};
-        window.AutonomyNetworkIdentity = {_internals: {
-            importSigningKey: async function(seed) {
-                if (seed !== openedSeed) throw new Error('unexpected seed');
-                return keyPair.privateKey;
-            },
         }};
         window.fetch = async function(url, opts) {
             var u = String(url);
-            if (u === '/api/identity/personal') return {
-                ok: true, json: async function() { return {
-                    display_name: 'Alex Operator', armored_private_key: 'encrypted armor',
-                    root_pub: '34'.repeat(32),
-                }; },
-            };
+            var json = function(body) { return {ok: true, json: async function() { return body; }}; };
+            if (u === '/api/identity/status') return json({passkeys: []});
+            if (u === '/api/identity/personal') return json({
+                display_name: 'Alex Operator', armored_private_key: armor, root_pub: rootPub});
+            if (u === '/api/identity/factor-policy') return json({
+                armor_version: 3, factors: [{factor_id: 'pw', label: 'Password'}]});
             if (u.indexOf('/decision') !== -1) {
                 posted.push(JSON.parse((opts || {}).body || '{}'));
-                return {ok: true, json: async function() { return {ok: true}; }};
+                return json({ok: true});
             }
             if (u.indexOf('?wait=20') !== -1) {
                 waitGets++;
-                return {ok: true, json: async function() { return {
-                    result: {execution: {ok: true}},
-                }; }};
+                return json({result: {execution: {ok: true}}});
             }
             if (u.indexOf('/api/approvals/apr-generic-dedup') !== -1) {
                 approvalGets++;
                 await sleep(40);
-                return {ok: true, json: async function() { return {
+                return json({
                     id: 'apr-generic-dedup', kind: 'jira_write', session: 'auto-agent-jira',
                     request: {op: 'comment', key: 'AUTO-123', body_markdown: 'Ship it.'},
                     result: null,
-                }; }};
+                });
             }
             throw new Error('unexpected fetch ' + u);
         };
@@ -5781,17 +5791,21 @@ DASHBOARD_ACCESS_APPROVAL_CHECKS = """(async () => {
         r.sheet_open = !!q('approval-request-overlay');
         r.title = textOf(q('approval-title-bar'));
         r.body = textOf(q('approval-body'));
-        r.password_label = textOf(q('approval-password-label'));
-        r.password_visible = !!q('approval-revoke-password') && q('approval-revoke-password').offsetParent !== null;
+        // No password on the sheet: Approve opens the shared unlock.
+        r.sheet_has_no_password = document.querySelectorAll(
+            '[data-testid="approval-request-overlay"] input[type="password"]').length === 0;
         r.action_label = textOf(q('approval-approve-button'));
 
-        data.approvalRequest.password = 'personal password';
-        await data.approveRequest();
+        var approving = data.approveRequest();
+        r.unlock_opened = await waitFor(function() { return !!rootDialog(); });
+        r.unlock_names_action = !!rootDialog() &&
+            rootDialog().textContent.indexOf('Approve dashboard access') !== -1;
+        if (rootDialog()) typePassword('personal password');
+        await approving;
         await tick();
-        r.closed_after_success = !q('approval-request-overlay');
+        r.closed_after_success = !q('approval-request-overlay') && !rootDialog();
         r.waited_for_execution = waitGets === 1;
         r.posted = posted[0] || null;
-        r.seed_zeroed = !!openedSeed && Array.from(openedSeed).every(function(b) { return b === 0; });
         var signedInput = new TextEncoder().encode(
             'autonomy.identity.dashboard-access-grant.v1\\n' + canonical(grant));
         r.signature_verifies = !!r.posted && await crypto.subtle.verify(
@@ -5799,16 +5813,23 @@ DASHBOARD_ACCESS_APPROVAL_CHECKS = """(async () => {
             Uint8Array.from(r.posted.signature.match(/.{2}/g).map(function(h) { return parseInt(h, 16); })),
             signedInput);
 
-        // A wrong password leaves the sheet open, shows the error inline, and
-        // never submits a decision body.
+        // A wrong password is refused inside the unlock, which stays open for
+        // another try; cancelling it is a recoverable non-decision on the
+        // sheet, and no decision body is ever submitted.
         data._approvalKinds.dashboard_access.open(data, row('apr-access-wrong'));
         await tick();
-        data.approvalRequest.password = 'wrong';
         var postsBeforeWrong = posted.length;
-        await data.approveRequest();
+        approving = data.approveRequest();
+        await waitFor(function() { return !!rootDialog(); });
+        if (rootDialog()) typePassword('wrong');
+        await waitFor(function() { return !!(rootDialog() && rootDialog().querySelector('.or-factor-err')); });
+        r.wrong_error = textOf(rootDialog() && rootDialog().querySelector('.or-factor-err'));
+        r.wrong_unlock_stays_open = !!rootDialog();
+        if (rootDialog()) rootDialog().querySelector('.or-cancel').click();
+        await approving;
         await tick();
         r.wrong_stays_open = !!q('approval-request-overlay');
-        r.wrong_error = textOf(q('approval-simple-error'));
+        r.cancel_error = textOf(q('approval-simple-error'));
         r.wrong_not_posted = posted.length === postsBeforeWrong;
 
         // Both the global and session-specific listeners can deliver one id.
@@ -5828,7 +5849,7 @@ DASHBOARD_ACCESS_APPROVAL_CHECKS = """(async () => {
     } finally {
         window.fetch = origFetch;
         window.AutonomyNetworkSession = origSession;
-        window.AutonomyNetworkIdentity = origIdentity;
+        if (rootDialog()) { var c = rootDialog().querySelector('.or-cancel'); if (c) c.click(); }
         data.approvalRequest = null;
         data._openingApprovals = null;
     }
@@ -5860,9 +5881,11 @@ class TestDashboardAccessApproval:
         assert "dashboard:ui" in c["body"]
         assert "auto-agent-voice" in c["body"]
         assert "121212121212" in c["body"]
-        assert c["password_label"] == "Personal identity password"
-        assert c["password_visible"] is True
+        # The sheet owns no password: Approve opens the shared factor-aware
+        # unlock (ceremony/open-root.js), named for the action.
+        assert c["sheet_has_no_password"] is True
         assert "Approve access" in c["action_label"]
+        assert c["unlock_opened"] is True and c["unlock_names_action"] is True
 
     def test_approval_signs_exact_grant_and_waits_for_executor(self):
         c = self._checks
@@ -5871,14 +5894,15 @@ class TestDashboardAccessApproval:
         assert c["posted"]["approved"] is True
         assert c["posted"]["grant"]["scope"] == ["dashboard:ui"]
         assert c["signature_verifies"] is True
-        assert c["seed_zeroed"] is True
         assert c["waited_for_execution"] is True
         assert c["closed_after_success"] is True
 
     def test_wrong_password_is_inline_and_submits_nothing(self):
         c = self._checks
-        assert c["wrong_stays_open"] is True
-        assert "did not open your personal identity" in c["wrong_error"]
+        assert c["wrong_error"], c              # refused inside the unlock
+        assert c["wrong_unlock_stays_open"] is True
+        assert c["wrong_stays_open"] is True    # cancelling is recoverable
+        assert "cancelled" in c["cancel_error"].lower(), c
         assert c["wrong_not_posted"] is True
 
     def test_duplicate_delivery_is_coalesced_by_shared_opener(self):
