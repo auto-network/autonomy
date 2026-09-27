@@ -82,3 +82,31 @@ def test_a_file_with_content_but_no_org_row_is_refused_and_left_untouched(data_r
         assert conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_the_follow_round_materializes_the_mirror_itself(data_root, monkeypatch):
+    """A standalone node has no connector to call materialize_follow_scopes
+    at start-up; the round does it, so a stub minted after start-up is
+    adopted before the pull is attempted."""
+    import asyncio
+    from tools.network.idkit import KeyPair
+
+    stub = data_root / "orgs" / "autonomy.db"
+    GraphDB(stub).close()
+    monkeypatch.setattr(graph_db, "is_followed_org",
+                        lambda slug, root=None: (_org_row(data_root / "orgs" / f"{slug}.db") or (None, None))[1] == "followed")
+    attempted = []
+
+    async def connect(row):
+        attempted.append(row["org_uuid"])
+        raise RuntimeError("no relay in this test")
+
+    scheduler = fss.FleetSyncScheduler(fss.FleetSyncRuntimeConfig(
+        machine_key=KeyPair.generate(), personal_root_pub=KeyPair.generate().public_hex,
+        roster_entries=lambda: (), peer_addresses=lambda: {},
+        personal_db_path=data_root / "personal.db", poll_interval=60.0,
+        sync_scopes=lambda: {"autonomy": stub}, follow_connect=connect,
+    ))
+    asyncio.run(scheduler._sync_follow_scopes(0.0))
+    assert _org_row(stub) == (ORG, "followed")        # adopted by the round
+    assert attempted == [ORG]                          # and the pull was attempted as a follow

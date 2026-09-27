@@ -4095,7 +4095,17 @@ class FleetSyncScheduler:
         """One round's follow pulls: for every enabled followed mirror, pull
         its public surface over its own org:follow link. Each is independent;
         one failing never stops the others, and a followed mirror is never
-        pulled any other way."""
+        pulled any other way.
+
+        The round materializes the mirrors first: the connector's start-up
+        call is the only other one, and a standalone node (no fleet runtime,
+        no connector) never made it, so a stub minted by an early settings
+        read stayed an untyped member scope forever (Windows signed-release
+        node, 2026-09-27: no adoption line, is_followed_org False)."""
+        try:
+            await asyncio.to_thread(materialize_follow_scopes)
+        except Exception:
+            logger.warning("follow: mirror materialization failed", exc_info=True)
         followed = self._followed_scopes()
         if not followed:
             return
