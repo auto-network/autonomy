@@ -288,3 +288,15 @@ def test_status_reports_the_stages_certificate_gate_and_advertisement(remote_api
 def test_requires_operator_authority(remote_api):
     r = remote_api.client.post("/api/network/remote-access/publish", json={"mode": "local"})
     assert r.status_code in (401, 403)
+
+
+def test_tailscale_may_name_its_tailnet_origin_explicitly(remote_api):
+    """Chosen from the local address, the request's own origin is localhost;
+    the operator names the Tailnet origin, validated as Tailscale."""
+    r = _publish(remote_api.client, mode="tailscale", origin="https://desktop.tail1234.ts.net:8080")
+    assert r.status_code == 200, r.text
+    assert r.json()["remote_access"]["origin"] == "https://desktop.tail1234.ts.net:8080"
+    bad = _publish(remote_api.client, mode="tailscale", origin="https://dash.example.com")
+    assert bad.status_code == 400 and bad.json()["error"] == "origin_invalid"
+    other_mode = _publish(remote_api.client, mode="local", origin="http://localhost")
+    assert other_mode.status_code == 400 and other_mode.json()["error"] == "unknown_fields"

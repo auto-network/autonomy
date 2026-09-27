@@ -3626,7 +3626,9 @@ async def post_remote_access_publish(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return _service_publication_error("invalid_json")
-    if not isinstance(body, dict) or not {"mode"} <= set(body) <= {"mode", "app_label", "label"}:
+    if not isinstance(body, dict) or not {"mode"} <= set(body) <= {"mode", "app_label", "label", "origin"}:
+        return _service_publication_error("unknown_fields")
+    if "origin" in body and body.get("mode") != "tailscale":
         return _service_publication_error("unknown_fields")
     from tools.dashboard import remote_access, service_publication
 
@@ -3644,7 +3646,7 @@ async def post_remote_access_publish(request: Request) -> JSONResponse:
     try:
         row = await remote_access.publish(
             body.get("mode"), org=org, app_label=body.get("app_label"), label=body.get("label"),
-            request_origin=request_origin)
+            request_origin=request_origin, origin=body.get("origin"))
     except service_publication.ServicePublicationError as exc:
         return _service_publication_error(exc.code, exc.status_code, exc.detail)
     except ValueError:

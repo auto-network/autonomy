@@ -114,32 +114,11 @@ def test_mission_item_links_use_the_recorded_origin(monkeypatch):
     assert mission_api._item_link("11111111-1111-4111-8111-111111111111", "core", "q-1").startswith("/mission/")
 
 
-def test_renew_script_names_no_machine_and_never_fails_silently(tmp_path):
-    """The script carries no machine name, renews the certificate's own Tailnet
-    name when DASHBOARD_DOMAIN is unset, and logs before any refusal (reviewer:
-    a silent cron failure on the first of the month)."""
+def test_renew_script_names_no_machine():
+    """The script carries no machine name (behaviour is covered in
+    test_renew_tls_cert.py)."""
     import re
-    import subprocess
     from pathlib import Path
 
-    script = Path(__file__).resolve().parents[1] / "renew-tls-cert.sh"
-    text = script.read_text()
-    assert not re.search(r"[a-z0-9-]+\.tail[0-9a-f]+\.ts\.net", text)     # no machine name
-    assert "DASHBOARD_DOMAIN:?" not in text
-
-    # The name comes from the existing certificate's SAN.
-    cert = tmp_path / "tls.crt"
-    _tailnet_certificate(cert, ["localhost", "Node.TailABCD.ts.net"])
-    fn = re.search(r"^tailnet_name_from_cert\(\) \{.*?^\}$", text, re.M | re.S).group(0)
-    got = subprocess.run(["bash", "-c", fn + f'\ntailnet_name_from_cert "{cert}"'],
-                         capture_output=True, text=True, timeout=30)
-    assert got.stdout.strip() == "node.tailabcd.ts.net", got.stderr
-
-    # No name anywhere: the refusal lands in the log, and the run stops.
-    root = tmp_path / "root"
-    (root / "data").mkdir(parents=True)
-    run = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30,
-                         env={"PATH": "/usr/bin:/bin", "AUTONOMY_ROOT": str(root)})
-    assert run.returncode == 2
-    log = (root / "data" / "cert-renew.log").read_text()
-    assert "no DASHBOARD_DOMAIN and no .ts.net name" in log
+    text = (Path(__file__).resolve().parents[1] / "renew-tls-cert.sh").read_text()
+    assert not re.search(r"[a-z0-9-]+\.tail[0-9a-f]+\.ts\.net", text)

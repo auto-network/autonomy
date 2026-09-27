@@ -333,14 +333,53 @@ def _respawn_dead_worker(self: BaseReload) -> None:
     self._last_respawn = now
 
 
+# ── the TLS pair ───────────────────────────────────────────────────────────
+
+def _tls_pair_signature(config) -> tuple | None:
+    """(inode, mtime_ns) of the certificate and key the server was started
+    with, or None when the server is plain HTTP or a file is missing."""
+    paths = [getattr(config, name, None) for name in ("ssl_certfile", "ssl_keyfile")]
+    if not paths[0]:
+        return None
+    signature = []
+    for path in paths:
+        if not path:
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        signature.append((st.st_ino, st.st_mtime_ns))
+    return tuple(signature)
+
+
+def _tls_pair_changed(self: BaseReload) -> bool:
+    """Uvicorn builds the SSL context per worker in Config.load(), so a
+    renewed certificate is served by the next hand-off and by nothing else
+    (auto-1ei8m): a container restart would drop the warm vault and every
+    connection. The renewal script only installs the pair; this notices it."""
+    current = _tls_pair_signature(self.config)
+    previous = getattr(self, "_tls_pair", None)
+    self._tls_pair = current
+    return previous is not None and current is not None and current != previous
+
+
 def _run_with_handoff(self: BaseReload) -> None:
     self.startup()
+    self._tls_pair = _tls_pair_signature(self.config)
     for changes in self:
         if changes:
             logger.warning(
                 "%s detected changes in %s. Reloading...",
                 self.reloader_name, ", ".join(str(c) for c in changes),
             )
+            self.restart()
+        elif _tls_pair_changed(self):
+            logger.warning(
+                "TLS certificate or key changed on disk (%s); handing off to a worker "
+                "that loads the new pair", getattr(self.config, "ssl_certfile", ""),
+            )
+            self._last_changed_paths = [str(getattr(self.config, "ssl_certfile", ""))]
             self.restart()
         elif not self.process.is_alive():
             _respawn_dead_worker(self)

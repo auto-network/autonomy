@@ -483,3 +483,76 @@ def test_startup_binds_the_plain_socket_before_the_first_spawn(sup, monkeypatch)
     finally:
         for sock in sup.sockets:
             sock.close()
+
+
+class _LoopingFake(FakeSupervisor):
+    """The fake with the BaseReload surface `_run_with_handoff` drives: the
+    watcher iteration, and the patched startup/restart/shutdown seams."""
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.should_restart()
+
+    def startup(self):
+        rwn._startup_with_handoff(self)
+
+    def restart(self):
+        rwn._restart_with_handoff(self)
+
+    def shutdown(self):
+        self.timeline.append("shutdown")
+
+
+def _looping(sup, monkeypatch):
+    fake = _LoopingFake(sup._tmp, sup.incumbent)
+    fake.notices = sup.notices
+    monkeypatch.setattr(rwn, "_notify_dashboard", lambda config, changed=None, **kw: fake.notices.append(changed) or True)
+    monkeypatch.setattr(rwn.signal, "signal", lambda *_a, **_k: None)
+    fake.signal_handler = lambda *_a: None
+    return fake
+
+
+def test_a_renewed_tls_pair_triggers_the_same_handoff(sup, monkeypatch, tmp_path):
+    """auto-1ei8m: the renewal script only installs the new pair; the
+    supervisor notices the change and hands off (Config.load() builds the SSL
+    context per worker), so the vault stays warm and no connection drops."""
+    import os
+
+    cert = tmp_path / "tls.crt"
+    key = tmp_path / "tls.key"
+    cert.write_text("CERT-1")
+    key.write_text("KEY-1")
+    sup = _looping(sup, monkeypatch)
+    sup.config.ssl_certfile = str(cert)
+    sup.config.ssl_keyfile = str(key)
+
+    def renew():
+        key.write_text("KEY-2")
+        cert.write_text("CERT-2")
+        os.utime(cert, ns=(cert.stat().st_atime_ns, cert.stat().st_mtime_ns + 1_000_000))
+        sup.timeline.append("renewed")
+        return None
+
+    # startup spawns the first worker; the ready step makes it ready; the
+    # renewal lands; the next poll hands off and that replacement is made
+    # ready by the following step.
+    sup.script = [_make_ready(sup), renew, _make_ready(sup), _exit()]
+    rwn._run_with_handoff(sup)
+
+    spawns = [event for event in sup.timeline if event.startswith("spawn:")]
+    assert len(spawns) == 2, sup.timeline                 # the first worker, then the hand-off
+    assert sup.timeline.index("renewed") < sup.timeline.index(spawns[1])
+    assert sup.notices[-1] == [str(cert)]                 # the notice names the certificate
+
+
+def test_an_unchanged_tls_pair_never_restarts(sup, monkeypatch, tmp_path):
+    cert = tmp_path / "tls.crt"
+    cert.write_text("CERT")
+    sup = _looping(sup, monkeypatch)
+    sup.config.ssl_certfile = str(cert)
+    sup.config.ssl_keyfile = None
+    sup.script = [_make_ready(sup), lambda: None, lambda: None, _exit()]
+    rwn._run_with_handoff(sup)
+    assert len([e for e in sup.timeline if e.startswith("spawn:")]) == 1

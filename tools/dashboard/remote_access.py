@@ -252,7 +252,8 @@ def request_came_through_gateway(headers, relay_origin: str | None) -> bool:
 # ── the publish call ──────────────────────────────────────────────────────
 
 async def publish(mode: str, *, org: str = DEFAULT_PUBLISHER, app_label: str | None = None,
-                  label: str | None = None, request_origin: str | None = None) -> dict:
+                  label: str | None = None, request_origin: str | None = None,
+                  origin: str | None = None) -> dict:
     """Perform the whole publish deterministically and idempotently.
 
     ``autonomy``: reserve the origin (or reuse it), bind this dashboard as the
@@ -271,7 +272,11 @@ async def publish(mode: str, *, org: str = DEFAULT_PUBLISHER, app_label: str | N
         raise service_publication.ServicePublicationError("invalid_mode", 400)
     previous = current()
     if mode != "autonomy":
-        origin = validate_request_origin(mode, request_origin)
+        # Tailscale: the operator may name the Tailnet origin explicitly (they
+        # usually choose from the local address, where the request's own
+        # origin is not the Tailnet one); it is validated like any other.
+        origin = validate_request_origin(
+            mode, origin if (mode == "tailscale" and origin) else request_origin)
         paused = _pause_relay_publication(previous)
         row = {"mode": mode, "origin": origin, "published_at": _utc_now()}
         if paused is not None:
