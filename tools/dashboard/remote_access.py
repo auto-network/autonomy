@@ -143,3 +143,148 @@ def check_label(org: str, candidate: object, *, existing: list[str] | None = Non
         "existing_label": f"That reads like your existing label \"{conflict.against}\".",
     }
     return LabelCheck(False, label, conflict.code, conflict.against, reasons[conflict.code])
+
+
+# ── the publish call and its record (graph://c9d72ea4-feb §10) ─────────────
+
+#: The dashboard's own Service app label when onboarding publishes it.
+DEFAULT_APP_LABEL = "dashboard"
+#: The scope the dashboard publishes under by default (operator, 2026-09-26).
+DEFAULT_PUBLISHER = "personal"
+
+
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def record(org: str, payload: dict) -> dict:
+    """Write the operator's remote-access row (personal-homed singleton)."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.dashboard_remote_access import (
+        REMOTE_ACCESS_KEY, REMOTE_ACCESS_REVISION, REMOTE_ACCESS_SET_ID)
+
+    settings_ops.write_by_key(REMOTE_ACCESS_SET_ID, REMOTE_ACCESS_REVISION, REMOTE_ACCESS_KEY,
+                              payload, org=None)
+    return dict(payload)
+
+
+def current() -> dict | None:
+    """The recorded remote-access row, or None before onboarding chose."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.dashboard_remote_access import REMOTE_ACCESS_KEY, REMOTE_ACCESS_SET_ID
+
+    row = settings_ops.read_set_key(REMOTE_ACCESS_SET_ID, REMOTE_ACCESS_KEY, org=None, peers=[])
+    if row is None or not isinstance(row.get("payload"), dict):
+        return None
+    return dict(row["payload"])
+
+
+async def publish(mode: str, *, org: str = DEFAULT_PUBLISHER, app_label: str | None = None,
+                  request_origin: str | None = None) -> dict:
+    """Perform the whole publish deterministically and idempotently.
+
+    ``autonomy``: reserve the origin (or reuse it), bind this dashboard as the
+    target on its plain listener (personal-gated by construction), activate,
+    ask the certificate manager and the gateway to converge, and record the
+    row. Re-running returns the same origin and makes no second reservation.
+    ``tailscale`` / ``local``: record the origin the operator reached the
+    dashboard on; nothing is published.
+    """
+    from tools.graph.schemas.dashboard_remote_access import REACH_MODES
+    from tools.dashboard import service_publication
+
+    if mode not in REACH_MODES:
+        raise service_publication.ServicePublicationError("invalid_mode", 400)
+    if mode != "autonomy":
+        if not isinstance(request_origin, str) or not request_origin:
+            raise service_publication.ServicePublicationError("origin_required", 400)
+        return record(org, {"mode": mode, "origin": request_origin, "published_at": _utc_now()})
+
+    label = app_label if app_label is not None else DEFAULT_APP_LABEL
+    reservation, _created = service_publication.reserve_origin(org, label)
+    reservation_id = reservation["reservation_id"]
+    await service_publication.bind_service_target(
+        org, reservation_id, None, service_publication.DASHBOARD_TARGET_DEFAULT_PORT,
+        kind=service_publication.DASHBOARD_TARGET_KIND)
+    service_publication.transition_reservation(org, reservation_id, "active")
+    _converge()
+    return record(org, {
+        "mode": "autonomy",
+        "origin": reservation["origin"],
+        "reservation_id": reservation_id,
+        "app_label": reservation["app_label"],
+        "published_at": _utc_now(),
+    })
+
+
+def _converge() -> None:
+    """Best effort: issue the certificate and reload the gateway now rather
+    than at their next tick. Failures here never fail the publish; status
+    reports them."""
+    try:
+        from tools.dashboard import service_certificate_manager
+
+        service_certificate_manager.request_reconcile()
+    except Exception:
+        pass
+    try:
+        import asyncio
+
+        from tools.dashboard import web_gateway_supervisor
+
+        asyncio.get_running_loop().create_task(web_gateway_supervisor.request_reload())
+    except Exception:
+        pass
+
+
+async def status() -> dict:
+    """The staged progress onboarding polls: what is recorded, and for the
+    relay mode where the publish stands (route, certificate, gate, advertised)."""
+    row = current()
+    if row is None:
+        return {"mode": None, "origin": None, "recorded": False}
+    result = {"mode": row["mode"], "origin": row["origin"], "recorded": True,
+              "published_at": row.get("published_at")}
+    if row["mode"] != "autonomy":
+        return result
+    from tools.dashboard import service_publication, service_status, web_gateway_supervisor
+    from tools.dashboard import service_certificate_manager
+
+    org = DEFAULT_PUBLISHER
+    reservation_id = row["reservation_id"]
+    result["reservation_id"] = reservation_id
+    try:
+        link = await service_status.service_status(org, reservation_id)
+        result["route_state"] = link.get("state")
+        result["stages"] = link.get("stages", [])
+        result["failed_stage"] = link.get("failed_stage")
+        result["detail"] = link.get("detail", "")
+    except service_publication.ServicePublicationError as exc:
+        result["route_state"] = "unavailable"
+        result["failed_stage"] = "reservation"
+        result["detail"] = exc.code
+    identity = None
+    try:
+        member = service_publication._member_by_key(org, reservation_id)
+        identity = service_publication.certificate_identity_for_payload(member.payload) if member else None
+    except Exception:
+        identity = None
+    certificate = "pending"
+    for state in service_certificate_manager.certificate_states():
+        if state.get("org") == org and (identity is None or state.get("persona_label") == identity):
+            certificate = {"current": "ok", "renewal_due": "ok", "issuing": "pending",
+                           "missing": "pending"}.get(state.get("state"), "failed")
+            if certificate == "failed":
+                result["certificate_detail"] = state.get("reason", "")
+            break
+    result["certificate"] = certificate
+    gateway = web_gateway_supervisor.status()
+    result["advertised"] = reservation_id in (gateway.get("advertised_routes") or [])
+    result["gateway_state"] = gateway.get("state")
+    # The personal passkey gate is delivered by its own bead; until its helper
+    # runs the route fails closed, and this is what the screen must say.
+    result["gate"] = "up" if "dashboard-passkey" in (gateway.get("auth_helpers") or []) else "pending"
+    result["enrollment"] = "closed"
+    return result

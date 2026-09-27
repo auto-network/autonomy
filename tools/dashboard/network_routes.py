@@ -3603,8 +3603,62 @@ async def get_remote_access_label_check(request: Request) -> JSONResponse:
                         headers={"Cache-Control": "no-store"})
 
 
+def _remote_access_org(request: Request) -> tuple[str | None, JSONResponse | None]:
+    """Operator authority; the organization selection when one was made, else
+    the personal scope (the default publisher: onboarding's publish call
+    arrives before any organization exists)."""
+    refused = require_global_api_authority(request)
+    if refused is not None:
+        return None, refused
+    from tools.dashboard import remote_access
+
+    org = organization_scope_from_request(request)
+    return (org if isinstance(org, str) and org else remote_access.DEFAULT_PUBLISHER), None
+
+
+async def post_remote_access_publish(request: Request) -> JSONResponse:
+    """One call performs the whole publish (graph://c9d72ea4-feb §10):
+    {mode, app_label?}. Idempotent; returns the recorded row."""
+    org, refused = _remote_access_org(request)
+    if refused is not None:
+        return refused
+    try:
+        body = await request.json()
+    except Exception:
+        return _service_publication_error("invalid_json")
+    if not isinstance(body, dict) or not {"mode"} <= set(body) <= {"mode", "app_label"}:
+        return _service_publication_error("unknown_fields")
+    from tools.dashboard import remote_access, service_publication
+
+    # The origin the operator reached the dashboard on: recorded for the local
+    # and Tailscale modes, taken from the request itself (never from the body).
+    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+    request_origin = f"{scheme}://{request.headers.get('host', '')}" if request.headers.get("host") else None
+    try:
+        row = await remote_access.publish(
+            body.get("mode"), org=org, app_label=body.get("app_label"), request_origin=request_origin)
+    except service_publication.ServicePublicationError as exc:
+        return _service_publication_error(exc.code, exc.status_code, exc.detail)
+    except ValueError:
+        return _service_publication_error("invalid_app_label")
+    return JSONResponse({"ok": True, "remote_access": row}, headers={"Cache-Control": "no-store"})
+
+
+async def get_remote_access_status(request: Request) -> JSONResponse:
+    """The staged progress onboarding polls every few seconds."""
+    _org, refused = _remote_access_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import remote_access
+
+    return JSONResponse({"ok": True, "status": await remote_access.status()},
+                        headers={"Cache-Control": "no-store"})
+
+
 ROUTES = [
     Route("/api/network/remote-access/label/check", get_remote_access_label_check, methods=["GET"]),
+    Route("/api/network/remote-access/publish", post_remote_access_publish, methods=["POST"]),
+    Route("/api/network/remote-access/status", get_remote_access_status, methods=["GET"]),
     Route("/api/network/service-reservations", get_service_reservations, methods=["GET"]),
     Route("/api/network/service-reservations", post_service_reservation, methods=["POST"]),
     Route("/api/network/serve-zones", get_serve_zones, methods=["GET"]),
