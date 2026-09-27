@@ -5,8 +5,26 @@ import pytest
 from tools.dashboard.dao import mission_control_db as db
 
 
+@pytest.fixture(autouse=True)
+def _missions_belong_to_an_organization(monkeypatch):
+    """These tests exercise the store, not org resolution: a mission always
+    belongs to an organization (create_mission refuses an empty one), and
+    this module's callers name none, so the node's default is fixed here."""
+    monkeypatch.setattr(db, "_default_org", lambda: "autonomy")
+
+
 def _db_path(tmp_path):
     return tmp_path / "mission_control.db"
+
+
+def test_a_mission_with_no_organization_is_refused(tmp_path, monkeypatch):
+    """No caller organization and no shell default: refused, nothing stored
+    (15dab483; the plugin route maps it to 400)."""
+    monkeypatch.setattr(db, "_default_org", lambda: "")
+    path = _db_path(tmp_path)
+    with pytest.raises(ValueError, match="belongs to an organization"):
+        db.create_mission("Unbounded", db_path=path)
+    assert db.list_missions(db_path=path) == []
 
 
 def test_create_and_get_mission(tmp_path):
