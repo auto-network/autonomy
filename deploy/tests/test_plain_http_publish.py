@@ -150,3 +150,70 @@ def test_installers_print_the_plain_url_as_the_first_screen():
     assert 'open http://localhost:${HTTP_PORT}/' in INSTALL.read_text()
     for script in (QUICKSTART, INSTALL):
         assert "--http-port) HTTP_PORT=" in script.read_text()
+
+
+# ── under WSL: the Windows side of localhost ──────────────────────────────
+
+def _fake_powershell(bindir: Path, busy_port: int | None, ping_code: str) -> None:
+    """A powershell.exe stand-in: reports the listener state for one port and
+    a fixed status code for the Invoke-WebRequest check."""
+    bindir.mkdir(exist_ok=True)
+    script = bindir / "powershell.exe"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'cmd="$*"\n'
+        f'if [[ "$cmd" == *Get-NetTCPConnection* ]]; then\n'
+        f'  [[ "$cmd" == *"-LocalPort {busy_port} "* ]] && echo busy || echo free\n'
+        f'elif [[ "$cmd" == *Invoke-WebRequest* ]]; then echo "{ping_code}"\n'
+        f'fi\n'
+    )
+    script.chmod(0o755)
+
+
+def _run_functions(script: Path, workdir: Path, body: str, env: dict[str, str]) -> subprocess.CompletedProcess:
+    names = ("set_env", "port_is_free", "choose_http_port", "windows_first_screen_check") if script is INSTALL \
+        else ("port_is_free", "choose_http_port", "windows_first_screen_check")
+    full = _functions(script, names) + "\n" + body + "\n"
+    return subprocess.run(["bash", "-euo", "pipefail", "-c", full], cwd=str(workdir),
+                          capture_output=True, text=True, timeout=30, env={**os.environ, **env})
+
+
+@pytest.mark.parametrize("script", [QUICKSTART, INSTALL], ids=["quickstart", "install-published"])
+def test_under_wsl_a_port_windows_holds_is_busy_even_when_the_distro_is_free(script, tmp_path):
+    _holder, _busy, free_a = _busy_and_free_ports()
+    _holder.close()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_b = probe.getsockname()[1]
+    (tmp_path / ".env").write_text("")
+    _fake_powershell(tmp_path / "bin", busy_port=free_a, ping_code="200")
+    env = {"WSL_DISTRO_NAME": "Ubuntu", "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}"}
+
+    result = _run_functions(script, tmp_path, f'choose_http_port "" {free_a} {free_b}', env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(free_b)
+
+    # Without WSL the same fake is never consulted: the first free port wins.
+    elsewhere = tmp_path / "plain"
+    elsewhere.mkdir()
+    (elsewhere / ".env").write_text("")
+    plain = _run_functions(script, elsewhere, f'choose_http_port "" {free_a} {free_b}', {"PATH": env["PATH"]})
+    assert plain.returncode == 0, plain.stderr
+    assert plain.stdout.strip() == str(free_a)
+
+
+@pytest.mark.parametrize("script", [QUICKSTART, INSTALL], ids=["quickstart", "install-published"])
+def test_under_wsl_the_final_check_runs_from_windows(script, tmp_path):
+    env = {"WSL_DISTRO_NAME": "Ubuntu", "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}"}
+    _fake_powershell(tmp_path / "bin", busy_port=None, ping_code="200")
+    ok = _run_functions(script, tmp_path, "windows_first_screen_check 80 8080", env)
+    assert ok.returncode == 0 and "Windows reaches http://localhost:80 (200)" in ok.stdout
+
+    _fake_powershell(tmp_path / "bin", busy_port=None, ping_code="0")
+    warned = _run_functions(script, tmp_path, "windows_first_screen_check 80 8080", env)
+    assert warned.returncode == 0
+    assert "WARNING: Windows could not reach http://localhost:80/api/ping" in warned.stderr
+    assert "https://localhost:8080/" in warned.stderr
+
+    quiet = _run_functions(script, tmp_path, "windows_first_screen_check 80 8080", {"PATH": env["PATH"]})
+    assert quiet.stdout == "" and quiet.stderr == ""

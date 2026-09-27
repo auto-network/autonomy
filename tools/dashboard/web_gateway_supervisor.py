@@ -522,6 +522,7 @@ class ComposeGatewayRuntime:
         # Read as "absent" when the keycache is not ours to read (a dev box or
         # test runner where /run/autonomy-keycache is root-only): this runs at
         # import, and an unreadable record must not stop the dashboard loading.
+        self.helpers_known = True
         try:
             prior = json.loads(self._helper_override.read_text())["services"]
         except FileNotFoundError:
@@ -530,6 +531,7 @@ class ComposeGatewayRuntime:
             logger.warning("helper override %s unreadable (%s); managed helpers start unknown",
                            self._helper_override, exc)
             prior = {}
+            self.helpers_known = False
         self._helpers = tuple(
             AuthHelper(name.replace("org-oidc-", "org-oidc:", 1),
                        str(Path(service["volumes"][0]["source"]).parent),
@@ -771,6 +773,10 @@ class WebGatewaySupervisor:
             "config_revision": self._config_revision,
             "auth_helpers": [helper.helper_id for helper in self._loaded_helpers],
         }
+        if not getattr(self._runtime, "helpers_known", True):
+            # The runtime could not read its own record of running helpers;
+            # say so rather than reporting none.
+            result["managed_helpers"] = "unknown"
         if self._last_error is not None:
             result["error"] = self._last_error
         return result

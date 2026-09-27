@@ -1128,9 +1128,14 @@ def test_runtime_import_survives_an_unreadable_helper_override(tmp_path, caplog)
             pytest.skip("running as a user that ignores directory modes")
         runtime = sup.ComposeGatewayRuntime(helper_override=str(override))
         assert runtime._helpers == ()
+        assert runtime.helpers_known is False
         assert "unreadable" in caplog.text
+        status = sup.WebGatewaySupervisor(runtime=runtime, loader=lambda: None).status()
+        assert status["managed_helpers"] == "unknown"
     finally:
         locked.chmod(stat.S_IRWXU)
 
     missing = sup.ComposeGatewayRuntime(helper_override=str(tmp_path / "absent.json"))
     assert missing._helpers == ()
+    assert missing.helpers_known is True
+    assert "managed_helpers" not in sup.WebGatewaySupervisor(runtime=missing, loader=lambda: None).status()

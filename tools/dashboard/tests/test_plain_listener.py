@@ -120,6 +120,20 @@ def test_bind_failure_surfaces_and_closes_the_socket():
 
 # ── worker side: serving ──────────────────────────────────────────────────
 
+def test_uvicorn_private_serve_contract_still_holds():
+    """start() drives Server._serve(sockets=...) instead of serve(): in uvicorn
+    0.44 serve() is exactly capture_signals() around _serve(), and the signal
+    capture would displace the primary server's handlers. An upgrade that
+    changes either fact must fail here, not on the node."""
+    import inspect
+
+    import uvicorn
+
+    assert "sockets" in inspect.signature(uvicorn.Server._serve).parameters
+    source = inspect.getsource(uvicorn.Server.serve)
+    assert "capture_signals()" in source
+    assert "self._serve(sockets)" in source
+
 def test_serves_the_app_without_tls_and_stops_cleanly():
     port = _free_port()
 

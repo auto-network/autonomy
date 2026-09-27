@@ -187,7 +187,33 @@ set_env() { grep -q "^$1=" .env && sed -i "s|^$1=.*|$1=$2|" .env || echo "$1=$2"
 # The plain-HTTP first-screen port: the first free of the candidates, chosen once
 # and recorded in .env (docker-compose.yml publishes it on 127.0.0.1). A connect
 # probe on localhost is deterministic and needs no tool beyond bash.
-port_is_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+port_is_free() {
+    ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null || return 1
+    # Under WSL the distro's localhost is relayed from Windows, and a port Windows
+    # itself holds (HTTP.sys on 80) is busy there while nothing answers in here.
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]] && command -v powershell.exe >/dev/null 2>&1; then
+        local win
+        win="$(powershell.exe -NoProfile -NonInteractive -Command \
+            "if (Get-NetTCPConnection -State Listen -LocalPort $1 -ErrorAction SilentlyContinue) { 'busy' } else { 'free' }" \
+            2>/dev/null | tr -d '\r')"
+        [[ "$win" == busy ]] && return 1
+    fi
+    return 0
+}
+windows_first_screen_check() {  # windows_first_screen_check <http-port> <https-port>
+    [[ -n "${WSL_DISTRO_NAME:-}" ]] && command -v powershell.exe >/dev/null 2>&1 || return 0
+    local code
+    code="$(powershell.exe -NoProfile -NonInteractive -Command \
+        "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://localhost:$1/api/ping).StatusCode } catch { 0 }" \
+        2>/dev/null | tr -d '\r')"
+    if [[ "$code" == 200 ]]; then
+        echo "==> Windows reaches http://localhost:$1 (200)"
+    else
+        echo "WARNING: Windows could not reach http://localhost:$1/api/ping (got '${code:-none}')." >&2
+        echo "         Open https://localhost:$2/ from the Windows browser instead, and check that Docker's" >&2
+        echo "         userland proxy is enabled and that nothing on Windows holds port $1." >&2
+    fi
+}
 choose_http_port() {  # choose_http_port <requested-or-empty> <candidate>... ; echoes the port
     local requested="$1" p; shift
     if [[ -n "$requested" ]]; then set_env DASHBOARD_HTTP_PORT "$requested"; echo "$requested"; return 0; fi
@@ -233,6 +259,7 @@ for _ in $(seq 1 30); do
     sleep 1
 done
 [[ "${plain:-}" == 200 ]] || { echo "the plain-HTTP listener did not answer http://localhost:${HTTP_PORT}/api/ping with 200 (last: $plain)" >&2; docker compose ps >&2; exit 5; }
+windows_first_screen_check "$HTTP_PORT" "$PORT"
 step "dashboard is up"
 echo
 echo "Autonomy ${RELEASE_TAG} is running: open http://localhost:${HTTP_PORT}/"
