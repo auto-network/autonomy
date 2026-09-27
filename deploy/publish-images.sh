@@ -28,6 +28,23 @@ esac
 
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 2; }
 
+# The repository the images come from, stamped as org.opencontainers.image.source
+# on every image built here and by agents/build.sh. GHCR attaches a package to
+# its repository by this label (and a first-time package then inherits the
+# repository's visibility instead of being created private, which stopped
+# Windows run 6 on 2026-09-27). Optional: a sovereign build may have no
+# public repository to name.
+SOURCE_URL="${AUTONOMY_IMAGE_SOURCE:-}"
+source_label=()
+if [[ -n "$SOURCE_URL" ]]; then
+    case "$SOURCE_URL" in
+        https://*) ;;
+        *) echo "AUTONOMY_IMAGE_SOURCE must be an https URL (the repository the images come from)" >&2; exit 2 ;;
+    esac
+    source_label=(--label "org.opencontainers.image.source=$SOURCE_URL")
+    export AUTONOMY_IMAGE_SOURCE="$SOURCE_URL"
+fi
+
 base="$REGISTRY/$NAMESPACE"
 node_ref="$base/autonomy-node:$RELEASE_TAG"
 session_ref="$base/autonomy-session:$RELEASE_TAG"
@@ -46,7 +63,7 @@ echo "==> Building node image from deploy/Dockerfile"
 node_src="$(mktemp -d)"
 git clone --quiet --depth 1 "file://$REPO_ROOT/.git" "$node_src/repo"
 node_build=(
-    docker build --pull
+    docker build --pull "${source_label[@]}"
     --build-arg "BASE_IMAGE=${AUTONOMY_BASE_IMAGE:-python:3.12-slim}"
     -f "$node_src/repo/deploy/Dockerfile"
     -t "$node_ref"
@@ -62,7 +79,7 @@ echo "==> Building Service gateway image from deploy/Dockerfile.service-gateway"
 # service-gateway from /app) whenever a Service is published, so a released
 # node needs it in the lock like every other image it runs; without it the
 # gateway fails with "No such image" (Windows run 5, 2026-09-27).
-docker build --pull \
+docker build --pull "${source_label[@]}" \
     -f "$node_src/repo/deploy/Dockerfile.service-gateway" \
     -t "$service_gateway_ref" \
     "$node_src/repo"

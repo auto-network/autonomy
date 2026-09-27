@@ -130,6 +130,25 @@ def test_publish_builds_pushes_and_records_exact_digests_without_signing(release
     assert all(f"@sha256:{DIGEST}" in line for line in image_lines)
 
 
+def test_publish_stamps_the_source_repository_on_every_image_it_builds(release_env):
+    """GHCR attaches a package to its repository by
+    org.opencontainers.image.source, and a first-time package then inherits
+    the repository's visibility (Windows run 6: a private gateway package)."""
+    env, log, _lock_file, _ = release_env
+    subprocess.run(["bash", str(PUBLISH)], env=env, check=True)
+    assert not any("image.source" in line for line in log.read_text().splitlines())
+    log.write_text("")
+    env = dict(env, AUTONOMY_IMAGE_SOURCE="https://github.com/auto-network/autonomy")
+    subprocess.run(["bash", str(PUBLISH)], env=env, check=True)
+    builds = [line for line in log.read_text().splitlines() if line.startswith("docker build")]
+    assert len(builds) == 2
+    assert all("--label org.opencontainers.image.source=https://github.com/auto-network/autonomy" in line
+               for line in builds), builds
+    refused = subprocess.run(["bash", str(PUBLISH)], env=dict(env, AUTONOMY_IMAGE_SOURCE="git@github.com:x/y"),
+                             capture_output=True, text=True)
+    assert refused.returncode == 2 and "https URL" in refused.stderr
+
+
 def test_publish_names_the_ghcr_packages_an_installer_cannot_pull(release_env, tmp_path):
     """GHCR creates a first-time package private and offers no visibility API
     (Windows run 6, 2026-09-27: autonomy-service-gateway). The release run

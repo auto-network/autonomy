@@ -39,6 +39,15 @@ done
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 
+# AUTONOMY_IMAGE_SOURCE (a release input, deploy/publish-images.sh): the
+# repository URL stamped as org.opencontainers.image.source, which is what
+# GHCR reads to attach a package to its repository (and to inherit the
+# repository's visibility for a first-time package).
+SOURCE_LABEL=()
+if [[ -n "${AUTONOMY_IMAGE_SOURCE:-}" ]]; then
+    SOURCE_LABEL=(--label "org.opencontainers.image.source=${AUTONOMY_IMAGE_SOURCE}")
+fi
+
 echo "==> Building docker image..."
 cd "$BUILD_DIR"
 
@@ -54,7 +63,7 @@ cp "$SCRIPT_DIR/agent_browser_shim.sh" context/
 if [[ -z "${CLAUDE_VERSION:-}" ]] && command -v claude >/dev/null 2>&1; then
     CLAUDE_VERSION=$(claude --version 2>/dev/null | awk '{print $1}')
 fi
-docker build $NO_CACHE $PULL --build-arg CLAUDE_VERSION="${CLAUDE_VERSION:-latest}" \
+docker build $NO_CACHE $PULL "${SOURCE_LABEL[@]}" --build-arg CLAUDE_VERSION="${CLAUDE_VERSION:-latest}" \
     -t autonomy-session context/
 echo "==> Done. Image: autonomy-session"
 docker images autonomy-session --format "  Size: {{.Size}}"
@@ -66,7 +75,7 @@ docker images autonomy-session --format "  Size: {{.Size}}"
 echo ""
 echo "==> Building dashboard variant (Python deps layered on base)..."
 # No --pull: these variants build FROM the local autonomy-session just built.
-docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.platform" -t autonomy-session-platform context/
+docker build $NO_CACHE "${SOURCE_LABEL[@]}" -f "$SCRIPT_DIR/Dockerfile.platform" -t autonomy-session-platform context/
 echo "==> Done. Image: autonomy-session-platform"
 docker images autonomy-session-platform --format "  Size: {{.Size}}"
 
@@ -75,7 +84,7 @@ docker images autonomy-session-platform --format "  Size: {{.Size}}"
 # against the host socket (graph://89d3c8df-544 §2).
 echo ""
 echo "==> Building host-terminal variant (docker CLI + compose plugin)..."
-docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.host-terminal" -t autonomy-host-terminal context/
+docker build $NO_CACHE "${SOURCE_LABEL[@]}" -f "$SCRIPT_DIR/Dockerfile.host-terminal" -t autonomy-host-terminal context/
 echo "==> Done. Image: autonomy-host-terminal"
 docker images autonomy-host-terminal --format "  Size: {{.Size}}"
 
@@ -84,7 +93,7 @@ docker images autonomy-host-terminal --format "  Size: {{.Size}}"
 # that need Docker-in-Docker (enterprise, widgets-ng) extend this.
 echo ""
 echo "==> Building dind variant (Docker CE + entrypoint wrapper)..."
-docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.dind" -t autonomy-session-dind context/
+docker build $NO_CACHE "${SOURCE_LABEL[@]}" -f "$SCRIPT_DIR/Dockerfile.dind" -t autonomy-session-dind context/
 echo "==> Done. Image: autonomy-session-dind"
 docker images autonomy-session-dind --format "  Size: {{.Size}}"
 
@@ -110,7 +119,7 @@ elif [[ -d "$PROJECTS_DIR" ]]; then
         image_tag="session-$project_name"
         echo ""
         echo "==> Building $image_tag (from $dockerfile)..."
-        docker build $NO_CACHE \
+        docker build $NO_CACHE "${SOURCE_LABEL[@]}" \
             -f "context/projects/$project_name/Dockerfile" \
             -t "$image_tag" \
             context/

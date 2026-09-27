@@ -30,6 +30,9 @@ jobs:
       AUTONOMY_IMAGE_NAMESPACE: ${{ inputs.namespace }}
       AUTONOMY_RELEASE_TAG: ${{ inputs.release_tag }}
       AUTONOMY_IMAGE_LOCK: ${{ runner.temp }}/image-lock.env
+      # Stamped as org.opencontainers.image.source: attaches each package to
+      # this repository on GHCR, so a first-time package is not created private.
+      AUTONOMY_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
 
