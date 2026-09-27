@@ -909,6 +909,16 @@ def reservation_publishers(org: str) -> dict[str, dict]:
                 names[member.key] = member.payload["display_name"]
     except Exception:
         names = {}
+    if org == "personal":
+        # The personal publisher is the identity itself (decision b): its
+        # name is the identity's display name, not a member-profile row
+        # (Windows run 6 showed "member <hex>" for the operator).
+        try:
+            root_pub, display_name = _persona_for_org(org)
+            if display_name:
+                names.setdefault(root_pub, display_name)
+        except Exception:
+            pass
     result: dict[str, dict] = {}
     for member in _reservation_members(org):
         persona_pub = member.payload.get("persona_pub")

@@ -222,7 +222,7 @@ def _serve_cert_ok(org: str, serve_cert_state=None) -> tuple[bool, str]:
         return False, f"serve certificate state unreadable ({exc})"
     status = str(state.get("status") or "missing")
     if status == "ok":
-        return True, "serving certificate current"
+        return True, "serving credential current"
     return False, f"serving certificate {status}" + (
         f": {state['error']}" if state.get("error") else ""
     )
