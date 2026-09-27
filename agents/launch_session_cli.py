@@ -393,9 +393,11 @@ def main() -> int:
         # Sign-ins are opened in memory and delivered into the container's
         # private ramfs once it runs (auto-1cc4q); a chosen vault account
         # that cannot be opened refuses the launch before Docker runs.
+        signin_accounts: dict = {}
         signins = _signin_payloads(
             creds.get("harness_token")
-            if creds is not None and creds.get("type") == "vault" else None)
+            if creds is not None and creds.get("type") == "vault" else None,
+            accounts_out=signin_accounts)
         if signins is None:
             print("ERROR: a sign-in account in the vault could not be opened",
                   file=sys.stderr)
@@ -471,7 +473,7 @@ def main() -> int:
 
         # docker run blocks until the session ends, so the sign-ins follow
         # the container from a thread that waits for it to be running.
-        deliver_signins_in_background(args.name, signins)
+        deliver_signins_in_background(args.name, signins, signin_accounts)
         result = subprocess.run(cmd)
 
         print(f"OUTPUT_DIR={run_dir}")

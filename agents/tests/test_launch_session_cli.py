@@ -18,7 +18,8 @@ def signin_deliveries(monkeypatch):
     that waits for a real container."""
     got = []
     monkeypatch.setattr(session_launcher, "deliver_signins_in_background",
-                        lambda name, payloads: got.append((name, sorted(payloads))))
+                        lambda name, payloads, accounts=None: got.append(
+                            (name, sorted(payloads))))
     return got
 
 
@@ -38,7 +39,7 @@ def test_foreground_unopenable_signin_refuses_before_docker(tmp_path, monkeypatc
     refusal on the foreground path too: main() returns 1 and Docker never
     runs (auto-vm8qh criterion 6, auto-1cc4q)."""
     _foreground_argv(tmp_path, monkeypatch)
-    monkeypatch.setattr(session_launcher, "_signin_payloads", lambda acct: None)
+    monkeypatch.setattr(session_launcher, "_signin_payloads", lambda acct, **_k: None)
     ran = []
     monkeypatch.setattr(subprocess, "run",
                         lambda *a, **k: ran.append(a) or types.SimpleNamespace(returncode=0))
@@ -52,7 +53,7 @@ def test_foreground_delivers_signins_into_the_ramfs(tmp_path, monkeypatch,
     mounted, and its harness argv waits for and links them."""
     _foreground_argv(tmp_path, monkeypatch)
     monkeypatch.setattr(session_launcher, "_signin_payloads",
-                        lambda acct: {session_launcher.CODEX_AUTH_FILENAME: b"{}"})
+                        lambda acct, **_k: {session_launcher.CODEX_AUTH_FILENAME: b"{}"})
     captured = {}
     monkeypatch.setattr(subprocess, "run", lambda cmd, *a, **k: captured.update(cmd=cmd)
                         or types.SimpleNamespace(returncode=0))
@@ -123,7 +124,7 @@ def _run_foreground_capture(tmp_path, monkeypatch, *, network_host, topo):
     monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: None)
     monkeypatch.setattr(session_launcher, "_resolve_credentials",
                         lambda: {"type": "token", "token": "t"})
-    monkeypatch.setattr(session_launcher, "_signin_payloads", lambda acct: {})
+    monkeypatch.setattr(session_launcher, "_signin_payloads", lambda acct, **_k: {})
     monkeypatch.setattr(session_launcher, "_setup_auth_docker_args",
                         lambda creds, run_dir: [])
 

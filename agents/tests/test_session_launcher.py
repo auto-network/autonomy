@@ -113,10 +113,10 @@ def signin_deliveries(monkeypatch):
     got = {"now": [], "background": []}
     monkeypatch.setattr(
         session_launcher, "deliver_signins",
-        lambda name, payloads: got["now"].append((name, sorted(payloads))) or [])
+        lambda name, payloads, **_k: got["now"].append((name, sorted(payloads))) or [])
     monkeypatch.setattr(
         session_launcher, "deliver_signins_in_background",
-        lambda name, payloads: payloads and got["background"].append(
+        lambda name, payloads, accounts=None: payloads and got["background"].append(
             (name, sorted(payloads))))
     return got
 
@@ -2259,7 +2259,7 @@ def test_mount_refusal_mints_no_token_and_opens_no_signin(tmp_path, fake_creds, 
         auth_db=types.SimpleNamespace(insert_token=lambda *a, **k: minted.append(a)))
     monkeypatch.setitem(__import__("sys").modules, "tools.dashboard.dao", fake_dao)
     monkeypatch.setattr(session_launcher, "_signin_payloads",
-                        lambda acct: opened.append(acct) or {})
+                        lambda acct, **_k: opened.append(acct) or {})
     monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: None)
     result = session_launcher.launch_session(
         session_type="dispatch", name="t", prompt=None, detach=True,
@@ -2646,3 +2646,167 @@ def test_dind_volume_create_failure_refuses_the_launch(
     assert _run(needs_nested_docker=True,
                 output_dir=str(tmp_path / "a")) is None
     assert not any(c[:2] == ["docker", "run"] for c in calls)
+
+
+# ── re-delivery after a reload kills the delivery thread (auto-fgheq) ──
+
+
+def test_signin_payloads_report_the_chosen_accounts(monkeypatch):
+    from tools.graph import harness_credentials as hv
+    _stub_vault(monkeypatch, {
+        "codex": [hv.Account("codex", "cx-1", {"id": "i", "access": "a", "refresh": "r"})],
+        "grok": [hv.Account("grok", "gk-1", {"auth": '{"t": 1}'})],
+    })
+    accounts = {}
+    payloads = session_launcher._signin_payloads(None, accounts_out=accounts)
+    assert accounts == {session_launcher.CODEX_AUTH_FILENAME: "cx-1",
+                        session_launcher.GROK_AUTH_FILENAME: "gk-1"}
+    for filename, account in accounts.items():
+        assert session_launcher._open_signin(filename, account) == payloads[filename] \
+            or filename == session_launcher.CODEX_AUTH_FILENAME  # codex stamps a time
+    assert session_launcher._open_signin(session_launcher.GROK_AUTH_FILENAME, "gone") is None
+
+
+@pytest.fixture
+def pending_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_launcher, "SIGNIN_PENDING_DIR", tmp_path / "pending")
+    return tmp_path / "pending"
+
+
+def test_background_delivery_keeps_a_pending_record_until_it_finishes(
+        pending_dir, monkeypatch):
+    import threading
+    release = threading.Event()
+    delivered = []
+
+    def deliver(name, payloads):
+        assert release.wait(10)
+        delivered.append(name)
+        return []
+    monkeypatch.setattr(session_launcher, "deliver_signins", deliver)
+    # the autouse fixture replaced it; use the real one here
+    monkeypatch.setattr(session_launcher, "deliver_signins_in_background",
+                        _REAL_BACKGROUND)
+    session_launcher.deliver_signins_in_background(
+        "auto-p", {"codex-auth.json": b"{}"}, {"codex-auth.json": "cx-1"})
+    record = json.loads((pending_dir / "auto-p.json").read_text())
+    assert record["accounts"] == {"codex-auth.json": "cx-1"}
+    assert "{}" not in json.dumps(record["accounts"])
+    release.set()
+    for _ in range(200):
+        if not (pending_dir / "auto-p.json").exists():
+            break
+        __import__("time").sleep(0.01)
+    assert delivered == ["auto-p"] and not (pending_dir / "auto-p.json").exists()
+
+
+_REAL_BACKGROUND = session_launcher.deliver_signins_in_background
+
+
+def _pending(pending_dir, name, *, accounts, deadline, age):
+    import os
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    path = pending_dir / f"{name}.json"
+    path.write_text(json.dumps({"deadline": deadline, "accounts": accounts}))
+    t = __import__("time").time() - age
+    os.utime(path, (t, t))
+    return path
+
+
+def test_redelivery_reopens_only_what_is_missing(pending_dir, monkeypatch, signin_deliveries):
+    import time as _t
+    now = _t.time()
+    _pending(pending_dir, "auto-r", deadline=now + 60, age=30,
+             accounts={"codex-auth.json": "cx-1", "grok-auth.json": "gk-1"})
+    monkeypatch.setattr(session_launcher, "_missing_signins",
+                        lambda name, files: ["grok-auth.json"])
+    monkeypatch.setattr(session_launcher, "_open_signin",
+                        lambda f, a: f"{f}:{a}".encode())
+    done = session_launcher.redeliver_pending_signins(since=now - 5, now=now)
+    assert done == {"auto-r": ["grok-auth.json"]}
+    assert signin_deliveries["now"] == [("auto-r", ["grok-auth.json"])]
+    assert not (pending_dir / "auto-r.json").exists()
+
+
+def test_redelivery_skips_its_own_records_and_drops_expired_ones(
+        pending_dir, monkeypatch, signin_deliveries):
+    import time as _t
+    now = _t.time()
+    mine = _pending(pending_dir, "auto-mine", deadline=now + 60, age=1,
+                    accounts={"codex-auth.json": "cx-1"})
+    expired = _pending(pending_dir, "auto-old", deadline=now - 1, age=300,
+                       accounts={"codex-auth.json": "cx-1"})
+    monkeypatch.setattr(session_launcher, "_missing_signins",
+                        lambda name, files: list(files))
+    monkeypatch.setattr(session_launcher, "_open_signin", lambda f, a: b"x")
+    assert session_launcher.redeliver_pending_signins(since=now - 10, now=now) == {}
+    assert mine.exists(), "a record this worker's own thread still owns"
+    assert not expired.exists()
+    assert signin_deliveries["now"] == []
+
+
+def test_a_record_owned_by_a_live_process_is_left_to_it(pending_dir, monkeypatch, signin_deliveries):
+    """Review of daca2ace: a foreground CLI's delivery thread survives a
+    dashboard reload; a second writer would race it on the same ramfs temp
+    file and could publish a truncated sign-in."""
+    import os
+    import time as _t
+    now = _t.time()
+    path = _pending(pending_dir, "auto-live", deadline=now + 60, age=300,
+                    accounts={"codex-auth.json": "cx-1"})
+    record = json.loads(path.read_text())
+    record.update(owner_pid=os.getpid(),
+                  owner_start=session_launcher._process_start_ticks(os.getpid()))
+    path.write_text(json.dumps(record))
+    os.utime(path, (now - 300, now - 300))   # old enough for the mtime rule
+    monkeypatch.setattr(session_launcher, "_missing_signins", lambda n, f: list(f))
+    monkeypatch.setattr(session_launcher, "_open_signin", lambda f, a: b"x")
+    assert session_launcher.redeliver_pending_signins(since=now, now=now) == {}
+    assert path.exists() and signin_deliveries["now"] == []
+
+
+@pytest.mark.parametrize("owner", ["dead", "reused"])
+def test_a_record_whose_owner_is_gone_is_redelivered(pending_dir, monkeypatch,
+                                                     signin_deliveries, owner):
+    import os
+    import time as _t
+    now = _t.time()
+    path = _pending(pending_dir, "auto-gone", deadline=now + 60, age=1,
+                    accounts={"codex-auth.json": "cx-1"})
+    record = json.loads(path.read_text())
+    ticks = session_launcher._process_start_ticks(os.getpid())
+    record.update(owner_pid=os.getpid() if owner == "reused" else 2**22 + 12345,
+                  owner_start=ticks + 1 if owner == "reused" else ticks)
+    path.write_text(json.dumps(record))
+    monkeypatch.setattr(session_launcher, "_missing_signins", lambda n, f: list(f))
+    monkeypatch.setattr(session_launcher, "_open_signin", lambda f, a: b"x")
+    # since=now-10 would skip it by age; the owner fields take precedence.
+    assert session_launcher.redeliver_pending_signins(since=now - 10, now=now) == {
+        "auto-gone": ["codex-auth.json"]}
+
+
+def test_an_expired_record_warns_when_the_harness_started_signed_out(
+        pending_dir, monkeypatch, caplog):
+    import time as _t
+    now = _t.time()
+    _pending(pending_dir, "auto-late", deadline=now - 1, age=300,
+             accounts={"codex-auth.json": "cx-1"})
+    monkeypatch.setattr(session_launcher, "_missing_signins", lambda n, f: list(f))
+
+    class Running:
+        stdout, returncode = "true\n", 0
+    monkeypatch.setattr(session_launcher.subprocess, "run", lambda *a, **k: Running())
+    with caplog.at_level("WARNING", logger=session_launcher.logger.name):
+        session_launcher.redeliver_pending_signins(since=now, now=now)
+    assert "auto-late started its harness without sign-ins" in caplog.text
+
+
+def test_the_presence_check_runs_as_the_secret_owner(monkeypatch):
+    calls = []
+
+    class Done:
+        returncode = 0
+    monkeypatch.setattr(session_launcher.subprocess, "run",
+                        lambda cmd, **k: calls.append(cmd) or Done())
+    assert session_launcher._missing_signins("auto-x", ["codex-auth.json"]) == []
+    assert calls[0][:4] == ["docker", "exec", "-u", "1000"]

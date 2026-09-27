@@ -987,8 +987,13 @@ def _codex_auth_doc(acct) -> bytes:
     return json.dumps(auth_doc, indent=2).encode()
 
 
-def _signin_payloads(claude_account: str | None) -> dict[str, bytes] | None:
+def _signin_payloads(claude_account: str | None,
+                     accounts_out: dict | None = None) -> dict[str, bytes] | None:
     """Every sign-in this launch delivers, ``{filename: content}``.
+
+    *accounts_out*, when given, receives ``{filename: account id}`` for each
+    included sign-in: the key selection only, never the secret, so a
+    re-delivery can reopen the same account (:func:`_open_signin`).
 
     Codex and Grok ride along whenever the vault holds a launchable account
     for them (any harness may shell out to either CLI); a missing account is
@@ -1006,22 +1011,44 @@ def _signin_payloads(claude_account: str | None) -> dict[str, bytes] | None:
         )
     else:
         payloads[CODEX_AUTH_FILENAME] = _codex_auth_doc(codex)
+        if accounts_out is not None:
+            accounts_out[CODEX_AUTH_FILENAME] = codex.id
     if claude_account:
         bundle = _claude_bundle_doc(claude_account)
         if bundle is None:
             return None
         payloads[CLAUDE_BUNDLE_FILENAME] = bundle
+        if accounts_out is not None:
+            accounts_out[CLAUDE_BUNDLE_FILENAME] = claude_account
     grok = _pick_account("grok")
     if grok is not None:
         auth = grok.get("auth")
         if auth:
             payloads[GROK_AUTH_FILENAME] = auth.encode()
+            if accounts_out is not None:
+                accounts_out[GROK_AUTH_FILENAME] = grok.id
         else:
             logger.warning(
                 "session_launcher: the Grok account has no stored sign-in; "
                 "remedy: unlock, or run `graph credentials import`",
             )
     return payloads
+
+
+def _open_signin(filename: str, account_id: str) -> bytes | None:
+    """Reopen one sign-in from the vault by the account a launch chose."""
+    if filename == CLAUDE_BUNDLE_FILENAME:
+        return _claude_bundle_doc(account_id)
+    harness = {CODEX_AUTH_FILENAME: "codex", GROK_AUTH_FILENAME: "grok"}.get(filename)
+    if harness is None:
+        return None
+    acct = next((a for a in _accounts(harness) if a.id == account_id), None)
+    if acct is None:
+        return None
+    if filename == CODEX_AUTH_FILENAME:
+        return _codex_auth_doc(acct)
+    auth = acct.get("auth")
+    return auth.encode() if auth else None
 
 
 def signin_argv_prefix(filenames) -> list[str]:
@@ -1087,15 +1114,164 @@ def deliver_signins(container: str, payloads: dict[str, bytes], *,
     return failed
 
 
+#: One JSON record per background delivery in flight, so a dashboard reload
+#: that kills the delivering thread can finish the job (auto-fgheq). It holds
+#: which accounts were chosen, never a secret.
+SIGNIN_PENDING_DIR = DATA_ROOT / "signin-pending"
+
+
+def _pending_path(container: str) -> Path:
+    return SIGNIN_PENDING_DIR / f"{container}.json"
+
+
+def _process_start_ticks(pid: int) -> int | None:
+    """``/proc/<pid>/stat`` field 22 (start time in clock ticks), which with
+    the pid identifies one process even after its pid is reused."""
+    try:
+        with open(f"/proc/{int(pid)}/stat") as fh:
+            return int(fh.read().rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _clear_pending(container: str) -> None:
+    try:
+        _pending_path(container).unlink()
+    except OSError:
+        pass
+
+
 def deliver_signins_in_background(container: str,
-                                  payloads: dict[str, bytes]) -> None:
+                                  payloads: dict[str, bytes],
+                                  accounts: dict[str, str] | None = None) -> None:
     """Deliver from a daemon thread, for launches whose container is started
     by someone else after this returns (tmux, the foreground CLI). The
-    thread lives only until delivery (bounded by SIGNIN_CONTAINER_WAIT_S)."""
+    thread lives only until delivery (bounded by SIGNIN_CONTAINER_WAIT_S).
+
+    With *accounts* (``{filename: account id}``) a pending record is kept
+    until the thread finishes, so :func:`redeliver_pending_signins` can
+    complete a delivery the thread did not live to make."""
     if not payloads:
         return
-    threading.Thread(target=deliver_signins, args=(container, payloads),
-                     name=f"signin-{container}", daemon=True).start()
+    if accounts:
+        try:
+            SIGNIN_PENDING_DIR.mkdir(parents=True, exist_ok=True)
+            _pending_path(container).write_text(json.dumps({
+                "deadline": time.time() + SIGNIN_CONTAINER_WAIT_S + SIGNIN_WAIT_S,
+                "accounts": {f: accounts[f] for f in payloads if f in accounts},
+                # The process whose thread is delivering: the dashboard
+                # worker, or a foreground CLI that outlives any reload.
+                "owner_pid": os.getpid(),
+                "owner_start": _process_start_ticks(os.getpid()),
+            }))
+        except OSError:
+            logger.exception("session_launcher: could not record the pending "
+                             "sign-in delivery for %s", container)
+
+    def run() -> None:
+        try:
+            deliver_signins(container, payloads)
+        finally:
+            _clear_pending(container)
+
+    threading.Thread(target=run, name=f"signin-{container}", daemon=True).start()
+
+
+def _missing_signins(container: str, filenames) -> list[str]:
+    """The sign-ins not present in the container's private ramfs."""
+    from agents.secret_ramfs import SESSION_SECRET_DST, SESSION_SECRET_UID
+    missing = []
+    for filename in filenames:
+        try:
+            r = subprocess.run(
+                ["docker", "exec", "-u", str(SESSION_SECRET_UID), container,
+                 "test", "-s", f"{SESSION_SECRET_DST}/{filename}"],
+                capture_output=True, timeout=15)
+            if r.returncode != 0:
+                missing.append(filename)
+        except (OSError, subprocess.TimeoutExpired):
+            missing.append(filename)
+    return missing
+
+
+def redeliver_pending_signins(*, since: float, now: float | None = None) -> dict[str, list[str]]:
+    """Finish sign-in deliveries a dashboard reload interrupted (auto-fgheq).
+
+    Run once when a dashboard worker activates. A record whose owner process
+    (pid and start time) is still alive is left alone: its delivery thread is
+    still working, and a second writer would race it on the same temp file in
+    the ramfs (a foreground CLI outlives any reload; an old worker overlaps
+    its replacement). A record from a dead owner has its missing sign-ins
+    reopened from the vault by the account the launch chose and delivered.
+    A record without owner fields falls back to its age: older than *since*
+    (this worker's start) means a predecessor's. The owner check assumes the
+    writer shares this process's PID namespace, as launches spawned by the
+    dashboard do; a launcher in another namespace writing to the same
+    DATA_ROOT would read as dead here, and would need its namespace id
+    recorded and treated as alive until the deadline. Expired records are dropped,
+    with a warning when their container is running without its sign-ins.
+    Returns ``{container: [filenames delivered]}``. Never raises."""
+    now = time.time() if now is None else now
+    done: dict[str, list[str]] = {}
+    try:
+        records = sorted(SIGNIN_PENDING_DIR.glob("*.json"))
+    except OSError:
+        return done
+    for path in records:
+        container = path.stem
+        try:
+            record = json.loads(path.read_text())
+            deadline = float(record.get("deadline") or 0)
+            accounts = dict(record.get("accounts") or {})
+            owner_pid = record.get("owner_pid")
+            owner_start = record.get("owner_start")
+            if owner_pid is not None and owner_start is not None:
+                if _process_start_ticks(int(owner_pid)) == int(owner_start):
+                    continue  # its delivery thread is still alive
+            elif path.stat().st_mtime >= since:
+                continue
+        except (OSError, ValueError, TypeError, AttributeError):
+            _clear_pending(container)
+            continue
+        if deadline <= now or not accounts:
+            if accounts:
+                try:
+                    missing = _missing_signins(container, accounts)
+                    running = subprocess.run(
+                        ["docker", "inspect", "-f", "{{.State.Running}}", container],
+                        capture_output=True, text=True, timeout=15,
+                    ).stdout.strip() == "true"
+                except (OSError, subprocess.TimeoutExpired):
+                    missing, running = [], False
+                if running and missing:
+                    logger.warning(
+                        "session_launcher: %s started its harness without sign-ins "
+                        "%s: the reload that interrupted their delivery outlasted "
+                        "the container's %d s wait", container, missing, SIGNIN_WAIT_S)
+            _clear_pending(container)
+            continue
+        try:
+            payloads = {}
+            for filename in _missing_signins(container, accounts):
+                content = _open_signin(filename, str(accounts[filename]))
+                if content is None:
+                    logger.error("session_launcher: sign-in %s for %s could not "
+                                 "be reopened from the vault", filename, container)
+                    continue
+                payloads[filename] = content
+            failed = (deliver_signins(container, payloads,
+                                      wait_s=max(1.0, deadline - now))
+                      if payloads else [])
+            done[container] = sorted(set(payloads) - set(failed))
+            if done[container]:
+                logger.warning("session_launcher: re-delivered sign-ins %s to %s "
+                               "after a dashboard reload", done[container], container)
+        except Exception:
+            logger.exception("session_launcher: sign-in re-delivery for %s failed",
+                             container)
+        finally:
+            _clear_pending(container)
+    return done
 
 
 class GrokLaunchProfile:
@@ -1985,9 +2161,11 @@ def launch_session(
     # private ramfs happens once it is running (auto-1cc4q). A vault account
     # that was chosen but cannot be opened refuses the launch before any
     # authority is minted below.
+    signin_accounts: dict[str, str] = {}
     signins = _signin_payloads(
         creds.get("harness_token")
-        if creds is not None and creds.get("type") == "vault" else None)
+        if creds is not None and creds.get("type") == "vault" else None,
+        accounts_out=signin_accounts)
     if signins is None:
         print(
             f"  ERROR: refusing to launch session '{name}': a sign-in "
@@ -2344,5 +2522,5 @@ def launch_session(
         # For tmux-based sessions: return a shell-safe command string. The
         # caller starts the container; the sign-ins follow it from a thread
         # that waits for it to be running.
-        deliver_signins_in_background(name, signins)
+        deliver_signins_in_background(name, signins, signin_accounts)
         return shlex.join(cmd)

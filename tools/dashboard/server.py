@@ -22748,6 +22748,21 @@ async def _activate_worker(reason: str) -> None:
             vault_handoff_attention.run_cycle,
             notice_failure=worker_handoff.notice_failure())
 
+    # A reload or restart kills the previous process's sign-in delivery
+    # threads; finish any delivery a still-waiting container needs
+    # (auto-fgheq). After the vault restore above, so the accounts reopen; on
+    # its own thread, because it may wait for a container to start.
+    try:
+        from agents.session_launcher import redeliver_pending_signins
+        from tools.dashboard import connector_code
+        threading.Thread(
+            target=redeliver_pending_signins,
+            kwargs={"since": connector_code.process_start_time()},
+            name="signin-redelivery", daemon=True,
+        ).start()
+    except Exception:
+        logger.exception("sign-in re-delivery could not start")
+
     try:
         from agents.dispatch_db import fail_stale_prelaunch_runs
         # Rows this process accepted during the overlap window are live, not
