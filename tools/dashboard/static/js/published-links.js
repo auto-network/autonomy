@@ -260,16 +260,24 @@
     // so it is offered only where that machine is this one and the link is
     // not paused (resume first).
     var refresh = (!s.remote && s.state !== 'paused') ? '<button class="pl-icon pl-refresh '+(busy?'busy':'')+'" data-action="refresh" '+(busy?'disabled':'')+' aria-label="Refresh service" title="Re-establish and verify the public link from this machine">'+icon('refresh')+'</button>' : '';
-    return '<article class="pl-card" data-service="'+esc(s.reservation_id)+'"><div class="pl-row">'+this.statusHtml(s)+'<div class="pl-session"><div class="pl-eyebrow">Hosted by</div><div class="pl-session-title">'+esc(s.session_title)+'</div><div class="pl-terminal">'+esc(s.target && s.target.session_id || 'Target unavailable')+'</div>'+(s.publisher?'<div class="pl-publisher">Published by <b>'+esc(s.publisher.display_name)+'</b>'+(s.session_local===false?' · on another member\'s machine':'')+'</div>':'')+'</div><div class="pl-hosted"><div class="pl-eyebrow">Hosted at</div><div class="pl-hostline"><span class="pl-host-app">'+esc(app)+'</span><span class="pl-host-dot">.</span><span class="pl-host-domain">'+esc(domain)+'</span>'+(root?'<span class="pl-host-root '+(short?'inline':'')+'">'+root+'</span>':'')+'</div>'+this.healthHtml(s)+this.accessControl(s)+'</div><div class="pl-footer"><button class="pl-secondary" data-action="rename">Rename</button><span></span><div class="pl-pair"><button class="pl-secondary" data-action="toggle">'+(s.state==='paused'?'Resume':'Pause')+'</button><button class="pl-danger" data-action="stop">Stop</button></div><span></span><div class="pl-icons">'+refresh+'<button class="pl-icon" data-action="share" aria-label="Share service">'+icon('share')+'</button><button class="pl-icon" data-action="visit" aria-label="Open service">'+icon('open')+'</button></div></div></div>'+
-      '<div class="pl-detail '+(detail==='rename'?'open':'')+'"><div class="pl-field"><label>Service hostname</label><input data-field="app" value="'+esc(s.app_label)+'"></div><div class="pl-field" style="margin-top:10px"><label>Publish under</label><select data-field="domain">'+select+'</select></div><p style="margin:8px 0 0;color:#fbbf24;font-size:11px">Changing either field creates a new public address. The current address stops after the new one is live.</p><div class="pl-formactions"><button class="pl-secondary" data-action="cancel">Cancel</button><button class="pl-primary" data-action="save">Save address</button></div></div>'+
+    var addressEditor='<div class="pl-address-editor"><div class="pl-field"><label>Service hostname</label><input data-field="app" value="'+esc(s.app_label)+'"></div><div class="pl-field" style="margin-top:10px"><label>Publish under</label><select data-field="domain">'+select+'</select></div><p style="margin:8px 0 0;color:#fbbf24;font-size:11px">Changing either field creates a new public address. The current address stops after the new one is live.</p><div class="pl-formactions"><button class="pl-secondary" data-action="cancel">Cancel</button><button class="pl-primary" data-action="save">Save address</button></div></div>';
+    return '<article class="pl-card" data-service="'+esc(s.reservation_id)+'"><div class="pl-row">'+this.statusHtml(s)+'<div class="pl-session"><div class="pl-eyebrow">Hosted by</div><div class="pl-session-title">'+esc(s.session_title)+'</div><div class="pl-terminal">'+esc(s.target && s.target.session_id || 'Target unavailable')+'</div>'+(s.publisher?'<div class="pl-publisher">Published by <b>'+esc(s.publisher.display_name)+'</b>'+(s.session_local===false?' · on another member\'s machine':'')+'</div>':'')+'</div><div class="pl-hosted"><div class="pl-section-heading"><div class="pl-eyebrow">Hosted at</div><button class="pl-access-edit" data-action="rename" aria-label="Edit hosted address" title="Edit hosted address"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 3 5 5-12 12-6 1 1-6Z"/><path d="m14 5 5 5"/></svg></button></div>'+(detail==='rename'?addressEditor:'<div class="pl-hostline"><span class="pl-host-app">'+esc(app)+'</span><span class="pl-host-dot">.</span><span class="pl-host-domain">'+esc(domain)+'</span>'+(root?'<span class="pl-host-root '+(short?'inline':'')+'">'+root+'</span>':'')+'</div>'+this.healthHtml(s))+this.accessControl(s)+'</div><div class="pl-footer pl-service-footer"><div class="pl-pair"><button class="pl-secondary" data-action="toggle">'+(s.state==='paused'?'Resume':'Pause')+'</button><button class="pl-danger" data-action="stop">Stop</button></div><span></span><div class="pl-icons">'+refresh+'<button class="pl-icon" data-action="share" aria-label="Share service">'+icon('share')+'</button><button class="pl-icon" data-action="visit" aria-label="Open service">'+icon('open')+'</button></div></div></div>'+
       '<div class="pl-detail '+(detail==='stop'?'open':'')+'"><div class="pl-share-title">Stop this Service?</div><p style="margin:5px 0 0;color:#9ca3af;font-size:12px">This closes the public connection. The current address will stop working.</p><div class="pl-formactions"><button class="pl-secondary" data-action="cancel">Cancel</button><button class="pl-danger" data-action="confirm-stop">Stop Service</button></div></div></article>';
   };
+
   Controller.prototype.accessControl = function (s) {
     var mode=(s.target||{}).access_mode||'public';
-    return '<div class="pl-field" style="margin-top:10px"><label>Access</label><select data-access aria-label="Service access" '+(!s.target||s.remote?'disabled':'')+'>'+
-      '<option value="public" '+(mode==='public'?'selected':'')+'>Public</option>'+
-      '<option value="personal" '+(mode==='personal'?'selected':'')+' disabled>Personal (passkey)</option>'+
-      '<option value="oidc" '+(mode==='oidc'?'selected':'')+' '+(!this.authentication.configured?'disabled':'')+'>Org (OIDC)</option></select></div>';
+    var labels={public:'Public',personal:'Personal',oidc:'Organization (OIDC)'};
+    var descriptions={public:'Anyone with the link can access this service.',personal:'Your personal passkey is required for access.',oidc:'Visitors must sign in with your organization’s identity provider.'};
+    var heading='<div class="pl-access-summary"><div class="pl-section-heading"><div class="pl-eyebrow">Access control</div>'+(!s.target||s.remote?'':'<button class="pl-access-edit" data-action="access-edit" aria-label="Edit service access" title="Edit service access"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 3 5 5-12 12-6 1 1-6Z"/><path d="m14 5 5 5"/></svg></button>')+'</div>';
+    if(this.open!=='access:'+s.reservation_id) return heading+'<div class="pl-access-heading"><span>'+esc(labels[mode])+'</span></div><p>'+esc(descriptions[mode])+'</p></div>';
+    var self=this;
+    var options=['public','personal','oidc'].map(function(value){
+      var disabled=value==='personal'||(value==='oidc'&&!self.authentication.configured);
+      var note=value==='personal'?'Not available yet.':value==='oidc'&&!self.authentication.configured?'Set up OIDC below first.':'';
+      return '<label class="pl-access-option '+(disabled?'unavailable':'')+'"><input type="radio" name="access-'+esc(s.reservation_id)+'" value="'+value+'" '+(mode===value?'checked':'')+' '+(disabled?'disabled':'')+'><span><b>'+labels[value]+'</b><span>'+descriptions[value]+'</span>'+(note?'<small>'+note+'</small>':'')+'</span></label>';
+    }).join('');
+    return heading+'<fieldset class="pl-access-editor"><legend>Who can access this service?</legend>'+options+'<div class="pl-formactions"><button class="pl-secondary" data-action="access-cancel">Cancel</button><button class="pl-primary" data-action="access-save">Save access</button></div></fieldset></div>';
   };
   Controller.prototype.shareCard = function (s) {
     var detail = this.open === 'revoke:'+s.token;
@@ -283,10 +291,6 @@
     this.root.querySelectorAll('[data-service]').forEach(function (card) {
       var s=self.services.find(function(x){return x.reservation_id===card.dataset.service;});
       card.onclick=function(e){var a=e.target.closest('[data-action]');if(!a)return;self.serviceAction(a.dataset.action,s,card,a);};
-      var access=card.querySelector('[data-access]');
-      if(access)access.onchange=function(){
-        request('/api/network/service-targets/'+encodeURIComponent(s.reservation_id),{method:'PUT',headers:{'Content-Type':'application/json','X-Graph-Org':self.slug},body:JSON.stringify({session_id:s.target.session_id,port:s.target.port,access_mode:access.value})}).then(function(){return self.refresh();}).catch(function(e){self.fail(e);});
-      };
     });
     this.root.querySelectorAll('[data-share]').forEach(function (card) {
       var s=self.shares.find(function(x){return x.token===card.dataset.share;});
@@ -349,6 +353,13 @@
   };
   Controller.prototype.refresh = function () { var self=this; return request('/api/network/published-links',{headers:{'X-Graph-Org':this.slug}}).then(function(d){self.absorb(d);self.status={};self.open=null;self.error='';self.errorDetail='';self.render();}); };
   Controller.prototype.serviceAction = function (action,s,card,button) {
+    if(action==='access-edit'){this.open='access:'+s.reservation_id;return this.render();}
+    if(action==='access-cancel'){this.open=null;return this.render();}
+    if(action==='access-save'){
+      var chosen=card.querySelector('input[type="radio"]:checked'),controller=this;
+      return request('/api/network/service-targets/'+encodeURIComponent(s.reservation_id),{method:'PUT',headers:{'Content-Type':'application/json','X-Graph-Org':this.slug},body:JSON.stringify({session_id:s.target.session_id,port:s.target.port,access_mode:chosen.value})}).then(function(){controller.open=null;return controller.refresh();}).catch(function(e){controller.fail(e);});
+    }
+
     var self=this, url=s.origin;
     if(action==='share') return shareUrl(s.app_label,url,button).catch(function(e){self.fail(e);});
     if(action==='visit') return window.open(url,'_blank','noopener');

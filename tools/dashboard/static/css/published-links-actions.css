@@ -5,3 +5,31 @@
   gap: 7px;
   justify-content: normal;
 }
+.pl-access-summary { margin-top: 12px; }
+.pl-access-heading { display: flex; align-items: center; gap: 12px; font-size: 12px; color: #e5e7eb; font-weight: 600; }
+.pl-access-summary p { margin: 3px 0 0; font-size: 11px; line-height: 1.45; color: #94a3b8; }
+.pl-section-heading { display: flex; align-items: center; justify-content: flex-start; gap: 7px; min-height: 22px; }
+.pl-access-edit { background: none; border: 0; font-size: 11px; font-weight: 400; cursor: pointer; }
+.pl-section-heading .pl-access-edit { position: relative; display: inline-flex; align-items: center; justify-content: center; padding: 2px; width: 18px; height: 20px; color: #94a3b8; border-radius: 3px; }
+.pl-section-heading .pl-access-edit::before { content: ""; position: absolute; inset: -5px; }
+.pl-section-heading .pl-access-edit:hover { color: #bfdbfe; background: #1f2937; }
+.pl-section-heading .pl-access-edit:focus-visible { outline: 2px solid #93c5fd; outline-offset: 3px; }
+.pl-access-edit svg { width: 13px; height: 13px; }
+.pl-address-editor { margin-top: 8px; }
+.pl-access-editor { margin: 8px 0 0; padding: 0; border: 0; border-radius: 0; min-width: 0; }
+.pl-access-editor legend { padding: 0; margin-bottom: 5px; color: #94a3b8; font-size: 11px; }
+.pl-access-option { display: flex; gap: 10px; align-items: flex-start; padding: 10px 8px; border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
+.pl-access-option:has(input:checked) { background: #1e293b; border-color: #475569; }
+.pl-access-option input { margin: 3px 0 0; accent-color: #93c5fd; width: 14px; height: 14px; flex-shrink: 0; }
+.pl-access-option b { display: block; color: #e5e7eb; font-size: 12px; font-weight: 600; }
+.pl-access-option span span { display: block; color: #94a3b8; font-size: 11px; line-height: 1.45; margin-top: 3px; }
+.pl-access-option small { display: block; color: #94a3b8; font-size: 10px; margin-top: 4px; }
+.pl-access-option.unavailable { cursor: default; }
+.pl-access-option.unavailable b { color: #94a3b8; }
+.pl-service-footer { grid-template-columns: auto minmax(18px,1fr) auto; }
+[data-service] .pl-session { padding-top: 0; }
+[data-service] .pl-section-heading { min-height: 0; height: 13.05px; }
+[data-service] .pl-section-heading .pl-access-edit { height: 13.05px; padding: 0; transform: translateY(-4px); }
+[data-service] .pl-session-title,
+[data-service] .pl-hosted > .pl-hostline,
+[data-service] .pl-access-heading { margin-top: 4px; }

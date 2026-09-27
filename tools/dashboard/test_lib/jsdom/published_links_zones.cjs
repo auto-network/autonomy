@@ -72,13 +72,15 @@ async function main() {
   assert.equal(personaCard.querySelector('.pl-host-root').textContent, '.serve.auto.network');
 
   // The picker lists the persona apex and every claimed zone, current one selected.
-  const options = [...personaCard.querySelectorAll('[data-field="domain"] option')].map((o) => [o.value, o.textContent, o.selected]);
+  personaCard.querySelector('[data-action="rename"]').click();
+  const options = [...root.querySelectorAll('[data-service="r-persona"] [data-field="domain"] option')].map((o) => [o.value, o.textContent, o.selected]);
   assert.deepEqual(options, [['', `${PERSONA}.serve.auto.network`, true], [ZONE, ZONE, false]]);
-  const zoneOptions = [...zoneCard.querySelectorAll('[data-field="domain"] option')].map((o) => [o.value, o.selected]);
+  root.querySelector('[data-service="r-zone"] [data-action="rename"]').click();
+  const zoneOptions = [...root.querySelectorAll('[data-service="r-zone"] [data-field="domain"] option')].map((o) => [o.value, o.selected]);
   assert.deepEqual(zoneOptions, [['', false], [ZONE, true]]);
 
   // Moving the persona service under the zone posts {app_label, zone}, rebinds the target, releases the old row.
-  personaCard.querySelector('[data-action="rename"]').click();
+  root.querySelector('[data-service="r-persona"] [data-action="rename"]').click();
   await settle();
   const select = root.querySelector('[data-service="r-persona"] [data-field="domain"]');
   select.value = ZONE;
