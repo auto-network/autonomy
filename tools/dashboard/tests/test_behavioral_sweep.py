@@ -7624,38 +7624,43 @@ EXPERIMENT_TOOLBAR_CHECKS = """(async () => {
   var q = (id) => document.querySelector('[data-testid="' + id + '"]');
   var r = {};
   var tick = async () => { await Alpine.nextTick(); await new Promise(r => setTimeout(r, 150)); };
+  // x-show hides without removing: visible means displayed.
+  var shown = (id) => { var el = q(id); return !!el && getComputedStyle(el).display !== 'none'; };
+  // One toolbar since 4a857fc2: capture is offered in every state, and the
+  // chat state's own control is Close chat, shown while chat is open (the
+  // chat toggle and its state classes were removed with the second toolbar).
 
   // DISCONNECTED: chatOpen=false, chatConnected=false (initial state)
   ep.chatOpen = false; ep.chatConnected = false;
   await tick();
   r.disc_iter = !!q('toolbar-iter-desktop');
-  r.disc_no_capture = !q('toolbar-capture');
-  r.disc_chat_class = q('toolbar-chat-toggle')?.classList.contains('chat-disconnected');
+  r.disc_capture = shown('design-linked-capture');
+  r.disc_no_chat_close = !shown('design-chat-close');
   r.disc_no_session = !q('toolbar-session-row');
 
   // PICKER: chatOpen=true, chatConnected=false
   ep.chatOpen = true;
   await tick();
   r.picker_title = q('toolbar-title')?.textContent?.includes('Select');
-  r.picker_chat_class = q('toolbar-chat-toggle')?.classList.contains('chat-open');
-  r.picker_no_capture = !q('toolbar-capture');
+  r.picker_chat_close = shown('design-chat-close');
+  r.picker_capture = shown('design-linked-capture');
   r.picker_no_iter = !q('toolbar-iter-desktop');
 
   // LIVE_CHAT: chatOpen=true, chatConnected=true
   ep.chatConnected = true; ep.chatSessionLabel = 'Test session label';
   await tick();
-  r.chat_no_capture = !q('toolbar-capture');
+  r.chat_capture = shown('design-linked-capture');
   r.chat_session = !!q('toolbar-session-row');
   r.chat_prime = !!q('toolbar-prime');
   r.chat_disconnect = !!q('toolbar-disconnect');
-  r.chat_icon = q('toolbar-chat-toggle')?.classList.contains('chat-connected-shown');
+  r.chat_close = shown('design-chat-close');
   r.chat_no_iter = !q('toolbar-iter-desktop');
 
   // LIVE_UI: chatOpen=false, chatConnected=true
   ep.chatOpen = false;
   await tick();
-  r.live_capture = !!q('toolbar-capture');
-  r.live_chat_green = q('toolbar-chat-toggle')?.classList.contains('chat-connected-hidden');
+  r.live_capture = shown('design-linked-capture');
+  r.live_no_chat_close = !shown('design-chat-close');
 
   return JSON.stringify(r);
 })()"""
@@ -7764,15 +7769,15 @@ class TestExperimentToolbar:
         c = self._checks
         assert c.get("disc_iter"), "Iter nav not visible in DISCONNECTED state"
 
-    def test_disconnected_no_capture(self):
-        """DISCONNECTED: capture button is hidden."""
+    def test_disconnected_capture(self):
+        """DISCONNECTED: capture is offered."""
         c = self._checks
-        assert c.get("disc_no_capture"), "Capture button should be hidden in DISCONNECTED"
+        assert c.get("disc_capture"), "Capture is offered in every state (4a857fc2)"
 
-    def test_disconnected_chat_class(self):
-        """DISCONNECTED: chat toggle has chat-disconnected class."""
+    def test_disconnected_no_chat_close(self):
+        """DISCONNECTED: Close chat is not shown."""
         c = self._checks
-        assert c.get("disc_chat_class"), "Chat toggle missing 'chat-disconnected' class"
+        assert c.get("disc_no_chat_close"), "Close chat is shown only while chat is open"
 
     def test_disconnected_no_session_row(self):
         """DISCONNECTED: no session row visible."""
@@ -7786,17 +7791,17 @@ class TestExperimentToolbar:
         c = self._checks
         assert c.get("live_capture"), "Capture button not visible in LIVE_UI"
 
-    def test_live_ui_chat_green(self):
-        """LIVE_UI: chat toggle has chat-connected-hidden class."""
+    def test_live_ui_no_chat_close(self):
+        """LIVE_UI: Close chat is not shown."""
         c = self._checks
-        assert c.get("live_chat_green"), "Chat toggle missing 'chat-connected-hidden' class"
+        assert c.get("live_no_chat_close"), "Close chat is shown only while chat is open"
 
     # ── LIVE_CHAT state ───────────────────────────────────────────
 
-    def test_live_chat_no_capture(self):
-        """LIVE_CHAT: capture button is hidden."""
+    def test_live_chat_capture(self):
+        """LIVE_CHAT: capture is offered."""
         c = self._checks
-        assert c.get("chat_no_capture"), "Capture should be hidden in LIVE_CHAT"
+        assert c.get("chat_capture"), "Capture is offered in every state (4a857fc2)"
 
     def test_live_chat_session_row(self):
         """LIVE_CHAT: session row is visible."""
@@ -7813,10 +7818,10 @@ class TestExperimentToolbar:
         c = self._checks
         assert c.get("chat_disconnect"), "Disconnect button not visible in LIVE_CHAT"
 
-    def test_live_chat_icon(self):
-        """LIVE_CHAT: chat toggle has chat-connected-shown class."""
+    def test_live_chat_close_offered(self):
+        """LIVE_CHAT: Close chat is shown."""
         c = self._checks
-        assert c.get("chat_icon"), "Chat toggle missing 'chat-connected-shown' class"
+        assert c.get("chat_close"), "Close chat not offered in LIVE_CHAT"
 
     def test_live_chat_no_iter(self):
         """LIVE_CHAT: iteration nav is hidden."""
@@ -7830,15 +7835,15 @@ class TestExperimentToolbar:
         c = self._checks
         assert c.get("picker_title"), "Title should contain 'Select' in PICKER state"
 
-    def test_picker_chat_class(self):
-        """PICKER: chat toggle has chat-open class."""
+    def test_picker_chat_close_offered(self):
+        """PICKER: Close chat is shown."""
         c = self._checks
-        assert c.get("picker_chat_class"), "Chat toggle missing 'chat-open' class"
+        assert c.get("picker_chat_close"), "Close chat not offered in PICKER"
 
-    def test_picker_no_capture(self):
-        """PICKER: capture button is hidden."""
+    def test_picker_capture(self):
+        """PICKER: capture is offered."""
         c = self._checks
-        assert c.get("picker_no_capture"), "Capture should be hidden in PICKER"
+        assert c.get("picker_capture"), "Capture is offered in every state (4a857fc2)"
 
     def test_picker_no_iter(self):
         """PICKER: iteration nav is hidden."""
