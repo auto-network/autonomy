@@ -138,6 +138,7 @@ from . import fleet_org_roster  # noqa: F401 — autonomy.fleet.org-roster#1
 from . import machine_identity  # noqa: F401 — autonomy.machine.identity#1
 from . import service_target  # noqa: F401 — autonomy.network.service-target#1
 from . import dashboard_remote_access  # noqa: F401 — autonomy.dashboard.remote-access#1
+from . import dashboard_passkey_gate  # noqa: F401 — autonomy.dashboard.passkey-gate#1
 from . import service_auth  # noqa: F401 — organization OIDC configuration
 from . import service_certificate  # noqa: F401 — autonomy.network.service-certificate#1
 from . import fleet_joining  # noqa: F401 — autonomy.machine.fleet-joining#1

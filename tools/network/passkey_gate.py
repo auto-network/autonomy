@@ -1,0 +1,571 @@
+"""The dashboard's passkey gate: the forward-auth helper beside the Service gateway.
+
+One small process, run from the node image in the gateway's network namespace
+(``render_helper_service``), that the gateway consults for every request to
+the dashboard's relay route (``service_gateway.render_gate``: ``forward_auth``
+on ``/oauth2/auth``, the rest of ``/oauth2/*`` proxied here). The dashboard
+process sees nothing until this helper has said yes.
+
+Decided by the operator on 2026-09-27 (graph://c9d72ea4-feb, option O2d):
+our own helper on py_webauthn, the library the dashboard already uses for its
+identity passkey, not a third-party identity provider. What it does:
+
+* ``GET /oauth2/auth`` — the forward-auth check: a valid gate cookie answers
+  200, anything else 401 (the gateway then redirects to ``/oauth2/start``).
+* ``GET /oauth2/start`` — the login page: one WebAuthn assertion against a
+  credential enrolled for this hostname. ``POST /oauth2/login/options`` and
+  ``POST /oauth2/login/verify`` are its two calls.
+* ``GET /oauth2/enroll?token=…`` — the enrollment page, reachable only with
+  the one-time token the dashboard minted (sha256 + expiry in the gate
+  record). ``POST /oauth2/enroll/options`` and ``POST /oauth2/enroll/verify``
+  register exactly one passkey; the verified credential is handed to the
+  dashboard over its plain listener (``/api/network/remote-access/gate/
+  registered``, authenticated with the helper secret), which records it,
+  closes enrollment and rewrites the gate record.
+
+State lives with the dashboard (a Settings row); this process reads the gate
+record the dashboard materializes into its runtime directory on every request,
+so a re-opened enrollment, a revoked passkey or a new sign count reach it with
+no restart. The cookie is an HMAC over ``expiry.nonce`` under the machine's
+cookie key, 12 hours, ``__Host-`` scoped, HttpOnly, SameSite=Lax. Nothing here
+imports the dashboard package: the helper holds the cookie key, the helper
+secret and public keys, and nothing else.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import hmac
+import json
+import secrets
+import time
+from pathlib import Path
+from urllib.parse import quote, urlsplit
+
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.routing import Route
+
+HELPER_ID = "dashboard-passkey"
+COOKIE_NAME = "__Host-autonomy-gate"
+#: Gate session lifetime (graph://c9d72ea4-feb O5: 12 h absolute; a passkey
+#: re-prompt is cheap and a phone re-authenticating every 15 minutes is not).
+SESSION_TTL_S = 12 * 3600
+#: A ceremony (options → authenticator → verify) is a human gesture away.
+PENDING_TTL_S = 600
+PENDING_MAX = 64
+RP_NAME = "Autonomy"
+#: The dashboard route this helper reports and calls back on.
+REGISTERED_PATH = "/api/network/remote-access/gate/registered"
+SIGN_COUNT_PATH = "/api/network/remote-access/gate/sign-count"
+
+#: Compose service the gateway supervisor renders for this helper: the node's
+#: own image and code, read-only, no ports, the gateway's network namespace.
+_LABEL = "autonomy.auth-config"
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _now() -> float:
+    return time.time()
+
+
+class GateRuntime:
+    """The helper's view of its runtime directory, read per request."""
+
+    def __init__(self, directory: Path | str) -> None:
+        self.directory = Path(directory)
+
+    def record(self) -> dict:
+        try:
+            data = json.loads((self.directory / "gate.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def cookie_key(self) -> bytes:
+        return bytes.fromhex((self.directory / "cookie-secret").read_text().strip())
+
+    def helper_secret(self) -> str:
+        return (self.directory / "helper-secret").read_text().strip()
+
+
+# ── gate cookie ─────────────────────────────────────────────────────────
+
+def mint_cookie(key: bytes, *, now: float | None = None, ttl: float = SESSION_TTL_S) -> str:
+    expiry = int((now if now is not None else _now()) + ttl)
+    nonce = secrets.token_hex(16)
+    body = f"{expiry}.{nonce}"
+    return f"{body}.{hmac.new(key, body.encode(), hashlib.sha256).hexdigest()}"
+
+
+def cookie_valid(key: bytes, value: str | None, *, now: float | None = None) -> bool:
+    if not value or value.count(".") != 2:
+        return False
+    expiry, nonce, signature = value.split(".")
+    if not expiry.isdigit() or len(nonce) != 32 or len(signature) != 64:
+        return False
+    expected = hmac.new(key, f"{expiry}.{nonce}".encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        return False
+    return int(expiry) > (now if now is not None else _now())
+
+
+def _set_cookie(response: Response, key: bytes) -> None:
+    response.set_cookie(
+        COOKIE_NAME, mint_cookie(key), max_age=SESSION_TTL_S, path="/",
+        secure=True, httponly=True, samesite="lax",
+    )
+
+
+# ── enrollment token ────────────────────────────────────────────────────
+
+def token_sha256(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def enrollment_open(record: dict, token: str | None, *, now: float | None = None) -> bool:
+    """True when the record's enrollment is open, unexpired, and *token*
+    is the one it was opened with."""
+    enrollment = record.get("enrollment")
+    if not isinstance(enrollment, dict) or not enrollment.get("open"):
+        return False
+    if not isinstance(token, str) or not token:
+        return False
+    expires_at = enrollment.get("expires_at")
+    if not isinstance(expires_at, (int, float)) or expires_at <= (now if now is not None else _now()):
+        return False
+    expected = enrollment.get("token_sha256")
+    return isinstance(expected, str) and hmac.compare_digest(expected, token_sha256(token))
+
+
+# ── the application ─────────────────────────────────────────────────────
+
+class GateApp:
+    def __init__(self, runtime: GateRuntime, *, post_dashboard=None) -> None:
+        self.runtime = runtime
+        self._pending_login: dict[str, dict] = {}
+        self._pending_enroll: dict[str, dict] = {}
+        self._post_dashboard = post_dashboard or _post_dashboard
+
+    # -- helpers --
+
+    def _prune(self, store: dict, *, reserve: int = 0) -> None:
+        cutoff = _now()
+        for key in [k for k, p in store.items() if p["expires"] <= cutoff]:
+            store.pop(key, None)
+        limit = max(PENDING_MAX - reserve, 0)
+        while len(store) > limit:
+            store.pop(next(iter(store)))
+
+    def _redirect_target(self, record: dict, rd: str | None) -> str:
+        """Only a URL on this gate's own origin is followed after login."""
+        origin = record.get("origin") or ""
+        if isinstance(rd, str) and origin and rd.startswith(origin + "/"):
+            parts = urlsplit(rd)
+            if not parts.fragment:
+                return rd
+        return "/"
+
+    # -- forward-auth --
+
+    async def auth(self, request: Request) -> Response:
+        try:
+            key = self.runtime.cookie_key()
+        except Exception:
+            return Response(status_code=503)
+        if cookie_valid(key, request.cookies.get(COOKIE_NAME)):
+            return Response(status_code=200, headers={"X-Auth-Gate": HELPER_ID})
+        return Response(status_code=401)
+
+    # -- login --
+
+    async def start(self, request: Request) -> Response:
+        record = self.runtime.record()
+        credentials = record.get("credentials") or []
+        rd = self._redirect_target(record, request.query_params.get("rd"))
+        return HTMLResponse(_login_page(rd, enrolled=bool(credentials)))
+
+    async def login_options(self, request: Request) -> Response:
+        from webauthn import generate_authentication_options, options_to_json
+        from webauthn.helpers.structs import (
+            AuthenticatorTransport, PublicKeyCredentialDescriptor, UserVerificationRequirement,
+        )
+
+        record = self.runtime.record()
+        rp_id, origin = record.get("rp_id"), record.get("origin")
+        if not rp_id or not origin:
+            return JSONResponse({"ok": False, "error": "gate is not configured"}, status_code=503)
+        allow = []
+        for row in record.get("credentials") or []:
+            try:
+                transports = [AuthenticatorTransport(t) for t in row.get("transports") or []]
+                allow.append(PublicKeyCredentialDescriptor(
+                    id=_b64url_decode(row["credential_id"]), transports=transports or None))
+            except Exception:
+                continue
+        if not allow:
+            return JSONResponse({"ok": False, "error": (
+                "no passkey is enrolled for this address; open enrollment from the "
+                "dashboard on the machine itself")}, status_code=409)
+        options = generate_authentication_options(
+            rp_id=rp_id, allow_credentials=allow,
+            user_verification=UserVerificationRequirement.REQUIRED,
+        )
+        self._prune(self._pending_login, reserve=1)
+        self._pending_login[_b64url(options.challenge)] = {
+            "rp_id": rp_id, "origin": origin, "expires": _now() + PENDING_TTL_S,
+        }
+        return JSONResponse({"ok": True, "options": json.loads(options_to_json(options))})
+
+    async def login_verify(self, request: Request) -> Response:
+        from webauthn import verify_authentication_response
+        from webauthn.helpers.exceptions import InvalidAuthenticationResponse
+
+        body = await _json_body(request)
+        credential = body.get("credential") if isinstance(body, dict) else None
+        if not isinstance(credential, dict):
+            return JSONResponse({"ok": False, "error": "body must carry 'credential'"}, status_code=400)
+        challenge_key = _challenge_of(credential)
+        self._prune(self._pending_login)
+        pending = self._pending_login.pop(challenge_key, None) if challenge_key else None
+        if pending is None:
+            return JSONResponse({"ok": False, "error": (
+                "unknown or expired passkey challenge; start the login again")}, status_code=400)
+        record = self.runtime.record()
+        row = next((r for r in record.get("credentials") or []
+                    if r.get("credential_id") == credential.get("rawId")), None)
+        if row is None:
+            return JSONResponse({"ok": False, "error": "this passkey is not enrolled here"}, status_code=403)
+        try:
+            verification = verify_authentication_response(
+                credential=credential,
+                expected_challenge=_b64url_decode(challenge_key),
+                expected_rp_id=pending["rp_id"],
+                expected_origin=pending["origin"],
+                credential_public_key=_b64url_decode(row["public_key"]),
+                credential_current_sign_count=int(row.get("sign_count") or 0),
+                require_user_verification=True,
+            )
+        except InvalidAuthenticationResponse as exc:
+            return JSONResponse({"ok": False, "error": f"passkey assertion did not verify: {exc}"},
+                                status_code=403)
+        except Exception as exc:  # noqa: BLE001 — malformed input is a refusal, not a crash
+            return JSONResponse({"ok": False, "error": f"malformed passkey assertion: {exc}"},
+                                status_code=400)
+        # The new sign count guards against a cloned authenticator; recorded
+        # best-effort (a lost update only weakens that one check).
+        try:
+            self._post_dashboard(record, self.runtime.helper_secret(), SIGN_COUNT_PATH, {
+                "credential_id": row["credential_id"], "sign_count": verification.new_sign_count,
+            })
+        except Exception:
+            pass
+        response = JSONResponse({"ok": True, "redirect": self._redirect_target(
+            record, body.get("rd") if isinstance(body, dict) else None)})
+        _set_cookie(response, self.runtime.cookie_key())
+        return response
+
+    # -- enrollment --
+
+    async def enroll_page(self, request: Request) -> Response:
+        record = self.runtime.record()
+        token = request.query_params.get("token")
+        if not enrollment_open(record, token):
+            return HTMLResponse(_closed_page(), status_code=403)
+        return HTMLResponse(_enroll_page(token))
+
+    async def enroll_options(self, request: Request) -> Response:
+        from webauthn import generate_registration_options, options_to_json
+        from webauthn.helpers.structs import (
+            AuthenticatorSelectionCriteria, PublicKeyCredentialDescriptor,
+            ResidentKeyRequirement, UserVerificationRequirement,
+        )
+
+        body = await _json_body(request)
+        token = body.get("token") if isinstance(body, dict) else None
+        record = self.runtime.record()
+        if not enrollment_open(record, token):
+            return JSONResponse({"ok": False, "error": "enrollment is closed"}, status_code=403)
+        rp_id, origin = record.get("rp_id"), record.get("origin")
+        if not rp_id or not origin:
+            return JSONResponse({"ok": False, "error": "gate is not configured"}, status_code=503)
+        exclude = []
+        for row in record.get("credentials") or []:
+            try:
+                exclude.append(PublicKeyCredentialDescriptor(id=_b64url_decode(row["credential_id"])))
+            except Exception:
+                continue
+        options = generate_registration_options(
+            rp_id=rp_id, rp_name=RP_NAME,
+            # One user, this dashboard: a stable, non-identifying handle.
+            user_id=hashlib.sha256(rp_id.encode()).digest(),
+            user_name="dashboard", user_display_name="Autonomy dashboard",
+            authenticator_selection=AuthenticatorSelectionCriteria(
+                resident_key=ResidentKeyRequirement.REQUIRED,
+                user_verification=UserVerificationRequirement.REQUIRED,
+            ),
+            exclude_credentials=exclude or None,
+        )
+        self._prune(self._pending_enroll, reserve=1)
+        self._pending_enroll[_b64url(options.challenge)] = {
+            "rp_id": rp_id, "origin": origin, "expires": _now() + PENDING_TTL_S,
+        }
+        return JSONResponse({"ok": True, "options": json.loads(options_to_json(options))})
+
+    async def enroll_verify(self, request: Request) -> Response:
+        from webauthn import verify_registration_response
+        from webauthn.helpers.exceptions import InvalidRegistrationResponse
+
+        body = await _json_body(request)
+        token = body.get("token") if isinstance(body, dict) else None
+        credential = body.get("credential") if isinstance(body, dict) else None
+        record = self.runtime.record()
+        if not enrollment_open(record, token):
+            return JSONResponse({"ok": False, "error": "enrollment is closed"}, status_code=403)
+        if not isinstance(credential, dict):
+            return JSONResponse({"ok": False, "error": "body must carry 'credential'"}, status_code=400)
+        challenge_key = _challenge_of(credential)
+        self._prune(self._pending_enroll)
+        pending = self._pending_enroll.pop(challenge_key, None) if challenge_key else None
+        if pending is None:
+            return JSONResponse({"ok": False, "error": (
+                "unknown or expired passkey challenge; start the enrollment again")}, status_code=400)
+        try:
+            verification = verify_registration_response(
+                credential=credential,
+                expected_challenge=_b64url_decode(challenge_key),
+                expected_rp_id=pending["rp_id"],
+                expected_origin=pending["origin"],
+                require_user_verification=True,
+            )
+        except InvalidRegistrationResponse as exc:
+            return JSONResponse({"ok": False, "error": f"passkey registration did not verify: {exc}"},
+                                status_code=400)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"malformed passkey registration: {exc}"},
+                                status_code=400)
+        raw_transports = (credential.get("response") or {}).get("transports") or []
+        registered = {
+            "token": token,
+            "credential_id": _b64url(verification.credential_id),
+            "public_key": _b64url(verification.credential_public_key),
+            "sign_count": verification.sign_count,
+            "transports": [t for t in raw_transports if isinstance(t, str)],
+            "rp_id": pending["rp_id"],
+        }
+        # The dashboard owns the record: it checks the token once more,
+        # appends the credential, closes enrollment and rewrites gate.json.
+        try:
+            reply = self._post_dashboard(record, self.runtime.helper_secret(), REGISTERED_PATH, registered)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"the dashboard did not record the passkey: {exc}"},
+                                status_code=502)
+        if not isinstance(reply, dict) or reply.get("ok") is not True:
+            return JSONResponse({"ok": False, "error": (
+                (reply or {}).get("error") if isinstance(reply, dict) else None)
+                or "the dashboard refused the passkey"}, status_code=502)
+        response = JSONResponse({"ok": True, "redirect": "/"})
+        _set_cookie(response, self.runtime.cookie_key())
+        return response
+
+    def routes(self) -> list[Route]:
+        return [
+            Route("/oauth2/auth", self.auth, methods=["GET", "HEAD"]),
+            Route("/oauth2/start", self.start, methods=["GET"]),
+            Route("/oauth2/login/options", self.login_options, methods=["POST"]),
+            Route("/oauth2/login/verify", self.login_verify, methods=["POST"]),
+            Route("/oauth2/enroll", self.enroll_page, methods=["GET"]),
+            Route("/oauth2/enroll/options", self.enroll_options, methods=["POST"]),
+            Route("/oauth2/enroll/verify", self.enroll_verify, methods=["POST"]),
+        ]
+
+
+def build_app(runtime_dir: Path | str, *, post_dashboard=None) -> Starlette:
+    gate = GateApp(GateRuntime(runtime_dir), post_dashboard=post_dashboard)
+    return Starlette(routes=gate.routes())
+
+
+async def _json_body(request: Request):
+    try:
+        return await request.json()
+    except Exception:
+        return None
+
+
+def _challenge_of(credential: dict) -> str | None:
+    """The challenge a WebAuthn response answered, from its clientDataJSON."""
+    try:
+        client_data = json.loads(_b64url_decode(credential["response"]["clientDataJSON"]))
+        challenge = client_data.get("challenge")
+        return challenge if isinstance(challenge, str) else None
+    except Exception:
+        return None
+
+
+def _post_dashboard(record: dict, helper_secret: str, path: str, payload: dict) -> dict:
+    """One JSON POST to the dashboard's plain listener on the compose network,
+    authenticated with the helper secret. Synchronous, five seconds."""
+    import urllib.request
+
+    upstream = record.get("dashboard_upstream")
+    if not isinstance(upstream, str) or not upstream:
+        raise RuntimeError("gate record names no dashboard upstream")
+    request = urllib.request.Request(
+        f"http://{upstream}{path}", data=json.dumps(payload).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {helper_secret}"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310 — fixed http upstream
+        return json.loads(response.read().decode("utf-8"))
+
+
+# ── compose service ──────────────────────────────────────────────────────
+
+def render_helper_service(runtime: Path, revision: str, *, image: str, port: int,
+                          app_mount: dict | None = None) -> dict:
+    """The compose service that runs this helper beside the gateway: the
+    dashboard's own image and, when given, its own code mount, so the helper
+    runs exactly the code the dashboard runs; read-only, no ports, no
+    capabilities, the gateway's network namespace."""
+    volumes = [{"type": "bind", "source": str(runtime), "target": "/run/gate", "read_only": True}]
+    if app_mount:
+        volumes.append({**app_mount, "target": "/app", "read_only": True})
+    return {
+        "image": image,
+        "profiles": ["service-gateway"],
+        "restart": "unless-stopped",
+        "user": "1000:1000",
+        "read_only": True,
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
+        "network_mode": "service:service-gateway",
+        "depends_on": {"service-gateway": {"condition": "service_started"}},
+        "entrypoint": ["python3", "-m", "tools.network.passkey_gate"],
+        "command": ["--runtime", "/run/gate", "--port", str(port)],
+        "working_dir": "/app",
+        "environment": {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1", "HOME": "/tmp"},
+        "tmpfs": ["/tmp"],
+        "labels": {_LABEL: revision},
+        "logging": {"driver": "json-file", "options": {"max-size": "1m", "max-file": "2"}},
+        "volumes": volumes,
+    }
+
+
+# ── pages ────────────────────────────────────────────────────────────────
+
+_STYLE = """
+body{margin:0;font:16px/1.5 system-ui,sans-serif;background:#0f1115;color:#e6e6e6;display:flex;min-height:100vh;align-items:center;justify-content:center}
+main{max-width:26rem;padding:2rem;text-align:center}
+h1{font-size:1.4rem;margin:0 0 .5rem}
+p{color:#b8bcc4;margin:.5rem 0 1.2rem}
+button{font:inherit;padding:.7rem 1.4rem;border-radius:.6rem;border:0;background:#4f8cff;color:#fff;cursor:pointer}
+button[disabled]{opacity:.5;cursor:default}
+.err{color:#ff8a8a;min-height:1.5rem;margin-top:1rem}
+"""
+
+_JS_COMMON = """
+function b64u(buf){return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}
+function unb64u(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';return Uint8Array.from(atob(s),c=>c.charCodeAt(0));}
+function fail(msg){document.getElementById('err').textContent=msg;document.getElementById('go').disabled=false;}
+async function post(path,body){var r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});var j=await r.json().catch(function(){return {}});if(!r.ok||!j.ok)throw new Error(j.error||('request failed ('+r.status+')'));return j;}
+"""
+
+
+def _page(title: str, body: str, script: str) -> str:
+    return (
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f"<title>{title}</title><style>{_STYLE}</style></head><body><main>{body}"
+        f"<div class=\"err\" id=\"err\"></div></main><script>{_JS_COMMON}{script}</script></body></html>"
+    )
+
+
+def _login_page(rd: str, *, enrolled: bool) -> str:
+    if not enrolled:
+        return _page("Autonomy", (
+            "<h1>No passkey enrolled</h1><p>This address is protected by a passkey that has not "
+            "been enrolled yet. Open enrollment from the dashboard on the machine itself, or from "
+            "another machine of your fleet, and use the link it shows.</p>"), "")
+    rd_json = json.dumps(rd)
+    return _page("Autonomy", (
+        "<h1>Autonomy</h1><p>Use your passkey to open this dashboard.</p>"
+        "<button id=\"go\">Continue with passkey</button>"), f"""
+var rd={rd_json};
+async function login(){{
+  document.getElementById('go').disabled=true;
+  try{{
+    var o=(await post('/oauth2/login/options',{{}})).options;
+    o.challenge=unb64u(o.challenge);
+    (o.allowCredentials||[]).forEach(function(c){{c.id=unb64u(c.id);}});
+    var cred=await navigator.credentials.get({{publicKey:o}});
+    var r=cred.response;
+    var out=await post('/oauth2/login/verify',{{rd:rd,credential:{{id:cred.id,rawId:b64u(cred.rawId),type:cred.type,
+      authenticatorAttachment:cred.authenticatorAttachment||null,clientExtensionResults:cred.getClientExtensionResults(),
+      response:{{clientDataJSON:b64u(r.clientDataJSON),authenticatorData:b64u(r.authenticatorData),signature:b64u(r.signature),
+      userHandle:r.userHandle?b64u(r.userHandle):null}}}}}});
+    location.replace(out.redirect||'/');
+  }}catch(e){{fail(e.message||String(e));}}
+}}
+document.getElementById('go').addEventListener('click',login);
+""")
+
+
+def _enroll_page(token: str) -> str:
+    token_json = json.dumps(token)
+    return _page("Autonomy", (
+        "<h1>Enroll your passkey</h1><p>This passkey will be the only way in at this address. "
+        "Enroll it on the device you will use to reach the dashboard.</p>"
+        "<button id=\"go\">Create passkey</button>"), f"""
+var token={token_json};
+async function enroll(){{
+  document.getElementById('go').disabled=true;
+  try{{
+    var o=(await post('/oauth2/enroll/options',{{token:token}})).options;
+    o.challenge=unb64u(o.challenge);o.user.id=unb64u(o.user.id);
+    (o.excludeCredentials||[]).forEach(function(c){{c.id=unb64u(c.id);}});
+    var cred=await navigator.credentials.create({{publicKey:o}});
+    var r=cred.response;
+    var out=await post('/oauth2/enroll/verify',{{token:token,credential:{{id:cred.id,rawId:b64u(cred.rawId),type:cred.type,
+      authenticatorAttachment:cred.authenticatorAttachment||null,clientExtensionResults:cred.getClientExtensionResults(),
+      response:{{clientDataJSON:b64u(r.clientDataJSON),attestationObject:b64u(r.attestationObject),
+      transports:(r.getTransports&&r.getTransports())||[]}}}}}});
+    history.replaceState(null,'','/oauth2/start');
+    location.replace(out.redirect||'/');
+  }}catch(e){{fail(e.message||String(e));}}
+}}
+document.getElementById('go').addEventListener('click',enroll);
+""")
+
+
+def _closed_page() -> str:
+    return _page("Autonomy", (
+        "<h1>Enrollment is closed</h1><p>This link is not valid: enrollment was never opened, "
+        "has already been used, or has expired. Open it again from the dashboard on the machine "
+        "itself.</p>"), "")
+
+
+# ── entry point ──────────────────────────────────────────────────────────
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--runtime", required=True, help="the gate runtime directory")
+    parser.add_argument("--port", type=int, required=True, help="loopback listener port")
+    args = parser.parse_args(argv)
+    import uvicorn
+
+    uvicorn.run(build_app(args.runtime), host="127.0.0.1", port=args.port,
+                log_level="warning", lifespan="off", access_log=False, proxy_headers=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

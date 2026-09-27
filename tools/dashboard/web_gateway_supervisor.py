@@ -17,7 +17,7 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
@@ -35,10 +35,25 @@ class AuthHelper:
     helper_id: str
     runtime_dir: str
     revision: str
+    #: The compose service that runs this helper. None means the
+    #: organization OIDC helper's standard oauth2-proxy service
+    #: (tools.network.service_auth.render_helper_service); the dashboard's
+    #: passkey helper renders its own (tools.network.passkey_gate).
+    service: dict | None = field(default=None, compare=False)
 
     @property
     def service_name(self) -> str:
         return self.helper_id.replace(":", "-")
+
+
+def _runtime_dir_of(service: dict) -> str:
+    """A helper's runtime directory from its recorded compose service: the
+    passkey helper binds the directory itself, the OIDC helper binds files
+    in it."""
+    source = Path(service["volumes"][0]["source"])
+    if service["volumes"][0].get("target") == "/run/gate":
+        return str(source)
+    return str(source.parent)
 
 
 def helper_listener_ports(helper_ids) -> dict[str, int]:
@@ -344,9 +359,12 @@ async def _build_desired_state() -> GatewayDesiredState:
     # Discovery opens every org store (read-only, memoized in org_ops) — the
     # cold call belongs off the loop.
     orgs = await asyncio.to_thread(_discover_orgs)
-    ports = helper_listener_ports(
-        f"org-oidc:{org}" for org in orgs if service_auth.configuration(org)["configured"]
-    )
+    from tools.dashboard import passkey_gate
+
+    ports = helper_listener_ports([
+        *(f"org-oidc:{org}" for org in orgs if service_auth.configuration(org)["configured"]),
+        passkey_gate.HELPER_ID,
+    ])
     for org in orgs:
         reservations = service_publication.list_reservations(org)
         target_ids = _local_reservation_ids(org)
@@ -420,10 +438,23 @@ async def _build_desired_state() -> GatewayDesiredState:
                         helper_id, f"127.0.0.1:{ports[helper_id]}", ("/oauth2/callback",),
                     ))
                 elif access == "personal":
-                    # The passkey provider is delivered by the coordinator's
-                    # separate feature; never interpret this selection as public.
-                    raise ValueError("Personal authentication is not configured")
+                    # The dashboard's own passkey gate (operator decision
+                    # 2026-09-27): one helper for the personal route, the
+                    # enrollment path unlogged because it carries the token.
+                    helper_id = passkey_gate.HELPER_ID
+                    if helper_id not in helpers:
+                        helpers[helper_id] = await asyncio.to_thread(
+                            passkey_gate.materialize_helper, route.hostname, ports[helper_id],
+                            f"{route.upstream_ip}:{route.port}",
+                        )
+                    route = replace(route, gate=service_gateway.GatedRoute(
+                        helper_id, f"127.0.0.1:{ports[helper_id]}", ("/oauth2/enroll",),
+                    ))
             except Exception:
+                # A route that cannot be resolved or gated renders the
+                # unavailable page; the reason is logged, never swallowed
+                # (a silent refusal here hid a planner fault, 2026-09-27).
+                logger.info("Service route %s/%s unavailable", org, reservation_id, exc_info=True)
                 try:
                     hostname = service_gateway.reservation_hostname(
                         org, reservation_id
@@ -582,8 +613,9 @@ class ComposeGatewayRuntime:
             self.helpers_known = False
         self._helpers = tuple(
             AuthHelper(name.replace("org-oidc-", "org-oidc:", 1),
-                       str(Path(service["volumes"][0]["source"]).parent),
-                       service["labels"]["autonomy.auth-config"])
+                       _runtime_dir_of(service),
+                       service["labels"]["autonomy.auth-config"],
+                       service=service)
             for name, service in prior.items()
         )
         self._helper_marker: str | None = None
@@ -601,7 +633,7 @@ class ComposeGatewayRuntime:
         # those exact services. Never use --remove-orphans on the shared project.
         combined = {h.helper_id: h for h in (*self._helpers, *helpers)}
         services = {
-            h.service_name: render_helper_service(Path(h.runtime_dir), h.revision)
+            h.service_name: h.service or render_helper_service(Path(h.runtime_dir), h.revision)
             for h in combined.values()
         }
         self._helper_override.write_text(json.dumps({"services": services}))

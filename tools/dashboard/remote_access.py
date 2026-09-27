@@ -24,6 +24,9 @@ import re
 from dataclasses import asdict, dataclass
 
 from tools.dashboard import label_lookalike
+import logging
+
+logger = logging.getLogger(__name__)
 
 #: The slug part of a persona label: normalize_persona_label keeps at most 42
 #: characters before the digest.
@@ -320,7 +323,17 @@ async def publish(mode: str, *, org: str = DEFAULT_PUBLISHER, app_label: str | N
     local_origin = _local_origin_of(request_origin) or (previous or {}).get("local_origin")
     if local_origin:
         row["local_origin"] = local_origin
-    return record(row)
+    saved = record(row)
+    # The gate opens with a one-time enrollment token while no gate passkey is
+    # enrolled (F3): the reach step lands on its link once the route is live.
+    try:
+        from tools.dashboard import passkey_gate
+
+        if passkey_gate.enrolled_count() == 0 and not passkey_gate.enrollment_state()["open"]:
+            passkey_gate.open_enrollment(opened_by="onboarding")
+    except Exception:
+        logger.warning("could not open gate enrollment after the publish", exc_info=True)
+    return saved
 
 
 def _tailnet_origin_verified(origin: str) -> bool:
@@ -430,7 +443,7 @@ def _invalidate_status() -> None:
     _status_cache = None
 
 
-async def status() -> dict:
+async def status(*, enrollment_link: bool = False) -> dict:
     """The staged progress onboarding polls: what is recorded and, for the
     relay mode, where the publish stands. One live probe answers every poll
     within STATUS_CACHE_SECONDS (single-flight: concurrent tabs share it)."""
@@ -439,10 +452,24 @@ async def status() -> dict:
         _status_lock = asyncio.Lock()
     async with _status_lock:
         if _status_cache is not None and time.monotonic() - _status_cache[0] < STATUS_CACHE_SECONDS:
-            return dict(_status_cache[1])
-        result = await _status_uncached()
-        _status_cache = (time.monotonic(), result)
-        return dict(result)
+            result = dict(_status_cache[1])
+        else:
+            result = await _status_uncached()
+            _status_cache = (time.monotonic(), result)
+            result = dict(result)
+    # The enrollment link carries the one-time token: added outside the
+    # shared cache, only for a caller the route judged local (never through
+    # the gated route).
+    if enrollment_link and result.get("enrollment") == "open" and result.get("origin"):
+        try:
+            from tools.dashboard import passkey_gate
+
+            url = passkey_gate.enrollment_url(result["origin"])
+        except Exception:
+            url = None
+        if url:
+            result["enrollment_url"] = url
+    return result
 
 
 async def _status_uncached() -> dict:
@@ -495,6 +522,10 @@ async def _status_uncached() -> dict:
                            "missing": "pending"}.get(state.get("state"), "failed")
             if certificate == "failed":
                 result["certificate_detail"] = state.get("reason", "")
+                # A failed attempt the manager will retry (its first try often
+                # races the connector, Windows run 6) is not a failure yet.
+                if "next attempt at" in result["certificate_detail"]:
+                    certificate = "retrying"
             break
     result["certificate"] = certificate
     # The publisher's serving connector: the relay route and the DNS-01
@@ -511,7 +542,16 @@ async def _status_uncached() -> dict:
     # The personal passkey gate is delivered by its own bead; until its helper
     # runs the route fails closed, and this is what the screen must say.
     result["gate"] = "up" if "dashboard-passkey" in (gateway.get("auth_helpers") or []) else "pending"
-    result["enrollment"] = "closed"
+    try:
+        from tools.dashboard import passkey_gate
+
+        enrollment = passkey_gate.enrollment_state()
+        result["enrollment"] = "open" if enrollment["open"] else "closed"
+        result["enrolled"] = passkey_gate.enrolled_count()
+        if enrollment["open"]:
+            result["enrollment_expires_at"] = enrollment["expires_at"]
+    except Exception:
+        result["enrollment"] = "unknown"
     return result
 
 

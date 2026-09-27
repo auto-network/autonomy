@@ -267,6 +267,8 @@ function welcomeApp() {
           location.assign(body.status.enrollment_url);
           return;
         }
+        // A certificate attempt that the manager will retry (its first try
+        // often races the connector) is not a stop: keep polling.
         if (body.status.mode !== 'autonomy' || this.reachLive() ||
             (body.status.advertised && body.status.gate !== 'up') ||
             body.status.certificate === 'failed') {
@@ -282,7 +284,8 @@ function welcomeApp() {
       var failed = st.failed_stage || '';
       var rows = [
         { name: 'reservation', label: 'Address reserved', done: !!st.reservation_id, bad: failed === 'reservation' },
-        { name: 'certificate', label: 'Certificate issued', done: st.certificate === 'ok', bad: st.certificate === 'failed' },
+        { name: 'certificate', label: st.certificate === 'retrying' ? 'Certificate issued (retrying)' : 'Certificate issued',
+          done: st.certificate === 'ok', bad: st.certificate === 'failed' },
         { name: 'route', label: 'Route live on the relay', done: !!st.advertised, bad: false },
         { name: 'gate', label: 'Passkey gate ready', done: st.gate === 'up', bad: false },
       ];
@@ -302,6 +305,7 @@ function welcomeApp() {
       if (st.mode !== 'autonomy') return st.origin;
       if (this.reachLive()) return st.origin;
       if (st.certificate === 'failed') return st.origin + ' — certificate issuance failed; see Published Links.';
+      if (st.certificate === 'retrying') return st.origin + ' — setting up (certificate, retrying)…';
       if (st.gate !== 'up' && st.advertised) return st.origin + ' — waiting for the passkey gate.';
       return st.origin + ' — setting up (' + (st.certificate === 'ok' ? 'route' : 'certificate') + ')…';
     },

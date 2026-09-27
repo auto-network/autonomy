@@ -62,6 +62,7 @@ from tools.data_paths import resolve_store
 # unlock_routes import into the call. The reverse edge is what is circular.
 from tools.dashboard.api_auth import (
     organization_scope_from_request,
+    principal_from_request,
     require_global_api_authority,
     resolve_scoped_org,
 )
@@ -3678,6 +3679,89 @@ async def post_remote_access_publish(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "remote_access": row}, headers={"Cache-Control": "no-store"})
 
 
+async def post_remote_access_enrollment_open(request: Request) -> JSONResponse:
+    """POST /api/network/remote-access/enrollment/open — mint a fresh one-time
+    gate enrollment token (F3/F4): operator authority, never through the
+    gated route. Returns {enrollment_url, expires_at}."""
+    _org, refused = _remote_access_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import passkey_gate, remote_access
+
+    recorded = remote_access.current() or {}
+    if remote_access.request_came_through_gateway(request.headers, recorded.get("origin")
+                                                  if recorded.get("mode") == "autonomy" else None):
+        return _service_publication_error("through_gateway", 403)
+    if recorded.get("mode") != "autonomy":
+        return _service_publication_error("not_published", 409)
+    principal = principal_from_request(request)
+    minted = await asyncio.to_thread(
+        passkey_gate.open_enrollment, opened_by=str(getattr(principal, "subject", None) or "operator"))
+    return JSONResponse({
+        "ok": True,
+        "enrollment_url": f"{recorded['origin']}/oauth2/enroll?token={minted['token']}",
+        "expires_at": minted["expires_at"],
+    })
+
+
+async def post_remote_access_enrollment_close(request: Request) -> JSONResponse:
+    _org, refused = _remote_access_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import passkey_gate, remote_access
+
+    recorded = remote_access.current() or {}
+    if remote_access.request_came_through_gateway(request.headers, recorded.get("origin")
+                                                  if recorded.get("mode") == "autonomy" else None):
+        return _service_publication_error("through_gateway", 403)
+    await asyncio.to_thread(passkey_gate.close_enrollment)
+    return JSONResponse({"ok": True})
+
+
+def _gate_helper_refused(request: Request) -> JSONResponse | None:
+    """The gate helper's callbacks: authenticated with the helper secret
+    materialized into its runtime directory, nothing else."""
+    from tools.dashboard import passkey_gate
+
+    if not passkey_gate.helper_authorized(request.headers):
+        return JSONResponse({"ok": False, "error": "helper_unauthorized"}, status_code=403)
+    return None
+
+
+async def post_remote_access_gate_registered(request: Request) -> JSONResponse:
+    """POST /api/network/remote-access/gate/registered — the helper verified a
+    registration under the open token: record it, close enrollment."""
+    refused = _gate_helper_refused(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import passkey_gate
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    try:
+        saved = await asyncio.to_thread(passkey_gate.register_credential, body if isinstance(body, dict) else {})
+    except passkey_gate.GateRefusal as exc:
+        return JSONResponse({"ok": False, "error": exc.code}, status_code=exc.status)
+    return JSONResponse({"ok": True, "enrolled": len(saved.get("credentials") or [])})
+
+
+async def post_remote_access_gate_sign_count(request: Request) -> JSONResponse:
+    refused = _gate_helper_refused(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import passkey_gate
+
+    try:
+        body = await request.json()
+        credential_id, sign_count = str(body["credential_id"]), int(body["sign_count"])
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
+    await asyncio.to_thread(passkey_gate.update_sign_count, credential_id, sign_count)
+    return JSONResponse({"ok": True})
+
+
 async def get_remote_access_status(request: Request) -> JSONResponse:
     """The staged progress onboarding polls every few seconds."""
     _org, refused = _remote_access_org(request)
@@ -3685,7 +3769,10 @@ async def get_remote_access_status(request: Request) -> JSONResponse:
         return refused
     from tools.dashboard import remote_access
 
-    return JSONResponse({"ok": True, "status": await remote_access.status()},
+    recorded = remote_access.current() or {}
+    local = not remote_access.request_came_through_gateway(
+        request.headers, recorded.get("origin") if recorded.get("mode") == "autonomy" else None)
+    return JSONResponse({"ok": True, "status": await remote_access.status(enrollment_link=local)},
                         headers={"Cache-Control": "no-store"})
 
 
@@ -3693,6 +3780,10 @@ ROUTES = [
     Route("/api/network/remote-access/label/check", get_remote_access_label_check, methods=["GET"]),
     Route("/api/network/remote-access/publish", post_remote_access_publish, methods=["POST"]),
     Route("/api/network/remote-access/status", get_remote_access_status, methods=["GET"]),
+    Route("/api/network/remote-access/enrollment/open", post_remote_access_enrollment_open, methods=["POST"]),
+    Route("/api/network/remote-access/enrollment/close", post_remote_access_enrollment_close, methods=["POST"]),
+    Route("/api/network/remote-access/gate/registered", post_remote_access_gate_registered, methods=["POST"]),
+    Route("/api/network/remote-access/gate/sign-count", post_remote_access_gate_sign_count, methods=["POST"]),
     Route("/api/network/service-reservations", get_service_reservations, methods=["GET"]),
     Route("/api/network/service-reservations", post_service_reservation, methods=["POST"]),
     Route("/api/network/serve-zones", get_serve_zones, methods=["GET"]),

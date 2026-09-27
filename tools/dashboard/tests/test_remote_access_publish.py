@@ -100,6 +100,28 @@ def remote_api(tmp_path, monkeypatch):
                 "detail": "no certificate", "stages": [{"name": "reservation", "ok": True}]}
     monkeypatch.setattr(service_status, "service_status", link_status)
 
+    # The gate's machine-vault rows (cookie key, helper secret, the open
+    # enrollment token) are plain rows here: nothing is sealed in this test.
+    from tools.dashboard import passkey_gate
+    from tools.graph.schemas.machine_vault import MACHINE_VAULT_AUDITED_SET_ID
+    vault: dict[str, dict] = {}
+    real_read, real_write = settings_ops.read_set_key, settings_ops.write_by_key
+
+    def read_set_key(set_id, key, *, org=None, peers=None):
+        if set_id == MACHINE_VAULT_AUDITED_SET_ID:
+            return {"payload": vault[key]} if key in vault else None
+        return real_read(set_id, key, org=org, peers=peers)
+
+    def write_by_key(set_id, revision, key, payload, *, org=None, **kw):
+        if set_id == MACHINE_VAULT_AUDITED_SET_ID:
+            vault[key] = dict(payload)
+            return "vault-row"
+        return real_write(set_id, revision, key, payload, org=org, **kw)
+
+    monkeypatch.setattr(settings_ops, "read_set_key", read_set_key)
+    monkeypatch.setattr(settings_ops, "write_by_key", write_by_key)
+    monkeypatch.setattr(passkey_gate, "_last_materialization", None)
+
     app = Starlette(
         routes=[
             Route("/api/network/remote-access/publish", network_routes.post_remote_access_publish, methods=["POST"]),
@@ -274,14 +296,27 @@ def test_status_reports_the_stages_certificate_gate_and_advertisement(remote_api
     assert status["mode"] == "autonomy" and status["origin"] == row["origin"]
     assert status["route_state"] == "Unavailable" and status["failed_stage"] == "certificate"
     assert status["certificate"] == "pending" and status["advertised"] is False
-    assert status["gate"] == "pending" and status["enrollment"] == "closed"
+    # The publish opened gate enrollment (no passkey yet): the link, with its
+    # one-time token, is shown to this local caller only.
+    assert status["gate"] == "pending" and status["enrollment"] == "open" and status["enrolled"] == 0
+    assert status["enrollment_url"].startswith(row["origin"] + "/oauth2/enroll?token=")
+    relayed = remote_api.client.get("/api/network/remote-access/status", headers={
+        **_headers(), "X-Forwarded-Host": row["origin"].removeprefix("https://")}).json()["status"]
+    assert relayed["enrollment"] == "open" and "enrollment_url" not in relayed
 
     label = row["origin"].split(".", 1)[1].split(".serve.auto.network")[0]
     remote_api.certificates.append({"org": "personal", "persona_label": label, "state": "issuance_failed",
-                                    "reason": "Certificate issuance failed: boom"})
+                                    "reason": "Certificate issuance failed: boom · next attempt at 21:08:00 UTC"})
+    remote_api.remote_access._invalidate_status()   # past the 2 s cache
+    status = remote_api.client.get("/api/network/remote-access/status", headers=_headers()).json()["status"]
+    # A failed attempt the manager will retry is "retrying" (Windows run 6:
+    # the first attempt raced the connector and the second succeeded).
+    assert status["certificate"] == "retrying" and "boom" in status["certificate_detail"]
+
+    remote_api.certificates[0]["reason"] = "Certificate issuance failed: boom"
     remote_api.gateway["advertised_routes"] = [row["reservation_id"]]
     remote_api.gateway["auth_helpers"] = ["dashboard-passkey"]
-    remote_api.remote_access._invalidate_status()   # past the 2 s cache
+    remote_api.remote_access._invalidate_status()
     status = remote_api.client.get("/api/network/remote-access/status", headers=_headers()).json()["status"]
     assert status["certificate"] == "failed" and "boom" in status["certificate_detail"]
     assert status["advertised"] is True and status["gate"] == "up"

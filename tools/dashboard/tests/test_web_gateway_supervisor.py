@@ -1152,3 +1152,87 @@ def test_runtime_import_survives_an_unreadable_helper_override(tmp_path, caplog)
     assert missing._helpers == ()
     assert missing.helpers_known is True
     assert "managed_helpers" not in sup.WebGatewaySupervisor(runtime=missing, loader=lambda: None).status()
+
+
+@pytest.mark.asyncio
+async def test_planner_gates_the_personal_dashboard_route_with_the_passkey_helper(monkeypatch, tmp_path):
+    """Operator decision 2026-09-27: the personal route is gated by the
+    dashboard's own passkey helper. The planner materializes it once, gives
+    its loopback port to the gate, leaves the enrollment path unlogged, and
+    the helper's own compose service travels with the AuthHelper."""
+    from tools.dashboard import passkey_gate
+
+    monkeypatch.setattr(sup, "_discover_orgs", lambda: ["personal"])
+    from tools.dashboard import service_auth
+    monkeypatch.setattr(service_auth, "configuration", lambda org: {"configured": False})
+    dash = "5030b922-d6cc-565c-8209-f675fa755226"
+    monkeypatch.setattr(
+        sup.service_publication, "list_reservations",
+        lambda _org: [{"reservation_id": dash, "state": "active", "persona_label": "alice-x"}],
+    )
+    monkeypatch.setattr(sup.service_publication, "_read_local_machine_id", lambda: LOCAL_MACHINE)
+    monkeypatch.setattr(
+        sup.service_publication, "list_service_targets",
+        lambda _org: [{"reservation_id": dash, "machine_id": LOCAL_MACHINE, "kind": "dashboard",
+                       "access_mode": "personal"}],
+    )
+    monkeypatch.setattr(sup.service_certificate, "active_gateway_pair", lambda _org, _persona: (
+        "/run/autonomy-service-gateway-certs/personas/alice-x/tls.crt",
+        "/run/autonomy-service-gateway-certs/personas/alice-x/tls.key"))
+
+    async def connector_ready(_org):
+        return True
+
+    monkeypatch.setattr(sup, "_connector_ready", connector_ready)
+    hostname = "dashboard.alice-x.serve.auto.network"
+
+    async def resolve(org, reservation_id):
+        return ServiceGatewayRoute(
+            reservation_id=dash, hostname=hostname, session_id="dashboard", container_id="a" * 64,
+            network="autonomy_default", upstream_ip="172.16.0.9", port=8081,
+            expires_at="2026-08-31T21:12:00.000Z",
+        )
+
+    monkeypatch.setattr(sup.service_gateway, "resolve_gateway_route", resolve)
+    materialized = []
+
+    def materialize(host, port, upstream):
+        materialized.append((host, port, upstream))
+        return sup.AuthHelper("dashboard-passkey", str(tmp_path), "rev-1", service={"image": "node", "volumes": [
+            {"type": "bind", "source": str(tmp_path), "target": "/run/gate", "read_only": True}]})
+
+    monkeypatch.setattr(passkey_gate, "materialize_helper", materialize)
+
+    plan = await sup.build_desired_state()
+
+    assert plan.ready is True, plan
+    assert materialized == [(hostname, sup.helper_listener_ports(["dashboard-passkey"])["dashboard-passkey"], "172.16.0.9:8081")]
+    assert [h.helper_id for h in plan.helpers] == ["dashboard-passkey"]
+    assert plan.helpers[0].service["image"] == "node"
+    assert "forward_auth 127.0.0.1:" in plan.caddyfile and "uri /oauth2/auth" in plan.caddyfile
+    assert 'log_skip "/oauth2/enroll"' in plan.caddyfile
+    assert "reverse_proxy 172.16.0.9:8081" in plan.caddyfile
+
+
+def test_helper_reconciliation_uses_the_helpers_own_service_and_recovers_its_runtime_dir(tmp_path):
+    """A helper that renders its own compose service (the passkey helper)
+    is written as-is, and read back with the right runtime directory."""
+    override = tmp_path / "compose.json"
+    runtime = sup.ComposeGatewayRuntime(helper_override=str(override))
+    passkey = sup.AuthHelper("dashboard-passkey", str(tmp_path / "gate"), "rev-1", service={
+        "image": "node", "labels": {"autonomy.auth-config": "rev-1"},
+        "volumes": [{"type": "bind", "source": str(tmp_path / "gate"), "target": "/run/gate", "read_only": True}]})
+    oidc = sup.AuthHelper("org-oidc:acme", str(tmp_path / "org-oidc-acme"), "rev-2")
+    from pathlib import Path
+
+    from tools.network.service_auth import render_helper_service
+    services = {passkey.service_name: passkey.service,
+                oidc.service_name: render_helper_service(Path(oidc.runtime_dir), oidc.revision)}
+    override.parent.mkdir(parents=True, exist_ok=True)
+    override.write_text(json.dumps({"services": services}))
+    again = sup.ComposeGatewayRuntime(helper_override=str(override))
+    by_id = {h.helper_id: h for h in again._helpers}
+    assert by_id["dashboard-passkey"].runtime_dir == str(tmp_path / "gate")
+    assert by_id["dashboard-passkey"].service["image"] == "node"
+    assert by_id["org-oidc:acme"].runtime_dir == str(tmp_path / "org-oidc-acme")
+    assert runtime is not None
