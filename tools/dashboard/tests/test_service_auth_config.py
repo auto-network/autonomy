@@ -11,7 +11,11 @@ def store(monkeypatch):
     monkeypatch.setattr(service_auth.settings_ops, "read_set_key", lambda sid, key, **kw: rows.get((kw.get("org"), sid, key)))
     def write(sid, revision, key, payload, **kw):
         rows[(kw.get("org"), sid, key)] = {"payload": payload}
-    monkeypatch.setattr(service_auth.settings_ops, "upsert_by_key", write)
+    def upsert(sid, revision, key, payload, **kw):
+        assert sid == SERVICE_AUTH_SET_ID, "Vault values must use write_by_key"
+        write(sid, revision, key, payload, **kw)
+    monkeypatch.setattr(service_auth.settings_ops, "upsert_by_key", upsert)
+    monkeypatch.setattr(service_auth.settings_ops, "write_by_key", write)
     monkeypatch.setattr(service_auth.service_publication, "list_zones", lambda org: [{"zone": "anchore.serve.auto.network", "state": "active"}])
     return rows
 
@@ -39,6 +43,13 @@ def test_no_domain_is_setup_prerequisite(store, monkeypatch):
     monkeypatch.setattr(service_auth.service_publication, "list_zones", lambda org: [])
     with pytest.raises(service_auth.service_publication.ServicePublicationError, match="domain_required"):
         service_auth.save_config("anchore", {})
+
+
+def test_edit_replaces_vaulted_secret(store):
+    config = {"provider": "okta", "issuer": "https://example.okta.com", "client_id": "client", "default_access": "oidc", "client_secret": "first"}
+    service_auth.save_config("anchore", config)
+    service_auth.save_config("anchore", {**config, "client_secret": "replacement"})
+    assert store[("anchore", SERVICE_AUTH_SECRET_SET_ID, "default")]["payload"] == {"client_secret": "replacement"}
 
 
 def test_cookie_key_is_local_and_stable(store):

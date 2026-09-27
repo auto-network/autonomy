@@ -31,7 +31,7 @@ def save_config(org: str, body: dict) -> dict:
     ServiceAuthV1.validate(payload)
     secret = body.get("client_secret")
     if secret:
-        settings_ops.upsert_by_key(SERVICE_AUTH_SECRET_SET_ID, 1, "default", {"client_secret": secret}, org=org)
+        settings_ops.write_by_key(SERVICE_AUTH_SECRET_SET_ID, 1, "default", {"client_secret": secret}, org=org)
     elif not configuration(org)["configured"]:
         raise service_publication.ServicePublicationError("client_secret_required", 400)
     settings_ops.upsert_by_key(SERVICE_AUTH_SET_ID, 1, "default", payload, org=org)
@@ -43,7 +43,7 @@ def cookie_secret(org: str) -> bytes:
     row = settings_ops.read_set_key(MACHINE_VAULT_AUDITED_SET_ID, key, org="machine", peers=[])
     if row is None:
         value = secrets.token_hex(32)
-        settings_ops.upsert_by_key(MACHINE_VAULT_AUDITED_SET_ID, 1, key, {"value": value}, org="machine")
+        settings_ops.write_by_key(MACHINE_VAULT_AUDITED_SET_ID, 1, key, {"value": value}, org="machine")
     else:
         value = row["payload"]["value"]
     return bytes.fromhex(value)
