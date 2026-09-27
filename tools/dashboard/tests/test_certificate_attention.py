@@ -55,21 +55,6 @@ def test_expiry_condition_warns_under_21_days(tmp_path, days, state):
         assert condition["state"] == state and condition["names"] == ["node.tailabcd.ts.net"]
 
 
-def test_derive_condition_is_versioned_by_not_after(tmp_path):
-    cert, _ = _pem_pair(tmp_path, ["node.tailabcd.ts.net"], days=10)
-    facts = tls_certificate.read_certificate(cert)
-    row = ca.derive_condition(facts, machine_id="ab" * 32)
-    assert row["kind"] == ca.KIND and row["attention_state"] == "needs_attention"
-    assert row["attention_id"] == f"machine:{'ab' * 32}:tls-certificate" and row["object_ref"] == "ab" * 32
-    assert row["safe_title"].startswith("Dashboard certificate expires in ")
-    assert "renew-tls-cert.sh" in row["safe_summary"]
-    assert row["source_version"] == int(facts.not_after.timestamp())
-    fresh, _ = _pem_pair(tmp_path / "fresh", ["node.tailabcd.ts.net"], days=80) if (tmp_path / "fresh").mkdir() is None else (None, None)
-    resolved = ca.derive_condition(tls_certificate.read_certificate(fresh), machine_id="ab" * 32)
-    assert resolved["attention_state"] == "resolved"
-    assert ca.derive_condition(None, machine_id="ab" * 32)["attention_state"] == "resolved"
-
-
 class _FakeIndex:
     def __init__(self):
         self.items = {}
@@ -80,6 +65,42 @@ class _FakeIndex:
     def publish(self, producer, condition):
         self.published.append((producer, dict(condition)))
         self.items[condition["attention_id"]] = SimpleNamespace(payload=dict(condition))
+
+
+
+def test_derive_condition_escalates_through_stages_and_a_renewal_resolves(tmp_path):
+    """Reviewer: a constant version froze the countdown and never escalated.
+    The version is NotAfter*4 + stage, so 20 days, 6 days and expired each
+    publish once, and any renewal is larger than every stage of the old one."""
+    cert, _ = _pem_pair(tmp_path, ["node.tailabcd.ts.net"], days=20)
+    facts = tls_certificate.read_certificate(cert)
+    on = facts.not_after.strftime("%-d %b %Y")
+    at = lambda days_before: facts.not_after - dt.timedelta(days=days_before)
+
+    warn = ca.derive_condition(facts, machine_id="ab" * 32, now=at(20))
+    urgent = ca.derive_condition(facts, machine_id="ab" * 32, now=at(6))
+    expired = ca.derive_condition(facts, machine_id="ab" * 32, now=at(-1))
+    current = ca.derive_condition(facts, machine_id="ab" * 32, now=at(60))
+    assert (warn["attention_state"], urgent["attention_state"], expired["attention_state"]) == ("needs_attention",) * 3
+    assert current["attention_state"] == "resolved"
+    assert warn["safe_title"] == f"Dashboard certificate expires on {on}"
+    assert urgent["safe_title"] == f"Dashboard certificate expires on {on} (under a week)"
+    assert expired["safe_title"] == f"Dashboard certificate expired on {on}"
+    assert "renew-tls-cert.sh" in warn["safe_summary"]
+    assert current["source_version"] < warn["source_version"] < urgent["source_version"] < expired["source_version"]
+    assert warn["attention_id"] == f"machine:{'ab' * 32}:tls-certificate" and warn["object_ref"] == "ab" * 32
+
+    # Three publishes as it ages, then a renewal resolves with a larger version.
+    index = _FakeIndex()
+    assert [ca.publish_condition(index, dict(row)) for row in (warn, warn, urgent, urgent, expired)] == \
+        ["published", "skipped", "published", "skipped", "published"]
+    (tmp_path / "fresh").mkdir()
+    fresh, _ = _pem_pair(tmp_path / "fresh", ["node.tailabcd.ts.net"], days=80)
+    renewed = ca.derive_condition(tls_certificate.read_certificate(fresh), machine_id="ab" * 32)
+    assert renewed["attention_state"] == "resolved" and renewed["source_version"] > expired["source_version"]
+    assert ca.publish_condition(index, dict(renewed)) == "published"
+    assert ca.publish_condition(index, dict(renewed)) == "skipped"
+    assert ca.derive_condition(None, machine_id="ab" * 32)["attention_state"] == "resolved"
 
 
 def test_publish_opens_once_and_resolves_only_an_open_item():

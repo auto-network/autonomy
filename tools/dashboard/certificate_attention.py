@@ -72,41 +72,60 @@ def _machine_id() -> str | None:
         return None
 
 
+#: Escalation stages of one certificate. The source version is
+#: NotAfter * 4 + stage: monotonic as a certificate ages through the stages,
+#: and any renewal (a later NotAfter) is larger than every stage of the old
+#: one, so each escalation publishes (and pushes) once and a renewal resolves.
+STAGE_CURRENT, STAGE_WARN, STAGE_URGENT, STAGE_EXPIRED = 0, 1, 2, 3
+URGENT_DAYS = 7
+
+
+def _stage(days: float | None) -> int:
+    if days is None or days > tls_certificate.EXPIRY_WARNING_DAYS:
+        return STAGE_CURRENT
+    if days <= 0:
+        return STAGE_EXPIRED
+    if days <= URGENT_DAYS:
+        return STAGE_URGENT
+    return STAGE_WARN
+
+
+def source_version(facts, stage: int) -> int:
+    return (int(facts.not_after.timestamp()) if facts is not None else 0) * 4 + stage
+
+
+def _on(facts) -> str:
+    return facts.not_after.strftime("%-d %b %Y")
+
+
 def derive_condition(facts, *, machine_id: str, now: datetime | None = None) -> dict:
     """One condition row for this machine's served certificate: needs
-    attention under the warning window (or expired), resolved otherwise.
-    ``source_version`` is the certificate's NotAfter, so a renewed certificate
-    is a newer version and an unchanged one never re-publishes."""
+    attention under the warning window, again under seven days, again once
+    expired; resolved otherwise. Titles carry the absolute date, so the item
+    stays true between cycles."""
     now = now or datetime.now(timezone.utc)
     attention_id = f"machine:{machine_id}:tls-certificate"
     object_ref = machine_id
-    condition = tls_certificate.expiry_condition(facts, now=now)
-    if condition is None:
-        version = int(facts.not_after.timestamp()) if facts is not None else 0
-        return {
-            "kind": KIND, "attention_id": attention_id, "object_ref": object_ref,
-            "attention_state": "resolved",
-            "safe_title": "Dashboard certificate is current",
-            "safe_summary": None,
-            "occurred_at": now.timestamp(), "source_version": version,
-        }
-    days = condition["days"]
-    if condition["state"] == "expired":
-        title = "Dashboard certificate has expired"
-        summary = (f"The certificate this dashboard serves expired on {condition['not_after']}. "
-                   "Renew it (tools/dashboard/renew-tls-cert.sh) so browsers and the fleet can connect.")
+    days = facts.days_remaining(now) if facts is not None else None
+    stage = _stage(days)
+    base = {"kind": KIND, "attention_id": attention_id, "object_ref": object_ref,
+            "occurred_at": now.timestamp(), "source_version": source_version(facts, stage)}
+    if stage == STAGE_CURRENT:
+        return {**base, "attention_state": "resolved",
+                "safe_title": "Dashboard certificate is current", "safe_summary": None}
+    remedy = ("The monthly renewal did not replace it: run tools/dashboard/renew-tls-cert.sh "
+              "on this machine and check data/cert-renew.log.")
+    if stage == STAGE_EXPIRED:
+        title = f"Dashboard certificate expired on {_on(facts)}"
+        summary = (f"The certificate this dashboard serves expired on {_on(facts)}; browsers and the "
+                   f"fleet cannot connect to it. {remedy}")
+    elif stage == STAGE_URGENT:
+        title = f"Dashboard certificate expires on {_on(facts)} (under a week)"
+        summary = f"The certificate this dashboard serves expires on {_on(facts)}. {remedy}"
     else:
-        title = f"Dashboard certificate expires in {int(days)} days"
-        summary = (f"The certificate this dashboard serves expires on {condition['not_after']}. "
-                   "The monthly renewal did not replace it; run tools/dashboard/renew-tls-cert.sh "
-                   "and check data/cert-renew.log.")
-    return {
-        "kind": KIND, "attention_id": attention_id, "object_ref": object_ref,
-        "attention_state": "needs_attention",
-        "safe_title": title, "safe_summary": summary,
-        "occurred_at": now.timestamp(),
-        "source_version": int(facts.not_after.timestamp()),
-    }
+        title = f"Dashboard certificate expires on {_on(facts)}"
+        summary = f"The certificate this dashboard serves expires on {_on(facts)}. {remedy}"
+    return {**base, "attention_state": "needs_attention", "safe_title": title, "safe_summary": summary}
 
 
 def publish_condition(index, condition: dict) -> str:
