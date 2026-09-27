@@ -264,6 +264,13 @@ class SessionLifecycleStateWriter:
                 sort_keys=True,
             )
 
+        # Only a launch or a revive is activity. Stopping and dying are not:
+        # last_activity keeps the session's real last-activity time (ended_at
+        # carries the death), and is filled only when the row never had one.
+        if to_state in ("LAUNCHING", "ACTIVE"):
+            last_activity_sql = "last_activity=?"
+        else:
+            last_activity_sql = "last_activity=COALESCE(last_activity, ?)"
         if to_state in ("ENDED", "FAILED"):
             ended_at_sql = "COALESCE(ended_at, ?)"
             ended_at_val: float | None = now
@@ -289,7 +296,7 @@ class SessionLifecycleStateWriter:
         cur = conn.execute(
             "UPDATE tmux_sessions"
             f" SET state=?, startup_state=?,"
-            f" last_activity=?, lifecycle_detail=?,"
+            f" {last_activity_sql}, lifecycle_detail=?,"
             f" ended_at={ended_at_sql}, attention={attention_sql}"
             " WHERE tmux_name=?",
             params,

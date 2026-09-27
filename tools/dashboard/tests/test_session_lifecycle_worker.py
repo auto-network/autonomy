@@ -201,3 +201,53 @@ def test_derive_lifecycle_state_coarse_mapping():
     assert derive_lifecycle_state(
         {"activity_state": "idle", "is_live": 1, "startup_state": None}
     ) == "ACTIVE"
+
+
+def _set_last_activity(value, tmux_name="auto-life"):
+    dashboard_db._conn.execute(
+        "UPDATE tmux_sessions SET last_activity=? WHERE tmux_name=?", (value, tmux_name))
+    dashboard_db._conn.commit()
+
+
+def test_stop_and_death_keep_the_sessions_real_last_activity(tmp_path):
+    """auto-l2xwf: a dead row's last_activity must stay the time it was last
+    active, not the time it was stopped (ended_at carries the death)."""
+    _init_db(tmp_path)
+    _insert_session()
+    writer = SessionLifecycleStateWriter()
+    writer.set_state("auto-life", "running")
+    _set_last_activity(1000.0)  # the tailer's last seen activity, long ago
+
+    writer.set_state("auto-life", "stopping")
+    writer.set_state("auto-life", "cleaning")
+    writer.set_state("auto-life", "dead")
+
+    row = _row()
+    assert row["state"] == "ENDED"
+    assert row["last_activity"] == 1000.0
+    assert row["ended_at"] > 1000.0
+
+
+def test_failure_keeps_last_activity_and_fills_it_only_when_missing(tmp_path):
+    _init_db(tmp_path)
+    _insert_session()
+    writer = SessionLifecycleStateWriter()
+    writer.set_state("auto-life", "running")
+    _set_last_activity(1000.0)
+    writer.fail("auto-life", phase="injecting", reason="x", retryable=True, attempt=1)
+    assert _row()["last_activity"] == 1000.0
+
+    _insert_session("auto-born-dead")
+    _set_last_activity(None, "auto-born-dead")
+    writer.fail("auto-born-dead", phase="launching", reason="y", retryable=True, attempt=1)
+    assert _row("auto-born-dead")["last_activity"] is not None
+
+
+def test_revive_is_activity(tmp_path):
+    _init_db(tmp_path)
+    _insert_session()
+    writer = SessionLifecycleStateWriter()
+    writer.set_state("auto-life", "running")
+    _set_last_activity(1000.0)
+    writer.set_state("auto-life", "running")
+    assert _row()["last_activity"] > 1000.0
