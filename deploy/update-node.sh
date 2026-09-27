@@ -8,8 +8,14 @@
 # --reload), so updating the checkout IS the deploy. No container restart, no
 # image rebuild, no registry.
 #
-# Why a bundle rather than `git pull`: the node has no git remote (it must not
-# phone home) and its code volume is not readable from the host without root.
+# A node with a network path to GitHub updates itself: its image keeps the
+# public origin and the dashboard checks it per the operator's software update
+# preference (profile menu, or automatically). This script is for a node
+# WITHOUT that path, or to push a commit that is not on origin yet.
+#
+# Why a bundle rather than `git pull`: this pushes from THIS checkout, which
+# the node cannot reach, and its code volume is not readable from the host
+# without root.
 # `git bundle create -` writes to stdout and `docker exec -i` reads stdin, so
 # the objects stream straight in with no temp file on either side.
 #

@@ -20,9 +20,17 @@ deploy goal), and a machine cannot reset away work it has not shipped.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import os
 import subprocess
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -73,6 +81,52 @@ def _git(*args: str, timeout: int = _LOCAL_TIMEOUT_S, check: bool = True) -> str
     return result.stdout
 
 
+def _ensure_origin() -> None:
+    """A node image keeps the public origin (deploy/Dockerfile); a code volume
+    seeded before that has none. Add it, so such a node self-heals on its
+    first check instead of never seeing an update."""
+    if _git("remote", "get-url", _ORIGIN, check=False).strip():
+        return
+    _git("remote", "add", _ORIGIN, _PUBLIC_ORIGIN_URL)
+    logger.info("software_update: added missing origin %s", _PUBLIC_ORIGIN_URL)
+
+
+def _checked_at() -> str | None:
+    """When origin was last fetched: git's own FETCH_HEAD mtime, so the answer
+    survives restarts and needs no bookkeeping of ours."""
+    try:
+        git_dir = _git("rev-parse", "--absolute-git-dir").strip()
+        mtime = os.path.getmtime(os.path.join(git_dir, "FETCH_HEAD"))
+    except (SoftwareUpdateError, subprocess.SubprocessError, OSError):
+        return None
+    return datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _last_update_path() -> Path:
+    from tools.data_paths import DATA_ROOT
+
+    return Path(DATA_ROOT) / "software-update" / "last-update.json"
+
+
+def last_update() -> dict[str, Any] | None:
+    """The most recent applied update on this machine, or None."""
+    try:
+        return json.loads(_last_update_path().read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _record_update(record: dict[str, Any]) -> None:
+    path = _last_update_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(record))
+        tmp.replace(path)
+    except OSError:
+        logger.warning("software_update: could not record the applied update", exc_info=True)
+
+
 def _short(sha: str) -> str:
     return sha[:10]
 
@@ -108,6 +162,7 @@ def update_status(*, fetch: bool = True) -> dict[str, Any]:
     }
     if fetch:
         try:
+            _ensure_origin()
             _git("fetch", _ORIGIN, _TRACK_BRANCH, timeout=_FETCH_TIMEOUT_S)
             status["fetched"] = True
         except (SoftwareUpdateError, subprocess.SubprocessError, OSError) as exc:
@@ -115,6 +170,8 @@ def update_status(*, fetch: bool = True) -> dict[str, Any]:
             # blank panel, and the caller sees why the fetch didn't land.
             status["error"] = f"fetch failed: {exc}"
 
+    status["checked_at"] = _checked_at()
+    status["last_update"] = last_update()
     try:
         current = _git("rev-parse", "HEAD").strip()
         current_subject = _git("log", "-1", "--format=%s").strip()
@@ -167,7 +224,7 @@ def update_status(*, fetch: bool = True) -> dict[str, Any]:
     return status
 
 
-def perform_update() -> dict[str, Any]:
+def perform_update(*, automatic: bool = False) -> dict[str, Any]:
     """Fast-forward this checkout onto origin. Re-verifies the guards under a
     fresh fetch, then ``reset --hard``. Refuses anything that is not a clean
     fast-forward so it can never destroy unshipped local work.
@@ -202,6 +259,13 @@ def perform_update() -> dict[str, Any]:
     deploy_changed = status.get("deploy_changed", False)
     _git("reset", "--hard", status["origin_ref"])
     after = _git("rev-parse", "HEAD").strip()
+    _record_update({
+        "automatic": automatic,
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "from": _short(before),
+        "to": _short(after),
+        "count": status.get("behind", 0),
+    })
     return {
         "updated": True,
         "from": _short(before),
@@ -210,3 +274,68 @@ def perform_update() -> dict[str, Any]:
         "commits": incoming,
         "deploy_changed": deploy_changed,
     }
+
+
+#: How often the poller re-reads the preference. Checks themselves run every
+#: ``interval_minutes``; this only bounds how soon a changed preference acts.
+POLL_TICK_S = 60
+
+
+async def run_poller(
+    publish: Callable[[dict[str, Any]], Awaitable[None]],
+    *,
+    read_preference: Callable[[], dict[str, Any]] | None = None,
+    status_fn: Callable[..., dict[str, Any]] = update_status,
+    update_fn: Callable[..., dict[str, Any]] = perform_update,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    tick_s: float = POLL_TICK_S,
+) -> None:
+    """The scheduled check (graph://89d3c8df-544 §6, driver S7).
+
+    While ``auto_check`` is on, fetch origin once per ``interval_minutes``;
+    with ``auto_install`` also on, apply an available fast-forward right away
+    (no idle check: the dashboard hot-reloads and sessions keep running).
+    ``publish`` receives ``{behind, can_update, ...}`` when ``behind`` changes
+    and after an automatic install. With ``auto_check`` off nothing is fetched.
+    """
+    if read_preference is None:
+        from tools.dashboard.software_update_settings import read_preference as _read
+
+        read_preference = _read
+    last_fetch: float | None = None
+    last_behind: int | None = None
+    while True:
+        try:
+            pref = await asyncio.to_thread(read_preference)
+            interval_s = max(int(pref.get("interval_minutes") or 360), 30) * 60
+            if pref.get("auto_check") and (last_fetch is None or clock() - last_fetch >= interval_s):
+                last_fetch = clock()
+                status = await asyncio.to_thread(status_fn, fetch=True)
+                if pref.get("auto_install") and status.get("can_update"):
+                    try:
+                        result = await asyncio.to_thread(update_fn, automatic=True)
+                    except SoftwareUpdateError as exc:
+                        logger.warning("software_update: automatic install refused: %s", exc)
+                    else:
+                        logger.info(
+                            "software_update: installed automatically %s -> %s (%s commits)",
+                            result.get("from"), result.get("to"), result.get("count"),
+                        )
+                        status = await asyncio.to_thread(status_fn, fetch=False)
+                        last_behind = status.get("behind")
+                        await publish({
+                            "behind": status.get("behind"), "can_update": status.get("can_update"),
+                            "installed": result,
+                        })
+                        await sleep(tick_s)
+                        continue
+                behind = status.get("behind")
+                if behind != last_behind:
+                    last_behind = behind
+                    await publish({"behind": behind, "can_update": status.get("can_update")})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("software_update: poller tick failed")
+        await sleep(tick_s)

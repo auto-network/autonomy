@@ -53,8 +53,12 @@ COPY . /app
 # Version stamp: read the commit hash + commit DATE from the checkout being
 # built. Both are deterministic per commit (reproducible image); the build
 # takes no version arg and nobody passes anything. Then KEEP .git (the launcher
-# clones REPO_ROOT to build /workspace/repo — see NODE-VOLUME-MODEL.md), removing
-# only the remote so the node never phones home, and gc'ing to shrink the pack.
+# clones REPO_ROOT to build /workspace/repo — see NODE-VOLUME-MODEL.md), point
+# origin at the PUBLIC repository over HTTPS (no key, read-only), and gc to
+# shrink the pack. The node fetches origin only as the operator's software
+# update preference allows (tools/dashboard/software_update_settings.py):
+# scheduled checks when "automatically check" is on, otherwise only when the
+# operator clicks "Check for updates" (graph://89d3c8df-544 §6).
 RUN set -e; \
     if [ ! -d /app/.git ]; then \
         echo "ERROR: build context has no .git; the version stamp needs a git checkout (git clone, not a source tarball)." >&2; \
@@ -65,6 +69,7 @@ RUN set -e; \
         "$(git -C /app show -s --format=%cI HEAD)" \
         > /app/VERSION; \
     git -C /app remote remove origin 2>/dev/null || true; \
+    git -C /app remote add origin https://github.com/auto-network/autonomy.git; \
     git -C /app gc --prune=now --quiet
 
 # Build the dashboard CSS once, at image build — no network at startup.

@@ -220,6 +220,7 @@ from tools.dashboard import harness_usage_settings as _harness_usage_settings  #
 from tools.dashboard import harness_bootstrap as _harness_bootstrap  # noqa: E402, F401
 from tools.dashboard import session_upload_settings as _session_upload  # noqa: E402, F401
 from tools.dashboard import session_orientation_settings as _session_orientation_settings  # noqa: E402, F401
+from tools.dashboard import software_update_settings as _software_update_settings  # noqa: E402, F401
 from tools.dashboard import session_board_settings  # noqa: E402
 from tools.dashboard import voice_transcription_settings as _voice_transcription_settings  # noqa: E402
 from tools.dashboard import worktree_directives as _worktree_directives  # noqa: E402, F401
@@ -11873,7 +11874,42 @@ async def api_software_update_status(request):
 
     fetch = request.query_params.get("fetch", "1") not in ("0", "false", "no")
     status = await asyncio.to_thread(software_update.update_status, fetch=fetch)
+    # The menu picks its tile from the preference, so it rides along: one
+    # request, no second round-trip on panel open.
+    preference = await asyncio.to_thread(_software_update_settings.read_preference)
+    status["auto_check"] = preference["auto_check"]
+    status["auto_install"] = preference["auto_install"]
     return JSONResponse(status)
+
+
+async def api_software_preference(request):
+    """GET / PUT the operator's software-update preference
+    (``software_update.preference#1``): ``auto_check``, ``auto_install``,
+    ``interval_minutes``. PUT merges the fields given; it is the operator's
+    alone."""
+    if request.method == "GET":
+        auth_error = api_auth.require_authenticated_api_caller(request)
+        if auth_error is not None:
+            return auth_error
+        return JSONResponse(await asyncio.to_thread(_software_update_settings.read_preference))
+    auth_error = api_auth.require_global_api_authority(request)
+    if auth_error is not None:
+        return auth_error
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+    from tools.graph.schemas import SchemaValidationError
+    try:
+        saved = await asyncio.to_thread(_software_update_settings.write_preference, body)
+    except SchemaValidationError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.exception("software_update: preference write failed")
+        return JSONResponse({"error": f"could not save the preference: {exc}"}, status_code=503)
+    return JSONResponse(saved)
 
 
 async def api_software_update(request):
@@ -21440,6 +21476,7 @@ routes = [
     Route("/api/version", api_version),
     Route("/api/software/update-status", api_software_update_status),
     Route("/api/software/update", api_software_update, methods=["POST"]),
+    Route("/api/software/preference", api_software_preference, methods=["GET", "PUT"]),
 
     # Graph write API (single-writer proxy for containers)
     Route("/api/graph/note", api_graph_note, methods=["POST"]),
@@ -21570,6 +21607,18 @@ routes = route_policy.apply_default_deny(routes)
 _dispatch_watcher_task: asyncio.Task | None = None
 _mock_event_watcher_task: asyncio.Task | None = None
 _harness_usage_poller_task: asyncio.Task | None = None
+_software_update_poller_task: asyncio.Task | None = None
+
+
+async def _software_update_poller() -> None:
+    """The scheduled software-update check (software_update.run_poller),
+    announced on SSE ``software_update`` when ``behind`` changes."""
+    from tools.dashboard import software_update
+
+    async def _publish(payload: dict) -> None:
+        await event_bus.broadcast("software_update", payload, dedup=False)
+
+    await software_update.run_poller(_publish)
 _tokens_rollup_poller_task: asyncio.Task | None = None
 _serving_bootstrap_task: asyncio.Task | None = None
 _event_proxy_task: asyncio.Task | None = None
@@ -22576,6 +22625,7 @@ async def _on_shutdown():
             _dispatch_watcher_task,
             _mock_event_watcher_task,
             _harness_usage_poller_task,
+            _software_update_poller_task,
             _tokens_rollup_poller_task,
             _claude_credentials_refresh_task,
             _codex_credentials_refresh_task,
@@ -22658,7 +22708,7 @@ async def _activate_worker(reason: str) -> None:
     lived inline in ``_on_startup``.
     """
     global _worker_activated, _claude_credentials_refresh_task
-    global _codex_credentials_refresh_task
+    global _codex_credentials_refresh_task, _software_update_poller_task
     if _worker_activated:
         return
     _worker_activated = True
@@ -22702,6 +22752,11 @@ async def _activate_worker(reason: str) -> None:
     except Exception:
         logger.exception("fleet sync scheduler failed to start")
 
+    if _should_run_harness_usage_poller():
+        # Fetches origin and may fast-forward the checkout: one worker only,
+        # so it starts at activation, like the credentials refresh pollers.
+        _software_update_poller_task = asyncio.create_task(
+            _software_update_poller(), name="software-update-poller")
     if _claude_credentials_refresh.should_run_credentials_refresh_poller():
         _claude_credentials_refresh_task = asyncio.create_task(
             _claude_credentials_refresh.credentials_refresh_poller()
