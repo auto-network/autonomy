@@ -88,6 +88,15 @@ def test_acme_bundle_round_trip_and_prunes_old_lineage_generations(
     assert (live / "cert.pem").is_symlink()
 
 
+def test_compose_environment_does_not_need_a_host_checkout(monkeypatch):
+    """auto-8pohz: a published node has no host checkout and no data root;
+    the certbot inputs come from the code volume, so issuance proceeds."""
+    monkeypatch.delenv("AUTONOMY_HOST_ROOT", raising=False)
+    monkeypatch.delenv("AUTONOMY_HOST_DATA_ROOT", raising=False)
+    env = certs._compose_environment()
+    assert "AUTONOMY_HOST_ROOT" not in env
+
+
 def test_compose_environment_derives_host_code_root_for_fresh_exec(monkeypatch):
     monkeypatch.delenv("AUTONOMY_HOST_ROOT", raising=False)
     monkeypatch.setenv("AUTONOMY_HOST_DATA_ROOT", "/opt/autonomy")

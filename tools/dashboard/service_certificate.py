@@ -148,11 +148,12 @@ def _compose_base() -> list[str]:
 def _compose_environment() -> dict[str, str]:
     """Environment for Compose interpolation in a fresh ``docker exec``.
 
-    ``AUTONOMY_HOST_ROOT`` is derived by the dashboard entrypoint and therefore
-    exists in the long-lived server process, but Docker does not retroactively
-    add that export to later ``docker exec`` processes. Re-derive the same host
-    path from the compose-declared data root and refuse an ambiguous relative
-    bind source.
+    The certbot job's inputs (the DNS-01 hook) come from the ``autonomy-code``
+    volume, never from a host checkout (auto-8pohz: a published node has no
+    checkout, so a host-path bind source made every certificate issuance fail
+    with "AUTONOMY_HOST_ROOT is unavailable"). ``AUTONOMY_HOST_ROOT`` is still
+    derived when the data root is known, for any remaining host-side
+    interpolation, but its absence no longer refuses issuance.
     """
     env = dict(os.environ)
     host_root = env.get("AUTONOMY_HOST_ROOT")
@@ -160,9 +161,8 @@ def _compose_environment() -> dict[str, str]:
         host_data_root = env.get("AUTONOMY_HOST_DATA_ROOT")
         if host_data_root:
             host_root = str(Path(host_data_root) / "code")
-    if not host_root or not Path(host_root).is_absolute():
-        raise ServiceCertificateError("AUTONOMY_HOST_ROOT is unavailable")
-    env["AUTONOMY_HOST_ROOT"] = host_root
+    if host_root and Path(host_root).is_absolute():
+        env["AUTONOMY_HOST_ROOT"] = host_root
     return env
 
 
@@ -180,8 +180,8 @@ def _certbot_command(
         "-e", "AUTONOMY_ACME_SOCKET=/run/autonomy-acme/dns01.sock",
         "service-certbot", "renew" if renew else "certonly", "--manual",
         "--preferred-challenges", "dns",
-        "--manual-auth-hook", "/usr/local/bin/autonomy-dns01-hook present",
-        "--manual-cleanup-hook", "/usr/local/bin/autonomy-dns01-hook cleanup",
+        "--manual-auth-hook", "/opt/autonomy-certbot/dns01-hook.py present",
+        "--manual-cleanup-hook", "/opt/autonomy-certbot/dns01-hook.py cleanup",
         "--non-interactive",
         "--config-dir", "/run/autonomy-acme/config",
         "--work-dir", "/run/autonomy-acme/work",

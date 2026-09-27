@@ -229,7 +229,7 @@ services:
     user: "1000:1000"
     # This pinned image has no ENTRYPOINT; replacing its default CMD must keep
     # the binary as argv[0].
-    command: ["caddy", "run", "--config", "/etc/caddy/bootstrap.json"]
+    command: ["caddy", "run", "--config", "/etc/caddy/bootstrap/bootstrap.json"]
     networks: ["default"]
     # Internal listener only. The public raw-stream adapter will dial this on
     # the Compose network; the test-only acceptance override publishes 8443.
@@ -245,15 +245,15 @@ services:
       - /data:rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700
       - /config:rw,noexec,nosuid,nodev,size=4m,uid=1000,gid=1000,mode=0700
     volumes:
-      # Host Compose resolves `.` from the checkout. The in-Dashboard
-      # supervisor exports AUTONOMY_HOST_ROOT so the host Docker daemon sees
-      # the same file even though the Compose client itself runs from /app.
-      - type: bind
-        source: ${AUTONOMY_HOST_ROOT:-.}/deploy/service-gateway/bootstrap.json
-        target: /etc/caddy/bootstrap.json
+      # The bootstrap config comes from the node's own code volume, never from
+      # a host checkout: a published node has none (auto-8pohz), and the
+      # in-Dashboard supervisor runs Compose from /app either way.
+      - type: volume
+        source: autonomy-code
+        target: /etc/caddy/bootstrap
         read_only: true
-        bind:
-          create_host_path: false
+        volume:
+          subpath: deploy/service-gateway
       - service-gateway-control:/run/autonomy-service-gateway
       # The dashboard creates this exact child inside its verified ramfs mount
       # before Caddy can start. Refuse a missing source; never fabricate a
@@ -306,12 +306,14 @@ services:
         target: /run/autonomy-acme
         bind:
           create_host_path: false
-      - type: bind
-        source: ${AUTONOMY_HOST_ROOT:-.}/deploy/service-certbot/dns01-hook.py
-        target: /usr/local/bin/autonomy-dns01-hook
+      # The DNS-01 hook comes from the node's own code volume (auto-8pohz),
+      # read-only; the certbot command names it under this mount.
+      - type: volume
+        source: autonomy-code
+        target: /opt/autonomy-certbot
         read_only: true
-        bind:
-          create_host_path: false
+        volume:
+          subpath: deploy/service-certbot
 
   # The node's tmux server: owns every session pane, host terminal and
   # container session alike (graph://89d3c8df-544 §1). The dashboard is a

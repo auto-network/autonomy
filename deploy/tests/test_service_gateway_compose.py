@@ -64,7 +64,7 @@ def test_service_gateway_is_digest_pinned_dormant_and_not_host_published():
         "caddy",
         "run",
         "--config",
-        "/etc/caddy/bootstrap.json",
+        "/etc/caddy/bootstrap/bootstrap.json",
     ]
     assert "ports" not in gateway
     assert gateway["networks"] == ["default"]
@@ -115,9 +115,17 @@ def test_service_gateway_mounts_only_config_control_and_ramfs_certificate_input(
     assert "/var/run/docker.sock" not in sources
     assert "service-gateway-control" in sources
     assert "/run/autonomy-keycache/service-gateway" in sources
-    assert (
-        "${AUTONOMY_HOST_ROOT:-.}/deploy/service-gateway/bootstrap.json"
-        in sources
+    # The bootstrap config is read from the code volume, never a host checkout
+    # (auto-8pohz: a published node has none).
+    assert not any(isinstance(v, str) and "AUTONOMY_HOST_ROOT" in v for v in gateway["volumes"])
+    assert any(
+        isinstance(volume, dict)
+        and volume.get("type") == "volume"
+        and volume.get("source") == "autonomy-code"
+        and volume.get("target") == "/etc/caddy/bootstrap"
+        and volume.get("read_only") is True
+        and volume.get("volume", {}).get("subpath") == "deploy/service-gateway"
+        for volume in gateway["volumes"]
     )
     assert any(
         isinstance(volume, dict)
@@ -173,8 +181,11 @@ def test_certbot_job_is_digest_pinned_ephemeral_and_receives_only_acme_ramfs():
     assert "/var/run/docker.sock" not in _volume_sources(certbot)
     assert _volume_sources(certbot) == [
         "/run/autonomy-keycache/service-acme",
-        "${AUTONOMY_HOST_ROOT:-.}/deploy/service-certbot/dns01-hook.py",
+        "autonomy-code",
     ]
+    hook = next(v for v in certbot["volumes"] if isinstance(v, dict) and v.get("source") == "autonomy-code")
+    assert hook == {"type": "volume", "source": "autonomy-code", "target": "/opt/autonomy-certbot",
+                    "read_only": True, "volume": {"subpath": "deploy/service-certbot"}}
     assert set(certbot["tmpfs"]) == {
         "/tmp:rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700",
     }
