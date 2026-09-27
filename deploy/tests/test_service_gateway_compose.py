@@ -189,3 +189,18 @@ def test_certbot_job_is_digest_pinned_ephemeral_and_receives_only_acme_ramfs():
     assert set(certbot["tmpfs"]) == {
         "/tmp:rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700",
     }
+
+
+def test_every_required_compose_variable_reaches_the_dashboard_environment():
+    """The dashboard runs Compose from /app for the gateway and the certbot
+    job; a published node has no .env there, so each variable this file
+    requires without a default must be in the dashboard's own environment
+    (auto-8pohz: run 4 failed with 'AUTONOMY_SUBNET is missing a value')."""
+    import re
+
+    text = COMPOSE.read_text()
+    required = set(re.findall(r"\$\{([A-Z0-9_]+):\?", text))
+    assert "AUTONOMY_SUBNET" in required
+    dashboard_env = _compose()["services"]["dashboard"]["environment"]
+    for name in required:
+        assert name in dashboard_env, name

@@ -92,6 +92,11 @@ services:
       # — outputs of startup, not operator inputs.
       AUTONOMY_HOST_DATA_ROOT: ${AUTONOMY_HOST_DATA_ROOT:-}
       AUTONOMY_HOST_HOME: ${AUTONOMY_HOST_HOME}
+      # The dashboard runs Compose itself (the service gateway, the certbot
+      # job) from /app, where a published node has no .env: every variable
+      # this file requires without a default must reach it through its own
+      # environment (auto-8pohz, Windows run 4: "AUTONOMY_SUBNET is missing").
+      AUTONOMY_SUBNET: ${AUTONOMY_SUBNET}
       # The container's OWN data root, pinned. Without it the code defaults to
       # the repo-relative <repo>/data; on this node /app/data is the real
       # autonomy-data mount, so pinning it keeps every resolved data path as
@@ -352,6 +357,7 @@ services:
       AUTONOMY_FLEET_INVITE: ${AUTONOMY_FLEET_INVITE:-}
       AUTONOMY_HOST_DATA_ROOT: ${AUTONOMY_HOST_DATA_ROOT:-}
       AUTONOMY_HOST_HOME: ${AUTONOMY_HOST_HOME}
+      AUTONOMY_SUBNET: ${AUTONOMY_SUBNET}
       AUTONOMY_DATA_ROOT: /app/data
       TZ: ${TZ:-UTC}
       # No keycache mount; skip the entrypoint's ramfs provisioning.
