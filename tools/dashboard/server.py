@@ -1241,6 +1241,19 @@ async def api_librarian_enqueue(request):
     except Exception:
         logger.warning("librarian enqueue preflight failed; enqueueing anyway",
                        exc_info=True)
+    # The job runs in the requester's org (auto-2v6ay.2): librarian_jobs has
+    # no org column, so it rides in the payload the dispatcher reads back.
+    # Any authenticated caller reaches this route, including an org-bound
+    # session: its own org OVERRIDES a body-supplied one, so a Y-bound caller
+    # cannot enqueue a job that runs as X. The operator's explicit choice
+    # stands; otherwise the org it is browsing fills the gap.
+    principal = api_auth.principal_from_request(request)
+    if getattr(principal, "org_bound", False) and getattr(principal, "org", ""):
+        payload = {**payload, "org": principal.org}
+    else:
+        request_org = api_auth.organization_scope_from_request(request)
+        if request_org and not payload.get("org"):
+            payload = {**payload, "org": request_org}
     from agents.librarian_db import enqueue as _enqueue_librarian_job
     job_id = _enqueue_librarian_job(job_type, payload=json.dumps(payload))
     return JSONResponse({"job_id": job_id, "job_type": job_type,
@@ -9240,7 +9253,7 @@ def _register_resumed_session_from_worker(
         coro = session_monitor.register(
             tmux_name=tmux_name,
             session_type=cfg.get("session_type") or "container",
-            project=cfg.get("register_project") or "autonomy",
+            project=cfg.get("register_project") or "personal",
             jsonl_path=jsonl_path,
             session_uuid=cfg.get("resume_uuid"),
         )
@@ -9281,7 +9294,7 @@ def _render_resume_message(*, tmux_name: str, cfg: dict) -> str | None:
             tmux_name=tmux_name,
             workspace_id=cfg.get("project_id") or "",
             workspace_name=cfg.get("workspace_name") or "default",
-            org=cfg.get("org") or "autonomy",
+            org=cfg.get("org") or "personal",
             resumed=True,
         )
     except Exception:
@@ -9413,7 +9426,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 prompt=None,
                 detach=False,
                 image="autonomy-session-platform",
-                metadata={"tmux_session": tmux_name, "org": "autonomy"},
+                metadata={"tmux_session": tmux_name, "org": _container_session_org(cfg)},
                 harness=cfg.get("harness"),
                 output_dir=str(run_dir),
                 model=cfg.get("model"),
@@ -9528,6 +9541,17 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         )
 
 
+def _container_session_org(cfg: dict) -> str:
+    """The org a generic (non-workspace) container session belongs to: the
+    one resolved when it was requested (``org``, carried as the session
+    row's ``register_project`` across resume and restart), else personal,
+    the org every identity has. It is stamped on the session token, so it
+    must never be a literal org a fresh node lacks (auto-2v6ay.2, ruling b).
+    """
+    org = cfg.get("org") or cfg.get("register_project") or ""
+    return org if org and org != "host" else "personal"
+
+
 def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWriter) -> None:
     """Worker-thread launch for the non-workspace creates: generic
     ``autonomy-session-platform`` containers and host terminals.
@@ -9568,7 +9592,7 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 prompt=None,
                 detach=False,
                 image="autonomy-session-platform",
-                metadata={"tmux_session": tmux_name, "org": "autonomy"},
+                metadata={"tmux_session": tmux_name, "org": _container_session_org(cfg)},
                 output_dir=str(run_dir),
                 global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
             )
@@ -9612,7 +9636,7 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             coro = session_monitor.register(
                 tmux_name=tmux_name,
                 session_type="host" if kind == "host" else "container",
-                project=cfg.get("register_project") or "autonomy",
+                project=cfg.get("register_project") or "personal",
                 jsonl_path=sess_dir,
                 seed_message="Starting..." if not cfg.get("first_message_is_primer") else "",
             )
@@ -9792,7 +9816,7 @@ def _run_session_restart(job: LifecycleJob, writer: SessionLifecycleStateWriter)
     pending = session_monitor.register_pending(
         tmux_name,
         session_type=cfg.get("session_type") or "container",
-        project=cfg.get("register_project") or "autonomy",
+        project=cfg.get("register_project") or "personal",
         harness=cfg.get("harness") or "claude",
     )
     if loop is not None and loop.is_running():
@@ -10110,10 +10134,15 @@ async def api_session_create(request):
         # tmux spawn, composer wait, injection) runs on the lifecycle
         # worker; this handler resolves the primer/orientation text (fast,
         # async-friendly) and enqueues.
+        #
+        # Its org is the requester's, else personal (auto-2v6ay.2, ruling
+        # b): it is stamped on the session token, the session row and the
+        # orientation, so one value flows through all three.
+        session_org = api_auth.organization_scope_from_request(request) or "personal"
         await session_monitor.register_pending(
             tmux_name,
             session_type="container",
-            project="autonomy",
+            project=session_org,
             harness="claude",
         )
         first_message: str | None = None
@@ -10132,7 +10161,7 @@ async def api_session_create(request):
                     tmux_name=tmux_name,
                     workspace_id="",
                     workspace_name="default",
-                    org="autonomy",
+                    org=session_org,
                 )
             except Exception:
                 logger.warning(
@@ -10149,7 +10178,8 @@ async def api_session_create(request):
                 "kind": "container",
                 "attempt": 1,
                 "harness": "claude",
-                "register_project": "autonomy",
+                "org": session_org,
+                "register_project": session_org,
                 "first_message": first_message,
                 "first_message_is_primer": bool(primer_url and not primer_error),
                 "event_loop": asyncio.get_running_loop(),
@@ -10382,7 +10412,8 @@ def _build_session_relaunch_config(
             "attempt": attempt,
             "project_id": proj.id if (kind == "project" and proj is not None) else None,
             "workspace_name": proj.name if (kind == "project" and proj is not None) else None,
-            "org": proj.graph_project if (kind == "project" and proj is not None) else "autonomy",
+            "org": (proj.graph_project if (kind == "project" and proj is not None)
+                    else _container_session_org({"register_project": project})),
             "resume_uuid": session_uuid,
             "output_dir": output_dir,
             "jsonl_path": jsonl_path,
@@ -10390,7 +10421,7 @@ def _build_session_relaunch_config(
             "model": model,
             "revived": True,
             "session_type": session_type,
-            "register_project": project or "autonomy",
+            "register_project": project or "personal",
             "event_loop": event_loop,
         }, None
 
@@ -10421,7 +10452,7 @@ def _build_session_relaunch_config(
         "kind": "container",
         "attempt": attempt,
         "harness": harness,
-        "register_project": project or "autonomy",
+        "register_project": project or "personal",
         "first_message": None,
         "event_loop": event_loop,
         "session_type": session_type,
@@ -10476,7 +10507,7 @@ async def api_session_retry(request):
     await session_monitor.register_pending(
         tmux_name,
         session_type=config.get("session_type") or "container",
-        project=config.get("register_project") or "autonomy",
+        project=config.get("register_project") or "personal",
         harness=config.get("harness") or "claude",
     )
     if not _SESSION_LIFECYCLE_WORKER.try_enqueue(LifecycleJob("retry", tmux_name, config)):
@@ -10836,7 +10867,7 @@ async def api_session_resume(request):
     register_project = (
         proj_for_resume.id if (session_type == "container" and proj_for_resume is not None)
         else ((dead_session or {}).get("project")
-              or ("host" if session_type == "host" else "autonomy"))
+              or ("host" if session_type == "host" else "personal"))
     )
     await session_monitor.register_pending(
         tmux_name,
@@ -10854,7 +10885,9 @@ async def api_session_resume(request):
             "attempt": 1,
             "project_id": proj_for_resume.id if (session_type == "container" and proj_for_resume is not None) else None,
             "workspace_name": proj_for_resume.name if (session_type == "container" and proj_for_resume is not None) else None,
-            "org": proj_for_resume.graph_project if (session_type == "container" and proj_for_resume is not None) else "autonomy",
+            "org": (proj_for_resume.graph_project
+                    if (session_type == "container" and proj_for_resume is not None)
+                    else _container_session_org({"register_project": register_project})),
             "resume_uuid": session_uuid,
             "output_dir": output_dir,
             "jsonl_path": file_path,
@@ -19018,6 +19051,7 @@ def _resolve_design_action_asset(asset_id: str) -> dict | None:
               created_at,
               creator_session_id,
               creator_session_label,
+              org,
               CASE WHEN fixture IS NOT NULL AND fixture != '' THEN 1 ELSE 0 END AS has_fixture
             FROM designs
             WHERE id = ? OR COALESCE(design_id, id) = ?
@@ -19048,6 +19082,7 @@ def _resolve_design_action_asset(asset_id: str) -> dict | None:
         "latest_created_at": max(created_values) if created_values else "",
         "creator_session_id": latest["creator_session_id"] or "",
         "creator_session_label": latest["creator_session_label"] or "",
+        "org": next((row["org"] for row in reversed(rows) if row["org"]), "") or "",
     }
     return design
 
@@ -19471,12 +19506,33 @@ async def _agentic_launch_task(
         _agentic_queue_event.set()
 
 
-def _inline_dispatch_target_org(body: dict, principal) -> str:
+def _asset_dispatch_org(design: dict | None, bead: dict | None, principal,
+                        request_org: str | None = None) -> str:
+    """The org a bead or design dispatch targets: the asset's own (a design's
+    ``org`` column, a bead's ``org:<slug>`` label), else an org-bound
+    caller's, else the org the request selected, else personal. Never a
+    literal org (auto-2v6ay.2, D5)."""
+    from agents.dispatcher import bead_org
+
+    # A bead's label is data its writer chose. Trusting it here is safe only
+    # because target_org_auth_error then refuses an org-bound caller whose
+    # target is not its own org: only the operator can land in another org.
+    own = (design or {}).get("org") if design is not None else bead_org(
+        (bead or {}).get("labels"))
+    if own:
+        return own
+    if getattr(principal, "org_bound", False) and getattr(principal, "org", ""):
+        return principal.org
+    return request_org or "personal"
+
+
+def _inline_dispatch_target_org(body: dict, principal,
+                                request_org: str | None = None) -> str:
     """The org an asset-less dispatch targets.
 
     An inline dispatch's natural home is the CALLER'S org — an org-bound
     session dispatching content targets its own database (member lookup,
-    source row, workspace routing). Defaulting to "autonomy" here sent
+    source row, workspace routing). Defaulting to a literal org here sent
     org-bound callers into target_org_auth_error, whose deliberate
     cross-org masking rendered the refusal as 'asset not found: ' with
     an empty id — the exact ghost the first inline tester chased. An
@@ -19487,7 +19543,7 @@ def _inline_dispatch_target_org(body: dict, principal) -> str:
         return explicit
     if getattr(principal, "org_bound", False) and getattr(principal, "org", ""):
         return principal.org
-    return "autonomy"
+    return request_org or "personal"
 
 
 async def api_agent_action_dispatch(request):
@@ -19620,7 +19676,8 @@ async def api_agent_action_dispatch(request):
             asset_type = str(src.get("type") or "")
             asset_title = str(src.get("title") or "")
         else:
-            target_org = "autonomy"
+            target_org = _asset_dispatch_org(
+            design, bead, principal, api_auth.organization_scope_from_request(request))
             if design is not None:
                 asset_id = str((design or {}).get("id") or asset_id)
                 asset_type = "design"
@@ -19698,7 +19755,8 @@ async def api_agent_action_dispatch(request):
     target_source_id = ""
     if inline_dispatch:
         target_kind = "inline"
-        target_org = _inline_dispatch_target_org(body, principal)
+        target_org = _inline_dispatch_target_org(
+            body, principal, api_auth.organization_scope_from_request(request))
     elif source is None:
         if requested_asset_kind == "design":
             design = await asyncio.to_thread(_resolve_design_action_asset, asset_id)
@@ -19726,7 +19784,8 @@ async def api_agent_action_dispatch(request):
         asset_id = str(source["id"])
         target_source_id = asset_id
     else:
-        target_org = "autonomy"
+        target_org = _asset_dispatch_org(
+            design, bead, principal, api_auth.organization_scope_from_request(request))
         if design is not None:
             target_kind = "design"
             asset_id = str(design.get("latest_revision_id") or design.get("id") or asset_id)

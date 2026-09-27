@@ -1607,7 +1607,9 @@ class SessionMonitor:
         if proj is None and jp is not None and not jp.is_dir():
             proj = jp.parent.name
         if proj is None:
-            proj = "autonomy"
+            # No project and no transcript to name one: personal, never a
+            # literal org (auto-2v6ay.2, D5).
+            proj = "personal"
 
         harness_token = _read_harness_token_from_meta(
             run_dir=run_dir, resolution_dir=res_dir,

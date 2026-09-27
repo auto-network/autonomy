@@ -165,7 +165,8 @@ class TestStartLibrarianHarness:
     """Librarians derive harness from the autonomy workspace when available."""
 
     def test_librarian_uses_autonomy_workspace_harness(self, test_projects):
-        job = {"id": "lib-1234", "job_type": "review_report", "payload": "{}"}
+        job = {"id": "lib-1234", "job_type": "review_report",
+               "payload": '{"org": "autonomy"}'}
         captured: dict = {}
 
         def fake_launch_session(**kwargs):
@@ -197,6 +198,22 @@ class TestStartLibrarianHarness:
             with patch.object(dispatcher, "launch_session", fake_launch_session):
                 dispatcher.start_librarian(job)
 
+        # No org on the job: personal, never a literal org (auto-2v6ay.2).
+        assert captured["metadata"]["org"] == "personal"
+
+    def test_librarian_runs_in_the_org_stamped_on_its_job(self, test_projects):
+        job = {"id": "lib-7777", "job_type": "review_report",
+               "payload": '{"org": "autonomy"}'}
+        captured: dict = {}
+
+        def fake_launch_session(**kwargs):
+            captured.update(kwargs)
+            return "fake-container-id"
+
+        with patch.object(dispatcher, "_build_librarian_prompt", return_value="prompt"):
+            with patch.object(dispatcher, "launch_session", fake_launch_session):
+                dispatcher.start_librarian(job)
+
         assert captured["metadata"]["org"] == "autonomy"
 
     def test_librarian_omits_claude_model_for_codex_harness(self, test_projects):
@@ -211,7 +228,8 @@ class TestStartLibrarianHarness:
             default_tags=("dashboard", "ui"),
             dispatch_labels=("dashboard",),
         )
-        job = {"id": "lib-5678", "job_type": "review_report", "payload": "{}"}
+        job = {"id": "lib-5678", "job_type": "review_report",
+               "payload": '{"org": "autonomy"}'}
         captured: dict = {}
 
         def fake_launch_session(**kwargs):

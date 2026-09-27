@@ -118,7 +118,10 @@ def test_get_ready_beads_merges_all_trackers(org_tree, monkeypatch):
     monkeypatch.setattr(disp, "run_bd", fake_run_bd)
     beads = disp.get_ready_beads()
     assert {b["id"] for b in beads} == {"auto-1", "anc-1"}
-    assert calls == [None, org_tree.anchore]
+    # Org trackers first, the shared tracker last: an org dir may name the
+    # shared database itself, and the first sight of a bead keeps its org
+    # (auto-2v6ay.2).
+    assert calls == [org_tree.anchore, None]
 
 
 def test_same_bead_via_two_trackers_dedupes_to_one(org_tree, monkeypatch):

@@ -294,7 +294,11 @@ def _insert_note_source(*, org: str, source_id: str, title: str) -> None:
 
 
 def _patch_bead_runtime(monkeypatch, bead: dict[str, Any]) -> None:
-    """Patch bead lookup + primer generation for bead-targeted tests."""
+    """Patch bead lookup + primer generation for bead-targeted tests.
+
+    A real bead carries its ``org:<slug>`` label, and a dispatch targets that
+    org (auto-2v6ay.2); these fixtures model beads of the autonomy tracker."""
+    bead.setdefault("labels", ["org:autonomy"])
     from tools.dashboard import server as server_mod
     from tools.graph import primer as primer_mod
 
@@ -610,6 +614,7 @@ def test_dispatch_design_action_uses_design_asset_context(
         "latest_created_at": "2026-07-02 11:00:00",
         "creator_session_id": "auto-designer",
         "creator_session_label": "Design agent",
+        "org": "autonomy",
     }
     monkeypatch.setattr(
         server_mod,
@@ -1860,7 +1865,7 @@ def test_inline_dispatch_carries_content_without_an_asset(
     r = client.post("/api/agent-actions/dispatch", json={
         "member_key": "note.analyze-inline",
         "custom_input": "PRIMER: analyze the attached corpus item 42",
-    })
+    }, headers={"X-Graph-Org": "autonomy"})
     assert r.status_code == 202, r.json()
     assert len(patch_launch_session) == 1
     prompt = patch_launch_session[-1]["kwargs"]["prompt"]
@@ -1897,10 +1902,10 @@ def test_idempotency_distinguishes_content(
     )
     r1 = client.post("/api/agent-actions/dispatch", json={
         "member_key": "note.analyze-inline", "custom_input": "item 1",
-    })
+    }, headers={"X-Graph-Org": "autonomy"})
     r2 = client.post("/api/agent-actions/dispatch", json={
         "member_key": "note.analyze-inline", "custom_input": "item 2",
-    })
+    }, headers={"X-Graph-Org": "autonomy"})
     assert r1.status_code == r2.status_code == 202
     assert r1.json()["run_id"] != r2.json()["run_id"]
     assert len(patch_launch_session) == 2
@@ -1916,7 +1921,10 @@ def test_inline_dispatch_targets_the_callers_org():
     anchore = SimpleNamespace(org_bound=True, org="anchore")
     operator = SimpleNamespace(org_bound=False, org=None)
     assert _inline_dispatch_target_org({}, anchore) == "anchore"
-    assert _inline_dispatch_target_org({}, operator) == "autonomy"
+    # An operator's dispatch homes to the org it is browsing, else personal:
+    # never a literal org (auto-2v6ay.2, D5).
+    assert _inline_dispatch_target_org({}, operator, "autonomy") == "autonomy"
+    assert _inline_dispatch_target_org({}, operator) == "personal"
     # explicit selection still wins (and is authz-checked downstream)
     assert _inline_dispatch_target_org(
         {"target_org": "autonomy"}, anchore) == "autonomy"

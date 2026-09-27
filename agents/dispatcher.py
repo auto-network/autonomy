@@ -321,6 +321,38 @@ def _provisioned_bead_trackers() -> list:
     return out
 
 
+def _tracker_database(beads_dir) -> str | None:
+    """The Dolt database a tracker dir's metadata.json names, or None."""
+    try:
+        meta = json.loads((Path(beads_dir) / "metadata.json").read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+    db = meta.get("dolt_database") if isinstance(meta, dict) else None
+    return db if isinstance(db, str) and db else None
+
+
+def _exclusive_bead_trackers() -> dict:
+    """{org: beads_dir} for the provisioned trackers whose database belongs
+    to that org ALONE -- the only ones that can vouch for a bead's org.
+
+    An org dir may name the shared database (on Home, orgs/autonomy/ names
+    "auto"), and the shared database also holds the beads of every org
+    without its own; a database named by two org dirs is likewise nobody's
+    alone. Either is not exclusive, nor is a dir whose database cannot be
+    read (review of f599e288)."""
+    shared = _tracker_database(DATA_ROOT / ".beads") or "auto"
+    trackers = _provisioned_bead_trackers()
+    databases = {org: _tracker_database(d) for org, d in trackers}
+    uses: dict = {}
+    for db in databases.values():
+        if db:
+            uses[db] = uses.get(db, 0) + 1
+    return {
+        org: d for org, d in trackers
+        if databases[org] and databases[org] != shared and uses[databases[org]] == 1
+    }
+
+
 def _bead_prefix_map() -> dict:
     """issue-prefix -> beads_dir, from each tracker's metadata.json.
 
@@ -551,8 +583,15 @@ def get_ready_beads(label_filter: str | None = None) -> list[dict]:
     # provisioned org tracker, each with its own credentials.
     beads: list[dict] = []
     seen_ids: set = set()
-    trackers = [None] + [d for _org, d in _provisioned_bead_trackers()]
-    for tracker_dir in trackers:
+    # Each bead keeps the org of the tracker it came from (_tracker_org): which
+    # tracker holds a bead is a fact of where it was filed, unlike its labels,
+    # which any writer sets. Only a tracker whose database is its org's alone
+    # vouches (_exclusive_bead_trackers); a bead from any other -- the shared
+    # tracker, or an org dir naming the shared database, as orgs/autonomy/
+    # does on Home -- carries None and takes the shared-tracker rule.
+    exclusive = _exclusive_bead_trackers()
+    trackers = list(_provisioned_bead_trackers()) + [(None, None)]
+    for tracker_org, tracker_dir in trackers:
         out = run_bd(["query", query, "--json"], beads_dir=tracker_dir)
         if not out:
             continue
@@ -566,6 +605,8 @@ def get_ready_beads(label_filter: str | None = None) -> list[dict]:
             bid = b.get("id")
             if bid and bid not in seen_ids:
                 seen_ids.add(bid)
+                if isinstance(b, dict):
+                    b["_tracker_org"] = tracker_org if tracker_org in exclusive else None
                 beads.append(b)
     return beads
 
@@ -823,6 +864,51 @@ def project_for_bead(bead: dict) -> WorkspaceV1 | None:
         if labels.intersection(cfg.dispatch_labels):
             return cfg
     return None
+
+
+def bead_org(labels) -> str | None:
+    """The org a bead belongs to, from its ``org:<slug>`` label, or None."""
+    for label in labels or ():
+        if isinstance(label, str) and label.startswith("org:"):
+            return label.split(":", 1)[1].strip() or None
+    return None
+
+
+def dispatch_org_for_bead(bead: dict) -> str:
+    """The org a bead no workspace claims runs as -- the org its session
+    token is minted for.
+
+    Not simply its ``org:<slug>`` label: a label is ordinary bead data, and a
+    session able to file and approve a bead could otherwise label it with
+    any org on the node and get a container scoped there (review of
+    fa4023c7). So:
+
+    * a bead from an org tracker whose database is that org's alone runs as
+      that org, whatever its label says (a mismatch is logged);
+    * any other bead -- the shared database, however it was reached -- may
+      use its label only when the named org has no exclusive tracker, since
+      that org's beads then live in the shared database; otherwise it runs
+      as personal.
+
+    Every org gets its own tracker the first time it is seen (auto-qxs39),
+    so the shared tracker's label path is only reached on a legacy host
+    install without a Dolt container, or for an org not yet provisioned.
+    """
+    label = bead_org(bead.get("labels"))
+    tracker_org = bead.get("_tracker_org")
+    if tracker_org:
+        if label and label != tracker_org:
+            logger.warning(
+                "bead %s is in the %s tracker but labelled org:%s; it runs as %s",
+                bead.get("id"), tracker_org, label, tracker_org)
+        return tracker_org
+    if label:
+        if label not in _exclusive_bead_trackers():
+            return label
+        logger.warning(
+            "bead %s in the shared database is labelled org:%s, which has its "
+            "own; it runs as personal", bead.get("id"), label)
+    return "personal"
 
 
 def _workspace_for_graph_project(graph_project: str) -> WorkspaceV1 | None:
@@ -2618,7 +2704,11 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
 
     container_name = f"librarian-{job_type}-{os.getpid()}-{job_id[:8]}"
     harness = "claude"
-    workspace = _workspace_for_graph_project("autonomy")
+    # The job's org is the requester's, stamped into the payload at enqueue
+    # (librarian_jobs has no org column); a job without one runs as personal,
+    # never a literal org a fresh node lacks (auto-2v6ay.2, D5).
+    librarian_org = str(payload.get("org") or "").strip() or "personal"
+    workspace = _workspace_for_graph_project(librarian_org)
     if workspace is not None:
         harness = workspace.harness
 
@@ -2629,8 +2719,8 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
         metadata={
             "job_id": job_id,
             "job_type": job_type,
-            "graph_project": "autonomy",
-            "org": "autonomy",
+            "graph_project": librarian_org,
+            "org": librarian_org,
         },
         detach=True,
         image=_rig_image,
@@ -3457,15 +3547,13 @@ def dispatch_cycle(
             continue
 
         # Launch agent container (blocks until container starts).
-        # When the bead's labels match no project (rig default beads),
-        # fall back to the rig's owning org slug so the dispatched
-        # session's .session_meta.json carries graph_org=autonomy and
-        # ingest routes it to the autonomy DB. Without this, the meta
-        # ships without a graph_org and downstream ingest passes that
-        # cannot resolve a routing target end up filing the session in
-        # personal.db (or, in fail-closed mode, skipping it entirely).
+        # When the bead's labels match no project, the session still needs a
+        # graph_org in its .session_meta.json, or ingest cannot route it:
+        # dispatch_org_for_bead, from the tracker the bead came from, never a
+        # literal org a fresh node does not have (auto-2v6ay.2, D5).
         graph_project = (
-            project.graph_project if project is not None else "autonomy"
+            project.graph_project if project is not None
+            else dispatch_org_for_bead(bead)
         )
         fallback_workspace = (
             _workspace_for_graph_project(graph_project)
