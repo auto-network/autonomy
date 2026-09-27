@@ -75,11 +75,20 @@ export async function prepareSignon(rootSeed, encrypted, signon) {
       serving_orgs: [], sync_orgs: [],
     };
   }
-  posts.push(...await signon._internals.prepareRootMaintenance(rootSeed,
-    organizations, fleetError || personalServeError ? null : runtime, inputs.personal_serve));
+  const maintenance = await signon._internals.prepareRootMaintenance(rootSeed,
+    organizations, fleetError || personalServeError ? null : runtime, inputs.personal_serve);
+  posts.push(...maintenance);
   if (!fleetError && runtime.enabled) {
+    // Whether THIS submission actually carries the personal registration: a
+    // prepared binding post for the personal scope, not an inference from
+    // runtime fields (preparing the registration can fail and still leave
+    // the fields looking as if it were about to register).
+    // The personal registration post carries no organization slug; an
+    // organization's binding renewal names one (network-signon.mjs).
+    const bindingRegistered = maintenance.some(post => post && post.step === 'binding'
+      && !post.error && post.url && !post.org);
     posts.push(await fleetRuntimePost(rootSeed,
-      runtimeActivation(runtime, { completion: inputs.completion, personalServeError })));
+      runtimeActivation(runtime, { completion: inputs.completion, bindingRegistered })));
   }
   return { vault, posts, failures,
     ready: vault ? organizations.filter(org => !org.serve_cert.required
@@ -94,11 +103,11 @@ export async function prepareSignon(rootSeed, encrypted, signon) {
 // preceding handoff, and a fresh identity's first sign-on registers it in THIS
 // submission (prepareRootMaintenance posts the binding before the runtime),
 // so both activate under it. An ordinary sign-in retains its binding and
-// activates as it is; a sign-on whose personal serve step already failed does
-// not claim a registration it will not make.
-export function runtimeActivation(runtime, { completion = null, personalServeError = null } = {}) {
-  const registersBinding = Boolean(runtime.personal_org_uuid) && !runtime.org_uuid && !personalServeError;
-  return completion || registersBinding
+// activates as it is; a submission that prepared no personal binding post
+// (the serve step failed, or preparing the registration threw) claims no
+// registration it does not make.
+export function runtimeActivation(runtime, { completion = null, bindingRegistered = false } = {}) {
+  return (completion || bindingRegistered) && runtime.personal_org_uuid
     ? { ...runtime, org_uuid: runtime.personal_org_uuid } : runtime;
 }
 

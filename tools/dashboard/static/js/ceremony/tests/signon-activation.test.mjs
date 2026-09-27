@@ -15,8 +15,13 @@ const fresh = {
   personal_org_uuid: '3b9559e6-ac00-5a73-83c2-310ecc564ed0', org_uuid: null, serves: true,
 };
 
-test('a fresh identity activates under the personal org uuid it registers', () => {
-  assert.equal(runtimeActivation(fresh).org_uuid, fresh.personal_org_uuid);
+test('a fresh identity activates under the personal org uuid this submission registers', () => {
+  assert.equal(runtimeActivation(fresh, { bindingRegistered: true }).org_uuid, fresh.personal_org_uuid);
+});
+
+test('with no binding post prepared, nothing is claimed', () => {
+  assert.equal(runtimeActivation(fresh).org_uuid, null);
+  assert.equal(runtimeActivation(fresh, { bindingRegistered: false }).org_uuid, null);
 });
 
 test('an ordinary sign-in keeps the binding it already has', () => {
@@ -29,11 +34,7 @@ test('a fleet completion activates under the uuid registered in the handoff', ()
     fresh.personal_org_uuid);
 });
 
-test('a sign-on whose personal serve step failed claims no registration', () => {
-  assert.equal(runtimeActivation(fresh, { personalServeError: 'serve-cert: refused' }).org_uuid, null);
-});
-
-test('a runtime with no personal org uuid is activated as it is', () => {
+test('a runtime with no personal org uuid is activated as it is, whatever was posted', () => {
   const none = { ...fresh, personal_org_uuid: null };
-  assert.deepEqual(runtimeActivation(none), none);
+  assert.deepEqual(runtimeActivation(none, { bindingRegistered: true }), none);
 });
