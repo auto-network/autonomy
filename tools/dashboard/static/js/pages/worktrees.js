@@ -2537,24 +2537,6 @@
             }
           },
         },
-        // One outgoing email from the org mailbox capability (mailbox_routes).
-        // The operator sees exactly what will be sent: sender comes from the
-        // install host-side, so only recipients, subject and body are shown.
-        email_send: {
-          open(self, r) {
-            const req = r.request || {};
-            const header = 'To: ' + (req.to || '?') +
-              (req.cc ? '\nCc: ' + req.cc : '') +
-              '\nSubject: ' + (req.subject || '(no subject)');
-            self.approvalRequest = {
-              id: r.id, kind: r.kind, session: r.session,
-              title: 'Send email', actionLabel: 'Send', op: 'send',
-              target: req.to || '',
-              bodyMarkdown: header + '\n\n' + (req.body || ''),
-              fields: null,
-            };
-          },
-        },
         // Share-link approval (spec §6.4): enrichment resolved the target
         // title from trusted local stores and staged the EXACT registry
         // request to sign; approve click-signs it with the operator session

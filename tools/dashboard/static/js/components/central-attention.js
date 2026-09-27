@@ -381,7 +381,8 @@
         if (!item) return;
         item.decisionError = '';
         // Migrated reviews never flash the legacy right-hand detail panel.
-        const shared = ['approval.dashboard_access.review', 'approval.fleet_machine_admission.review'].includes(item.rendererId);
+        const shared = ['approval.dashboard_access.review', 'approval.fleet_machine_admission.review',
+          'approval.email_send.review'].includes(item.rendererId);
         this.selectedItem = shared ? null : item;
         try {
           const payload = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id));
@@ -409,7 +410,14 @@
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
           }).catch(() => {});
           if (shared) {
-            if (item.rendererId === 'approval.fleet_machine_admission.review') {
+            if (item.rendererId === 'approval.email_send.review') {
+              const { openEmailApproval } = await import('./email-approval.js');
+              this._sharedApprovalItem = item;
+              this._sharedApprovalDialog = await openEmailApproval(item, {
+                onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+              });
+            } else if (item.rendererId === 'approval.fleet_machine_admission.review') {
               const { openFleetApproval } = await import('./fleet-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = openFleetApproval(item, {

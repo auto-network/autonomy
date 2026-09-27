@@ -5,7 +5,12 @@ operator for approval; this command blocks until they decide. A decline exits 1:
 confirm intent with the user before retrying."""
 import argparse, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from _mail_lib import SESSION, call, fail
+from _mail_lib import call, fail
+
+# The approval the operator reviews holds the whole message, so it is bounded;
+# these match MAX_BODY_BYTES / MAX_BODY_LINES in the dashboard's mailbox backend.
+MAX_BODY_BYTES = 6000
+MAX_BODY_LINES = 120
 
 p = argparse.ArgumentParser(prog="mail-send", description=__doc__.splitlines()[1])
 p.add_argument("--to", required=True)
@@ -19,9 +24,10 @@ for name, val in (("to", a.to), ("cc", a.cc), ("subject", a.subject)):
         fail(f"mail-send: {name} may not contain line breaks")
 if not body.strip():
     fail("mail-send: empty body")
-if not SESSION:
-    fail("mail-send: AUTONOMY_SESSION is not set")
-staged = call("POST", "/api/approvals", {"kind": "email_send", "session": SESSION, "request": {
+if len(body.encode("utf-8")) > MAX_BODY_BYTES or body.rstrip("\n").count("\n") + 1 > MAX_BODY_LINES:
+    fail(f"mail-send: the body is limited to {MAX_BODY_BYTES} bytes and {MAX_BODY_LINES} lines")
+# The dashboard derives the requesting session from this session's bearer.
+staged = call("POST", "/api/approvals", {"kind": "email_send", "request": {
     "to": a.to, "cc": a.cc, "subject": a.subject, "body": body}})
 rid = staged.get("id") or fail("mail-send: the dashboard did not accept the request")
 print(f"Waiting for operator approval (request {rid})...", file=sys.stderr)

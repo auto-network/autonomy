@@ -133,6 +133,8 @@ def test_capability_ships_no_credential_surface():
     manifest = json.loads((PKG / "manifest.json").read_text())
     assert "required_env" not in manifest and "required_secret_files" not in manifest
     for tool in (PKG / "tools").iterdir():
+        if not tool.is_file():
+            continue
         text = tool.read_text()
         for forbidden in ("imaplib", "smtplib", "MAILBOX_PASSWORD", "agent-mailbox", "vault"):
             assert forbidden not in text, f"{tool.name} mentions {forbidden}"
@@ -140,7 +142,8 @@ def test_capability_ships_no_credential_surface():
 
 def test_manifest_exposes_every_executable_tool():
     manifest = json.loads((PKG / "manifest.json").read_text())
-    executables = sorted(p.name for p in (PKG / "tools").iterdir() if os.access(p, os.X_OK))
+    executables = sorted(p.name for p in (PKG / "tools").iterdir()
+                         if p.is_file() and os.access(p, os.X_OK))
     assert sorted(manifest["tool_target"]["expose_commands"]) == executables
 
 

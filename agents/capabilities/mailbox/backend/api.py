@@ -51,6 +51,51 @@ class MailboxError(Exception):
     """A mailbox operation failed; the message never carries the password."""
 
 
+MAX_BODY_BYTES = 6000
+MAX_BODY_LINES = 120
+
+
+def installed_config(org: str | None) -> dict:
+    """The org install's non-secret broker_config (empty when absent)."""
+    if not org:
+        return {}
+    try:
+        from tools.graph import ops as graph_ops
+        rows = graph_ops.read_set("autonomy.org.capability.install", org=org, peers=[])
+        for m in (getattr(rows, "members", []) or []):
+            payload = m.payload if isinstance(m.payload, dict) else {}
+            if payload.get("contract") == CONTRACT:
+                return dict(payload.get("broker_config") or {})
+    except Exception:
+        pass
+    return {}
+
+
+def sender_address(org: str | None) -> str:
+    """The address this org's mailbox sends from, without touching the password."""
+    cfg = installed_config(org)
+    sender = (os.environ.get("MAILBOX_FROM") or str(cfg.get("from_addr") or "")
+              or os.environ.get("MAILBOX_USERNAME") or str(cfg.get("username") or "")).strip()
+    if not sender:
+        raise MailboxError("the mailbox capability is not configured for this organization")
+    return sender
+
+
+def body_lines(body: str) -> list[str]:
+    """A plain-text body as lines: tabs become four spaces, other control
+    characters are refused, and the size is bounded so the whole message fits
+    the approval the operator reviews."""
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
+    if re.search(r"[\x00-\x08\x0b-\x1f\x7f]", text):
+        raise MailboxError("the body contains control characters")
+    if len(text.encode("utf-8")) > MAX_BODY_BYTES:
+        raise MailboxError(f"the body is over {MAX_BODY_BYTES} bytes; send a shorter message")
+    lines = text.rstrip("\n").split("\n")
+    if len(lines) > MAX_BODY_LINES:
+        raise MailboxError(f"the body is over {MAX_BODY_LINES} lines; send a shorter message")
+    return lines
+
+
 @dataclass(frozen=True)
 class MailboxConfig:
     imap_host: str
@@ -67,18 +112,7 @@ class MailboxConfig:
 
     @classmethod
     def resolve(cls, org: str | None) -> "MailboxConfig":
-        installed: dict = {}
-        if org:
-            try:
-                from tools.graph import ops as graph_ops
-                rows = graph_ops.read_set("autonomy.org.capability.install", org=org, peers=[])
-                for m in (getattr(rows, "members", []) or []):
-                    payload = m.payload if isinstance(m.payload, dict) else {}
-                    if payload.get("contract") == CONTRACT:
-                        installed = payload.get("broker_config") or {}
-                        break
-            except Exception:
-                pass
+        installed = installed_config(org)
 
         def value(env: str, key: str, default: str = "") -> str:
             return (os.environ.get(env) or str(installed.get(key) or "") or default).strip()

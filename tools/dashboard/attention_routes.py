@@ -457,10 +457,12 @@ def pending_session_approval(session: Mapping[str, Any], actor: HumanApprovalAct
 
 def build_production_runtime() -> AttentionRouteRuntime:
     from tools.dashboard import fleet_enrollment_approvals as fleet
+    from tools.dashboard import mailbox_central
     dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
     approval_registry = build_production_registry(runtimes={
         dashboard_access_central.KIND: dashboard_approval_runtime,
         fleet.KIND: fleet.build_approval_runtime(),
+        mailbox_central.KIND: mailbox_central.build_approval_runtime(),
     })
     approval_waiters = ApprovalWaitHub()
     coordinator_holder: dict[str, Any] = {}
@@ -489,6 +491,8 @@ def build_production_runtime() -> AttentionRouteRuntime:
             dashboard_access_central.KIND,
             dashboard_access_central.APPLICATION_SCOPE,
         ): dashboard_attention_runtime,
+        (mailbox_central.KIND, mailbox_central.APPLICATION_SCOPE):
+            mailbox_central.build_attention_runtime(approvals),
     }
     # The backup plugin's non-approval publication runtimes (auto-fnydv).
     # The registry rows are closed substrate code; the plugin supplies
@@ -519,7 +523,19 @@ def build_production_runtime() -> AttentionRouteRuntime:
         producer=producer,
         consumer=consumer,
     )
-    coordinator_holder["coordinator"] = coordinator
+    email_consumer = mailbox_central.EmailSendConsumer()
+    email_coordinator = mailbox_central.EmailSendCoordinator(
+        approvals=approvals,
+        index=index,
+        producer=attention_registry.producer(
+            mailbox_central.KIND, mailbox_central.APPLICATION_SCOPE,
+        ),
+        consumer=email_consumer,
+    )
+    # One reconciler slot, one coordinator per migrated kind; each ignores
+    # other kinds' approval ids.
+    reconcilers = mailbox_central.ReconcilerGroup(coordinator, email_coordinator)
+    coordinator_holder["coordinator"] = reconcilers
     approval_http = ApprovalHttpBridge(
         approvals=approvals,
         registry=ApprovalHttpRegistry(
@@ -531,6 +547,11 @@ def build_production_runtime() -> AttentionRouteRuntime:
                         consumer,
                         reconcile=coordinator.reconcile_exact,
                     ),
+                mailbox_central.KIND:
+                    mailbox_central.build_http_adapter(
+                        email_consumer,
+                        reconcile=email_coordinator.reconcile_exact,
+                    ),
             },
         ),
         wait_hub=approval_waiters,
@@ -541,9 +562,10 @@ def build_production_runtime() -> AttentionRouteRuntime:
         approvals=approvals,
         hub=PrivateAttentionHub(item_resolver=index.get_query_item),
         approval_http=approval_http,
-        approval_reconciler=coordinator,
+        approval_reconciler=reconcilers,
         operator_result_projectors={dashboard_access_central.KIND: consumer.project,
-                                    fleet.KIND: fleet.project_result},
+                                    fleet.KIND: fleet.project_result,
+                                    mailbox_central.KIND: email_consumer.project},
     )
 
 
