@@ -178,7 +178,9 @@ for name in "${!IMG[@]}"; do
         # that refuses the anonymous pull (a package left private, a wrong
         # name) fails here too, and that is not a signature failure. Windows
         # run 6 (2026-09-27) read a private GHCR package as a bad signature.
-        if grep -Eqi 'UNAUTHORIZED|unauthorized|denied|MANIFEST_UNKNOWN|NAME_UNKNOWN|not found|no such host|could not resolve' "$TOOLS/verify.err"; then
+        # Registry forms only: cosign's own "no matching signatures" or
+        # "signature not found" is a signature failure and stays exit 4.
+        if grep -Eqi 'UNAUTHORIZED|unauthorized|denied|MANIFEST_UNKNOWN|NAME_UNKNOWN|manifest unknown|repository name not known|no such host|could not resolve' "$TOOLS/verify.err"; then
             echo "IMAGE UNREACHABLE: $ref cannot be pulled anonymously (private package or wrong reference) — refusing to install" >&2
             sed 's/^/    /' "$TOOLS/verify.err" >&2
             echo "    A first-time GHCR package is private: make it public in the package's settings, then rerun." >&2

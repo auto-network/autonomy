@@ -52,7 +52,7 @@ def _run(tmp_path: Path, lock: Path, *extra: str,
     _exe(
         fake / "cosign",
         f'#!/usr/bin/env bash\necho "cosign $*" >>"$T_LOG"\n'
-        f'[[ "$*" == *@sha256:{BAD}* ]] && exit 1\n'
+        f'[[ "$*" == *@sha256:{BAD}* ]] && {{ echo "Error: no matching signatures: signature not found" >&2; exit 1; }}\n'
         f'[[ "$*" == *@sha256:{PRIVATE}* ]] && {{ echo "Error: GET https://ghcr.io/token?scope=repository:example/autonomy-node:pull: UNAUTHORIZED" >&2; exit 1; }}\n'
         'exit 0\n',
     )
