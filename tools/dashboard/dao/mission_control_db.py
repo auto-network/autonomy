@@ -426,6 +426,14 @@ def create_mission(
     mission_id = str(uuid.uuid4())
     created_at = time.time()
     org = (org or "").strip() or _default_org()
+    if not org:
+        # No caller organization and no shell default (a node with no shared
+        # organization has none: there is no default first organization).
+        # An empty organization is a mission nothing is bounded by, so the
+        # creation is refused, not written.
+        raise ValueError(
+            "a mission belongs to an organization: create or join one first"
+        )
     conn = _get_conn(db_path)
     try:
         conn.execute(

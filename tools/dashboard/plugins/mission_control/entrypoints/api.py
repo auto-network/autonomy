@@ -281,7 +281,10 @@ async def create_mission(request: Request) -> JSONResponse:
     # org-bound caller's scope is next; the shell default remains only for
     # global-authority callers that named nothing.
     org = (body.get("org") or "").strip()         or api_auth.organization_scope_from_request(request)
-    mission = db.create_mission(name, coordinator_session, org=org or None)
+    try:
+        mission = db.create_mission(name, coordinator_session, org=org or None)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     if style and style != "freeform":
         db.set_mission_style(mission["mission_id"], style)
         mission = db.get_mission(mission["mission_id"])

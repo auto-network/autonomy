@@ -133,6 +133,19 @@ def test_create_mission():
     assert body["status"] == "active"
 
 
+def test_create_mission_refuses_an_unbounded_mission(monkeypatch):
+    """No caller organization and no shell default (a node with no shared
+    organization has none): the mission is refused, never stored with an
+    empty organization (reviewer note on ffac0470)."""
+    monkeypatch.setattr(db, "_default_org", lambda: "")
+    monkeypatch.setattr(api_auth, "organization_scope_from_request", lambda request: None)
+    client = _client()
+    resp = client.post("/api/missions", json={"name": "Unbounded", "coordinator_session": "auto-x"})
+    assert resp.status_code == 400
+    assert "organization" in resp.json()["error"]
+    assert client.get("/api/missions").json()["missions"] == []
+
+
 def test_create_mission_requires_name():
     client = _client()
     resp = client.post("/api/missions", json={})
