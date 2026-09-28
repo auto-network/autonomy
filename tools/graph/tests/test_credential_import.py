@@ -550,3 +550,46 @@ def test_setup_token_dry_run_and_junk_file(warm_vault, tmp_path):
     assert hv.list_accounts("claude") == []
     _write_setup_token(home, token="not a token")
     assert ci.import_claude(str(home), fetch_identity=_identity()).status == ci.STATUS_NEEDS_SIGN_IN
+
+
+# ── log levels on the working setup-token path (auto-gksaw) ──
+
+
+def test_setup_token_403_is_logged_as_expected_not_as_an_error(warm_vault, tmp_path, caplog):
+    """Windows run 12: a successful first launch logged 'profile GET FAILED
+    HTTP 403' at ERROR. For a setup token the 403 is the expected answer."""
+    home = tmp_path / "home"
+    _write_setup_token(home)
+
+    def _inference_only(_tok):
+        raise ci.CredentialImportError("profile endpoint returned HTTP 403", http_status=403)
+
+    with caplog.at_level("INFO", logger="tools.graph.credential_import"):
+        assert ci.import_claude(str(home), fetch_identity=_inference_only).status == ci.STATUS_IMPORTED
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert "inference-only" in caplog.text
+
+
+def test_a_sign_in_that_fails_validation_is_still_an_error(warm_vault, tmp_path, caplog):
+    home = tmp_path / "home"
+    _write_claude_file(home)
+
+    def _fail(_tok):
+        raise ci.CredentialImportError("profile endpoint returned HTTP 401", http_status=401)
+
+    with caplog.at_level("INFO", logger="tools.graph.credential_import"):
+        ci.import_claude(str(home), fetch_identity=_fail)
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert errors and "401" in errors[0].getMessage()
+
+
+def test_the_profile_fetch_reports_the_http_status(monkeypatch):
+    import urllib.error
+
+    def _refuse(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(ci.urllib.request, "urlopen", _refuse)
+    with pytest.raises(ci.CredentialImportError) as exc:
+        ci._http_fetch_claude_identity("sk-ant-oat01-" + "x" * 60)
+    assert exc.value.http_status == 403

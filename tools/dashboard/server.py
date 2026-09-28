@@ -10200,7 +10200,10 @@ async def api_session_create(request):
         model = _resolve_host_session_model()
         alias = body.get("alias")
         from agents.session_launcher import _resolve_credentials
-        host_creds = _resolve_credentials(prefer_alias=alias)
+        # An empty vault is this branch's expected first step, not a failure:
+        # the bootstrap below imports the operator's sign-in, and its own
+        # resolve reports the final outcome.
+        host_creds = _resolve_credentials(prefer_alias=alias, empty_vault_expected=True)
         if host_creds is None:
             refusal = _host_credential_refusal()
             if refusal is not None:
@@ -10211,8 +10214,9 @@ async def api_session_create(request):
         if host_creds is None:
             return JSONResponse(
                 {"error": "no Claude account is installed to start a host "
-                          "terminal with, and none was found at "
-                          f"{HOST_HOME_MOUNT}/.claude/.credentials.json"},
+                          "terminal with, and no sign-in was found at "
+                          f"{HOST_HOME_MOUNT}/.claude/.credentials.json or "
+                          f"{HOST_HOME_MOUNT}/.claude/.setup-token"},
                 status_code=503,
             )
 

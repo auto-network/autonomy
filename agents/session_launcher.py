@@ -675,6 +675,7 @@ def _is_usage_usable(payload: dict) -> bool:
 def _resolve_credentials_via_substrate(
     *, prefer_alias: str | None,
     rng: random.Random | None = None,
+    empty_vault_expected: bool = False,
 ) -> dict | None:
     """The account picker over the operator's vault (record v16 §10.9).
 
@@ -706,8 +707,12 @@ def _resolve_credentials_via_substrate(
             return None
         # No account at all. The two ways in are the operator's own acts
         # (graph claude install, or a sign-in on the machine found by the
-        # Getting Started scan); neither can run unattended from here.
-        logger.error(
+        # Getting Started scan); neither can run unattended from here. A
+        # caller that imports one next (the host terminal's bootstrap) asks
+        # for INFO: the empty vault is its expected first step, and the
+        # ERROR belongs to its final result (auto-gksaw).
+        logger.log(
+            logging.INFO if empty_vault_expected else logging.ERROR,
             "session_launcher: no Claude account in the vault; remedy: "
             "`graph claude install --alias <name>`, or sign in to Claude on "
             "this machine and run `graph credentials import`",
@@ -763,7 +768,7 @@ def _resolve_credentials_via_substrate(
 
 
 def _resolve_credentials(
-    *, prefer_alias: str | None = None,
+    *, prefer_alias: str | None = None, empty_vault_expected: bool = False,
 ) -> dict | None:
     """Resolve Claude credentials for a session launch.
 
@@ -781,12 +786,17 @@ def _resolve_credentials(
          over harness usage if every token has fresh telemetry, else
          uniform random pick. Empty rows trigger ``graph claude
          install`` and a re-read.
+
+    ``empty_vault_expected``: the caller imports an account next when the
+    vault has none, so that case is logged at INFO rather than ERROR.
     """
     oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
     if oauth_token:
         return {"type": "token", "token": oauth_token}
 
-    return _resolve_credentials_via_substrate(prefer_alias=prefer_alias)
+    return _resolve_credentials_via_substrate(
+        prefer_alias=prefer_alias, empty_vault_expected=empty_vault_expected,
+    )
 
 
 def _setup_auth_docker_args(creds: dict, run_dir: Path) -> list[str] | None:

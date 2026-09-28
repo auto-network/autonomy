@@ -76,7 +76,15 @@ class CredentialImportError(RuntimeError):
     orchestrator catches it and turns it into a ``needs_sign_in`` result —
     a missing file (harness simply not authed) is *not* an error and is
     signalled by discovery returning ``None`` instead.
+
+    ``http_status`` is set when a validation call answered with an HTTP
+    error, so a caller for which that answer is expected (a setup token's
+    403 on the profile call) can say so instead of reporting a failure.
     """
+
+    def __init__(self, message: str, *, http_status: int | None = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
 
 
 # ── result model ─────────────────────────────────────────────
@@ -269,13 +277,16 @@ def _http_fetch_claude_identity(access_token: str) -> ClaudeIdentity:
             body_bytes = resp.read()
             status = getattr(resp, "status", 200)
     except urllib.error.HTTPError as exc:
+        # Whether an HTTP error is a failure is the caller's call: a sign-in
+        # that cannot fetch its profile is; a setup token's 403 is not.
         elapsed_ms = (time.monotonic() - started) * 1000
-        logger.error(
-            "credential import: profile GET FAILED HTTP %d in %.1fms",
+        logger.info(
+            "credential import: profile GET HTTP %d in %.1fms",
             exc.code, elapsed_ms,
         )
         raise CredentialImportError(
-            f"Claude validation failed: profile endpoint returned HTTP {exc.code}"
+            f"Claude validation failed: profile endpoint returned HTTP {exc.code}",
+            http_status=exc.code,
         ) from None
     except urllib.error.URLError as exc:
         elapsed_ms = (time.monotonic() - started) * 1000
@@ -349,8 +360,20 @@ def _import_claude_setup_token(
 
     try:
         identity: ClaudeIdentity | None = fetch_identity(token)
-    except CredentialImportError:
+    except CredentialImportError as exc:
         identity = None
+        if exc.http_status == 403:
+            # The expected answer: a setup token carries only the inference
+            # scope, so the profile call refuses it (auto-gksaw).
+            logger.info(
+                "credential import: the setup token is inference-only "
+                "(profile HTTP 403); keyed by token hash",
+            )
+        else:
+            logger.error(
+                "credential import: setup token profile check failed (%s); "
+                "keyed by token hash", exc,
+            )
     if identity is not None:
         account_id = identity.org_uuid
         label = identity.account_email
@@ -424,6 +447,7 @@ def import_claude(
     try:
         identity = fetch_identity(disc.access_token)
     except CredentialImportError as exc:
+        logger.error("credential import: Claude sign-in validation failed: %s", exc)
         return HarnessResult("claude", STATUS_NEEDS_SIGN_IN, str(exc))
     existing = hv.read_account("claude", identity.org_uuid)
     sealed_exp = existing.expires_ms() if existing is not None else None

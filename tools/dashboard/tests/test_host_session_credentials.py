@@ -13,7 +13,7 @@ from agents import session_launcher
 def test_an_alias_steers_the_choice(monkeypatch):
     seen = {}
 
-    def picker(*, prefer_alias=None):
+    def picker(*, prefer_alias=None, empty_vault_expected=False):
         seen["alias"] = prefer_alias
         return {"type": "token", "token": "tok", "alias": prefer_alias}
 
@@ -34,6 +34,27 @@ def test_no_installed_account_resolves_to_none(monkeypatch):
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
 
     assert session_launcher._resolve_credentials(prefer_alias=None) is None
+
+
+def test_an_empty_vault_logs_info_only_when_the_caller_imports_next(monkeypatch, caplog):
+    """Windows run 12: the host terminal's first launch logged 'no Claude
+    account in the vault' at ERROR, and then succeeded through the bootstrap."""
+    from tools.graph import harness_credentials as hv
+
+    monkeypatch.setattr(session_launcher, "_claude_accounts", lambda: [])
+    monkeypatch.setattr(hv, "list_accounts", lambda harness, **kw: [])
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    with caplog.at_level("INFO", logger="agents.session_launcher"):
+        assert session_launcher._resolve_credentials(empty_vault_expected=True) is None
+    [record] = [r for r in caplog.records if "no Claude account" in r.getMessage()]
+    assert record.levelname == "INFO"
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="agents.session_launcher"):
+        assert session_launcher._resolve_credentials() is None
+    [record] = [r for r in caplog.records if "no Claude account" in r.getMessage()]
+    assert record.levelname == "ERROR"
 
 
 def test_an_operator_override_still_wins(monkeypatch):
@@ -65,11 +86,12 @@ def host_create(monkeypatch):
 
     from tools.graph import harness_credentials as hv
 
-    calls = {"resolve": [], "import": [], "pending": [], "jobs": []}
+    calls = {"resolve": [], "resolve_quiet": [], "import": [], "pending": [], "jobs": []}
     state = {"rows": [], "accounts": []}
 
-    def fake_resolve(*, prefer_alias=None):
+    def fake_resolve(*, prefer_alias=None, empty_vault_expected=False):
         calls["resolve"].append(prefer_alias)
+        calls["resolve_quiet"].append(empty_vault_expected)
         return state["rows"].pop(0) if state["rows"] else None
 
     def fake_import(home, **kwargs):
@@ -104,6 +126,9 @@ async def test_host_create_bootstraps_from_the_operator_home_once(host_create):
 
     assert resp.status_code == 202
     assert calls["import"] == ["/host-home"]
+    # The first resolve expects an empty vault (INFO); the bootstrap's own
+    # resolve reports the outcome at the default level (auto-gksaw).
+    assert calls["resolve_quiet"] == [True, False]
     tmux_name, pending = calls["pending"][0]
     assert tmux_name.startswith("host-")
     assert pending["session_type"] == "host"
@@ -138,6 +163,7 @@ async def test_host_create_with_no_credential_anywhere_names_the_file(host_creat
 
     assert resp.status_code == 503
     assert b"/host-home/.claude/.credentials.json" in resp.body
+    assert b"/host-home/.claude/.setup-token" in resp.body
     assert calls["import"] == ["/host-home"]
     assert calls["jobs"] == []
 
