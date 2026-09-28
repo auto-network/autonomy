@@ -38,6 +38,26 @@ TAIL_QUERY_KEYS = ("tail_lines", "tail_entries", "before", "before_file",
                    "after_file", "after")
 
 
+#: Refusals that mean the MACHINE cannot be reached right now (as opposed to
+#: a session it does not have): the viewer renders them as "unreachable".
+UNREACHABLE_REFUSALS = frozenset({
+    "destination-slot-absent", "session-control-timeout",
+    "peer-refused-session-control", "personal-connector-unavailable",
+    "session-control-not-negotiated", "session-control-failed",
+})
+
+
+def unreachable_since(machine: str) -> int | None:
+    """Unix seconds of the last successful pull from *machine* (a name or
+    machine_pub), or None when it was never reached."""
+    from tools.dashboard import session_control_client, session_presence
+
+    pub = session_control_client.resolve_machine(machine)
+    if pub is None:
+        return None
+    return session_presence._peer_last_success_s().get(pub)
+
+
 def rewrite_identity(data: dict, address: str) -> dict:
     """Make a far machine's tail response name the session by its Home
     address, so the viewer's store, SSE routing and attachment URLs

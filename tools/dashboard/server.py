@@ -7029,10 +7029,25 @@ async def _remote_session_tail(request, project: str, address: str):
              if k in remote_view.TAIL_QUERY_KEYS}
     reply = await remote_view.fetch_tail(machine, name, project, query)
     if not reply.get("ok"):
-        status = 404 if reply.get("refusal") == "no-such-session" else 502
-        return JSONResponse({"error": reply.get("detail") or reply.get("refusal"),
-                             "refusal": reply.get("refusal")}, status_code=status)
+        refusal = reply.get("refusal")
+        if refusal in remote_view.UNREACHABLE_REFUSALS:
+            # The machine, not the session, is missing: the viewer shows
+            # "<machine> unreachable since <t>" and no transcript
+            # (design 64906530 revision f984e30b).
+            since = await asyncio.to_thread(remote_view.unreachable_since, machine)
+            return JSONResponse({
+                "entries": [], "is_live": False, "session_id": address,
+                "tmux_session": address, "tmux_name": address,
+                "machine": machine, "machine_reachable": False,
+                "machine_unreachable": {"machine": machine, "since": since},
+                "live_updates": False,
+            })
+        status = 404 if refusal == "no-such-session" else 502
+        return JSONResponse({"error": reply.get("detail") or refusal,
+                             "refusal": refusal}, status_code=status)
     data = remote_view.rewrite_identity(reply["tail"], address)
+    data["machine"] = machine
+    data["machine_reachable"] = True
     data["live_updates"] = _get_remote_watcher().watch(
         address, machine, name, project, remote_view.forward_cursor(data))
     return JSONResponse(data)
@@ -14295,6 +14310,30 @@ async def api_dao_session_status(request):
         except Exception:
             logger.warning("session presence read failed", exc_info=True)
     return JSONResponse(rows)
+
+async def api_fleet_launch_targets(request):
+    """GET /api/fleet/launch-targets — this machine and every other fleet
+    machine with its live sessions, free RAM, free disk and load, for the
+    Sessions page's machine chooser (bead auto-mje3g). Global authority."""
+    refused = api_auth.require_global_api_authority(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import fleet_machines
+
+    return JSONResponse({"targets": await fleet_machines.launch_targets()})
+
+
+async def api_sessions_remote(request):
+    """GET /api/sessions/remote — Active-list rows for sessions on the
+    operator's other machines, addressed <name>@<machine> (bead
+    auto-mje3g). Global authority."""
+    refused = api_auth.require_global_api_authority(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import fleet_machines
+
+    return JSONResponse({"sessions": await fleet_machines.remote_sessions()})
+
 
 async def api_remote_machine_status(request):
     """``status`` of another fleet machine over session-control/1
@@ -22286,6 +22325,8 @@ routes = [
     Route("/api/dao/recent_sessions", api_dao_recent_sessions),
     Route("/api/dao/session_status", api_dao_session_status),
     Route("/api/fleet/remote/{machine}/status", api_remote_machine_status),
+    Route("/api/fleet/launch-targets", api_fleet_launch_targets),
+    Route("/api/sessions/remote", api_sessions_remote),
     Route("/api/worktrees", api_worktrees),
     Route("/api/worktrees/orgs", api_worktrees_orgs),
     Route("/api/worktrees/refresh", api_worktrees_refresh, methods=["POST"]),

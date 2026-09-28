@@ -169,15 +169,37 @@ def status_op(limits_provider: Callable[[], dict]) -> OpHandler:
             limits = await asyncio.to_thread(limits_provider)
         except Exception:
             limits = {}
+        from tools.dashboard import machine_resources
+
+        resources = await asyncio.to_thread(machine_resources.sample)
         return ok({
             "machine_pub": machine.machine_pub if machine else None,
             "machine_id": machine.machine_id if machine else None,
             "label": names.get(machine.machine_id) if machine else None,
             "active": len(live),
+            "live_sessions": len(live),
+            "resources": resources,
             "dispatch_limits": limits,
         })
 
     return status
+
+
+#: Fields of a session:registry row that never leave this machine: the
+#: harness credential identity (an account id) and its alias.
+_PRIVATE_ROW_FIELDS = ("harness_token", "harness_token_alias")
+
+
+async def sessions_op(_body: dict, _peer: str) -> dict:
+    """``sessions``: this machine's Active rows exactly as its own
+    session:registry payload builds them (bead auto-mje3g), so a remote card
+    carries the same fields as a local one. Read-only."""
+    from tools.dashboard.dao import sessions as dao_sessions
+
+    rows = await asyncio.to_thread(dao_sessions.get_active_sessions)
+    clean = [{k: v for k, v in row.items() if k not in _PRIVATE_ROW_FIELDS}
+             for row in rows]
+    return ok({"sessions": clean})
 
 
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
@@ -327,6 +349,7 @@ def install(limits_provider: Callable[[], dict],
     """Register the built-in ops, plus the server-owned *ops*, and start the
     pump (worker activation)."""
     register_op("status", status_op(limits_provider))
+    register_op("sessions", sessions_op)
     if create is not None:
         register_op("launch", launch_op(create))
     for name, handler in (ops or {}).items():

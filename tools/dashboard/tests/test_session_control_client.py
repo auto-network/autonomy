@@ -109,11 +109,15 @@ def test_status_reports_identity_live_count_and_dispatch_limits(monkeypatch):
     monkeypatch.setattr(session_presence, "_machine_names", lambda: NAMES)
     monkeypatch.setattr(dashboard_db, "get_live_sessions",
                         lambda: [{"tmux_name": "auto-1"}, {"tmux_name": "auto-2"}])
+    from tools.dashboard import machine_resources
+
+    monkeypatch.setattr(machine_resources, "sample", lambda: {"ram_free_gb": 4.0})
     status = scc.status_op(lambda: {"bead_max_concurrent": 2})
     reply = asyncio.run(status({}, A))
     assert reply == {"v": 1, "ok": True, "result": {
         "machine_pub": B, "machine_id": "b2" * 32, "label": "sjc-2",
-        "active": 2, "dispatch_limits": {"bead_max_concurrent": 2}}}
+        "active": 2, "live_sessions": 2, "resources": {"ram_free_gb": 4.0},
+        "dispatch_limits": {"bead_max_concurrent": 2}}}
 
 
 def test_a_connector_that_refuses_at_once_is_not_polled_in_a_tight_loop(monkeypatch):
