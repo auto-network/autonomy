@@ -282,3 +282,51 @@ def test_cert_manager_defers_expected_errors_without_traceback(caplog, monkeypat
         asyncio.run(mgr.reconcile_once())
     rec = [r for r in caplog.records if "reconciliation failed" in r.getMessage()]
     assert len(rec) == 1 and rec[0].exc_info is not None
+
+
+# ── declared long-poll holds are not HANGs ────────────────────────────────
+
+def test_declared_long_poll_hold_is_not_logged_as_a_hang(caplog, monkeypatch):
+    """A handler that deliberately holds the request (``?wait=``) declares
+    the hold in ``request.state.held_ms``; the classifier judges only the
+    remainder, so a 55 s poll logs at INFO, not as SLOW-REQUEST(HANG)."""
+    import asyncio
+    import logging
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+    from tools.dashboard import server
+    from tools.dashboard.server import _RequestDurationMiddleware as M
+
+    async def poll(request: Request):
+        request.state.held_ms = 55_000.0
+        return JSONResponse({"ok": True})
+
+    async def slow(request: Request):
+        return JSONResponse({"ok": True})
+
+    import time as real_time
+    from types import SimpleNamespace
+
+    # Only the middleware's own clock is faked (server.time); anyio and the
+    # test client keep the real one.
+    ticks = iter([0.0, 55.02, 0.0, 6.0])
+    def monotonic():
+        tick = next(ticks, None)
+        return real_time.monotonic() if tick is None else tick
+
+    monkeypatch.setattr(server, "time", SimpleNamespace(monotonic=monotonic))
+    app = Starlette(routes=[Route("/poll", poll), Route("/slow", slow)],
+                    middleware=[Middleware(M)])
+    caplog.set_level(logging.INFO, logger=server._http_logger.name)
+    with TestClient(app) as client:
+        assert client.get("/poll").status_code == 200
+        assert client.get("/slow").status_code == 200
+    lines = [r for r in caplog.records if r.name == server._http_logger.name]
+    poll_line = next(r for r in lines if "/poll" in r.getMessage())
+    slow_line = next(r for r in lines if "/slow" in r.getMessage())
+    assert poll_line.levelno == logging.INFO and "SLOW-REQUEST" not in poll_line.getMessage()
+    assert slow_line.levelno == logging.ERROR and "SLOW-REQUEST(HANG)" in slow_line.getMessage()

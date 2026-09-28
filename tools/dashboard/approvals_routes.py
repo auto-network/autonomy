@@ -403,7 +403,9 @@ async def _get_approval_legacy(request: Request) -> JSONResponse:
     if wait is not None:
         if r["result"] is None:
             try:
-                r = await wait_for_approval(rid, float(wait or 0)) or r
+                wait_seconds = float(wait or 0)
+                request.state.held_ms = wait_seconds * 1000
+                r = await wait_for_approval(rid, wait_seconds) or r
             except ValueError:
                 pass
         result = r["result"]
@@ -590,6 +592,7 @@ async def get_approval(request: Request) -> JSONResponse:
                 wait_seconds = float(raw_wait)
             except (TypeError, ValueError, OverflowError) as exc:
                 raise ApprovalHttpBridgeError("invalid_request") from exc
+            request.state.held_ms = wait_seconds * 1000
             envelope = await _approval_http_bridge().held_envelope(
                 approval_id, principal, wait_seconds,
             )

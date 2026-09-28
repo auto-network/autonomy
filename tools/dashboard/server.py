@@ -23177,12 +23177,18 @@ class _RequestDurationMiddleware(BaseHTTPMiddleware):
         t0 = time.monotonic()
         response = await call_next(request)
         dur_ms = (time.monotonic() - t0) * 1000
-        if dur_ms >= self._HANG_MS:
+        # A long-poll handler declares how long it deliberately held the
+        # request (request.state.held_ms); only the time beyond that hold
+        # says anything about the loop, so classify on the remainder. Without
+        # this every ?wait=55 poll logged as a HANG and buried the real ones.
+        held_ms = float(getattr(request.state, "held_ms", 0.0) or 0.0)
+        excess_ms = dur_ms - held_ms
+        if excess_ms >= self._HANG_MS:
             _http_logger.error(
                 "SLOW-REQUEST(HANG) %s %s %d %.0fms client=%s — event loop likely blocked",
                 *self._describe(request, response.status_code, dur_ms),
             )
-        elif dur_ms >= self._SLOW_MS:
+        elif excess_ms >= self._SLOW_MS:
             _http_logger.warning(
                 "SLOW-REQUEST %s %s %d %.0fms client=%s",
                 *self._describe(request, response.status_code, dur_ms),

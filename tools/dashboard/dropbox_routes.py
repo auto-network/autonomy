@@ -229,6 +229,7 @@ async def wait_enrollment(request: Request) -> JSONResponse:
         wait = min(float(request.query_params.get("wait", "0")), 60.0)
     except ValueError:
         wait = 0.0
+    request.state.held_ms = max(0.0, wait) * 1000
     deadline = time.monotonic() + max(0.0, wait)
     while True:
         answer = await asyncio.to_thread(desk.collect, approval_id)
