@@ -7033,8 +7033,8 @@ async def _remote_session_tail(request, project: str, address: str):
         return JSONResponse({"error": reply.get("detail") or reply.get("refusal"),
                              "refusal": reply.get("refusal")}, status_code=status)
     data = remote_view.rewrite_identity(reply["tail"], address)
-    _get_remote_watcher().watch(address, machine, name, project,
-                                remote_view.forward_cursor(data))
+    data["live_updates"] = _get_remote_watcher().watch(
+        address, machine, name, project, remote_view.forward_cursor(data))
     return JSONResponse(data)
 
 
@@ -23443,6 +23443,13 @@ async def _on_shutdown():
     # warn a browser, but still leave timing state for the next process.
     if _restart_notice_payload is None:
         _write_restart_notice({"started_at_ms": int(time.time() * 1000)})
+    # Remote-session viewer polls (auto-fd68i): cancel them with the other
+    # background work rather than leaving them to the loop's teardown.
+    if _remote_watcher is not None:
+        try:
+            await _remote_watcher.stop()
+        except Exception:
+            logger.debug("remote watcher stop failed", exc_info=True)
     global _plain_listener
     if _plain_listener is not None:
         listener, _plain_listener = _plain_listener, None

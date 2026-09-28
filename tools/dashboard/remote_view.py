@@ -27,6 +27,10 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 1.5
+#: Concurrent watches. Each polls with a fresh pair and handshake, so this
+#: bounds the load one Home puts on its fleet; a viewer past it still gets
+#: its tail, just without live updates.
+MAX_WATCHES = 8
 #: A watch lives this long after the viewer's last tail request for it.
 WATCH_TTL_S = 600.0
 #: Query keys the tail op forwards; every tail mode the viewer uses.
@@ -100,8 +104,10 @@ class RemoteWatcher:
     """One forward-poll loop per remote session someone is viewing."""
 
     def __init__(self, event_bus, *, fetch=fetch_tail,
-                 interval: float = POLL_INTERVAL_S, ttl: float = WATCH_TTL_S):
+                 interval: float = POLL_INTERVAL_S, ttl: float = WATCH_TTL_S,
+                 max_watches: int = MAX_WATCHES):
         self._bus = event_bus
+        self._max = max_watches
         self._fetch = fetch
         self._interval = interval
         self._ttl = ttl
@@ -111,18 +117,20 @@ class RemoteWatcher:
         return sorted(self._watches)
 
     def watch(self, address: str, machine: str, name: str, project: str,
-              cursor: dict | None) -> None:
-        """Start, or keep alive, the watch for *address*."""
+              cursor: dict | None) -> bool:
+        """Start, or keep alive, the watch for *address*. False when no live
+        updates will follow (no cursor, or MAX_WATCHES already running)."""
         until = time.monotonic() + self._ttl
         existing = self._watches.get(address)
         if existing is not None:
             existing.until = until
-            return
-        if cursor is None:
-            return
+            return True
+        if cursor is None or len(self._watches) >= self._max:
+            return False
         watch = _Watch(address, machine, name, project, cursor, until)
         self._watches[address] = watch
         watch.task = asyncio.get_running_loop().create_task(self._run(watch))
+        return True
 
     async def _run(self, watch: _Watch) -> None:
         try:

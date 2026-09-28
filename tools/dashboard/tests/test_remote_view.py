@@ -170,6 +170,7 @@ def test_the_viewers_tail_is_proxied_rewritten_and_watched(monkeypatch):
     class W:
         def watch(self, *args):
             watched.append(args)
+            return True
 
     monkeypatch.setattr(api_auth, "require_global_api_authority", lambda r: None)
     monkeypatch.setattr(remote_view, "fetch_tail", fake_fetch)
@@ -218,3 +219,21 @@ def test_an_attachment_url_with_the_address_goes_to_the_remote_machine(tmp_path,
         {"tmux_name": ADDRESS, "path": "shot.png"})))
     assert response.status_code == 200
     assert asked == [("sjc-2", "output", {"tmux_name": "auto-9", "path": "shot.png"})]
+
+
+
+def test_watches_are_capped_and_the_tail_says_so():
+    async def run():
+        bus = Bus()
+        replies = [{"v": 1, "ok": True, "tail": {"is_live": True, "entries": []}}] * 50
+        watcher, _ = _watcher(list(replies), bus)
+        watcher._max = 2
+        results = [watcher.watch(f"auto-{i}@sjc-2", "sjc-2", f"auto-{i}", "p",
+                                 {"file": "s", "off": 0}) for i in range(3)]
+        assert results == [True, True, False]
+        assert watcher.watch("auto-0@sjc-2", "sjc-2", "auto-0", "p",
+                             {"file": "s", "off": 0}) is True    # keep-alive still works
+        await watcher.stop()
+        assert watcher.watching() == []
+
+    asyncio.run(run())
