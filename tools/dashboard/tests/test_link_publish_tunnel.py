@@ -1139,3 +1139,27 @@ def test_an_unexpected_failure_before_create_link_leaves_no_grant(
     assert "before the registry created the link" in execution["error"]
     assert _cached_grants() == {}
     assert len(dropped) == 1
+
+
+@pytest.mark.parametrize("extra, reason", [
+    ({"ttl": 604800}, "it takes no duration"),
+    ({"expires_at": 1900000000000}, "it takes no duration"),
+    ({"meta": {"label": "Follow us", "ttl": 604800}}, "meta.ttl is forbidden"),
+    ({"target_uuid": "11111111-1111-4111-8111-111111111111"}, "accepts only org, target_type and meta"),
+])
+def test_org_follow_publish_with_a_duration_is_refused_at_creation(
+    env, monkeypatch, extra, reason,
+):
+    """auto-eky23: a doomed follow publish is refused when it is CREATED, with
+    its reason, so no approval ever reaches the operator."""
+    _serving_ok(monkeypatch)
+    _channel_key_ok(monkeypatch)
+    request = {"org": ORG, "target_type": "org:follow", "meta": {"label": "Follow us"}}
+    request.update(extra)
+    before = ar.pending_count(kind="link_publish")
+    r = env.post("/api/approvals", json={
+        "kind": "link_publish", "session": SESSION, "request": request,
+    })
+    assert r.status_code == 400, r.text
+    assert reason in r.text
+    assert ar.pending_count(kind="link_publish") == before

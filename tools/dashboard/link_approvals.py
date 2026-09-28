@@ -248,6 +248,20 @@ def _follow_publish_request(request: dict) -> dict:
     (TTL class indefinite), so ``meta.ttl`` is forbidden — as it is for
     org:join. Mutates *request* in place, the way the executor then reads it;
     prepare_create freezes the enriched request onto the approval row."""
+    # The request's whole shape is checked here, at creation, so a doomed
+    # publish never reaches the operator (operator, 2026-09-28: "the
+    # structure of the request should obviously be validated long before it
+    # even gets to my approval"; auto-eky23).
+    extra = set(request) - {"org", "target_type", "meta"}
+    if extra & {"ttl", "expires_at", "duration"}:
+        raise ValueError(
+            "an org:follow link never expires unless revoked; it takes no duration"
+        )
+    if extra:
+        raise ValueError(
+            "org:follow publish accepts only org, target_type and meta, not "
+            + ", ".join(sorted(extra))
+        )
     org = request.get("org")
     if not isinstance(org, str) or not org:
         raise ValueError("org:follow publish requires the local org slug")

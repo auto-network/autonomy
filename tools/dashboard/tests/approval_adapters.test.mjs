@@ -218,3 +218,28 @@ test('an org:join publish shows its fixed expiry and signs the frozen payload wi
   const write = requests.find(row => row.options?.method === 'POST');
   assert.deepEqual(JSON.parse(write.options.body), { approved: true, envelope: { signed: 'existing-envelope' } });
 });
+// A standing follow link (org:follow) never expires unless revoked: no
+// duration choice, "No expiration" as the fact, and the decision carries no
+// TTL. The executor refuses one after approval (auto-eky23, live 2026-09-28:
+// approval 39fec671372c failed "it takes no duration").
+test('an org:follow publish offers no duration and signs no TTL', async () => {
+  const orgUuid = '22222222-2222-4222-8222-222222222222';
+  state = { signedIn: true, orgs: [{ org: orgUuid, live: true }] };
+  const payload = { org: orgUuid, target_uuid: orgUuid, target_type: 'org:follow',
+    meta: { label: 'Standing follow link for autonomy', org: 'autonomy' } };
+  await instance._approvalKinds.link_publish.open(instance, {
+    ...request(), ttl: null,
+    request: { org: 'autonomy', target_type: 'org:follow', target_uuid: orgUuid },
+    registry_request: { payload } });
+  assert.equal(q('select'), null, 'no duration choice for a follow link');
+  assert.ok(shadowText().includes('Link expires'), 'expiry fact missing');
+  assert.ok(shadowText().includes('No expiration'), 'no-expiration fact missing');
+  q('#primary').click();
+  await until(() => q('#result-title')?.textContent === 'Link published');
+  assert.equal(signs.length, 1);
+  assert.deepEqual(signs[0].slice(0, 3), ['TUNNEL', '/control/create-link', payload]);
+  const write = requests.find(row => row.options?.method === 'POST');
+  const body = JSON.parse(write.options.body);
+  assert.deepEqual(body, { approved: true, envelope: { signed: 'existing-envelope' } });
+  assert.equal('ttl' in body, false);
+});

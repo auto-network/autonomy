@@ -288,6 +288,9 @@
   async function _signAuthorizedLinkDecision(req, session, signer, rr) {
     const isRevoke = req.op === 'revoke';
     const isOrgJoin = !isRevoke && rr.payload && rr.payload.target_type === 'org:join';
+    // An org:follow link never expires unless revoked: it takes no duration
+    // (the executor refuses one; auto-eky23).
+    const isOrgFollow = !isRevoke && rr.payload && rr.payload.target_type === 'org:follow';
     let ttl = null;
     let payload;
     if (isRevoke) {
@@ -304,6 +307,8 @@
       if (rr.payload.meta && Object.keys(rr.payload.meta).length) {
         payload.meta = JSON.parse(JSON.stringify(rr.payload.meta));
       }
+    } else if (isOrgFollow) {
+      payload = _linkPayloadWithTtl(rr.payload, null);
     } else {
       ttl = req.duration === 'none' ? null
         : (req.duration === 'custom'
@@ -328,7 +333,7 @@
       } catch (error) {
         throw new Error('This approval could not be signed. Unlock it again and retry.');
       }
-      return (isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl };
+      return (isOrgJoin || isOrgFollow || isRevoke) ? { envelope } : { envelope, ttl };
     } finally {
       // Unchecked is deliberately one action only. Checked retains the
       // non-extractable authority (never any factor material); Lock clears
@@ -2553,7 +2558,9 @@
             const currentDuration = r.ttl == null ? '604800' : String(r.ttl);  // default 1 week when no TTL was requested
             const customDuration = r.ttl != null && !_LINK_DURATION_VALUES.has(currentDuration);
             const duration = customDuration ? 'custom' : currentDuration;
-            const fixedExpiry = req.target_type === 'org:join';
+            // org:join: the invitation's expiry; org:follow: never expires
+            // unless revoked. Neither offers a duration.
+            const fixedExpiry = req.target_type === 'org:join' || req.target_type === 'org:follow';
             const approval = {
               id: r.id, kind: r.kind, session: r.session,
               // Which session is asking, by name and working title — the
@@ -2584,11 +2591,11 @@
               actingIdentity: acting, actorIdentity: actor,
               duration,
               fixedExpiry,
-              fixedExpiryLabel: fixedExpiry && Number.isSafeInteger(
-                r.absolute_expiry,
-              )
-                ? new Date(r.absolute_expiry).toLocaleString()
-                : '',
+              fixedExpiryLabel: req.target_type === 'org:follow'
+                ? 'No expiration'
+                : (fixedExpiry && Number.isSafeInteger(r.absolute_expiry)
+                  ? new Date(r.absolute_expiry).toLocaleString()
+                  : ''),
               customDurationSeconds: customDuration ? r.ttl : null,
               customDurationLabel: customDuration ? _linkTtlText(r.ttl) : '',
               allowSessionApprovals: false,
