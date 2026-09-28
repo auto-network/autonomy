@@ -155,32 +155,38 @@ describe('AssetPresence', () => {
     ctl.destroy();
   });
 
-  it('requests a link_publish approval, waits, and resets on cancel or decline', async () => {
-    const { win, requests } = makeWindow({ responses: { '/api/approvals': { id: 'central-1' } } });
-    let overlay = '';
-    win.openApprovalOverlay = (id) => { overlay = id; };
+  it('shares through the operator review: one request, Reviewing while open, refresh after publishing', async () => {
+    const { win, requests } = makeWindow();
+    const specs = []; let finish;
+    const operateLink = (spec) => { specs.push(spec); return new Promise((resolve) => { finish = resolve; }); };
     const el = new FakeEl();
-    const ctl = AssetPresence.mount(el, { org: 'autonomy', targetType: 'note', targetUuid: 'note-1', sessions: [] });
-    await ctl.requestShare();
-    const post = requests.find((r) => r.url === '/api/approvals');
-    const body = JSON.parse(post.init.body);
-    assert.equal(body.kind, 'link_publish');
-    assert.equal(JSON.stringify(body.request), JSON.stringify({ org: 'autonomy', target_type: 'note', target_uuid: 'note-1', meta: {} }));
-    assert.equal(overlay, 'central-1');
-    assert.equal(ctl.shareState, 'awaiting');
-    assert.match(el.html, /Awaiting approval/);
-    assert.match(el.html, /asset-share-cancel/);
-    await ctl.requestShare();  // no double request while awaiting
-    assert.equal(requests.filter((r) => r.url === '/api/approvals').length, 1);
-    ctl.cancelShareWait();
+    const ctl = AssetPresence.mount(el, { org: 'autonomy', targetType: 'note', targetUuid: 'note-1', sessions: [], operateLink });
+    const sharing = ctl.requestShare();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(specs.length, 1);
+    assert.equal(specs[0].op, 'publish');
+    assert.equal(JSON.stringify(specs[0].request), JSON.stringify({ org: 'autonomy', target_type: 'note', target_uuid: 'note-1', meta: {} }));
+    assert.equal(ctl.shareState, 'requesting');
+    assert.match(el.html, /Reviewing…/);
+    await ctl.requestShare();  // no second request while the review is open
+    assert.equal(specs.length, 1);
+    const reads = requests.length;
+    finish({ ok: true, url: 'https://relay.auto.network/l/abc' });
+    await sharing;
     assert.equal(ctl.shareState, 'idle');
+    assert.ok(requests.length > reads, 'share state re-read after publishing');
+    assert.ok(!requests.some((r) => r.url === '/api/approvals'), 'no approval request');
 
-    await ctl.requestShare();
-    win.fetch = async (url) => (String(url).startsWith('/api/approvals/')
-      ? { ok: true, json: async () => ({ result: { approved: false } }) }
-      : { ok: true, json: async () => ({ shared: false, grants: [] }) });
-    assert.equal(await ctl.checkApproval(), 'declined');
-    ctl.destroy();
+    // Closing the review publishes nothing and leaves the control idle.
+    const cancelled = ctl.requestShare(); finish(null); await cancelled;
+    assert.equal(ctl.shareState, 'idle');
+    // A refusal is shown, not swallowed.
+    const refused = AssetPresence.mount(new FakeEl(), { org: 'autonomy', targetType: 'note', targetUuid: 'note-3', sessions: [],
+      operateLink: async () => { throw new Error('register autonomy from its organization page (/orgs/autonomy) first'); } });
+    await refused.requestShare();
+    assert.equal(refused.shareState, 'error');
+    assert.match(refused.shareError, /register autonomy/);
+    refused.destroy(); ctl.destroy();
   });
 
   it('offers the chat toggle only when the surface has chat, and routes it back', async () => {
@@ -330,15 +336,14 @@ describe('AssetPresence', () => {
   it('an asset with no org reads and requests sharing in personal, never a literal org', async () => {
     // auto-2v6ay.2 (operator decision D5): the fallback was 'autonomy', an org
     // a fresh node does not have.
-    const { win, requests } = makeWindow({ responses: { '/api/approvals': { id: 'central-2' } } });
-    win.openApprovalOverlay = () => {};
+    const { requests } = makeWindow();
+    const specs = [];
     const el = new FakeEl();
-    const ctl = AssetPresence.mount(el, { targetType: 'note', targetUuid: 'note-2', sessions: [] });
+    const ctl = AssetPresence.mount(el, { targetType: 'note', targetUuid: 'note-2', sessions: [], operateLink: async (spec) => { specs.push(spec); return null; } });
     await new Promise((r) => setTimeout(r, 0));
     assert.ok(requests.some((r) => r.url === '/api/share-state/note/note-2?org=personal'));
     await ctl.requestShare();
-    const post = requests.find((r) => r.url === '/api/approvals');
-    assert.equal(JSON.parse(post.init.body).request.org, 'personal');
+    assert.equal(specs[0].request.org, 'personal');
     assert.ok(!requests.some((r) => /org=autonomy/.test(r.url)));
     ctl.destroy();
   });

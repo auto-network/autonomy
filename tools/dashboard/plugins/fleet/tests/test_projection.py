@@ -239,7 +239,7 @@ def test_active_invitation_projects_short_link_and_signed_bootstrap_value():
     assert value["publishedAt"] == NOW - 10_000
     assert value["expiresAt"] == NOW + 86_400_000
     # The stable target id rides along so the browser can deactivate the
-    # invitation and post the matching link_revoke approval.
+    # invitation and revoke its published route (operator link operation).
     assert value["targetUuid"] == "11111111-1111-4111-8111-111111111111"
 
 

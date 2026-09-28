@@ -368,9 +368,12 @@ function fleetPage() {
       this.invitationError = null;
       try {
         const org = this.invitation.publishingOrg || 'personal';
-        await this._postJson('/api/approvals', {
-          kind: 'link_publish',
-          session: 'Fleet invitation',
+        // The operator publishes the invitation route from this Dashboard:
+        // review, sign on confirm, publish (auto-fkhq0.10a).
+        const links = await import('/static/js/components/link-central-approval.js');
+        await links.operateLinkDirectly({
+          op: 'publish',
+          requester: 'Fleet invitation',
           request: {
             org,
             target_uuid: crypto.randomUUID(),
@@ -453,11 +456,12 @@ function fleetPage() {
       try {
         const targetUuid = this.invitation.targetUuid;
         if (!targetUuid) throw new Error('the invitation record is missing its target');
-        // Tear the published rendezvous route down through the approvals
-        // rendezvous, and stop honouring the invitation locally right away.
-        await this._postJson('/api/approvals', {
-          kind: 'link_revoke',
-          session: 'Fleet invitation',
+        // Tear the published rendezvous route down (review, sign on confirm,
+        // revoke), and stop honouring the invitation locally either way.
+        const links = await import('/static/js/components/link-central-approval.js');
+        const revoked = await links.operateLinkDirectly({
+          op: 'revoke',
+          requester: 'Fleet invitation',
           request: {
             org: this.invitation.publishingOrg || 'personal',
             target_uuid: targetUuid,
@@ -468,6 +472,9 @@ function fleetPage() {
           target_uuid: targetUuid,
         });
         await this.load({ quiet: true });
+        if (!revoked) {
+          this.invitationError = 'The invitation no longer works on this machine, but its public route was not revoked.';
+        }
       } catch (error) {
         this.invitationError = (error && error.message) || String(error);
       } finally {

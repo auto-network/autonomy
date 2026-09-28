@@ -1,11 +1,12 @@
-/* Link publish / revoke signing, shared by the Central link review.
+/* Link publish / revoke signing, shared by the Central link review and the
+ * operator's own link requests (org invitations, asset share, fleet invites).
  *
- * Moved unchanged from pages/worktrees.js (auto-fkhq0.10a): the same factor-
- * aware unlock only when no retained session carries this organization, the
- * same inline register-before-freeze, and the same signature over TUNNEL + the
- * control path that the executor reconstructs. The only change is that the
- * caller supplies req.refreshRegistryRequest(), which re-reads the frozen
- * registry request after an inline registration. */
+ * Moved from pages/worktrees.js (auto-fkhq0.10a): the same factor-aware unlock
+ * only when no retained session carries this organization, and the same
+ * signature over TUNNEL + the control path that the executor reconstructs.
+ * Inline registration is gone: an unregistered organization is refused when
+ * the link is requested, so every request that reaches signing already carries
+ * its frozen registry request. */
 
 export function _linkTtlText(ttl) {
   if (!ttl) return 'No expiration';
@@ -58,72 +59,6 @@ export function _matchingApprovalAuthority(req) {
 // Gate 2 unlocks org authority only for the concrete action being reviewed.
 // The passphrase and root plaintext stay inside network-signon.js; this
 // function receives only a signed envelope back.
-// recovery_policy is 'none' (operator decision: recovery is a sovereign,
-// root-mutable policy — the root holder can ADD recovery later via a
-// root-signed policy update). NB the policy-update path that makes 'none'
-// reversible is a SEPARATE registry companion (registry.auto.network +
-// redeploy); until it deploys, 'none' is not yet reversible in the LIVE
-// registry, so this flow must not promise "add recovery later" in the UI.
-const INLINE_RECOVERY_POLICY = 'none';
-
-// Inline first-publish registration (register-before-freeze). Reuses the
-// EXISTING root-signed registration ceremony via exposed internals — no new
-// crypto: open the sealed org root with the personal root the shared
-// factor-aware unlock just produced, sign a root-direct registration
-// envelope, POST it to the server route (which verifies signer==root_pub,
-// matches the stored key, and forwards to the registry that verifies the
-// signature and returns the binding). The org root plaintext is zeroed
-// before this returns (I1); the personal seed belongs to the caller.
-async function _registerOrgInline(req, personalRoot) {
-  if (!INLINE_RECOVERY_POLICY) {
-    throw new Error(
-      'First-publish registration is not enabled yet — the organization ' +
-      'recovery policy is still being decided. Register from the ' +
-      'getting-started flow for now.');
-  }
-  const session = window.AutonomyNetworkSession;
-  const identity = window.AutonomyNetworkIdentity;
-  if (!session || !session._internals || !identity || !identity._internals) {
-    throw new Error('Registration is unavailable in this browser. Reload and try again.');
-  }
-  const S = session._internals, I = identity._internals;
-  const orgHeaders = req.orgSlug ? { 'X-Graph-Org': req.orgSlug } : {};
-  const orgQ = req.orgSlug ? ('?org=' + encodeURIComponent(req.orgSlug)) : '';
-  const keyResp = await fetch('/api/network/org-key' + orgQ, { headers: orgHeaders });
-  if (!keyResp.ok) {
-    throw new Error('Could not load this organization\'s signing key (' + keyResp.status + ').');
-  }
-  const orgKey = await keyResp.json();
-  if (!orgKey.armored_private_key && !orgKey.sealed_root_key) {
-    throw new Error('This organization has no signing key to register.');
-  }
-  // Unseal the org root with the already-open personal root. A retired
-  // password-only org armor cannot be opened this way and says so.
-  const opened = await S.openOrgRootWithSeed(orgKey, personalRoot.seed);
-  let rootKey = null;
-  try {
-    rootKey = await I.importSigningKey(opened.seed);
-    const payload = {
-      org_uuid: crypto.randomUUID(),
-      root_pub: opened.rootPub,
-      recovery_policy: INLINE_RECOVERY_POLICY,
-    };
-    const envelope = await I.signRegistration(rootKey, opened.rootPub, payload);
-    const resp = await fetch('/api/network/register', {
-      method: 'POST',
-      headers: Object.assign({ 'Content-Type': 'application/json' }, orgHeaders),
-      body: JSON.stringify({ org: req.orgSlug, envelope: envelope }),
-    });
-    const body = await resp.json().catch(function () { return {}; });
-    if (!resp.ok || body.ok === false) {
-      throw new Error(body.error || ('Registration was refused (' + resp.status + ').'));
-    }
-  } finally {
-    if (opened && opened.seed) { opened.seed.fill(0); opened.seed = null; }
-    rootKey = null;   // I1: drop the root; the armor is the survivor
-  }
-}
-
 export async function _signLinkDecision(self, req, { mount, signal, view, onAuthenticated } = {}) {
   let rr = req.registryRequest;
   const session = window.AutonomyNetworkSession;
@@ -140,7 +75,7 @@ export async function _signLinkDecision(self, req, { mount, signal, view, onAuth
   // password field: a publish is authorized by the operator's PERSONA,
   // which derives from the personal root, so the personal root's factors
   // are the only credential that was ever really being asked for.
-  const needsRoot = (req.registrationRequired && !rr) || !_matchingApprovalAuthority(req);
+  const needsRoot = !_matchingApprovalAuthority(req);
   let opened = null;
   if (needsRoot) {
     const { openRoot } = await import('../ceremony/open-root.js');
@@ -165,52 +100,11 @@ export async function _signLinkDecision(self, req, { mount, signal, view, onAuth
   return _signAuthorizedLinkDecision(req, session, signer, rr);
 }
 
-// Establish authority for one link action from an opened personal root:
-// register the organization inline when it has never been registered,
-// then sign on as this organization's persona unless a retained session
-// already carries it.
+// Establish authority for one link action from an opened personal root: sign
+// on as this organization's persona unless a retained session already
+// carries it.
 async function _authorizeLinkDecision(req, session, opened) {
   let rr = req.registryRequest;
-  // Register-before-freeze: a keyed-but-unregistered org registers its
-  // EXISTING key inline (the root just opened unseals it), then a
-  // re-enrich freezes the publish against the now-live binding. Nothing is
-  // frozen or executed before the binding exists, so the confused-deputy
-  // execute path is untouched.
-  if (req.registrationRequired && !rr) {
-    // On-the-fly registration: register this org's EXISTING key inline in
-    // the SAME Approve, invisibly. auto.network routes scope by the
-    // X-Graph-Org header (a bare ?org= is refused cross-org without it), so
-    // every call below carries it. Only SKIP registration if the org is
-    // DEFINITIVELY already bound (a valid 200 binding from a prior half-
-    // completed Approve); ANY other response (404, a scope 403, an error)
-    // means "not confirmed bound" -> register. Never guess "bound" from a
-    // non-200 and silently skip.
-    const orgHeaders = req.orgSlug ? { 'X-Graph-Org': req.orgSlug } : {};
-    const bq = req.orgSlug ? ('?org=' + encodeURIComponent(req.orgSlug)) : '';
-    let alreadyBound = false;
-    try {
-      const b = await fetch('/api/network/binding' + bq, { headers: orgHeaders });
-      if (b.ok) {
-        const bj = await b.json().catch(function () { return {}; });
-        alreadyBound = !!(bj && bj.org_uuid && bj.root_pub && bj.registry_url);
-      }
-    } catch (e) { /* unreachable -> treat as not bound, register */ }
-    if (!alreadyBound) await _registerOrgInline(req, opened);
-    // Wait for the publish request to freeze against the now-live binding
-    // (covers read-after-write timing). Invisible -- it just completes; no
-    // "try again" is ever surfaced to the operator.
-    for (let attempt = 0; attempt < 15 && !rr; attempt++) {
-      // The caller says where the frozen request is re-read (legacy approval
-      // row, or the Central bootstrap); both return registry_request.
-      rr = await req.refreshRegistryRequest();
-      if (!rr) await new Promise(function (resolve) { setTimeout(resolve, 200); });
-    }
-    if (!rr) {
-      throw new Error('Registered your organization, but the publish request '
-        + 'did not prepare against the new binding.');
-    }
-    req.registryRequest = rr;
-  }
   if (!rr) {
     throw new Error('This request is missing its auto.network details. Close it and try again.');
   }

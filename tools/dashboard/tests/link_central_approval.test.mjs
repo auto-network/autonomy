@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
 import { mintPasswordArmor } from '../static/js/ceremony/root-factor-policy.js';
 import { bytesToHex } from '../static/js/ceremony/primitives.js';
-import { openLinkCentralApproval, linkReviewState } from '../static/js/components/link-central-approval.js';
+import { openLinkCentralApproval, linkReviewState, operateLinkDirectly } from '../static/js/components/link-central-approval.js';
 
 // Ported from the retired Worktrees link-sheet tests in approval_adapters.test.mjs
 // (auto-fkhq0.10a). Same authority and signing; the Central order is Grant
@@ -112,11 +112,14 @@ test('drift blocks the review, and Authorize writes nothing', async () => {
   assert.equal(signs.length, 0); assert.deepEqual(log, []);
 });
 
-test('an unregistered organization is not blocked by its missing binding', async () => {
+test('a request without its frozen registry request is blocked with a reason, and nothing is written', async () => {
   bootstrap = { ...bootstrap, registry_request: null };
   await openLinkCentralApproval(item());
-  assert.equal(q('#review-unavailable').hidden, true);
-  assert.equal(q('#primary').disabled, false);
+  assert.equal(q('#review-unavailable').hidden, false);
+  assert.match(q('#review-unavailable').textContent, /missing its auto.network details/);
+  assert.equal(q('#primary').disabled, true);
+  q('#primary').click(); await wait(50);
+  assert.deepEqual(log, []);
 });
 
 test('an org:join publish shows its fixed expiry and signs the frozen payload with no TTL', async () => {
@@ -178,4 +181,51 @@ test('elsewhere and expired states say why and offer no action', async () => {
   assert.match(q('#review-unavailable').textContent, /Only Office NUC can carry this out/);
   assert.equal(linkReviewState({ state: 'expired_unexecuted' }, [], 'publish').unavailable, 'Approved but not published in time.');
   assert.equal(linkReviewState({ state: 'expired_unexecuted' }, [], 'revoke').unavailable, 'Approved but not revoked in time.');
+});
+
+// The operator's own link requests (org invitation, asset share, fleet
+// invitation): prepared, reviewed, signed only on explicit confirm, published.
+function direct({ status = 200, prepared } = {}) {
+  const base = global.fetch;
+  global.fetch = async (url, options) => {
+    url = String(url);
+    if (url === '/api/links/operations') {
+      log.push('prepare'); log.push(JSON.parse(options.body));
+      return reply(prepared || { operation_id: 'op-1',
+        review: { op: 'publish', org: 'autonomy', target_type: 'note', type_label: 'Note', target_title: 'Release note', ttl: 604800, fixed_expiry: false, acting_identity: { name: 'Autonomy Network' } },
+        signing: bootstrap }, status);
+    }
+    if (url === '/api/links/operations/op-1') { log.push('operation'); log.push(JSON.parse(options.body)); return reply({ execution }); }
+    return base(url, options);
+  };
+}
+test('a direct request shows the review, signs only on confirm, and resolves to the execution', async () => {
+  direct();
+  const request = { org: 'autonomy', target_type: 'note', target_uuid: 'note-id', meta: {} };
+  const outcome = operateLinkDirectly({ op: 'publish', request, requester: 'Share by link' });
+  await until(() => q('#primary'));
+  // A retained session could sign at once; it still waits for the operator.
+  await wait(50); assert.equal(signs.length, 0);
+  assert.deepEqual(log[1], { op: 'publish', request });
+  q('#primary').click();
+  await until(() => q('#result-title')?.textContent === 'Link published');
+  q('#close')?.click(); q('#primary')?.click();
+  assert.deepEqual(await outcome, execution);
+  assert.deepEqual(log.filter(e => typeof e === 'string'), ['prepare', 'sign', 'operation']);
+  assert.deepEqual(operationBody(), { op: 'publish', request });
+  assert.deepEqual(log.filter(e => typeof e === 'object').pop(), { envelope: { signed: 'envelope' }, ttl: 604800 });
+});
+test('closing a direct review without confirming signs and publishes nothing', async () => {
+  direct();
+  const outcome = operateLinkDirectly({ op: 'publish', request: { org: 'autonomy' } });
+  await until(() => q('#close'));
+  q('#close').click();
+  assert.equal(await outcome, null);
+  assert.equal(signs.length, 0);
+  assert.ok(!log.includes('operation'));
+});
+test('a planner refusal reports its detail and opens no review', async () => {
+  direct({ status: 422, prepared: { error: 'invalid_request', detail: 'register autonomy from its organization page (/orgs/autonomy) first' } });
+  await assert.rejects(operateLinkDirectly({ op: 'publish', request: { org: 'autonomy' } }), /register autonomy from its organization page/);
+  assert.equal(document.querySelector('[data-testid=approval-dialog]'), null);
 });

@@ -33,6 +33,7 @@ async function readJson(url, init) {
     const error = new Error(ERRORS[data.error] || data.error || 'This request is no longer available.');
     error.status = response.status;
     error.code = data.error || '';
+    error.detail = typeof data.detail === 'string' ? data.detail : '';
     throw error;
   }
   return data;
@@ -56,38 +57,22 @@ export function linkReviewState(result, actions, op) {
   return {state, operate: false, unavailable: (actions || []).includes('granted') ? '' : 'This request is no longer available.'};
 }
 
-export async function openLinkCentralApproval(item, {
-  onResolved = () => {}, onClose = () => {}, sign = _signLinkDecision,
-} = {}) {
-  const review = item.safeReview || {};
+/* The sheet both link flows show: the signing request, the expiry choice
+ * (fixed for invitations), who it is for, and anything that blocks it. */
+function linkSheet(review, signing) {
   const op = review.op === 'revoke' ? 'revoke' : 'publish';
-  const itemUrl = '/api/attention/items/' + encodeURIComponent(item.id);
-  const detail = await readJson(itemUrl);
-  const result = detail.review?.application_result || null;
-  const view = linkReviewState(result, item.actions, op);
-  // The frozen registry request does not change after review; fetch it now
-  // so drift and blocking errors show before anything is decided.
-  let bootstrap = null;
-  if (!view.unavailable || view.operate) {
-    try { bootstrap = await readJson(itemUrl + '/link-operation-bootstrap'); } catch (error) { bootstrap = {blocking_error: error.message}; }
-  }
-  const label = review.requester_label || 'A session';
-  const session = await requestingSession(label.split(' · ')[0], label);
   const acting = review.acting_identity || {};
   const ttl = review.ttl == null ? null : Number(review.ttl);
   const current = ttl == null ? '604800' : String(ttl);
   const custom = ttl != null && !_LINK_DURATION_VALUES.has(current);
   const approval = {
-    id: item.id, op, orgSlug: review.org || '', orgUuid: bootstrap?.org_uuid || null,
+    op, orgSlug: review.org || '', orgUuid: signing?.org_uuid || null,
     actingIdentity: acting, fixedExpiry: !!review.fixed_expiry,
     duration: custom ? 'custom' : current, customDurationSeconds: custom ? ttl : null,
     allowSessionApprovals: false,
-    registryRequest: bootstrap?.registry_request || null,
-    registrationRequired: !bootstrap?.registry_request,
-    refreshRegistryRequest: async () => (await readJson(itemUrl + '/link-operation-bootstrap')).registry_request || null,
+    registryRequest: signing?.registry_request || null,
   };
   approval.allowSessionApprovals = _matchingApprovalAuthority(approval);
-
   const controls = document.createElement('div');
   if (op === 'publish' && !approval.fixedExpiry) {
     const row = document.createElement('label'); row.className = 'approval-fact';
@@ -107,17 +92,47 @@ export async function openLinkCentralApproval(item, {
     choice.append(checkbox, document.createTextNode('Allow approvals this session without unlocking again.'));
     controls.append(choice);
   }
-
   const facts = [];
   if (review.recipient?.display_name) facts.push(['Prepared for', review.recipient.display_name]);
   if (review.fixed_expiry && Number.isSafeInteger(review.absolute_expiry)) facts.push(['Link expires', new Date(review.absolute_expiry).toLocaleString()]);
   if (review.label) facts.push(['Label', review.label]);
-  // The link kind's intro is fixed by the dialog, so the state is a fact.
-  if (view.operate) facts.push(['Status', `Approved, not yet ${op === 'revoke' ? 'revoked' : 'published'}`]);
-  if (view.operate && result?.operable_until) facts.push([op === 'revoke' ? 'Revoke by' : 'Publish by', clock(result.operable_until)]);
-  const blocking = view.unavailable || bootstrap?.blocking_error
-    || (bootstrap?.binding_drift ? 'This organization changed after the request was prepared. Close it and ask again.' : '');
+  const blocking = signing?.blocking_error
+    || (signing?.binding_drift ? 'This organization changed after the request was prepared. Close it and ask again.' : '')
+    || (signing && !signing.registry_request ? 'This request is missing its auto.network details. Close it and try again.' : '');
   const target = {name: review.target_title || 'Share link', type: review.type_label || review.target_type || 'Item', byline: 'On auto.network'};
+  const verb = op === 'revoke' ? 'Revoke' : 'Publish';
+  return {op, approval, controls, facts, blocking, target, verb,
+    organization: {name: acting.name || approval.orgSlug, image: acting.favicon || ''},
+    working: op === 'revoke' ? 'Revoking link' : 'Publishing link',
+    success: op === 'revoke' ? 'Link revoked' : 'Link published',
+    failed: `The link could not be ${op === 'revoke' ? 'revoked' : 'published'}.`};
+}
+
+function operationBody(sheet, signed) {
+  return sheet.op === 'publish' && !sheet.approval.fixedExpiry && 'ttl' in signed
+    ? {envelope: signed.envelope, ttl: signed.ttl} : {envelope: signed.envelope};
+}
+
+export async function openLinkCentralApproval(item, {
+  onResolved = () => {}, onClose = () => {}, sign = _signLinkDecision,
+} = {}) {
+  const review = item.safeReview || {};
+  const itemUrl = '/api/attention/items/' + encodeURIComponent(item.id);
+  const detail = await readJson(itemUrl);
+  const result = detail.review?.application_result || null;
+  const view = linkReviewState(result, item.actions, review.op === 'revoke' ? 'revoke' : 'publish');
+  // The frozen registry request does not change after review; fetch it now
+  // so drift and blocking errors show before anything is decided.
+  let signing = null;
+  if (!view.unavailable || view.operate) {
+    try { signing = await readJson(itemUrl + '/link-operation-bootstrap'); } catch (error) { signing = {blocking_error: error.message}; }
+  }
+  const sheet = linkSheet(review, signing);
+  const label = review.requester_label || 'A session';
+  const session = await requestingSession(label.split(' · ')[0], label);
+  // The link kind's intro is fixed by the dialog, so the state is a fact.
+  if (view.operate) sheet.facts.push(['Status', `Approved, not yet ${sheet.op === 'revoke' ? 'revoked' : 'published'}`]);
+  if (view.operate && result?.operable_until) sheet.facts.push([sheet.op === 'revoke' ? 'Revoke by' : 'Publish by', clock(result.operable_until)]);
 
   async function decide(outcome) {
     const response = await readJson(itemUrl + '/approval-decision', {
@@ -127,35 +142,28 @@ export async function openLinkCentralApproval(item, {
     if (response.resolution?.outcome !== outcome) throw new Error('This request was not completed.');
   }
 
-  const verb = op === 'revoke' ? 'Revoke' : 'Publish';
   return openApprovalDialog({
-    retained: !approval.registrationRequired && _matchingApprovalAuthority(approval),
+    retained: _matchingApprovalAuthority(sheet.approval),
     review: {
-      kind: op === 'publish' ? 'link' : 'operation',
-      title: `${verb} this share link`,
-      intro: '',
-      organization: {name: acting.name || approval.orgSlug, image: acting.favicon || ''},
+      kind: sheet.op === 'publish' ? 'link' : 'operation',
+      title: `${sheet.verb} this share link`, intro: '',
+      organization: sheet.organization,
       requester: {kind: 'Requesting session', name: session.name || label, byline: session.byline || '', href: session.href || localHref(item.requester?.href)},
-      target, controls, facts,
-      unavailable: blocking,
+      target: sheet.target, controls: sheet.controls, facts: sheet.facts,
+      unavailable: view.unavailable || sheet.blocking,
     },
     // Grant first, then sign: the envelope must be newer than the Grant.
     authorize: async (options) => {
       if (!view.operate) { await decide('granted'); view.operate = true; }
-      if (!approval.registryRequest && !approval.registrationRequired) {
-        approval.registryRequest = await approval.refreshRegistryRequest();
-      }
-      return sign(null, approval, options);
+      return sign(null, sheet.approval, options);
     },
     execute: async (signed) => {
-      const body = op === 'publish' && !approval.fixedExpiry && 'ttl' in signed
-        ? {envelope: signed.envelope, ttl: signed.ttl} : {envelope: signed.envelope};
       try {
         const response = await readJson(itemUrl + '/link-operation', {
-          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(operationBody(sheet, signed)),
         });
         const execution = response.execution || {};
-        if (execution.ok !== true) throw new Error(execution.error || `The link could not be ${op === 'revoke' ? 'revoked' : 'published'}.`);
+        if (execution.ok !== true) throw new Error(execution.error || sheet.failed);
         onResolved();
         return {approved: true, execution};
       } finally {
@@ -164,12 +172,58 @@ export async function openLinkCentralApproval(item, {
     },
     decline: !view.operate && !view.unavailable && (item.actions || []).includes('declined')
       ? async () => { await decide('declined'); onResolved(); } : null,
-    result: {
-      working: op === 'revoke' ? 'Revoking link' : 'Publishing link',
-      success: op === 'revoke' ? 'Link revoked' : 'Link published',
-      copy: '',
-      fact: {...target, href: session.href, linkLabel: 'View requesting session'},
-    },
+    result: {working: sheet.working, success: sheet.success, copy: '',
+      fact: {...sheet.target, href: session.href, linkLabel: 'View requesting session'}},
     onClose,
+  });
+}
+
+/* A link the operator asks for from this Dashboard (an org invitation, an
+ * asset share, a fleet invitation). There is no approval to wait for: the
+ * operator is the one acting, so the Dashboard prepares the signing request,
+ * the same review is shown, and the link is signed and published only when
+ * the operator confirms it, even when a retained session could sign without
+ * an unlock. Resolves to the executor's output, or null when the operator
+ * closes the review without confirming. */
+export async function operateLinkDirectly({op, request, requester = 'This Dashboard'}, {sign = _signLinkDecision} = {}) {
+  const prepared = await readJson('/api/links/operations', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({op, request}),
+  }).catch((error) => {
+    // A planner refusal says exactly why; there is nothing to sign.
+    if (error.code === 'invalid_request') throw new Error(error.detail || error.message);
+    throw error;
+  });
+  const sheet = linkSheet({...(prepared.review || {}), op}, prepared.signing || {});
+  const operationUrl = '/api/links/operations/' + encodeURIComponent(prepared.operation_id);
+  return await new Promise((resolve, reject) => {
+    let execution = null;
+    openApprovalDialog({
+      retained: _matchingApprovalAuthority(sheet.approval),
+      review: {
+        kind: sheet.op === 'publish' ? 'link' : 'operation',
+        title: `${sheet.verb} this share link`, intro: '',
+        organization: sheet.organization,
+        requester: {kind: 'Requested from', name: requester, byline: '', href: ''},
+        target: sheet.target, controls: sheet.controls, facts: sheet.facts,
+        unavailable: sheet.blocking,
+      },
+      authorize: (options) => sign(null, sheet.approval, options),
+      execute: async (signed) => {
+        try {
+          const response = await readJson(operationUrl, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(operationBody(sheet, signed)),
+          });
+          execution = response.execution || {};
+          if (execution.ok !== true) throw new Error(execution.error || sheet.failed);
+          return {approved: true, execution};
+        } finally {
+          signed.envelope = null;
+        }
+      },
+      decline: null,
+      result: {working: sheet.working, success: sheet.success, copy: '', fact: {...sheet.target}},
+      onClose: () => resolve(execution && execution.ok === true ? execution : null),
+    });
   });
 }

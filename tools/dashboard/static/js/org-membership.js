@@ -462,7 +462,7 @@
   Controller.prototype.publishingHtml = function () {
     return '<div class="mem-section"><div class="mem-panel">'
       + '<h3>Invitation signed</h3>'
-      + '<p>One step left: approve publishing its public join route. The request is in your approvals inbox' + (window.openApprovalOverlay ? ' — it should have just opened' : '') + '.</p>'
+      + '<p>One step left: confirm publishing its public join link in the review that just opened.</p>'
       + (this.error ? '<p class="mem-once" style="color:#fca5a5">' + esc(this.error) + '</p>' : '')
       + '<div class="mem-panel-actions">'
       + '<button type="button" class="mem-secondary" data-action="finish-mint">Close</button>'
@@ -1018,30 +1018,16 @@
       expires_at: minted.expiry,
       meta: label ? { label: label } : {},
     };
-    return request('/api/approvals', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        kind: 'link_publish',
-        session: 'Organization membership',
-        request: request_body,
-      }),
-    }).then(function (approval) {
-      if (window.openApprovalOverlay) window.openApprovalOverlay(approval.id);
-      var poll = function () {
-        if (self.mintStep !== 'publishing') return null;
-        return request('/api/approvals/' + encodeURIComponent(approval.id) + '?wait=25').then(function (row) {
-          var result = row.result || {};
-          if (result.approved === false) throw new Error('Publishing the invitation link was declined. The signed invitation stays active without a link; deactivate it if that was unintended.');
-          var execution = result.execution;
-          if (execution && execution.ok === false) {
-            throw new Error(execution.error || 'Publishing the invitation link failed.');
-          }
-          if (execution && execution.url) return execution;
-          return poll();
-        });
-      };
-      return poll();
+    // The operator is the one acting: prepare, review, sign on confirm, and
+    // publish from this Dashboard (auto-fkhq0.10a). No approval to wait for.
+    return import('/static/js/components/link-central-approval.js').then(function (links) {
+      return links.operateLinkDirectly(
+        { op: 'publish', request: request_body, requester: 'Organization membership' });
+    }).then(function (execution) {
+      if (!execution && self.mintStep === 'publishing') {
+        throw new Error('The invitation link was not published. The signed invitation stays active without a link; deactivate it if that was unintended.');
+      }
+      return execution;
     }).then(function (execution) {
       if (!execution) return;
       // The executor returns the CANONICAL url and the minted channel public

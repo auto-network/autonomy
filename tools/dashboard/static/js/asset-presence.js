@@ -29,8 +29,6 @@
 (function () {
   'use strict';
 
-  var POLL_MS = 4500;
-  var POLL_TICKS = 40; // ~3 minutes
 
   function esc(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) {
@@ -133,12 +131,10 @@
     this.el = el;
     this.opts = Object.assign({ extraIds: [], sessions: [], chat: null }, opts || {});
     this.share = { shared: false, grants: [] };
-    this.shareState = 'idle'; // idle | requesting | awaiting | error
+    this.shareState = 'idle'; // idle | requesting | error
     this.shareError = '';
     this.publicationBusy = false;
     this.publicationError = '';
-    this.approvalId = '';
-    this._pollTimer = null;
     this._destroyed = false;
     this._onClick = this._onClick.bind(this);
     this._onToggle = this._onToggle.bind(this);
@@ -185,7 +181,6 @@
 
   Control.prototype.destroy = function () {
     this._destroyed = true;
-    this._stopPoll();
     this.el.removeEventListener('click', this._onClick);
     document.removeEventListener('click', this._onDocumentClick, true);
     document.removeEventListener('keydown', this._onKeydown);
@@ -303,16 +298,11 @@
         + '<button type="button" class="design-presence-action" data-action="manage" data-testid="asset-share-manage" title="Manage share in Published Links" aria-label="Manage share in Published Links">' + MANAGE_SVG + '</button>'
         + '</span></div>';
     } else {
-      var text = this.shareState === 'requesting' ? 'Requesting…'
-        : this.shareState === 'awaiting' ? 'Awaiting approval'
+      var text = this.shareState === 'requesting' ? 'Reviewing…'
         : this.shareState === 'error' ? 'Share failed — retry'
         : 'Share by link';
-      var disabled = (this.shareState === 'requesting' || this.shareState === 'awaiting') ? ' disabled' : '';
-      sharing = '<button type="button" class="design-presence-share" data-action="share" data-testid="asset-share-request"' + disabled + '>' + esc(text) + '</button>'
-        + (this.shareState === 'awaiting'
-          ? '<div class="design-presence-note">Approve the publish request in Central; the link appears here once it is minted. '
-            + '<button type="button" class="design-presence-link" data-action="cancel-share" data-testid="asset-share-cancel">Cancel</button></div>'
-          : '');
+      var disabled = this.shareState === 'requesting' ? ' disabled' : '';
+      sharing = '<button type="button" class="design-presence-share" data-action="share" data-testid="asset-share-request"' + disabled + '>' + esc(text) + '</button>';
     }
     var error = this.shareError ? '<div class="design-presence-note is-error">' + esc(this.shareError) + '</div>' : '';
     var publication = '';
@@ -397,8 +387,6 @@
       if (this.opts.chat && this.opts.chat.onToggle) this.opts.chat.onToggle(null);
     } else if (action === 'share') {
       this.requestShare();
-    } else if (action === 'cancel-share') {
-      this.cancelShareWait();
     } else if (action === 'share-link') {
       this.shareLink();
     } else if (action === 'open-link') {
@@ -445,98 +433,43 @@
       var next = data && typeof data === 'object' ? { shared: !!data.shared, grants: data.grants || [] } : this.share;
       var changed = JSON.stringify(next) !== JSON.stringify(this.share);
       this.share = next;
-      if (this.share.shared && this.shareState === 'awaiting') {
-        this.shareState = 'idle';
-        this._stopPoll();
-        changed = true;
-      }
       if (changed) this.render();
     } catch (e) { /* keep the last known state */ }
   };
 
   Control.prototype.requestShare = async function () {
     if (this.opts.mode === 'activity' || this.opts.sharing === false) return;
-    if (this.shareState === 'requesting' || this.shareState === 'awaiting') return;
+    if (this.shareState === 'requesting') return;
     this.shareError = '';
     this.shareState = 'requesting';
     this.render();
     try {
-      var res = await fetcher()('/api/approvals', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          kind: 'link_publish',
-          session: 'dashboard-ui',
-          request: {
-            org: this.opts.org || 'personal',
-            target_type: this.opts.targetType,
-            target_uuid: this.opts.targetUuid,
-            meta: {},
-          },
-        }),
+      // The operator is the one sharing: prepare, review, sign on confirm and
+      // publish from this Dashboard (auto-fkhq0.10a). No approval to await.
+      var operate = this.opts.operateLink || async function (spec) {
+        var links = await import('/static/js/components/link-central-approval.js');
+        return links.operateLinkDirectly(spec);
+      };
+      var execution = await operate({
+        op: 'publish',
+        requester: 'Share by link',
+        request: {
+          org: this.opts.org || 'personal',
+          target_type: this.opts.targetType,
+          target_uuid: this.opts.targetUuid,
+          meta: {},
+        },
       });
-      var data = await res.json().catch(function () { return {}; });
-      if (!res.ok || data.error) {
-        this.shareState = 'error';
-        this.shareError = data.error || ('Share request failed (HTTP ' + res.status + ')');
-        this.render();
-        return;
-      }
-      this.shareState = 'awaiting';
-      this.approvalId = data.id || '';
+      if (this._destroyed) return;
+      this.shareState = 'idle';
+      if (execution) await this.refresh();
       this.render();
-      if (data.id && typeof window.openApprovalOverlay === 'function') {
-        try { window.openApprovalOverlay(data.id); } catch (e) { /* Central still has it */ }
-      }
-      this._startPoll();
     } catch (e) {
+      if (this._destroyed) return;
       this.shareState = 'error';
-      this.shareError = 'Share request failed: ' + (e.message || e);
+      this.shareError = (e && e.message) || String(e);
       this.render();
     }
-  };
-
-  Control.prototype.checkApproval = async function () {
-    if (!this.approvalId) return 'pending';
-    try {
-      var res = await fetcher()('/api/approvals/' + encodeURIComponent(this.approvalId));
-      if (!res.ok) return res.status === 404 ? 'declined' : 'pending';
-      var data = await res.json();
-      var result = data && data.result;
-      if (!result) return 'pending';
-      return result.approved ? 'approved' : 'declined';
-    } catch (e) { return 'pending'; }
-  };
-
-  Control.prototype._startPoll = function () {
-    this._stopPoll();
-    var self = this;
-    var remaining = POLL_TICKS;
-    var tick = function () {
-      self._pollTimer = null;
-      if (self._destroyed || self.shareState !== 'awaiting') return;
-      self.checkApproval().then(function (decided) {
-        if (self._destroyed || self.shareState !== 'awaiting') return;
-        if (decided === 'declined') { self.shareState = 'idle'; self.render(); return; }
-        return self.refresh();
-      }).then(function () {
-        if (self._destroyed || self.shareState !== 'awaiting') return;
-        if (--remaining <= 0) { self.shareState = 'idle'; self.render(); return; }
-        self._pollTimer = setTimeout(tick, POLL_MS);
-      });
-    };
-    this._pollTimer = setTimeout(tick, POLL_MS);
-  };
-
-  Control.prototype._stopPoll = function () {
-    if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
-  };
-
-  Control.prototype.cancelShareWait = function () {
-    this._stopPoll();
-    this.approvalId = '';
-    this.shareState = 'idle';
-    this.render();
   };
 
   Control.prototype.shareLink = async function () {

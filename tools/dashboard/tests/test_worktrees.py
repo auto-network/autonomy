@@ -1257,7 +1257,7 @@ class TestWorktreePage:
         central = (JS_DIR / "components" / "link-central-approval.js").read_text()
         assert "_signLinkDecision" not in worktrees
         assert "export async function _signLinkDecision(self, req, {" in signing
-        assert "sign(null, approval, options)" in central
+        assert "sign(null, sheet.approval, options)" in central
 
     def test_revoke_decision_path_has_its_own_shape(self):
         """The revoke path is not the publish path: its envelope payload must
@@ -1269,7 +1269,7 @@ class TestWorktreePage:
         central = (JS_DIR / "components" / "link-central-approval.js").read_text()
         assert "const isRevoke = req.op === 'revoke';" in signing
         assert "req.orgUuid || (" in signing
-        assert "orgUuid: bootstrap?.org_uuid || null," in central
+        assert "orgUuid: signing?.org_uuid || null," in central
         assert "await import('../ceremony/open-root.js')" in signing
         assert "session.signOnWithRootSeed(opened.seed, opened.rootPub, {\n" in signing
         assert "org: req.orgSlug, requireServingRuntime: true," in signing
