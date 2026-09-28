@@ -7000,6 +7000,86 @@ def _parse_and_enrich_segments(
     return out, spans, trimmed_from
 
 
+_remote_watcher = None
+
+
+def _get_remote_watcher():
+    global _remote_watcher
+    if _remote_watcher is None:
+        from tools.dashboard.remote_view import RemoteWatcher
+
+        _remote_watcher = RemoteWatcher(event_bus)
+    return _remote_watcher
+
+
+async def _remote_session_tail(request, project: str, address: str):
+    """The tail of ``<name>@<machine>``, a session on another fleet machine
+    (graph://7eb29bc8-31a §9.6): the far machine runs its own tail with the
+    viewer's exact query, the identity fields are rewritten to the address,
+    and a watcher republishes new entries on this bus while it is viewed."""
+    from tools.dashboard import remote_view
+
+    refused = api_auth.require_global_api_authority(request)
+    if refused is not None:
+        return refused
+    name, _, machine = address.rpartition("@")
+    if not _TMUX_NAME_RE.match(name or "") or not machine:
+        return JSONResponse({"error": "invalid session address"}, status_code=400)
+    query = {k: str(v) for k, v in request.query_params.items()
+             if k in remote_view.TAIL_QUERY_KEYS}
+    reply = await remote_view.fetch_tail(machine, name, project, query)
+    if not reply.get("ok"):
+        status = 404 if reply.get("refusal") == "no-such-session" else 502
+        return JSONResponse({"error": reply.get("detail") or reply.get("refusal"),
+                             "refusal": reply.get("refusal")}, status_code=status)
+    data = remote_view.rewrite_identity(reply["tail"], address)
+    _get_remote_watcher().watch(address, machine, name, project,
+                                remote_view.forward_cursor(data))
+    return JSONResponse(data)
+
+
+async def _inbound_session_tail(body: dict, peer: str) -> dict:
+    """session-control ``tail``: run this machine's own api_session_tail
+    for another machine of this fleet with the viewer's query, so every tail
+    mode behaves exactly as it does locally. Large replies stream."""
+    from urllib.parse import urlencode
+
+    from starlette.requests import Request as _Request
+
+    from tools.dashboard import remote_view
+    from tools.dashboard import session_control_client as scc
+    from tools.network.session_control import transfer_dir
+
+    name, project, query = body.get("session_id"), body.get("project"), body.get("query")
+    if not isinstance(name, str) or not _TMUX_NAME_RE.match(name):
+        return scc.refusal("bad-request", "session_id")
+    if not isinstance(project, str) or not _TMUX_NAME_RE.match(project):
+        return scc.refusal("bad-request", "project")
+    if not isinstance(query, dict) or any(
+            k not in remote_view.TAIL_QUERY_KEYS or not isinstance(v, str)
+            for k, v in query.items()):
+        return scc.refusal("bad-request", "query")
+    scope = {
+        "type": "http", "method": "GET", "headers": [],
+        "path": f"/api/session/{project}/{name}/tail",
+        "query_string": urlencode(query).encode(),
+        "path_params": {"project": project, "session_id": name},
+    }
+    response = await api_session_tail(_Request(scope))
+    if response.status_code == 404:
+        return scc.refusal(scc.NO_SUCH_SESSION, name)
+    if response.status_code != 200:
+        return scc.refusal("tail-failed", response.body.decode("utf-8", "replace")[:300])
+    raw = bytes(response.body)
+    if len(raw) <= 192 * 1024:
+        return scc.ok({"tail": json.loads(raw)})
+    import secrets as _secrets
+
+    staged = transfer_dir() / f"tail-{_secrets.token_hex(16)}.json"
+    await asyncio.to_thread(staged.write_bytes, raw)
+    return scc.ok({"stream_file": str(staged), "stream_delete": True})
+
+
 async def api_session_tail(request):
     """Tail JSONL entries for any session by project/session_id.
 
@@ -7009,6 +7089,8 @@ async def api_session_tail(request):
     """
     project = request.path_params["project"]
     session_id = request.path_params["session_id"]
+    if "@" in session_id:
+        return await _remote_session_tail(request, project, session_id)
     tail_lines_raw = request.query_params.get("tail_lines")
     tail_entries_raw = request.query_params.get("tail_entries")
     before_raw = request.query_params.get("before")
@@ -7813,6 +7895,11 @@ async def api_session_output(request):
     """
     tmux_name = request.path_params["tmux_name"]
     rel_path = request.path_params["path"]
+    machine = request.query_params.get("m")
+    if "@" in tmux_name:
+        # <name>@<machine>: the address a remote session's viewer uses for
+        # its attachment tiles (graph://7eb29bc8-31a §9.6).
+        tmux_name, _, machine = tmux_name.rpartition("@")
 
     if not _TMUX_NAME_RE.match(tmux_name):
         return JSONResponse({"error": "invalid session name"}, status_code=400)
@@ -7826,7 +7913,6 @@ async def api_session_output(request):
     # Cross-org guard BEFORE the run-dir glob/stat/read (auto-49esb): a cross-org
     # session's files are refused as the same 404 a session with no run dir
     # returns, so existence never leaks.
-    machine = request.query_params.get("m")
     if machine:
         # A file from a session on another fleet machine
         # (graph://7eb29bc8-31a §9.2 ``output``), streamed over
@@ -12119,6 +12205,21 @@ async def page_session_view_by_name(request):
     session_id = request.path_params["session_id"]
     if os.environ.get("DASHBOARD_MOCK"):
         return HTMLResponse(_load_template("base.html"))
+
+    # Tier 0: <name>@<machine>, a session on another fleet machine
+    # (graph://7eb29bc8-31a §9.6): its project comes from session presence.
+    if "@" in session_id:
+        from tools.dashboard import session_control_client, session_presence
+
+        name, _, machine = session_id.rpartition("@")
+        machine_pub = await asyncio.to_thread(
+            session_control_client.resolve_machine, machine)
+        rows = await asyncio.to_thread(session_presence.read_presence)
+        row = next((r for r in rows if r["tmux_name"] == name
+                    and r["machine_pub"] == machine_pub and r.get("project")), None)
+        if row is not None:
+            return RedirectResponse(
+                url=f"/session/{row['project']}/{session_id}", status_code=302)
 
     # Tier 1: live session in tmux_sessions.
     session = dashboard_db.get_session(session_id)
@@ -23628,7 +23729,8 @@ async def _activate_worker(reason: str) -> None:
                 _resolved_dispatch_limits, _create_session_from_body,
                 ops={"send": _inbound_session_send, "stop": _inbound_session_stop,
                      "output": _inbound_session_output,
-                     "fetch-branch": _inbound_session_fetch_branch})
+                     "fetch-branch": _inbound_session_fetch_branch,
+                     "tail": _inbound_session_tail})
         except Exception:
             logger.exception("session-control inbound pump failed to start")
 
