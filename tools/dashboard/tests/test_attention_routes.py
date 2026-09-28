@@ -624,14 +624,15 @@ class TestAttentionOperatorAPI:
         assert len(applications) == 12
         assert sum(len(app.classes) for app in applications) == 19
         assert [app.application_scope for app in applications if app.enabled] == [
-            "mailbox", "sessions", "fleet", "backup", "machine"
+            "mailbox", "sessions", "vault", "fleet", "backup", "machine"
         ]
         assert [
             cls.kind
             for app in applications
             for cls in app.classes
             if cls.publication_enabled
-        ] == ["email_send", "dashboard_access", "fleet_machine_admission", "backup.failed",
+        ] == ["email_send", "dashboard_access", "vault_open", "fleet_machine_admission",
+              "backup.failed",
               "backup.stale", "backup.drill_failed", "backup.offsite_unreachable",
               "machine.tls_certificate_expiring", "machine.vault_handoff_failed"]
         store = InMemoryAttentionIndexStore()
