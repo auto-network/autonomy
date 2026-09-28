@@ -75,6 +75,15 @@ CREATE TABLE IF NOT EXISTS visitor_tokens (
     created_at      REAL NOT NULL
 );
 
+-- One row per approved visitor request that minted a guest (auto-fkhq0.12).
+-- Written in the same transaction as the visitor row and kept when the guest
+-- is removed, so an approval mints at most once, ever. Holds no token.
+CREATE TABLE IF NOT EXISTS visitor_token_mints (
+    approval_id     TEXT PRIMARY KEY,
+    participant_id  TEXT NOT NULL,
+    minted_at       REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS mission_conversation (
     entry_id                  TEXT PRIMARY KEY,
     mission_id                 TEXT NOT NULL,
@@ -1114,8 +1123,9 @@ def activate_site_revision(
 
 def create_visitor_token(
     display_name: str, *, avatar_attachment_id: str | None = None,
+    approval_id: str | None = None,
     db_path: Path | str | None = None,
-) -> dict:
+) -> dict | None:
     """Mint a token for a person the operator is handing a share link to.
 
     Global, not mission-scoped: a person is a person regardless of which
@@ -1123,12 +1133,22 @@ def create_visitor_token(
     independently of the token -- safe to display/store (conversation
     history, future Presence rows); the raw token is the bearer secret
     and is returned here ONCE, never again.
+
+    With ``approval_id`` the mint is once-only for that approval: the
+    ``visitor_token_mints`` row commits with the visitor, and when it already
+    exists nothing is minted and None is returned (no token is read back).
     """
     token = uuid.uuid4().hex + uuid.uuid4().hex  # 256 bits, unguessable
     participant_id = f"guest:{uuid.uuid4()}"
     created_at = time.time()
     conn = _get_conn(db_path)
     try:
+        if approval_id is not None:
+            conn.execute(
+                "INSERT INTO visitor_token_mints (approval_id, participant_id, minted_at)"
+                " VALUES (?, ?, ?)",
+                (approval_id, participant_id, created_at),
+            )
         conn.execute(
             "INSERT INTO visitor_tokens"
             " (token, participant_id, display_name, created_at, avatar_attachment_id)"
@@ -1136,6 +1156,11 @@ def create_visitor_token(
             (token, participant_id, display_name, created_at, avatar_attachment_id),
         )
         conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        if approval_id is None:
+            raise
+        return None
     finally:
         conn.close()
     return {
@@ -1143,6 +1168,34 @@ def create_visitor_token(
         "participant_id": participant_id,
         "display_name": display_name,
         "avatar_attachment_id": avatar_attachment_id,
+    }
+
+
+def visitor_minted_for(
+    approval_id: str, *, db_path: Path | str | None = None,
+) -> dict | None:
+    """The guest an approval minted, as display-safe fields, or None if it
+    minted nothing. ``display_name`` is None once the guest was removed.
+    Never reads the token."""
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT m.participant_id, m.minted_at, v.display_name, v.avatar_attachment_id"
+            " FROM visitor_token_mints m"
+            " LEFT JOIN visitor_tokens v ON v.participant_id = m.participant_id"
+            " WHERE m.approval_id = ?",
+            (approval_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {
+        "participant_id": row["participant_id"],
+        "minted_at": row["minted_at"],
+        "display_name": row["display_name"],
+        "avatar_attachment_id": row["avatar_attachment_id"],
+        "removed": row["display_name"] is None,
     }
 
 

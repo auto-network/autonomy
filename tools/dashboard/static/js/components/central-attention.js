@@ -384,7 +384,8 @@
         const shared = ['approval.dashboard_access.review', 'approval.fleet_machine_admission.review',
           'approval.email_send.review', 'approval.vault_open.review',
           'approval.link_publish.review', 'approval.link_revoke.review',
-          'approval.external_service_access.review', 'approval.mcp_crosstalk.review'].includes(item.rendererId);
+          'approval.external_service_access.review', 'approval.mcp_crosstalk.review',
+          'approval.visitor_token.review'].includes(item.rendererId);
         this.selectedItem = shared ? null : item;
         try {
           const payload = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id));
@@ -412,7 +413,14 @@
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
           }).catch(() => {});
           if (shared) {
-            if (item.rendererId === 'approval.mcp_crosstalk.review') {
+            if (item.rendererId === 'approval.visitor_token.review') {
+              const { openVisitorCentralApproval } = await import('./visitor-central-approval.js');
+              this._sharedApprovalItem = item;
+              this._sharedApprovalDialog = await openVisitorCentralApproval(item, {
+                onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+              });
+            } else if (item.rendererId === 'approval.mcp_crosstalk.review') {
               const { openCrosstalkCentralApproval } = await import('./crosstalk-central-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = await openCrosstalkCentralApproval(item, {

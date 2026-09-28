@@ -459,6 +459,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
     from tools.dashboard import link_approval_central
     from tools.dashboard import external_service_approvals as external
     from tools.dashboard import mcp_crosstalk_central as crosstalk
+    from tools.dashboard import visitor_approvals as visitor
     dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
     approval_registry = build_production_registry(runtimes={
         dashboard_access_central.KIND: dashboard_approval_runtime,
@@ -467,6 +468,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
         vault_open_central.KIND: vault_open_central.build_approval_runtime(),
         external.KIND: external.build_approval_runtime(),
         crosstalk.KIND: crosstalk.build_approval_runtime(),
+        visitor.KIND: visitor.build_approval_runtime(),
         **{kind: link_approval_central.build_approval_runtime(kind) for kind in link_approval_central.KINDS},
     })
     approval_waiters = ApprovalWaitHub()
@@ -504,6 +506,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
         **{(external.KIND, scope): external.build_attention_runtime(approvals)
            for scope in external.APPLICATIONS},
         (crosstalk.KIND, crosstalk.APPLICATION_SCOPE): crosstalk.build_attention_runtime(approvals),
+        (visitor.KIND, visitor.APPLICATION_SCOPE): visitor.build_attention_runtime(approvals),
         **{(kind, link_approval_central.APPLICATION_SCOPE):
            link_approval_central.build_attention_runtime(approvals, kind) for kind in link_approval_central.KINDS},
     }
@@ -582,6 +585,12 @@ def build_production_runtime() -> AttentionRouteRuntime:
         index=index,
         producer=attention_registry.producer(crosstalk.KIND, crosstalk.APPLICATION_SCOPE),
     )
+    visitor_desk = visitor.VisitorDesk(approvals=approvals)
+    visitor_coordinator = visitor.VisitorCoordinator(
+        approvals=approvals,
+        index=index,
+        producer=attention_registry.producer(visitor.KIND, visitor.APPLICATION_SCOPE),
+    )
     link_desk = link_approval_central.LinkApprovalDesk(approvals=approvals, index=index)
     link_coordinators = [
         link_approval_central.LinkApprovalCoordinator(
@@ -594,7 +603,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
     # other kinds' approval ids.
     reconcilers = mailbox_central.ReconcilerGroup(
         coordinator, email_coordinator, vault_coordinator, enrollment_coordinator,
-        crosstalk_coordinator, *link_coordinators,
+        crosstalk_coordinator, visitor_coordinator, *link_coordinators,
     )
     coordinator_holder["coordinator"] = reconcilers
     approval_http = ApprovalHttpBridge(
@@ -612,6 +621,11 @@ def build_production_runtime() -> AttentionRouteRuntime:
                     mailbox_central.build_http_adapter(
                         email_consumer,
                         reconcile=email_coordinator.reconcile_exact,
+                    ),
+                visitor.KIND:
+                    visitor.build_http_adapter(
+                        visitor_desk,
+                        reconcile=visitor_coordinator.reconcile_exact,
                     ),
                 vault_open_central.KIND:
                     vault_open_central.build_http_adapter(
@@ -641,6 +655,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
                                     vault_open_central.KIND: vault_delivery.operator_result,
                                     external.KIND: enrollment_desk.operator_result,
                                     crosstalk.KIND: crosstalk_desk.operator_result,
+                                    visitor.KIND: visitor_desk.operator_result,
                                     **{kind: link_desk.operator_result
                                        for kind in link_approval_central.KINDS}},
         vault_open_delivery=vault_delivery,
