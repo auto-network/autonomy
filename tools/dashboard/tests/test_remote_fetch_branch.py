@@ -180,8 +180,9 @@ def _call(body):
 def test_the_route_asks_with_this_clones_base_and_reports_nothing_new(route, machines):
     status, data = _call({"session": "auto-9@sjc-2"})
     assert status == 200, data
-    assert data == {"session": "auto-9@sjc-2", "repos": [
-        {"repo": "autonomy", "head": machines["base"], "empty": True}]}
+    assert data == {"session": f"auto-9@{PEER[:12]}", "display": "auto-9@sjc-2",
+                    "repos": [{"repo": "autonomy", "head": machines["base"],
+                               "empty": True}]}
     ((machine, op, body, stream),) = route.asked
     assert (machine, op, stream) == ("sjc-2", "fetch-branch", True)
     assert body == {"tmux_name": "auto-9", "repo": "autonomy", "have": [machines["base"]]}
@@ -198,3 +199,63 @@ def test_a_refusal_is_reported_per_repo(route):
     status, data = _call({"session": "auto-9@sjc-2"})
     assert status == 409
     assert data["repos"][0]["refusal"] == "base-missing"
+
+
+
+@pytest.mark.parametrize("label", ["a/../../b", "Home Mac", "x~^:y"])
+def test_a_free_text_machine_label_never_becomes_a_path_or_ref(
+        route, machines, monkeypatch, label):
+    """The profile label is display only: the import lands under the durable
+    key's prefix, inside data/worktrees, on a valid ref."""
+    from tools.dashboard import session_presence
+
+    monkeypatch.setattr(session_presence, "read_presence", lambda: [{
+        "tmux_name": "auto-9", "machine": label, "machine_pub": PEER,
+        "project": "autonomy-developer-opus", "local": False, "reachable": True}])
+    home_worktrees = machines["tmp"] / "home" / "worktrees"
+    monkeypatch.setattr(server, "WORKTREES_DIR", machines["sjc_worktrees"])
+    real = _fetch({"tmux_name": "auto-9", "repo": "autonomy", "have": [machines["base"]]})
+    monkeypatch.setattr(server, "WORKTREES_DIR", home_worktrees)
+    # What the requesting connector hands the dashboard: the streamed copy
+    # under result.file (tools.network.session_control._receive_stream).
+    route.reply = {**real, "result": {**real["result"],
+                                      "file": real["result"]["stream_file"]}}
+    status, data = _call({"session": "auto-9@sjc-2"})
+    assert status == 200, data
+    assert data["session"] == f"auto-9@{PEER[:12]}"
+    assert data["display"] == f"auto-9@{label}"
+    worktree = Path(data["repos"][0]["worktree"]).resolve()
+    worktree.relative_to(home_worktrees.resolve())
+    assert git(machines["home_clone"], "rev-parse",
+               f"session/auto-9@{PEER[:12]}") == machines["head"]
+
+
+def test_the_worktree_follows_what_the_bundle_delivered_not_the_claim(machines, monkeypatch):
+    reply = _fetch({"tmux_name": "auto-9", "repo": "autonomy", "have": [machines["base"]]})
+    monkeypatch.setattr(server, "WORKTREES_DIR", machines["tmp"] / "home" / "worktrees")
+    out = server._import_remote_branch(
+        machines["home_clone"], Path(reply["result"]["stream_file"]),
+        "session/auto-9", machines["base"], "auto-9@a1a1a1a1a1a1", "autonomy")
+    assert out["head"] == machines["head"]
+    assert "peer claimed head" in out["warning"]
+
+
+def test_an_untracked_file_counts_as_local_changes(machines, monkeypatch):
+    first = _fetch({"tmux_name": "auto-9", "repo": "autonomy", "have": [machines["base"]]})
+    home_worktrees = machines["tmp"] / "home" / "worktrees"
+    monkeypatch.setattr(server, "WORKTREES_DIR", home_worktrees)
+    server._import_remote_branch(
+        machines["home_clone"], Path(first["result"]["stream_file"]),
+        "session/auto-9", machines["head"], "auto-9@a1a1a1a1a1a1", "autonomy")
+    worktree = home_worktrees / "auto-9@a1a1a1a1a1a1" / "autonomy-auto-9@a1a1a1a1a1a1"
+    (worktree / "scratch.txt").write_text("operator scratch")
+    sjc_wt = machines["sjc_worktrees"] / "auto-9" / "autonomy-auto-9"
+    monkeypatch.setattr(server, "WORKTREES_DIR", machines["sjc_worktrees"])
+    newer = commit(sjc_wt, "scratch.txt", "remote version")
+    second = _fetch({"tmux_name": "auto-9", "repo": "autonomy", "have": [machines["head"]]})
+    monkeypatch.setattr(server, "WORKTREES_DIR", home_worktrees)
+    spared = server._import_remote_branch(
+        machines["home_clone"], Path(second["result"]["stream_file"]),
+        "session/auto-9", newer, "auto-9@a1a1a1a1a1a1", "autonomy")
+    assert "local changes" in spared["warning"]
+    assert (worktree / "scratch.txt").read_text() == "operator scratch"

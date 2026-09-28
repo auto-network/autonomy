@@ -4242,8 +4242,10 @@ async def api_worktree_remote_fetch(request):
         repos = [r for r in repos if _worktree_basename(r.url) == wanted]
     if not repos:
         return JSONResponse({"error": "no writable repo to fetch"}, status_code=404)
+    # The machine-profile label is free text (spaces, "/", ".."), so it is
+    # display only; the path and the ref use the durable key's prefix.
     label = row["machine"]
-    local_session = f"{name}@{label}"
+    local_session = f"{name}@{row['machine_pub'][:12]}"
     results = []
     for repo in repos:
         repo_name = _worktree_basename(repo.url)
@@ -4274,8 +4276,8 @@ async def api_worktree_remote_fetch(request):
             bundle.unlink(missing_ok=True)
         worktree_monitor.invalidate(local_session, repo_name, reason="remote-fetch")
     ok = all("head" in r and "error" not in r and "refusal" not in r for r in results)
-    return JSONResponse({"session": local_session, "repos": results},
-                        status_code=200 if ok else 409)
+    return JSONResponse({"session": local_session, "display": f"{name}@{label}",
+                         "repos": results}, status_code=200 if ok else 409)
 
 
 def _import_remote_branch(clone: Path, bundle: Path, branch: str, head: str,
@@ -4288,18 +4290,29 @@ def _import_remote_branch(clone: Path, bundle: Path, branch: str, head: str,
     if verified.returncode != 0:
         return {"repo": repo_name, "error": "bundle does not verify: "
                 + verified.stderr.strip()[-200:]}
-    worktree = WORKTREES_DIR / local_session / f"{repo_name}-{local_session}"
+    if not _TMUX_NAME_RE.match(local_session.replace("@", "-", 1)):
+        return {"repo": repo_name, "error": f"invalid local session {local_session!r}"}
+    root = WORKTREES_DIR.resolve()
+    worktree = (WORKTREES_DIR / local_session / f"{repo_name}-{local_session}")
+    try:
+        worktree.resolve().relative_to(root)
+    except ValueError:
+        return {"repo": repo_name, "error": "worktree path leaves data/worktrees"}
     existing = (worktree / ".git").exists()
     # Decide BEFORE the fetch: fetching moves the branch this worktree has
     # checked out, after which every file reads as changed against HEAD.
-    if existing and _git(worktree, "status", "--porcelain",
-                         "--untracked-files=no").stdout.strip():
+    # Untracked files count too: reset --hard would overwrite one the fetched
+    # head now tracks, and an operator's scratch file must not vanish.
+    if existing and _git(worktree, "status", "--porcelain").stdout.strip():
         return {"repo": repo_name, "head": head, "worktree": str(worktree),
                 "warning": "worktree has local changes; not updated"}
     fetched = _git(clone, "fetch", "--update-head-ok", str(bundle),
                    f"+refs/heads/{branch}:refs/heads/{local_branch}", timeout=300)
     if fetched.returncode != 0:
         return {"repo": repo_name, "error": fetched.stderr.strip()[-300:]}
+    # What the bundle delivered, not what the peer claimed.
+    delivered = _git(clone, "rev-parse", f"refs/heads/{local_branch}").stdout.strip()
+    mismatch = delivered != head
     if not existing:
         worktree.parent.mkdir(parents=True, exist_ok=True)
         added = _git(clone, "worktree", "add", str(worktree), local_branch)
@@ -4308,11 +4321,14 @@ def _import_remote_branch(clone: Path, bundle: Path, branch: str, head: str,
     else:
         # It was clean, so bringing its files to the fetched head discards
         # nothing of the operator's (untracked files are kept).
-        reset = _git(worktree, "reset", "--hard", head)
+        reset = _git(worktree, "reset", "--hard", delivered)
         if reset.returncode != 0:
             return {"repo": repo_name, "error": reset.stderr.strip()[-300:]}
-    return {"repo": repo_name, "head": head, "branch": local_branch,
-            "worktree": str(worktree)}
+    out = {"repo": repo_name, "head": delivered, "branch": local_branch,
+           "worktree": str(worktree)}
+    if mismatch:
+        out["warning"] = f"peer claimed head {head[:12]}, bundle delivered {delivered[:12]}"
+    return out
 
 
 async def _stop_session(name: str) -> tuple[dict, int]:
