@@ -400,3 +400,15 @@ def test_a_dripping_sender_is_cut_off_by_the_overall_deadline(tmp_path, monkeypa
     with pytest.raises(session_control.SessionControlError, match="deadline"):
         asyncio.run(session_control._receive_stream(Drip(), timeout=1.0))
     assert not list((tmp_path / "session-transfer").glob("in-*"))
+
+
+def test_open_streamable_refuses_a_fifo_without_blocking(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(session_control, "_data_root", lambda: tmp_path)
+    runs = tmp_path / "agent-runs" / "auto-1-x"
+    runs.mkdir(parents=True)
+    os.mkfifo(runs / "out.txt")
+    started = time.monotonic()
+    assert session_control.open_streamable(runs / "out.txt") is None
+    assert time.monotonic() - started < 1.0

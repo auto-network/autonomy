@@ -206,7 +206,11 @@ def open_streamable(path) -> tuple[int, int] | None:
     if not _within_roots(resolved):
         return None
     try:
-        fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        # O_NONBLOCK: a FIFO planted in a session's output would otherwise
+        # block this open (and the event loop) until someone writes to it;
+        # non-blocking it returns at once and S_ISREG below refuses it.
+        fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                     | getattr(os, "O_CLOEXEC", 0))
     except OSError:
         return None
     try:
