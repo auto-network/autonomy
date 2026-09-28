@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -24,6 +25,11 @@ from tools.data_paths import resolve_store
 #: split resolver that rooting could move only halfway.
 _DB_PATH = resolve_store("auth")
 _conn: sqlite3.Connection | None = None
+_conn_owner: int | None = None
+#: The connection init_db opened and its file, so other threads can open their
+#: own handle to the same store (a connection injected from outside is unknown).
+_opened: "tuple[sqlite3.Connection, str] | None" = None
+_thread_local = threading.local()
 
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS session_tokens (
@@ -53,10 +59,12 @@ CREATE INDEX IF NOT EXISTS idx_crosstalk_target
 
 def init_db(db_path: Path | None = None) -> None:
     """Initialise auth.db and create schema. Idempotent."""
-    global _conn
+    global _conn, _conn_owner, _opened
     path = db_path or _DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     _conn = sqlite3.connect(str(path), check_same_thread=False)
+    _conn_owner = threading.get_ident()
+    _opened = (_conn, str(path))
     _conn.row_factory = sqlite3.Row
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA busy_timeout=5000")
@@ -92,11 +100,59 @@ def init_db(db_path: Path | None = None) -> None:
 
 
 def get_conn() -> sqlite3.Connection:
-    """Return the module-level connection, initialising if needed."""
+    """Return a connection to the active auth store for the calling thread.
+
+    One sqlite3 connection must never serve two threads at once: concurrent
+    execute()/fetchone() on a shared handle raises InterfaceError and returns
+    other callers' rows — measured 1,059 errors and 1,563 wrong token
+    resolutions in 4,800 concurrent lookups (auto-czoc0 acceptance), i.e.
+    spurious 401s and mis-attributed tokens. The thread that opened the store
+    keeps the module connection; every other thread gets its own handle to the
+    same file (init_db puts auth.db in WAL mode, which makes that safe), as
+    dashboard_db does. A handle is referenced only by its thread's local
+    storage and is closed when the thread exits (no list may hold them).
+    """
     if _conn is None:
         init_db()
     assert _conn is not None
-    return _conn
+    if threading.get_ident() == _conn_owner:
+        return _conn
+    if _opened is None or _opened[0] is not _conn:  # injected from outside init_db (tests)
+        return _conn
+    path = _opened[1]
+    holder = getattr(_thread_local, "holder", None)
+    if holder is not None and holder.path == path:
+        return holder.conn
+    if holder is not None:
+        holder.close()
+    holder = _ThreadConn(path)
+    _thread_local.holder = holder
+    return holder.conn
+
+
+class _ThreadConn:
+    """One thread's handle to the auth store, closed when the thread exits.
+
+    threading.local drops a thread's values when the thread ends, but a
+    deallocated sqlite3.Connection does not reliably release its file (measured:
+    one descriptor left open per exited thread), so the holder closes it
+    explicitly. Worker threads come and go under load (auto-bkv3p)."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout=5000")
+
+    def close(self) -> None:
+        try:
+            self.conn.close()
+        except Exception:  # noqa: BLE001 - never raise from thread teardown
+            pass
+
+    def __del__(self) -> None:
+        # Runs at thread exit; a failing close must not crash or print there.
+        self.close()
 
 
 # -- Token operations ----------------------------------------------------------
