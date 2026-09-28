@@ -397,7 +397,7 @@ def main() -> int:
         signins = _signin_payloads(
             creds.get("harness_token")
             if creds is not None and creds.get("type") == "vault" else None,
-            accounts_out=signin_accounts)
+            accounts_out=signin_accounts, harness=args.harness)
         if signins is None:
             print("ERROR: a sign-in account in the vault could not be opened",
                   file=sys.stderr)

@@ -988,31 +988,40 @@ def _codex_auth_doc(acct) -> bytes:
 
 
 def _signin_payloads(claude_account: str | None,
-                     accounts_out: dict | None = None) -> dict[str, bytes] | None:
+                     accounts_out: dict | None = None,
+                     *, harness: str | None = None) -> dict[str, bytes] | None:
     """Every sign-in this launch delivers, ``{filename: content}``.
+
+    Only the sign-in of the session's own *harness* (auto-9hu6y, default
+    decided by host-0927-113441): a Claude session no longer carries Codex
+    and Grok tokens it does not use. ``harness=None`` keeps every one, for
+    callers that do not know it.
 
     *accounts_out*, when given, receives ``{filename: account id}`` for each
     included sign-in: the key selection only, never the secret, so a
     re-delivery can reopen the same account (:func:`_open_signin`).
 
-    Codex and Grok ride along whenever the vault holds a launchable account
-    for them (any harness may shell out to either CLI); a missing account is
-    WARNED with the remedy and simply absent — the truthful "not signed in".
-    The Claude bundle is included when the session's Claude credential is a
-    vault account. Returns None when a vault account that WAS chosen cannot
+    A wanted Codex or Grok sign-in whose account the vault lacks is WARNED
+    with the remedy and simply absent — the truthful "not signed in". The
+    Claude bundle is included when the session's Claude credential is a
+    vault account (only a Claude session resolves one). Returns None when a vault account that WAS chosen cannot
     be opened: the launch is refused rather than started half signed in."""
     payloads: dict[str, bytes] = {}
-    codex = _pick_account("codex")
-    if codex is None:
-        logger.warning(
-            "session_launcher: no Codex account in the vault — the session "
-            "will launch WITHOUT Codex sign-in and will prompt for it. "
-            "Remedy: run `graph credentials import`.",
-        )
-    else:
-        payloads[CODEX_AUTH_FILENAME] = _codex_auth_doc(codex)
-        if accounts_out is not None:
-            accounts_out[CODEX_AUTH_FILENAME] = codex.id
+    def wants(name: str) -> bool:
+        return harness is None or harness == name
+
+    if wants("codex"):
+        codex = _pick_account("codex")
+        if codex is None:
+            logger.warning(
+                "session_launcher: no Codex account in the vault — the session "
+                "will launch WITHOUT Codex sign-in and will prompt for it. "
+                "Remedy: run `graph credentials import`.",
+            )
+        else:
+            payloads[CODEX_AUTH_FILENAME] = _codex_auth_doc(codex)
+            if accounts_out is not None:
+                accounts_out[CODEX_AUTH_FILENAME] = codex.id
     if claude_account:
         bundle = _claude_bundle_doc(claude_account)
         if bundle is None:
@@ -1020,7 +1029,7 @@ def _signin_payloads(claude_account: str | None,
         payloads[CLAUDE_BUNDLE_FILENAME] = bundle
         if accounts_out is not None:
             accounts_out[CLAUDE_BUNDLE_FILENAME] = claude_account
-    grok = _pick_account("grok")
+    grok = _pick_account("grok") if wants("grok") else None
     if grok is not None:
         auth = grok.get("auth")
         if auth:
@@ -2165,7 +2174,7 @@ def launch_session(
     signins = _signin_payloads(
         creds.get("harness_token")
         if creds is not None and creds.get("type") == "vault" else None,
-        accounts_out=signin_accounts)
+        accounts_out=signin_accounts, harness=harness)
     if signins is None:
         print(
             f"  ERROR: refusing to launch session '{name}': a sign-in "

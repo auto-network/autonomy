@@ -1940,9 +1940,9 @@ def test_detached_launch_delivers_signins_and_mounts_none(
     run_dir = tmp_path / "run"
     _run(name="auto-s", output_dir=str(run_dir), harness="codex")
     cmd = captured_run[0]
+    # A codex session gets only its own sign-in (auto-9hu6y).
     assert signin_deliveries["now"] == [
-        ("auto-s", [session_launcher.CODEX_AUTH_FILENAME,
-                    session_launcher.GROK_AUTH_FILENAME])]
+        ("auto-s", [session_launcher.CODEX_AUTH_FILENAME])]
     assert signin_deliveries["background"] == []
     joined = " ".join(cmd)
     for dest in session_launcher.SIGNIN_CONTAINER_PATHS.values():
@@ -2810,3 +2810,27 @@ def test_the_presence_check_runs_as_the_secret_owner(monkeypatch):
                         lambda cmd, **k: calls.append(cmd) or Done())
     assert session_launcher._missing_signins("auto-x", ["codex-auth.json"]) == []
     assert calls[0][:4] == ["docker", "exec", "-u", "1000"]
+
+
+# ── auto-9hu6y: a session gets only its own harness's sign-in ─────────
+
+
+@pytest.mark.parametrize("harness,expected", [
+    ("claude", set()),
+    ("codex", {"codex-auth.json"}),
+    ("grok", {"grok-auth.json"}),
+    (None, {"codex-auth.json", "grok-auth.json"}),
+])
+def test_only_the_sessions_own_harness_signin_is_delivered(monkeypatch, harness, expected):
+    from tools.graph import harness_credentials as hv
+    _stub_vault(monkeypatch, {
+        "codex": [hv.Account("codex", "cx", {"id": "i", "access": "a", "refresh": "r"})],
+        "grok": [hv.Account("grok", "gk", {"auth": '{"t": 1}'})],
+    })
+    assert set(session_launcher._signin_payloads(None, harness=harness)) == expected
+
+
+def test_a_claude_session_with_a_vault_account_gets_only_its_bundle(monkeypatch):
+    _claude_vault(monkeypatch)
+    payloads = session_launcher._signin_payloads("org-1", harness="claude")
+    assert set(payloads) == {session_launcher.CLAUDE_BUNDLE_FILENAME}
