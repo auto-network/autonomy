@@ -915,16 +915,14 @@ def test_org_join_publish_over_tunnel_caches_invite_grant(
     assert grants[token]["channel_pub"] == "ce" * 32
 
 
-def test_org_follow_publish_keeps_org_identity_off_the_wire(
+def test_org_follow_publish_names_the_org_slug_and_keeps_its_uuid_local(
     env, session_key, session_cert, monkeypatch,
 ):
-    """An org:follow publish tells the relay only what it needs to mint the
-    token: the target and an optional label. The org slug and uuid that
-    prepare_create writes into meta (the served follow admission names the
-    scope by them) stay in the LOCAL grant. The relay admits only
-    ttl/label/require_auth in meta, and the first real follow publish was
-    refused with "meta carries unsupported fields" (2026-09-25) because both
-    identity keys rode along."""
+    """An org:follow publish sends the relay the target, an optional label and
+    the org slug, which the envelope names so a follower can name its mirror
+    (auto-iyxik). The org uuid stays in the LOCAL grant: the relay has it as
+    target_uuid, and on 2026-09-25 it refused the first real follow publish
+    ("meta carries unsupported fields") when meta carried both identity keys."""
     _serving_ok(monkeypatch)
     _channel_key_ok(monkeypatch)
     token = "f0110000" * 4
@@ -948,8 +946,8 @@ def test_org_follow_publish_keeps_org_identity_off_the_wire(
     assert (org, op) == (ORG, "create-link")
     assert args["target_type"] == "org:follow"
     assert args["target_uuid"] == ORG_UUID
-    # Only the label crosses; never ttl (indefinite), never the identity.
-    assert args.get("meta") == {"label": "Follow us"}
+    # The label and the slug cross; never ttl (indefinite), never the uuid.
+    assert args.get("meta") == {"label": "Follow us", "org": ORG}
     assert "expires_at" not in args
     grants = _cached_grants()
     assert grants[token]["target_type"] == "org:follow"

@@ -141,23 +141,32 @@ def cmd_follow_add(args) -> None:
         )
     org_uuid = envelope.get("org")
     meta = envelope.get("meta") or {}
-    slug = meta.get("org") if isinstance(meta, dict) else None
+    published = meta.get("org") if isinstance(meta, dict) else None
     if not org_uuid or not isinstance(org_uuid, str):
         _fail("link envelope carried no org uuid")
-    # The relay admits only ttl/label/require_auth in a link's meta, so a
-    # link published since 2026-09-25 carries no org slug in its envelope
-    # (the slug stays in the publisher's local grant, which serving reads).
-    # The follower names its mirror with --as until the envelope carries the
-    # slug again. The first-run seed never needs this: it names the mirror
-    # from the allowlist's own ``org:``.
-    if not slug or not isinstance(slug, str):
-        slug = getattr(args, "as_slug", None)
-    if not slug or not isinstance(slug, str):
+    from tools.graph import org_ops
+
+    explicit = getattr(args, "as_slug", None)
+    if isinstance(explicit, str) and explicit:
+        # The operator's own name for the mirror: taken exactly, and the
+        # collision guard below refuses it rather than renaming it.
+        slug = explicit
+    elif isinstance(published, str) and published:
+        # The envelope names the org slug (auto-iyxik), but it is the
+        # PUBLISHER's claim: name the mirror the way the join path names a
+        # joined org, keyed by the org's uuid (an existing local org of this
+        # uuid keeps its slug; a different org holding the name disambiguates
+        # with the uuid prefix; reserved names are skipped).
+        try:
+            slug = org_ops.local_slug_for_org(published, org_uuid)
+        except Exception as exc:  # noqa: BLE001
+            _fail(f"could not name a local mirror for {published!r} ({exc})")
+    else:
+        # A link published before its org republished carries no slug.
         _fail(
             "the link envelope names no org slug; pass --as <slug> to name "
             "the local mirror (data/orgs/<slug>.db), e.g. --as autonomy"
         )
-    from tools.graph import org_ops
 
     try:
         org_ops._validate_slug(slug)

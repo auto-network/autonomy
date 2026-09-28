@@ -18,6 +18,7 @@ silently skipped when the schema is unregistered.
 from __future__ import annotations
 
 import json
+import re
 import functools
 import os
 import secrets
@@ -266,6 +267,44 @@ def _inventory_read(path: Path) -> OrgRef | None:
 
 
 # ── Read paths ───────────────────────────────────────────────
+
+
+def local_slug_for_org(name: str, org_uuid: str, *, root: Path | str | None = None) -> str:
+    """The local slug for an organization this node joins or follows.
+
+    Keyed by the organization's stable id, never by the name it arrives
+    with: a local organization already holding ``org_uuid`` keeps its slug,
+    so a follow after a join (and a join after a follow) lands on the same
+    file. Otherwise the name lowercased and hyphenated (the founder's own
+    convention), disambiguated with the uuid's prefix when a DIFFERENT
+    organization already holds it here. Names ``_validate_slug`` refuses
+    (the operator's local stores) are skipped. The name is a hint: a joined
+    org's display name, or the slug a follow link's publisher claims
+    (auto-iyxik).
+    """
+    from .db import LOCAL_STORE_SLUGS, _STRINGIFIED_ABSENCE
+
+    for ref in list_orgs(root=root):
+        if ref.id == org_uuid and ref.slug not in LOCAL_STORE_SLUGS:
+            return ref.slug
+    base = re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-")[:48] or "organization"
+    for candidate in (base, f"{base}-{org_uuid[:8]}"):
+        if candidate in _STRINGIFIED_ABSENCE:
+            continue
+        try:
+            _validate_slug(candidate)
+        except OrgError:
+            continue
+        # Free means NO FILE: a store that exists but cannot be read right now
+        # (no bootstrap row yet, busy, locked) is someone's, never ours to
+        # take. list_orgs skips such a file, so the uuid scan above cannot
+        # vouch for it either.
+        if not _slug_db_path(candidate, root).exists():
+            return candidate
+        existing = get_org(candidate, root=root)
+        if existing is not None and existing.id == org_uuid:
+            return candidate
+    raise ValueError("could not derive a free local slug for the organization")
 
 
 def list_orgs(*, root: Path | str | None = None) -> list[OrgRef]:

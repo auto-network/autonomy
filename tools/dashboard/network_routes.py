@@ -702,26 +702,6 @@ def _claim_key_matches(
     return hashlib.sha256(material).hexdigest() == claim_key
 
 
-def _slug_for_joined_org(name: str, org_uuid: str) -> str:
-    """A local slug for an organization this node joins: the organization's
-    display name lowercased and hyphenated (the founder's own convention),
-    disambiguated with the org uuid's prefix if a DIFFERENT org already holds
-    that slug here. A slug already holding THIS org (same stable id) is
-    reused so a repeated install is idempotent."""
-    from tools.graph import org_ops
-
-    base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48] or "organization"
-    for candidate in (base, f"{base}-{org_uuid[:8]}"):
-        try:
-            org_ops._validate_slug(candidate)
-        except Exception:
-            continue
-        existing = org_ops.get_org(candidate)
-        if existing is None or existing.id == org_uuid:
-            return candidate
-    raise ValueError("could not derive a free local slug for the organization")
-
-
 def _registry_membership_state(binding: dict) -> tuple[dict | None, str | None]:
     """One registry read of the org's current membership checkpoint tuple
     ({seq, members_root, checkpointers_root, ledger_head}); (state, None) or
@@ -1024,7 +1004,7 @@ async def post_join_outcome(request: Request) -> JSONResponse:
     # Install: the org DB under the founder's stable id, the ledger, the
     # binding, the persona. Idempotent on a repeat with the same org.
     try:
-        slug = _slug_for_joined_org(org_name, stable_id)
+        slug = org_ops.local_slug_for_org(org_name, stable_id)
         identity = {"name": org_name}
         for key, limit in (("byline", 300), ("description", 300), ("color", 16)):
             value = body.get("org_" + key)

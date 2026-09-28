@@ -1089,7 +1089,10 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     # exactly the metadata the accepted set (token, org, timing, volume)
     # excludes. It stays in the LOCAL grant below, which is the only copy
     # serving ever reads.
-    wire_meta = {k: v for k, v in meta.items() if k not in _LOCAL_ONLY_META}
+    local_only = _LOCAL_ONLY_META
+    if req.get("target_type") == "org:follow":
+        local_only = local_only - {"org"}
+    wire_meta = {k: v for k, v in meta.items() if k not in local_only}
     if wire_meta:
         args["meta"] = wire_meta
     # org:join carries its invitation binding as TOP-LEVEL control args (not
@@ -1350,11 +1353,13 @@ def _compensate_failed_publish(org, token, stage, *, detail=None, probe=None,
 #: Grant meta the dashboard keeps to itself and never puts on the wire to
 #: the registry. The relay is untrusted (I5) and authorizes nothing with
 #: these — serving reads the LOCAL grant cache only — so shipping them
-#: would leak who a link is for while buying nothing. ``org`` and
-#: ``org_uuid`` are the org:follow grant's identity (prepare_create writes
-#: them so the served follow admission can name the scope); the relay
-#: admits only ttl/label/require_auth in meta and refused the first real
-#: follow publish with "meta carries unsupported fields" (2026-09-25).
+#: would leak who a link is for while buying nothing. ``org_uuid`` is the
+#: org:follow grant's identity (prepare_create writes it so the served
+#: follow admission can name the scope); the relay already has it as the
+#: target_uuid. ``org`` (the slug) is local-only except on org:follow,
+#: whose envelope names it so a follower can name its mirror
+#: (auto-iyxik, graph://5f2f5a49-00d §10.4; the relay admits exactly
+#: {label, org} there).
 _LOCAL_ONLY_META = frozenset({"participant_id", "ice_policy", "org", "org_uuid"})
 
 
