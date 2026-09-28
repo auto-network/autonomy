@@ -125,6 +125,44 @@ def ensure_network() -> None:
             raise RuntimeError(f"cannot attach the dashboard to {NETWORK}: {proc.stderr.strip()}")
 
 
+class IsolationUnavailable(RuntimeError):
+    """The lease -> dashboard refusal could not be put in place."""
+
+
+def _isolation_rule(subnet: str) -> list[str]:
+    # New connections from the lease network to anything in the dashboard's
+    # network namespace are dropped; replies to connections the dashboard
+    # opens (ESTABLISHED) still pass, so dashboard -> lease keeps working.
+    return ["INPUT", "-s", subnet, "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"]
+
+
+def isolate_dashboard() -> None:
+    """Refuse, at the network level, every connection a lease starts toward the
+    dashboard (the dashboard dials leases, never the reverse).
+
+    The dashboard runs unprivileged, so a short-lived helper sharing its
+    network namespace installs one rule there (idempotent). The rule lives as
+    long as the dashboard container; each worker activation re-checks it.
+    """
+    from agents.mount_plan import _own_container_id
+
+    own = _own_container_id()
+    if not own:
+        raise IsolationUnavailable("the dashboard is not a container; lease isolation needs one")
+    subnet = _docker("network", "inspect", "--format",
+                     "{{(index .IPAM.Config 0).Subnet}}", NETWORK).stdout.strip()
+    if not subnet:
+        raise IsolationUnavailable(f"{NETWORK} has no subnet")
+    helper = ["run", "--rm", "--network", f"container:{own}", "--cap-drop", "ALL",
+              "--cap-add", "NET_ADMIN", "--user", "0", "--entrypoint", "iptables", IMAGE, "-w"]
+    rule = _isolation_rule(subnet)
+    if _docker(*helper, "-C", *rule, check=False).returncode == 0:
+        return
+    proc = _docker(*helper, "-I", *rule, check=False)
+    if proc.returncode != 0 or _docker(*helper, "-C", *rule, check=False).returncode != 0:
+        raise IsolationUnavailable(f"cannot install the lease refusal rule: {proc.stderr.strip()[:300]}")
+
+
 def profile_mount_argv(org: str, workspace: str, name: str) -> list[str]:
     from agents.mount_plan import MountPlan, discover_topology, mount_args
     from tools.browser_broker.profiles import profile_mount

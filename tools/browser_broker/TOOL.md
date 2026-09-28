@@ -47,18 +47,22 @@ graph://c330323d-986; epic `auto-8q7oe`.
 
 ### Invariants and residual risk (review of auto-czoc0)
 
-- **The dashboard is reachable from leases on `autonomy-browser`.** It is
-  safe only because every dashboard listener on that network is HTTPS with a
-  certificate a lease cannot match, and a lease never ignores certificate
-  errors (pinned in `tests/test_lease_agent.py`). Adding a plain-HTTP
-  listener to the dashboard container, or relaxing either, exposes the
-  dashboard to web content — and on a node where the human gate is not yet
-  enforced, operator authority with it. Removing the path at the network
-  level is follow-up work.
+- **Leases cannot open connections to the dashboard.** The dashboard joins
+  `autonomy-browser` only to dial leases. At activation, a short-lived helper
+  sharing the dashboard's network namespace installs
+  `INPUT -s <lease subnet> -m conntrack --ctstate NEW -j DROP` there
+  (`browser_containers.isolate_dashboard`); leases are refused (503
+  `isolation`) until that rule is verified. Defence in depth: every dashboard
+  listener is HTTPS with a certificate no lease hostname matches, and a lease
+  never ignores certificate errors (pinned in `tests/test_lease_agent.py`).
+  Removing the rule, adding a plain-HTTP listener, or ignoring certificate
+  errors would expose the dashboard — and on a node whose human gate is not
+  yet enforced, operator authority — to web content.
 - **Leases have egress from the node's network.** A page in a lease can reach
   the node's LAN (routers, internal services, link-local metadata), limited
   only by Chrome's Private Network Access. An egress policy for leases
-  (drop RFC1918 and link-local) is follow-up work.
+  (drop RFC1918 and link-local) is the P1 follow-up that lands before
+  `auto-8q7oe.6`.
 
 ## Lease image
 

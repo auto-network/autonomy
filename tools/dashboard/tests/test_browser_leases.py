@@ -157,6 +157,7 @@ def test_profile_integrity(tmp_path):
 def broker(db, monkeypatch, tmp_path):
     epoch = store.take_epoch()
     monkeypatch.setattr(reconciler, "_epoch", epoch)
+    monkeypatch.setattr(reconciler, "_isolated", True)
     monkeypatch.setattr(reconciler, "defaults", lambda: dict(LIMITS))
     monkeypatch.setattr(routes, "_free_gib", lambda: 500.0)
     monkeypatch.setenv("BROWSER_PROFILES_DIR", str(tmp_path / "profiles"))
@@ -332,6 +333,7 @@ def test_activation_adopts_and_stops_orphans(db, monkeypatch):
               containers.LeaseContainer("brw-e-orphan", "o" * 64, "running", {})]
     stopped = []
     monkeypatch.setattr(containers, "ensure_network", lambda: None)
+    monkeypatch.setattr(containers, "isolate_dashboard", lambda: None)
     monkeypatch.setattr(containers, "list_containers", lambda: listed)
     monkeypatch.setattr(containers, "stop", lambda name: stopped.append(name))
     new = reconciler.activate()
@@ -352,3 +354,49 @@ def test_a_record_whose_container_vanished_is_closed(db, live, monkeypatch):
     reconciler.reconcile_once()
     assert store.get(h).state == "gone"
     assert "container-gone" in store.get(h).audit
+
+
+def test_no_lease_starts_without_the_dashboard_refusal(broker, monkeypatch):
+    launched, _ = broker
+    monkeypatch.setattr(reconciler, "_isolated", False)
+    assert _call(routes.create_lease, "owner", {"adapter": "chrome-headed",
+                                                "profile": {"kind": "ephemeral"}}) == (
+        503, {"error": "unavailable", "reason": "isolation"})
+    assert launched == [] and store.list_leases() == []
+
+
+def test_isolation_rule_is_checked_inserted_and_verified(monkeypatch):
+    import subprocess
+
+    calls, rules = [], set()
+
+    def fake_docker(*args, check=True, **kw):
+        calls.append(args)
+        if args[:2] == ("network", "inspect"):
+            return subprocess.CompletedProcess(args, 0, "172.19.0.0/16\n", "")
+        if args[0] == "run":
+            op, rule = args[args.index("-w") + 1], args[args.index("-w") + 2:]
+            if op == "-I":
+                rules.add(rule)
+            return subprocess.CompletedProcess(args, 0 if rule in rules else 1, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(containers, "_docker", fake_docker)
+    monkeypatch.setattr("agents.mount_plan._own_container_id", lambda: "dash123")
+    containers.isolate_dashboard()
+    run = [c for c in calls if c[0] == "run"]
+    assert [c[c.index("-w") + 1] for c in run] == ["-C", "-I", "-C"]
+    helper = run[1]
+    assert helper[helper.index("--network") + 1] == "container:dash123"
+    assert "NET_ADMIN" in helper and helper[helper.index("--cap-drop") + 1] == "ALL"
+    assert helper[helper.index("-w") + 2:] == ("INPUT", "-s", "172.19.0.0/16", "-m", "conntrack",
+                                               "--ctstate", "NEW", "-j", "DROP")
+    calls.clear()
+    containers.isolate_dashboard()  # idempotent: one check, no second insert
+    assert [c[c.index("-w") + 1] for c in calls if c[0] == "run"] == ["-C"]
+
+
+def test_isolation_needs_a_containerized_dashboard(monkeypatch):
+    monkeypatch.setattr("agents.mount_plan._own_container_id", lambda: None)
+    with pytest.raises(containers.IsolationUnavailable):
+        containers.isolate_dashboard()

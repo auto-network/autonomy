@@ -35,6 +35,24 @@ EXPIRY_GRACE_S = 15.0
 
 _epoch: Optional[int] = None
 _tick = 0
+_isolated = False
+ISOLATION_RETRY_TICKS = 6
+
+
+def isolated() -> bool:
+    """Whether the lease -> dashboard refusal is verified in place; leases are
+    not started without it."""
+    return _isolated
+
+
+def _ensure_isolation() -> None:
+    global _isolated
+    try:
+        containers.isolate_dashboard()
+        _isolated = True
+    except Exception as exc:
+        _isolated = False
+        logger.warning("browser broker: lease isolation unavailable, leases refused: %s", exc)
 
 
 def epoch() -> Optional[int]:
@@ -117,6 +135,7 @@ def activate() -> int:
     global _epoch
     _epoch = store.take_epoch()
     containers.ensure_network()
+    _ensure_isolation()
     rows = {lease.lease_hash: lease for lease in store.list_leases()}
     adopted = orphans = 0
     for container in containers.list_containers():
@@ -140,6 +159,8 @@ def reconcile_once(now: Optional[float] = None) -> None:
         return  # a newer worker owns the leases
     now = now or time.time()
     _tick += 1
+    if not _isolated and _tick % ISOLATION_RETRY_TICKS == 0:
+        _ensure_isolation()
     if _tick % 2 == 1:
         _docker_pass(epoch_, now)
     leases = store.list_leases()

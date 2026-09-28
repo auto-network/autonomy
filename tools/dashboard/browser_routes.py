@@ -86,6 +86,8 @@ def create_lease(authorization, body) -> tuple[int, dict]:
     scope = _scope(authorization)
     adapter, kind, name, ttl = parse_request(body)
     epoch = _epoch()
+    if not reconciler.isolated():
+        raise _Reply(503, {"error": "unavailable", "reason": "isolation"})
     limits = reconciler.defaults()
     if kind == "persistent":
         from tools.browser_broker.profiles import profile_container_name, profile_path

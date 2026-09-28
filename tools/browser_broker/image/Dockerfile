@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     BROWSER_SCREEN=1920x1080x24
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        xvfb x11vnc tini procps ca-certificates \
+        xvfb x11vnc tini procps ca-certificates iptables \
         fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir patchright==1.63.0 websockets==17.1 \
