@@ -95,6 +95,8 @@ function linkSheet(review, signing) {
   const facts = [];
   if (review.recipient?.display_name) facts.push(['Prepared for', review.recipient.display_name]);
   if (review.fixed_expiry && Number.isSafeInteger(review.absolute_expiry)) facts.push(['Link expires', new Date(review.absolute_expiry).toLocaleString()]);
+  // A standing follow link never expires unless revoked (auto-eky23).
+  else if (op === 'publish' && review.target_type === 'org:follow') facts.push(['Link expires', 'No expiration']);
   if (review.label) facts.push(['Label', review.label]);
   const blocking = signing?.blocking_error
     || (signing?.binding_drift ? 'This organization changed after the request was prepared. Close it and ask again.' : '')

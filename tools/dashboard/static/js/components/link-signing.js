@@ -136,6 +136,9 @@ async function _authorizeLinkDecision(req, session, opened) {
 async function _signAuthorizedLinkDecision(req, session, signer, rr) {
   const isRevoke = req.op === 'revoke';
   const isOrgJoin = !isRevoke && rr.payload && rr.payload.target_type === 'org:join';
+  // An org:follow link never expires unless revoked: it takes no duration
+  // (the server refuses one; auto-eky23).
+  const isOrgFollow = !isRevoke && rr.payload && rr.payload.target_type === 'org:follow';
   let ttl = null;
   let payload;
   if (isRevoke) {
@@ -152,6 +155,8 @@ async function _signAuthorizedLinkDecision(req, session, signer, rr) {
     if (rr.payload.meta && Object.keys(rr.payload.meta).length) {
       payload.meta = JSON.parse(JSON.stringify(rr.payload.meta));
     }
+  } else if (isOrgFollow) {
+    payload = _linkPayloadWithTtl(rr.payload, null);
   } else {
     ttl = req.duration === 'none' ? null
       : (req.duration === 'custom'
@@ -176,7 +181,7 @@ async function _signAuthorizedLinkDecision(req, session, signer, rr) {
     } catch (error) {
       throw new Error('This approval could not be signed. Unlock it again and retry.');
     }
-    return (isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl };
+    return (isOrgJoin || isOrgFollow || isRevoke) ? { envelope } : { envelope, ttl };
   } finally {
     // Unchecked is deliberately one action only. Checked retains the
     // non-extractable authority (never any factor material); Lock clears

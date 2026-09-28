@@ -138,6 +138,24 @@ test('an org:join publish shows its fixed expiry and signs the frozen payload wi
   assert.deepEqual(operationBody(), { envelope: { signed: 'envelope' } });
 });
 
+// auto-eky23 (live 2026-09-28: approval 39fec671372c failed after approval,
+// "it takes no duration"): a standing follow link offers no duration, says so,
+// and signs the frozen payload with no TTL on it or on the operation.
+test('an org:follow publish offers no duration, says No expiration, and signs no TTL', async () => {
+  const orgUuid = '22222222-2222-4222-8222-222222222222';
+  state = { signedIn: true, orgs: [{ org: orgUuid, live: true }] };
+  const payload = { org: orgUuid, target_uuid: orgUuid, target_type: 'org:follow', meta: { label: 'Follow us', org: 'autonomy' } };
+  bootstrap = { ...bootstrap, registry_request: { payload }, org_uuid: orgUuid };
+  await openLinkCentralApproval(item({ ttl: null, fixed_expiry: true, target_type: 'org:follow' }));
+  assert.equal(q('select'), null, 'no duration choice for a follow link');
+  assert.ok(shadowText().includes('Link expires'));
+  assert.ok(shadowText().includes('No expiration'));
+  q('#primary').click();
+  await until(() => q('#result-title')?.textContent === 'Link published');
+  assert.deepEqual(signs[0].slice(0, 3), ['TUNNEL', '/control/create-link', payload]);
+  assert.deepEqual(operationBody(), { envelope: { signed: 'envelope' } });
+});
+
 test('decline records a decline and signs nothing', async () => {
   await openLinkCentralApproval(item());
   q('#secondary').click(); q('#primary').click();

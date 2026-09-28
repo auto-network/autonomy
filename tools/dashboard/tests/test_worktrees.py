@@ -1273,7 +1273,7 @@ class TestWorktreePage:
         assert "await import('../ceremony/open-root.js')" in signing
         assert "session.signOnWithRootSeed(opened.seed, opened.rootPub, {\n" in signing
         assert "org: req.orgSlug, requireServingRuntime: true," in signing
-        assert "(isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl }" in signing
+        assert "(isOrgJoin || isOrgFollow || isRevoke) ? { envelope } : { envelope, ttl }" in signing
 
     def test_share_links_sign_tunnel_pop_bytes_not_registry_bytes(self):
         """D19 (Codex finding #3): a share-link approval must sign the tunnel
@@ -1285,7 +1285,9 @@ class TestWorktreePage:
         assert "const signMethod = 'TUNNEL'" in js
         assert "'/control/revoke-link' : '/control/create-link'" in js
         assert "const isOrgJoin = !isRevoke && rr.payload && rr.payload.target_type === 'org:join'" in js
-        assert "(isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl }" in js
+        # org:follow takes no duration (auto-eky23): no TTL signed or sent.
+        assert "const isOrgFollow = !isRevoke && rr.payload && rr.payload.target_type === 'org:follow'" in js
+        assert "(isOrgJoin || isOrgFollow || isRevoke) ? { envelope } : { envelope, ttl }" in js
         assert "signer.signRegistryRequest(" in js
         assert "signMethod, signPath, payload, { org: req.orgSlug }" in js
 
