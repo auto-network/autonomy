@@ -9902,6 +9902,75 @@ _SESSION_LIFECYCLE_WORKER.register_handler("retry", _run_session_retry)
 _SESSION_LIFECYCLE_WORKER.register_handler("restart", _run_session_restart)
 
 
+#: Slack after a step's budget before the deferred startup-recovery re-check
+#: reads the row again: past the worker's own deadline (it fails a stuck step
+#: at the budget), well inside the reaper's belt (REAPER_BELT_MARGIN_S), so
+#: the re-check decides first and the two never double-fire.
+_STARTUP_RECOVERY_RECHECK_SLACK_S = 10.0
+_startup_recovery_rechecks: set = set()
+
+
+def _launch_budget_remaining(row: dict, now: float) -> float:
+    """Seconds left before a launching row's current step exhausts its budget
+    (the worker's own STEP_TIMEOUTS_S deadline, from the last transition —
+    the same anchor the liveness reaper uses). Zero or less: past it."""
+    from tools.dashboard.session_lifecycle_worker import STEP_TIMEOUTS_S
+
+    phase = row.get("startup_state") or "requesting"
+    budget = STEP_TIMEOUTS_S.get(phase, max(STEP_TIMEOUTS_S.values()))
+    anchor = row.get("last_activity") or row.get("created_at") or 0
+    return budget - (now - anchor)
+
+
+def _recover_lifecycle_row(tmux_name: str, state: str) -> None:
+    """Resolve one launch that no worker owns: adopt it as running if its tmux
+    session survived, else fail it retryably."""
+    if _tmux_session_exists(tmux_name):
+        # Adopt as running through the lifecycle writer — the single
+        # state writer — clearing startup_state and re-asserting
+        # is_live. The activity poller re-derives idle/running on
+        # its next pass.
+        _SESSION_LIFECYCLE_WORKER.state_writer.set_state(tmux_name, "running")
+        logger.info(
+            "startup_recovery: adopted %s (was %s, tmux alive)",
+            tmux_name, state,
+        )
+    else:
+        SessionLifecycleStateWriter().fail(
+            tmux_name,
+            phase="startup_recovery",
+            reason=f"dashboard restarted mid-launch (was {state}); process gone",
+            retryable=True,
+        )
+        logger.warning(
+            "startup_recovery: failed %s (was %s, tmux gone)",
+            tmux_name, state,
+        )
+
+
+def _recoverable(row: dict | None) -> bool:
+    return bool(row) and bool(row.get("startup_state")) and row.get("startup_state") != "setup_failed"
+
+
+async def _recheck_launch_after_budget(tmux_name: str, seen: dict, delay: float) -> None:
+    """The deferred half of startup recovery: once the step's budget has run
+    out, read the row again. A transition since the sweep (phase or
+    last_activity moved, or the launch ended) means a live worker owns it —
+    nothing to do. An unchanged row is orphaned and is resolved now."""
+    await asyncio.sleep(max(delay, 0.0))
+    try:
+        row = await asyncio.to_thread(dashboard_db.get_session, tmux_name)
+        if not _recoverable(row):
+            return
+        if (row.get("startup_state"), row.get("last_activity")) != (
+            seen.get("startup_state"), seen.get("last_activity"),
+        ):
+            return
+        await asyncio.to_thread(_recover_lifecycle_row, tmux_name, row["startup_state"])
+    except Exception:
+        logger.exception("startup_recovery: deferred re-check failed for %s", tmux_name)
+
+
 async def _recover_stuck_lifecycle_rows() -> None:
     """Startup recovery (FSM contract, correctness addition 3).
 
@@ -9909,16 +9978,24 @@ async def _recover_stuck_lifecycle_rows() -> None:
     loses the job and leaves the row frozen in a non-terminal
     startup_state with is_live=1 — the "stuck forever" class the June-18
     review predicted (40 restarts observed in a single 2-day log window).
-    Sweep at boot, before requests arrive:
+    Sweep at boot, before requests arrive, re-reading each row as it is
+    decided:
 
-    - tmux session still exists → the process outlived the restart; the
-      interrupted launch work is gone, but the session itself is healthy.
-      Adopt as running: clear startup_state. (v1 — bead 4 re-enters the
-      worker at the interrupted phase instead, and routes the write
-      through the lifecycle writer once the legacy writers are deleted.)
-    - tmux session gone → the launch died with the restart. Mark it
-      failed(startup_recovery) so the operator gets a retryable failed
-      card instead of an eternally-launching one.
+    - Its step is still within its budget → it is still launching. A hot
+      reload overlaps the old worker with this one, and that worker may
+      be mid-launch (auto-2btus: failed at 02:45:55, tmux created at
+      02:45:57, session up). Re-check once the budget has run out
+      (:func:`_recheck_launch_after_budget`); only an unchanged row is
+      resolved as below.
+    - Past its budget, tmux session still exists → the process outlived
+      the restart; the interrupted launch work is gone, but the session
+      itself is healthy. Adopt as running: clear startup_state. (v1 —
+      bead 4 re-enters the worker at the interrupted phase instead, and
+      routes the write through the lifecycle writer once the legacy
+      writers are deleted.)
+    - Past its budget, tmux session gone → the launch died with the
+      restart. Mark it failed(startup_recovery) so the operator gets a
+      retryable failed card instead of an eternally-launching one.
 
     setup_failed rows are skipped: sticky, already operator-visible.
     """
@@ -9927,35 +10004,29 @@ async def _recover_stuck_lifecycle_rows() -> None:
     except Exception:
         logger.exception("startup_recovery: could not list live sessions")
         return
-    for row in rows:
-        state = row.get("startup_state")
-        if not state or state == "setup_failed":
-            continue
-        tmux_name = row.get("tmux_name")
-        if not tmux_name:
+    for listed in rows:
+        tmux_name = listed.get("tmux_name")
+        if not tmux_name or not _recoverable(listed):
             continue
         try:
-            if _tmux_session_exists(tmux_name):
-                # Adopt as running through the lifecycle writer — the single
-                # state writer — clearing startup_state and re-asserting
-                # is_live. The activity poller re-derives idle/running on
-                # its next pass.
-                _SESSION_LIFECYCLE_WORKER.state_writer.set_state(tmux_name, "running")
+            row = await asyncio.to_thread(dashboard_db.get_session, tmux_name)
+            if not _recoverable(row):
+                continue
+            state = row["startup_state"]
+            remaining = _launch_budget_remaining(row, time.time())
+            if remaining > 0:
                 logger.info(
-                    "startup_recovery: adopted %s (was %s, tmux alive)",
-                    tmux_name, state,
+                    "startup_recovery: %s still launching (%s, %.0fs of its "
+                    "budget left); re-checking after it",
+                    tmux_name, state, remaining,
                 )
-            else:
-                SessionLifecycleStateWriter().fail(
-                    tmux_name,
-                    phase="startup_recovery",
-                    reason=f"dashboard restarted mid-launch (was {state}); process gone",
-                    retryable=True,
-                )
-                logger.warning(
-                    "startup_recovery: failed %s (was %s, tmux gone)",
-                    tmux_name, state,
-                )
+                task = asyncio.create_task(_recheck_launch_after_budget(
+                    tmux_name, dict(row), remaining + _STARTUP_RECOVERY_RECHECK_SLACK_S,
+                ))
+                _startup_recovery_rechecks.add(task)
+                task.add_done_callback(_startup_recovery_rechecks.discard)
+                continue
+            _recover_lifecycle_row(tmux_name, state)
         except Exception:
             logger.exception("startup_recovery: sweep failed for %s", tmux_name)
 
