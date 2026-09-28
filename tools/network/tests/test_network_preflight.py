@@ -13,6 +13,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import ipaddress
+
 import pytest
 
 from tools.network import network_preflight as np
@@ -183,6 +185,8 @@ def _compose_env(**overrides: str) -> dict:
 
     env = dict(os.environ)
     env.setdefault("AUTONOMY_HOST_HOME", str(Path.home()))
+    env.setdefault("AUTONOMY_BROWSER_SUBNET", "172.16.2.0/24")
+    env.setdefault("AUTONOMY_BROWSER_EGRESS_SUBNET", "172.16.3.0/24")
     for name, value in overrides.items():
         if value is None:
             env.pop(name, None)
@@ -261,3 +265,39 @@ def test_env_refuses_to_choose_blind(monkeypatch, capsys):
     monkeypatch.setattr(np, "read_docker_pools", lambda: (None, False))
     assert np.main(["--env"]) == 1
     assert "refusing to choose a subnet blind" in capsys.readouterr().err
+
+
+
+def test_compose_resolves_the_browser_subnets_from_defaults_and_overrides():
+    """Host ruling (auto-8c2df): the browser subnets have defaults, so an
+    installed node's compose keeps working without an .env edit."""
+    if _compose_argv() is None:
+        pytest.skip("docker compose CLI not available")
+    defaults = _run_compose_config(_compose_env(AUTONOMY_SUBNET="172.16.0.0/24",
+                                                AUTONOMY_BROWSER_SUBNET=None,
+                                                AUTONOMY_BROWSER_EGRESS_SUBNET=None))
+    assert defaults.returncode == 0, defaults.stderr
+    assert "172.31.254.0/24" in defaults.stdout and "172.31.255.0/24" in defaults.stdout
+    override = _run_compose_config(_compose_env(AUTONOMY_SUBNET="172.16.0.0/24",
+                                                AUTONOMY_BROWSER_SUBNET="172.16.9.0/24"))
+    assert override.returncode == 0 and "172.16.9.0/24" in override.stdout
+
+
+def test_compose_file_gives_the_browser_subnets_defaults():
+    text = (REPO_ROOT / "docker-compose.yml").read_text()
+    assert "${AUTONOMY_BROWSER_SUBNET:-172.31.254.0/24}" in text
+    assert "${AUTONOMY_BROWSER_EGRESS_SUBNET:-172.31.255.0/24}" in text
+
+
+def test_browser_subnets_are_two_more_free_blocks(monkeypatch):
+    monkeypatch.setattr(np, "read_host_cidrs", lambda: (
+        ["192.168.1.0/24", "172.24.0.0/20"],
+        [{"iface": "eth0", "cidr": "192.168.1.0/24", "docker": False}]))
+    monkeypatch.setattr(np, "read_docker_networks", lambda: [{"name": "autonomy_default",
+                                                              "subnets": ["172.16.0.0/24"]}])
+    monkeypatch.setattr(np, "read_docker_pools", lambda: (None, True))
+    report = np.build_report()
+    chosen, (browser, egress) = report["chosen_subnet"], report["browser_subnets"]
+    blocks = [chosen, browser, egress]
+    assert len(set(blocks)) == 3 and "172.16.0.0/24" not in blocks
+    assert all(not ipaddress.ip_network(b).overlaps(ipaddress.ip_network("172.24.0.0/20")) for b in blocks)

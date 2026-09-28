@@ -29,6 +29,8 @@ from tools.data_paths import REPO_ROOT
 
 IMAGE = "autonomy-browser:local"
 NETWORK = "autonomy-browser"
+#: The egress proxy (a Compose service on the browser network), auto-8c2df.
+EGRESS_PROXY = "http://autonomy-browser-egress:3128"
 AGENT_PORT = 7300
 SHM_SIZE = "1g"
 SECCOMP_PROFILE = REPO_ROOT / "tools" / "browser_broker" / "image" / "seccomp-chrome.json"
@@ -106,7 +108,7 @@ def create_args(*, name: str, lease_labels: dict[str, str], caps: Caps,
             "--security-opt", f"seccomp={SECCOMP_PROFILE}",
             "--security-opt", "no-new-privileges",
             "-e", "BROWSER_LEASE_SECRET", "-e", "BROWSER_VNC_PASSWORD",
-            "-e", "BROWSER_LEASE_EXPIRES_AT"]
+            "-e", "BROWSER_LEASE_EXPIRES_AT", "-e", f"BROWSER_PROXY={EGRESS_PROXY}"]
     if timezone:
         argv += ["-e", f"TZ={timezone}"]
     for key, value in sorted(lease_labels.items()):
@@ -114,14 +116,13 @@ def create_args(*, name: str, lease_labels: dict[str, str], caps: Caps,
     return argv + mount_argv + [IMAGE]
 
 
-def ensure_network() -> None:
-    """Create ``autonomy-browser`` if missing. The dashboard never joins it:
-    the network redesign (auto-8c2df) reaches leases through a relay instead."""
-    if _docker("network", "inspect", NETWORK, check=False).returncode != 0:
-        proc = _docker("network", "create", "--driver", "bridge",
-                       "--label", f"{LABEL}.network=1", NETWORK, check=False)
-        if proc.returncode != 0 and not _says(proc, "already exists"):
-            raise RuntimeError(f"cannot create {NETWORK}: {proc.stderr.strip()}")
+def browser_network_ready() -> bool:
+    """Whether ``autonomy-browser`` exists and is an internal network.
+
+    Compose owns the network (auto-8c2df); the dashboard never creates it and
+    never joins it. Leases start only on an internal one."""
+    proc = _docker("network", "inspect", "--format", "{{.Internal}}", NETWORK, check=False)
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
 def profile_mount_argv(org: str, workspace: str, name: str) -> list[str]:

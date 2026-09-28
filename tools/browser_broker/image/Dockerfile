@@ -25,7 +25,7 @@ RUN useradd -m -u 1000 browser \
     && chown browser:browser /profile /tmp/downloads
 WORKDIR /opt/lease
 COPY tools/connectors/__init__.py tools/connectors/stealth_repl.py tools/connectors/repl_auth.py tools/connectors/
-COPY tools/browser_broker/__init__.py tools/browser_broker/lease_agent.py tools/browser_broker/lease_watchdog.py tools/browser_broker/
+COPY tools/browser_broker/__init__.py tools/browser_broker/lease_agent.py tools/browser_broker/lease_watchdog.py tools/browser_broker/egress_proxy.py tools/browser_broker/
 COPY tools/browser_broker/image/entrypoint.sh /opt/lease/entrypoint.sh
 
 USER browser

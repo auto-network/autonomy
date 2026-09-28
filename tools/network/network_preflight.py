@@ -433,6 +433,16 @@ def build_report() -> dict:
     # operator's interface networks, and every subnet Docker already holds.
     avoid = list(routes) + operator_cidrs + docker_subnets
     chosen = choose_subnet(avoid)
+    # The browser broker's two networks (auto-8c2df): the internal browser
+    # network and the egress proxy's network. Each is another free /24, also
+    # disjoint from the project subnet chosen above and from each other.
+    browser_subnets: list[str] = []
+    taken = avoid + ([chosen] if chosen else [])
+    for _ in range(2):
+        pick = choose_subnet(taken)
+        if pick:
+            browser_subnets.append(pick)
+            taken.append(pick)
 
     pool_overlaps = overlapping_pairs(pools, operator_cidrs)
 
@@ -469,6 +479,7 @@ def build_report() -> dict:
             {"pool": p, "host_network": h} for p, h in pool_overlaps
         ],
         "network_collisions": collisions,
+        "browser_subnets": browser_subnets,
         "chosen_subnet": chosen,
     }
 
@@ -548,12 +559,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="print only `AUTONOMY_SUBNET=<cidr>` for the project .env")
     parser.add_argument("--print-subnet", action="store_true",
                         help="print only the chosen subnet CIDR")
+    parser.add_argument("--env-browser", action="store_true",
+                        help="print only AUTONOMY_BROWSER_SUBNET and AUTONOMY_BROWSER_EGRESS_SUBNET "
+                             "for the project .env (the browser broker's networks)")
     args = parser.parse_args(argv)
 
-    _QUIET = args.json or args.env or args.print_subnet
+    _QUIET = args.json or args.env or args.print_subnet or args.env_browser
     report = build_report()
 
-    if (args.print_subnet or args.env) and not report["host_routes"]:
+    if (args.print_subnet or args.env or args.env_browser) and not report["host_routes"]:
         # Every real host has at least its own connected network. An empty
         # table means the routes could not be read, and a subnet chosen now
         # would be a guess that can land on the operator's LAN.
@@ -571,6 +585,14 @@ def main(argv: list[str] | None = None) -> int:
             print("no free subnet found", file=sys.stderr)
             return 1
         print(f"AUTONOMY_SUBNET={report['chosen_subnet']}")
+        return 0
+    if args.env_browser:
+        if len(report["browser_subnets"]) != 2:
+            print("no two free subnets found for the browser networks", file=sys.stderr)
+            return 1
+        browser, egress = report["browser_subnets"]
+        print(f"AUTONOMY_BROWSER_SUBNET={browser}")
+        print(f"AUTONOMY_BROWSER_EGRESS_SUBNET={egress}")
         return 0
     if args.json:
         print(json.dumps(report, indent=2, default=str))

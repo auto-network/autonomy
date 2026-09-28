@@ -578,6 +578,27 @@ services:
     volumes:
       - dolt-data:/var/lib/dolt
 
+  # Chrome's only way out of a browser lease: an HTTP forward proxy that
+  # accepts clients only from the browser network and connects only to
+  # globally routable addresses it resolved and checked itself (no host
+  # firewall rules). Runs from the lease image; carries no credentials and no
+  # lease state, so restarting it ends no lease.
+  browser-egress:
+    image: autonomy-browser:local
+    build:
+      context: .
+      dockerfile: tools/browser_broker/image/Dockerfile
+    container_name: autonomy-browser-egress
+    entrypoint: ["python", "-m", "tools.browser_broker.egress_proxy"]
+    user: "1000:1000"
+    environment:
+      BROWSER_SUBNET: ${AUTONOMY_BROWSER_SUBNET:-172.31.254.0/24}
+    networks: ["autonomy-browser", "autonomy-browser-egress"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
 volumes:
   # Explicit `name:` pins the DAEMON volume name. Without it Compose scopes the
   # volume to the project (`<project>_autonomy-code`, e.g. `autonomy_autonomy-orgs`
@@ -616,3 +637,24 @@ networks:
     ipam:
       config:
         - subnet: ${AUTONOMY_SUBNET:?run `python3 -m tools.network.network_preflight --env >> .env` to choose a free subnet first (bead auto-oj3bc)}
+  # The browser broker (auto-8c2df, design graph://c330323d-986 v7). Lease
+  # containers join only `autonomy-browser`, which is INTERNAL: no route to the
+  # host, the LAN, the NAS, the tailnet or any other container network. The
+  # egress proxy is the one member also on `autonomy-browser-egress`, which
+  # nothing else joins. The dashboard joins neither. Unlike AUTONOMY_SUBNET the
+  # subnets have DEFAULTS (host ruling, auto-8c2df): an installed node must not
+  # need its .env edited before compose works again. The defaults sit at the top
+  # of 172.16.0.0/12, away from the blocks the daemon and WSL take first; if they
+  # overlap anything this host routes, override them with a checked pair:
+  #     python3 -m tools.network.network_preflight --env-browser >> .env
+  autonomy-browser:
+    name: autonomy-browser
+    internal: true
+    ipam:
+      config:
+        - subnet: ${AUTONOMY_BROWSER_SUBNET:-172.31.254.0/24}
+  autonomy-browser-egress:
+    name: autonomy-browser-egress
+    ipam:
+      config:
+        - subnet: ${AUTONOMY_BROWSER_EGRESS_SUBNET:-172.31.255.0/24}
