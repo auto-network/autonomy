@@ -237,3 +237,20 @@ def test_a_lost_reply_is_retried_with_the_same_id_and_starts_one_session(
     assert len(calls) == 1
     assert [r["tmux_name"] for r in dashboard_db.get_live_sessions()
             if r.get("launch_op_id") == ids[0]] == ["auto-remote-1"]
+
+
+@pytest.mark.parametrize("state", ["FAILED", "ENDED"])
+def test_a_retry_of_a_launch_whose_session_died_is_refused_not_repeated(db, state):
+    calls = []
+    create = _creator(calls)
+    launch = scc.launch_op(create)
+    body = {"operation_id": OP_ID, "project": "p"}
+    first = asyncio.run(launch(body, PEER))
+    name = first["result"]["tmux_name"]
+    conn = dashboard_db.get_conn()
+    conn.execute("UPDATE tmux_sessions SET state = ? WHERE tmux_name = ?", (state, name))
+    conn.commit()
+    retry = asyncio.run(launch(body, PEER))
+    assert retry["ok"] is False and retry["refusal"] == scc.LAUNCH_REFUSED
+    assert name in retry["detail"] and state in retry["detail"]
+    assert len(calls) == 1

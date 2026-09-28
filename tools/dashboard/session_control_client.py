@@ -216,6 +216,16 @@ def launch_op(create: Callable[[dict], Awaitable[object]]) -> OpHandler:
             existing = await asyncio.to_thread(
                 dashboard_db.session_for_launch_op, operation_id)
             if existing is not None:
+                state = existing.get("state")
+                if state in ("FAILED", "ENDED"):
+                    # The operation already ran and its session is gone. Say
+                    # so, so the caller mints a new operation id; never
+                    # relaunch silently under the old one.
+                    return refusal(
+                        LAUNCH_REFUSED,
+                        f"operation {operation_id} already launched "
+                        f"{existing['tmux_name']}, now {state}; retry with a "
+                        f"new operation_id")
                 return ok({"tmux_name": existing["tmux_name"], **here,
                            "repeated": True})
             request = {"type": "container", "project": project}
