@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -754,6 +755,7 @@ def test_verify_container_started_fails_fast_with_pane_tail(monkeypatch):
     from tools.dashboard import server
 
     monkeypatch.setattr(server, "_container_exists", lambda _n: False)
+    monkeypatch.setattr(server, "_launch_client_alive", lambda _n: None)
     monkeypatch.setattr(
         server, "_run_tmux_capture",
         lambda _n, **_kw: "docker: OCI runtime create failed: ro mkdir\n",
@@ -784,6 +786,104 @@ def test_verify_container_probe_failure_is_not_a_verdict(monkeypatch):
             deadline=server.time.monotonic(),
         )
     assert "could not be verified" in str(exc.value)
+
+
+class _LaunchClock:
+    """monotonic() that advances only when the check sleeps."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def _stub_launch_wait(monkeypatch, server, *, container_at, client_alive):
+    clock = _LaunchClock()
+    monkeypatch.setattr(server.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(server.time, "sleep", clock.sleep)
+    start = clock.now
+    monkeypatch.setattr(
+        server, "_container_exists",
+        lambda _n: container_at is not None and clock.now - start >= container_at,
+    )
+    monkeypatch.setattr(server, "_launch_client_alive", lambda _n: client_alive(clock.now - start))
+    monkeypatch.setattr(
+        server, "_run_tmux_capture",
+        lambda _n, **_kw: "docker: Error response from daemon: invalid mount config\n",
+    )
+    return clock, start
+
+
+def test_verify_container_accepts_a_slow_create_while_docker_run_lives(monkeypatch):
+    """auto-tszqp: under dind/vfs two concurrent creates took ~27 s. A
+    container that appears after 25 s while its docker run client is
+    still working is a successful launch, not a 20 s timeout."""
+    from tools.dashboard import server
+
+    clock, start = _stub_launch_wait(
+        monkeypatch, server, container_at=25.0, client_alive=lambda _t: True,
+    )
+    server._verify_container_started(
+        tmux_name="auto-life", deadline=start + server._LIFECYCLE_LAUNCHING_TIMEOUT_S,
+    )
+    assert 25.0 <= clock.now - start < 27.0
+
+
+def test_verify_container_fails_within_2s_when_docker_run_exits(monkeypatch):
+    from tools.dashboard import server
+
+    clock, start = _stub_launch_wait(
+        monkeypatch, server, container_at=None, client_alive=lambda t: t < 1.0,
+    )
+    with pytest.raises(RuntimeError) as exc:
+        server._verify_container_started(
+            tmux_name="auto-life", deadline=start + server._LIFECYCLE_LAUNCHING_TIMEOUT_S,
+        )
+    assert clock.now - start <= 2.0
+    assert "exited and no container remains" in str(exc.value)
+    assert "invalid mount config" in str(exc.value)
+
+
+def test_verify_container_fails_at_the_step_deadline_while_docker_run_lives(monkeypatch):
+    from tools.dashboard import server
+
+    clock, start = _stub_launch_wait(
+        monkeypatch, server, container_at=None, client_alive=lambda _t: True,
+    )
+    deadline = start + server._LIFECYCLE_LAUNCHING_TIMEOUT_S
+    with pytest.raises(RuntimeError) as exc:
+        server._verify_container_started(tmux_name="auto-life", deadline=deadline)
+    assert deadline <= clock.now < deadline + 2.0
+    assert "before the launch deadline" in str(exc.value)
+
+
+def test_launch_client_alive_reads_pane_dead_and_a_missing_session(monkeypatch):
+    """#{pane_dead} is the signal (pane_current_command names the wrapper
+    shell). A missing session makes display-message print nothing with
+    rc 0, so has-session settles it; any other tmux failure is unknown."""
+    from tools.dashboard import server
+
+    replies = {}
+
+    def fake_run(argv, **_kw):
+        verb = "display-message" if "display-message" in argv else "has-session"
+        rc, out, err = replies[verb]
+        return subprocess.CompletedProcess(argv, rc, out, err)
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    replies["display-message"] = (0, "0\n", "")
+    assert server._launch_client_alive("auto-life") is True
+    replies["display-message"] = (0, "1\n", "")
+    assert server._launch_client_alive("auto-life") is False
+    replies["display-message"] = (0, "\n", "")
+    replies["has-session"] = (1, "", "can't find session: auto-life\n")
+    assert server._launch_client_alive("auto-life") is False
+    replies["has-session"] = (1, "", "error connecting to /tmp/tmux-1000/default\n")
+    assert server._launch_client_alive("auto-life") is None
 
 
 def test_wait_for_setup_fails_when_container_dies_mid_setup(monkeypatch, tmp_path):

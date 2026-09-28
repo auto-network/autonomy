@@ -8435,6 +8435,37 @@ def _release_launch_pane(tmux_name: str) -> None:
     )
 
 
+def _launch_client_alive(tmux_name: str) -> bool | None:
+    """Is the launch pane's ``docker run`` client still running? Tri-state:
+    False is authoritative (the pane's command exited, or the tmux session
+    is gone); None means tmux could not answer.
+
+    Read through ``#{pane_dead}``, which the launch's ``remain-on-exit``
+    (:func:`_launch_keep_pane`) keeps meaningful after the command exits.
+    ``pane_current_command`` is not usable here: the pane runs docker
+    through a wrapper shell, so it names the shell. ``display-message``
+    against a missing session prints nothing and exits 0 (tmux 3.4), so
+    an empty answer is settled by ``has-session``, whose "can't find
+    session" is the only reply taken as gone.
+    """
+    try:
+        pr = subprocess.run(
+            tmux_route.argv(tmux_name, "display-message", "-t", tmux_name, "-p", "#{pane_dead}"),
+            capture_output=True, text=True, timeout=_LIFECYCLE_TMUX_OP_TIMEOUT_S,
+        )
+        if pr.returncode == 0 and pr.stdout.strip() in ("0", "1"):
+            return pr.stdout.strip() == "0"
+        hs = subprocess.run(
+            tmux_route.argv(tmux_name, "has-session", "-t", tmux_name),
+            capture_output=True, text=True, timeout=_LIFECYCLE_TMUX_OP_TIMEOUT_S,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if hs.returncode != 0 and "can't find session" in (hs.stderr or ""):
+        return False
+    return None
+
+
 def _verify_container_started(*, tmux_name: str, deadline: float) -> None:
     """Fail fast when ``docker run`` produced no container.
 
@@ -8443,19 +8474,40 @@ def _verify_container_started(*, tmux_name: str, deadline: float) -> None:
     leaves NO container, and without this check the launch would sit in
     phantom ``setup_running`` for the full setup budget before failing
     (auto-0709-092918: three 600s cycles against a mount error that was
-    printed in the pane within two seconds). Polls until the container
-    object exists; probe failures (None) don't count against it.
+    printed in the pane within two seconds). Probe failures (None) don't
+    count against it.
+
+    The wait ends on docker's own outcome, not a fixed clock
+    (auto-tszqp): it returns when the container exists, fails at once
+    when the ``docker run`` client has exited without one, and otherwise
+    waits until ``deadline`` — the launch step's. A fixed 20 s window
+    failed launches whose container a slow daemon (dind/vfs, concurrent
+    creates) was still making, and teardown then killed it on arrival.
     """
     saw_missing = False
-    while time.monotonic() < deadline:
+    client_exited = False
+    while True:
         exists = _container_exists(tmux_name)
         if exists:
             return
         if exists is False:
             saw_missing = True
+            if _launch_client_alive(tmux_name) is False:
+                # The client may have exited after creating the container
+                # (a harness that quit at once): look once more before
+                # calling it a failed launch.
+                if _container_exists(tmux_name):
+                    return
+                client_exited = True
+                break
+        if time.monotonic() >= deadline:
+            break
         time.sleep(1.0)
-    detail = "docker run produced no container"
-    if not saw_missing:
+    if client_exited:
+        detail = "docker run exited and no container remains"
+    elif saw_missing:
+        detail = "docker run produced no container before the launch deadline"
+    else:
         detail = "container presence could not be verified (docker probe failing)"
     tail = _pane_tail(tmux_name)
     if tail:
@@ -9164,7 +9216,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         # error): the tmux spawn alone proves nothing.
         _verify_container_started(
             tmux_name=tmux_name,
-            deadline=time.monotonic() + 20,
+            deadline=launch_deadline,
         )
         _release_launch_pane(tmux_name)
 
@@ -9493,7 +9545,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         # error): the tmux spawn alone proves nothing.
         _verify_container_started(
             tmux_name=tmux_name,
-            deadline=time.monotonic() + 20,
+            deadline=launch_deadline,
         )
         _release_launch_pane(tmux_name)
 
@@ -9641,7 +9693,7 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         # error): the tmux spawn alone proves nothing.
         _verify_container_started(
             tmux_name=tmux_name,
-            deadline=time.monotonic() + 20,
+            deadline=launch_deadline,
         )
         _release_launch_pane(tmux_name)
 
