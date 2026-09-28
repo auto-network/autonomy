@@ -352,7 +352,11 @@ class TestAttentionOperatorAPI:
         )
         assert second.status_code == 200
         assert second.json()["items"][0]["attention_id"] == "sender-item"
-        tampered = cursor[:-1] + ("A" if cursor[-1] != "A" else "B")
+        # Flip a character in the middle: the last base64url character of the
+        # signature carries padding bits, so changing only it can decode to
+        # the same bytes (a 1-in-32 flake when the cursor ended in "B").
+        mid = len(cursor) // 2
+        tampered = cursor[:mid] + ("A" if cursor[mid] != "A" else "B") + cursor[mid + 1:]
         assert client.get(
             "/api/attention/items", params={"limit": "1", "cursor": tampered},
         ).status_code == 400
