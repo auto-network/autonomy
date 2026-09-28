@@ -45,6 +45,21 @@ graph://c330323d-986; epic `auto-8q7oe`.
 - Limits: the machine Setting `autonomy.browser.defaults`
   (`tools/graph/schemas/browser_defaults.py`).
 
+### Invariants and residual risk (review of auto-czoc0)
+
+- **The dashboard is reachable from leases on `autonomy-browser`.** It is
+  safe only because every dashboard listener on that network is HTTPS with a
+  certificate a lease cannot match, and a lease never ignores certificate
+  errors (pinned in `tests/test_lease_agent.py`). Adding a plain-HTTP
+  listener to the dashboard container, or relaxing either, exposes the
+  dashboard to web content — and on a node where the human gate is not yet
+  enforced, operator authority with it. Removing the path at the network
+  level is follow-up work.
+- **Leases have egress from the node's network.** A page in a lease can reach
+  the node's LAN (routers, internal services, link-local metadata), limited
+  only by Chrome's Private Network Access. An egress policy for leases
+  (drop RFC1918 and link-local) is follow-up work.
+
 ## Lease image
 
 `image/build.sh` builds `autonomy-browser:local` (about 1.3 GB) from a flat

@@ -197,6 +197,11 @@ def _own_container_id() -> Optional[str]:
     return hostname or None
 
 
+#: The browser broker's lease network (tools/dashboard/browser_containers.py).
+#: The dashboard joins it to reach lease containers; sessions must never.
+_BROWSER_LEASE_NETWORK = "autonomy-browser"
+
+
 def _own_primary_network(cid: str) -> str:
     """The node's primary user-defined docker network — the one a launched
     session joins to reach the dashboard by its ``dashboard`` alias.
@@ -216,10 +221,17 @@ def _own_primary_network(cid: str) -> str:
         nets = json.loads(out.stdout) or {}
     except Exception:
         return ""
-    for name in nets:
-        if name not in ("bridge", "host", "none"):
+    eligible = [name for name in nets
+                if name not in ("bridge", "host", "none", _BROWSER_LEASE_NETWORK)]
+    # Prefer the network on which the node carries its ``dashboard`` alias —
+    # the one sessions must join. The inspect map's keys are sorted, so "first
+    # eligible" alone would follow network names, not purpose.
+    for name in eligible:
+        endpoint = nets.get(name) or {}
+        names = (endpoint.get("Aliases") or []) + (endpoint.get("DNSNames") or [])
+        if "dashboard" in names:
             return name
-    return ""
+    return eligible[0] if eligible else ""
 
 
 def _deepest_containing(

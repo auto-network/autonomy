@@ -345,3 +345,38 @@ def test_workspace_bind_on_a_private_mount_is_emitted_without_rslave():
         "--mount", "type=bind,src=/mnt/nas/data,dst=/data,bind-propagation=rslave",
     ]
     assert "bind-propagation" not in " ".join(mp.mount_args(plan, topo))
+
+
+# ── the node's primary network is its Compose network, never the lease network ──
+def test_primary_network_is_the_dashboard_alias_network_not_the_lease_network(monkeypatch):
+    """auto-czoc0 review: the dashboard also joins autonomy-browser, which sorts
+    before autonomy_default in docker's inspect map. Sessions must still launch
+    on the network where the node carries its ``dashboard`` alias."""
+    import json
+    import subprocess
+
+    networks = {  # docker serializes the map with sorted keys
+        "autonomy-browser": {"Aliases": [], "DNSNames": ["dashboard-1", "abc123"], "GwPriority": -1},
+        "autonomy_default": {"Aliases": ["dashboard"],
+                             "DNSNames": ["dashboard-1", "dashboard", "abc123"], "GwPriority": 0},
+    }
+
+    def fake_run(argv, **kwargs):
+        fmt = argv[argv.index("--format") + 1]
+        payload = networks if "Networks" in fmt else []
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(mp.subprocess, "run", fake_run)
+    monkeypatch.setattr(mp, "_own_container_id", lambda: "abc123")
+    mp.reset_topology_cache()
+    try:
+        assert mp._own_primary_network("abc123") == "autonomy_default"
+        assert mp.discover_topology().network == "autonomy_default"
+        # With no alias anywhere, the lease network is still never chosen.
+        for endpoint in networks.values():
+            endpoint["Aliases"], endpoint["DNSNames"] = [], []
+        assert mp._own_primary_network("abc123") == "autonomy_default"
+        del networks["autonomy_default"]
+        assert mp._own_primary_network("abc123") == ""
+    finally:
+        mp.reset_topology_cache()

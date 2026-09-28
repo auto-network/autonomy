@@ -73,6 +73,23 @@ def test_well_formed_commands_parse():
     assert parse_target({"css": "#main"}) == ("css", "#main")
 
 
+def test_chrome_never_ignores_certificate_errors_and_keeps_its_sandbox():
+    # Lease pages can reach the dashboard on autonomy-browser; its TLS certificate
+    # is what keeps them out, so certificate errors must never be ignored.
+    options = lease_agent.launch_options(40000, "1920x1080x24")
+    assert options["ignore_https_errors"] is False
+    assert options["chromium_sandbox"] is True
+    flags = " ".join(options["args"])
+    for forbidden in ("--ignore-certificate-errors", "--ignore-certificate-errors-spki-list",
+                      "--allow-insecure-localhost", "--no-sandbox", "--disable-web-security",
+                      "--disable-dev-shm-usage", "--disable-layer-tree-host-memory-pressure",
+                      "--remote-debugging-address"):
+        assert forbidden not in flags
+    assert "--disable-dev-shm-usage" in options["ignore_default_args"]
+    source = (Path(lease_agent.__file__)).read_text()
+    assert "ignore_https_errors=True" not in source and "ignore-certificate-errors" not in source
+
+
 def test_window_fills_the_screen():
     assert window_args("1920x1080x24") == ["--window-position=0,0", "--window-size=1920,1080"]
     assert window_args("") == []

@@ -14,6 +14,7 @@ value), never on its command line.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -33,6 +34,8 @@ SHM_SIZE = "1g"
 SECCOMP_PROFILE = REPO_ROOT / "tools" / "browser_broker" / "image" / "seccomp-chrome.json"
 LABEL = "autonomy.browser"
 DOCKER_TIMEOUT_S = 30
+
+logger = logging.getLogger(__name__)
 
 
 class DockerUnavailable(RuntimeError):
@@ -109,7 +112,14 @@ def ensure_network() -> None:
 
     own = _own_container_id()
     if own:
-        proc = _docker("network", "connect", NETWORK, own, check=False)
+        # --gw-priority -1 keeps the dashboard's default route (its egress) on
+        # its own network; without it the attach moves the default route to the
+        # lease bridge (measured). Docker < 28 lacks the flag: attach anyway.
+        proc = _docker("network", "connect", "--gw-priority", "-1", NETWORK, own, check=False)
+        if proc.returncode != 0 and "gw-priority" in proc.stderr:
+            logger.warning("docker lacks --gw-priority; the dashboard's default route "
+                           "may move to %s", NETWORK)
+            proc = _docker("network", "connect", NETWORK, own, check=False)
         if proc.returncode != 0 and "already exists" not in proc.stderr \
                 and "already attached" not in proc.stderr:
             raise RuntimeError(f"cannot attach the dashboard to {NETWORK}: {proc.stderr.strip()}")

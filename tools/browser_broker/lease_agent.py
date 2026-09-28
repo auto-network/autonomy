@@ -261,6 +261,18 @@ def window_args(screen: str) -> list[str]:
     return ["--window-position=0,0", f"--window-size={match[1]},{match[2]}"]
 
 
+def launch_options(cdp_port: int, screen: str) -> dict:
+    """Chrome's launch options. Certificate errors are never ignored: lease pages
+    can reach the dashboard on the lease network, and only its TLS certificate,
+    which no lease hostname matches, keeps them out (see TOOL.md)."""
+    return dict(
+        channel="chrome", headless=False, no_viewport=True, chromium_sandbox=True,
+        accept_downloads=True, ignore_https_errors=False,
+        ignore_default_args=list(CHROME_IGNORED_DEFAULTS),
+        args=[*CHROME_ARGS, *window_args(screen), f"--remote-debugging-port={cdp_port}"],
+    )
+
+
 def _free_loopback_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -294,12 +306,7 @@ class LeaseAgent(BrowserController):
         port = _free_loopback_port()
         self._playwright = sync_playwright().start()
         self._context = self._playwright.chromium.launch_persistent_context(
-            str(self.profile_dir), channel="chrome", headless=False,
-            no_viewport=True, chromium_sandbox=True, accept_downloads=True,
-            ignore_default_args=list(CHROME_IGNORED_DEFAULTS),
-            args=[*CHROME_ARGS, *window_args(os.environ.get("BROWSER_SCREEN", "")),
-                  f"--remote-debugging-port={port}"],
-        )
+            str(self.profile_dir), **launch_options(port, os.environ.get("BROWSER_SCREEN", "")))
         pages = self._context.pages
         self.page = pages[0] if pages else self._context.new_page()
         self.page.on("download", lambda download: self._downloads.append(download))
