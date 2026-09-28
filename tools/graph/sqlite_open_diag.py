@@ -23,6 +23,7 @@ import sqlite3
 import sys
 import threading
 import weakref
+from collections import deque
 from pathlib import Path
 
 _REPO_ROOT = str(Path(__file__).resolve().parents[2]) + "/"
@@ -90,9 +91,31 @@ def _database_name(database) -> str | None:
     return Path(text).name
 
 
-def _forget(conn_id: int) -> None:
-    with _lock:
-        _live.pop(conn_id, None)
+#: (id, dead weak reference) of collected connections, drained under the
+#: lock. The weak-reference callback runs wherever the garbage collector does
+#: — possibly on a thread already holding ``_lock``, mid-way through a dict
+#: update — so it takes no lock and touches no dict: a deque append is atomic.
+_collected: deque[tuple[int, "weakref.ref"]] = deque()
+
+
+def _forget(conn_id: int, ref: "weakref.ref") -> None:
+    _collected.append((conn_id, ref))
+
+
+def _drain_collected() -> None:
+    """Drop collected connections from ``_live``. The lock is held.
+
+    An entry goes only if it still holds the dead reference: CPython reuses
+    a collected object's id, so a new connection may already be registered
+    under it, and popping by id alone would stop counting a live one."""
+    while True:
+        try:
+            conn_id, ref = _collected.popleft()
+        except IndexError:
+            return
+        entry = _live.get(conn_id)
+        if entry is not None and entry[0] is ref:
+            del _live[conn_id]
 
 
 def _connect(database, *args, **kwargs):
@@ -106,8 +129,9 @@ def _connect(database, *args, **kwargs):
     conn = _original_connect(database, *args, **kwargs)
     key = (name, _opener())
     conn_id = id(conn)
-    ref = weakref.ref(conn, lambda _r, conn_id=conn_id: _forget(conn_id))
+    ref = weakref.ref(conn, lambda r, conn_id=conn_id: _forget(conn_id, r))
     with _lock:
+        _drain_collected()
         _opened[key] = _opened.get(key, 0) + 1
         _live[conn_id] = (ref, key)
     return conn
@@ -135,6 +159,7 @@ def snapshot(database: str | None = None) -> list[dict]:
     """Per database file and opener: opened, and still open now. Sorted by
     ``open_now``, largest first. *database* filters by file name."""
     with _lock:
+        _drain_collected()
         opened = dict(_opened)
         live = list(_live.values())
     open_now: dict[tuple[str, str], int] = {}

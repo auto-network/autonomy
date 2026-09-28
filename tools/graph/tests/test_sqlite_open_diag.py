@@ -2,6 +2,7 @@
 
 import gc
 import sqlite3
+import weakref
 
 from tools.graph import sqlite_open_diag
 
@@ -59,4 +60,20 @@ def test_a_positional_factory_is_wrapped_in_place(tmp_path):
     conn = sqlite3.connect(str(tmp_path / "positional.db"), 5.0, 0, "", True, Mine)
     assert isinstance(conn, Mine)
     assert [row["open_now"] for row in sqlite_open_diag.snapshot("positional.db")] == [1]
+    conn.close()
+
+
+def test_a_reused_id_does_not_drop_the_live_connection(tmp_path):
+    """A collected connection's id can be handed to the next one before the
+    collection is drained; the drain must not forget the newcomer."""
+    sqlite_open_diag.install()
+
+    class Gone:
+        pass
+
+    conn = sqlite3.connect(str(tmp_path / "reused.db"))
+    stale = weakref.ref(Gone())  # the collected predecessor's reference
+    assert stale() is None
+    sqlite_open_diag._forget(id(conn), stale)
+    assert [row["open_now"] for row in sqlite_open_diag.snapshot("reused.db")] == [1]
     conn.close()

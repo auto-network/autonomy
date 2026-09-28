@@ -743,7 +743,9 @@ class VaultKeyControl:
 
     ``holdings`` is a ``tools.vault.storage_object.Holdings`` — the state
     secrets this process holds plus the public descriptors and bridges it has
-    seen. ``content_store`` is the object store the locators address.
+    seen. ``content_store`` is the object store the locators address. The
+    holder opens it for the caller, and the caller owns it: whoever obtains a
+    control closes its store when done (``_close_vault_key_controls``).
 
     Declared here rather than imported from the vault so that this module
     depends on the INTERFACE it needs and not on whatever fills it: the cache
@@ -4986,6 +4988,23 @@ def _vault_key_control(org: str | None, set_id: str, cache: dict):
     return answer
 
 
+def _close_vault_key_controls(controls) -> None:
+    """Close the content store of each key control a read obtained.
+
+    The holder opens a store (a SQLite connection) per control and the
+    reader owns it from there: dropped unclosed, the connection sits in a
+    reference cycle until a full garbage collection, and a busy dashboard
+    gained about ten open connections a minute (auto-bkv3p)."""
+    for control in controls:
+        close = getattr(getattr(control, "content_store", None), "close", None)
+        if close is None:
+            continue
+        try:
+            close()
+        except Exception:  # noqa: BLE001 — closing is cleanup, never a refusal
+            logger.debug("closing a vault content store failed", exc_info=True)
+
+
 def _unwrap_vault_locator(
     locator, *, set_id: str, key: str, setting_id: str, declared_tier: str,
     org: str | None, cache: dict,
@@ -5242,21 +5261,27 @@ def _freeze_secured_locator(
         if control is None:
             raise VaultError(missing)
 
-        # Re-derive the factor-gated view from the immutable object named by
-        # the locator. This closes the small read/fetch race without exposing
-        # the locator or trusting only row metadata.
-        gated = vault_storage_object.open_revision_for_member(
-            locator,
-            holdings=control.holdings,
-            content_store=control.content_store,
-        )
-    if not isinstance(gated, vault_storage_object.SealedContentKey):
-        raise VaultError(f"{set_id}/{key} no longer requires a factor")
-    gated_digest = hashlib.sha256(canonical_json(asdict(gated))).hexdigest()
-    if gated_digest != sealed_content_key_digest:
-        raise VaultError(
-            f"the secured setting changed before approval ({set_id}/{key})"
-        )
+    try:
+        if not personal_direct:
+            # Re-derive the factor-gated view from the immutable object named
+            # by the locator. This closes the small read/fetch race without
+            # exposing the locator or trusting only row metadata.
+            gated = vault_storage_object.open_revision_for_member(
+                locator,
+                holdings=control.holdings,
+                content_store=control.content_store,
+            )
+        if not isinstance(gated, vault_storage_object.SealedContentKey):
+            raise VaultError(f"{set_id}/{key} no longer requires a factor")
+        gated_digest = hashlib.sha256(canonical_json(asdict(gated))).hexdigest()
+        if gated_digest != sealed_content_key_digest:
+            raise VaultError(
+                f"the secured setting changed before approval ({set_id}/{key})"
+            )
+    except BaseException:
+        # The caller closes the control it is handed; a refusal hands none.
+        _close_vault_key_controls([control])
+        raise
     return locator, gated, personal_direct, control, effective_setting_id
 
 
@@ -5283,12 +5308,13 @@ def secured_open_bundle(
     """
     from tools.vault import personal_object, storage_object as vault_storage_object
 
-    _locator, gated, personal_direct, _control, _effective = _freeze_secured_locator(
+    _locator, gated, personal_direct, control, _effective = _freeze_secured_locator(
         set_id, key,
         setting_id=setting_id,
         sealed_content_key_digest=sealed_content_key_digest,
         org=org,
     )
+    _close_vault_key_controls([control])
     if personal_direct:
         genesis_id = personal_object._GENESIS_ID
         setting_name = personal_object.object_id_for(set_id, key)
@@ -5346,22 +5372,25 @@ def open_secured_setting(
     # The ONE mandatory future insertion point: write the attributed,
     # fail-closed audit event here, immediately before either storage shape can
     # apply the key and yield plaintext.
-    if personal_direct:
-        opened = personal_object.open_revision(
-            locator,
-            set_id=set_id,
-            key=key,
-            setting_id=effective_setting_id,
-            content_key=content_key,
-        )
-    else:
-        assert control is not None
-        opened = vault_storage_object.open_revision(
-            locator,
-            holdings=control.holdings,
-            content_store=control.content_store,
-            content_key=content_key,
-        )
+    try:
+        if personal_direct:
+            opened = personal_object.open_revision(
+                locator,
+                set_id=set_id,
+                key=key,
+                setting_id=effective_setting_id,
+                content_key=content_key,
+            )
+        else:
+            assert control is not None
+            opened = vault_storage_object.open_revision(
+                locator,
+                holdings=control.holdings,
+                content_store=control.content_store,
+                content_key=content_key,
+            )
+    finally:
+        _close_vault_key_controls([control])
     if not isinstance(opened, dict):
         raise VaultError(f"{set_id}/{key} opened to a non-object payload")
     return opened
@@ -5979,129 +6008,136 @@ def read_set(
     # set answers this once and never consults the vault again.
     declared_tier = schemas.declared_vault_tier(set_id)
     key_control_cache: dict = {}
-    for key in keys_seen:
-        excluded_ids = {row["excludes"] for (_, row) in excludes.get(key, [])}
-        candidate_bases = [
-            (src_org, row) for (src_org, row) in bases[key]
-            if row["id"] not in excluded_ids
-        ]
-        if not candidate_bases:
-            continue
-
-        # The six-step slot ordering (auto-y2ubq): eligibility and the
-        # plausibility window filter, then rung → store → revision →
-        # signed_at → persona hash, with the legacy created_at tiebreak
-        # surviving only among unsigned single-writer rows. Revision sits
-        # below store because the reachability filter below has already
-        # dropped every candidate that cannot serve a requested revision;
-        # within one store it still discriminates two coexisting
-        # generations of a value.
-        candidate_bases = _rank_candidates(
-            candidate_bases,
-            reading_org=resolved_org,
-            now=now,
-            dropped=dropped,
-        )
-        if not candidate_bases:
-            continue
-
-        # Asking for a revision should consider the rows that can be served as
-        # it, rather than picking a winner first and discovering afterwards
-        # that it cannot be. Otherwise a row stored at exactly the requested
-        # revision loses to one that cannot reach it, and the read comes back
-        # empty with the answer in the set the whole time.
-        #
-        # If NOTHING can reach the target, the winner is chosen as usual and
-        # dropped below with its reason, so drop accounting says the same thing
-        # it always did.
-        if target_revision is not None:
-            reachable = [
-                om for om in candidate_bases
-                if _can_reach_revision(set_id, om[1], target_revision)
+    try:
+        for key in keys_seen:
+            excluded_ids = {row["excludes"] for (_, row) in excludes.get(key, [])}
+            candidate_bases = [
+                (src_org, row) for (src_org, row) in bases[key]
+                if row["id"] not in excluded_ids
             ]
-            if reachable:
-                candidate_bases = reachable
+            if not candidate_bases:
+                continue
 
-        chosen_org, chosen_row = candidate_bases[0]
-
-        # Apply overrides whose supersedes targets this base, oldest first so
-        # last-write-wins is guaranteed rather than incidental. Without an
-        # explicit order, two overrides patching the same key resolve by
-        # whatever order SQLite happened to return rows in.
-        merged_payload = json.loads(chosen_row["payload"])
-        # A vaulted locator authenticates the UUID of the physical row that
-        # created it. Overrides replace a vaulted payload whole, so once one
-        # wins the merge the effective locator belongs to that override—not
-        # to the base row whose identity the resolved Setting exposes. Keep
-        # those two identities distinct or every updated audited/secured
-        # value is opened against the base UUID and fails authentication.
-        effective_payload_row_id = chosen_row["id"]
-        for (_, ov_row) in sorted(
-            overrides.get(key, []),
-            key=lambda om: (om[1]["created_at"] or "", om[1]["_rowid"]),
-        ):
-            if ov_row["supersedes"] == chosen_row["id"]:
-                ov_payload = json.loads(ov_row["payload"])
-                merged_payload = json_merge_patch(merged_payload, ov_payload)
-                effective_payload_row_id = ov_row["id"]
-
-        resolved = _row_to_resolved(chosen_row, org=chosen_org)
-
-        # Step six — the merged locator, opened.
-        if declared_tier is not None:
-            opened, sealed, failure = _unwrap_vault_locator(
-                merged_payload,
-                set_id=set_id,
-                key=key,
-                setting_id=effective_payload_row_id,
-                declared_tier=declared_tier,
-                org=chosen_org,
-                cache=key_control_cache,
+            # The six-step slot ordering (auto-y2ubq): eligibility and the
+            # plausibility window filter, then rung → store → revision →
+            # signed_at → persona hash, with the legacy created_at tiebreak
+            # surviving only among unsigned single-writer rows. Revision sits
+            # below store because the reachability filter below has already
+            # dropped every candidate that cannot serve a requested revision;
+            # within one store it still discriminates two coexisting
+            # generations of a value.
+            candidate_bases = _rank_candidates(
+                candidate_bases,
+                reading_org=resolved_org,
+                now=now,
+                dropped=dropped,
             )
-            if failure is not None or sealed is not None:
-                # Neither is a value, so nothing downstream that shapes a
-                # value applies: defaults, upconversion and model validation
-                # would all be operating on something that is not the payload,
-                # and model validation in particular would DROP the member —
-                # turning a refusal into an absence.
-                resolved.payload = None
-                resolved.vault_error = failure
-                resolved.sealed_content_key = sealed
-                members.append(resolved)
+            if not candidate_bases:
                 continue
-            merged_payload = opened
 
-        # Shape the resolved payload to the schema, both directions: fill a
-        # declared field that is absent, drop a stored field it does not
-        # declare. Without the second half a read-modify-write writer carries
-        # a removed field forward and its own write is refused.
-        resolved.payload = _drop_undeclared_fields(
-            chosen_row["set_id"], chosen_row["schema_revision"],
-            _apply_declared_defaults(
+            # Asking for a revision should consider the rows that can be served as
+            # it, rather than picking a winner first and discovering afterwards
+            # that it cannot be. Otherwise a row stored at exactly the requested
+            # revision loses to one that cannot reach it, and the read comes back
+            # empty with the answer in the set the whole time.
+            #
+            # If NOTHING can reach the target, the winner is chosen as usual and
+            # dropped below with its reason, so drop accounting says the same thing
+            # it always did.
+            if target_revision is not None:
+                reachable = [
+                    om for om in candidate_bases
+                    if _can_reach_revision(set_id, om[1], target_revision)
+                ]
+                if reachable:
+                    candidate_bases = reachable
+
+            chosen_org, chosen_row = candidate_bases[0]
+
+            # Apply overrides whose supersedes targets this base, oldest first so
+            # last-write-wins is guaranteed rather than incidental. Without an
+            # explicit order, two overrides patching the same key resolve by
+            # whatever order SQLite happened to return rows in.
+            merged_payload = json.loads(chosen_row["payload"])
+            # A vaulted locator authenticates the UUID of the physical row that
+            # created it. Overrides replace a vaulted payload whole, so once one
+            # wins the merge the effective locator belongs to that override—not
+            # to the base row whose identity the resolved Setting exposes. Keep
+            # those two identities distinct or every updated audited/secured
+            # value is opened against the base UUID and fails authentication.
+            effective_payload_row_id = chosen_row["id"]
+            for (_, ov_row) in sorted(
+                overrides.get(key, []),
+                key=lambda om: (om[1]["created_at"] or "", om[1]["_rowid"]),
+            ):
+                if ov_row["supersedes"] == chosen_row["id"]:
+                    ov_payload = json.loads(ov_row["payload"])
+                    merged_payload = json_merge_patch(merged_payload, ov_payload)
+                    effective_payload_row_id = ov_row["id"]
+
+            resolved = _row_to_resolved(chosen_row, org=chosen_org)
+
+            # Step six — the merged locator, opened.
+            if declared_tier is not None:
+                opened, sealed, failure = _unwrap_vault_locator(
+                    merged_payload,
+                    set_id=set_id,
+                    key=key,
+                    setting_id=effective_payload_row_id,
+                    declared_tier=declared_tier,
+                    org=chosen_org,
+                    cache=key_control_cache,
+                )
+                if failure is not None or sealed is not None:
+                    # Neither is a value, so nothing downstream that shapes a
+                    # value applies: defaults, upconversion and model validation
+                    # would all be operating on something that is not the payload,
+                    # and model validation in particular would DROP the member —
+                    # turning a refusal into an absence.
+                    resolved.payload = None
+                    resolved.vault_error = failure
+                    resolved.sealed_content_key = sealed
+                    members.append(resolved)
+                    continue
+                merged_payload = opened
+
+            # Shape the resolved payload to the schema, both directions: fill a
+            # declared field that is absent, drop a stored field it does not
+            # declare. Without the second half a read-modify-write writer carries
+            # a removed field forward and its own write is refused.
+            resolved.payload = _drop_undeclared_fields(
                 chosen_row["set_id"], chosen_row["schema_revision"],
-                merged_payload,
-            ),
+                _apply_declared_defaults(
+                    chosen_row["set_id"], chosen_row["schema_revision"],
+                    merged_payload,
+                ),
+            )
+
+            # Optional revision transform.
+            if target_revision is not None:
+                transformed, reason = _shape_to_target(resolved, target_revision)
+                if transformed is None:
+                    if reason == "no_upconvert_path":
+                        dropped.no_upconvert_path += 1
+                    elif reason == "above_target_no_downgrade":
+                        dropped.above_target_no_downgrade += 1
+                    continue
+                resolved = transformed
+
+            # Optional payload typing via Pydantic (or compatible) model.
+            if model is not None:
+                typed = _apply_model(resolved, model, dropped)
+                if typed is None:
+                    continue
+                resolved = typed
+
+            members.append(resolved)
+    finally:
+        # Each control holds an open content-store connection; a read that
+        # left it to the garbage collector leaked ~10 a minute (auto-bkv3p).
+        _close_vault_key_controls(
+            control for control, _missing in key_control_cache.values()
         )
-
-        # Optional revision transform.
-        if target_revision is not None:
-            transformed, reason = _shape_to_target(resolved, target_revision)
-            if transformed is None:
-                if reason == "no_upconvert_path":
-                    dropped.no_upconvert_path += 1
-                elif reason == "above_target_no_downgrade":
-                    dropped.above_target_no_downgrade += 1
-                continue
-            resolved = transformed
-
-        # Optional payload typing via Pydantic (or compatible) model.
-        if model is not None:
-            typed = _apply_model(resolved, model, dropped)
-            if typed is None:
-                continue
-            resolved = typed
-
-        members.append(resolved)
 
     # Re-apply the payload predicate to the RESOLVED members. On the layer-free
     # path this only confirms the SQL narrowing; on the full-fetch fallback it

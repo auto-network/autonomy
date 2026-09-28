@@ -127,3 +127,38 @@ def test_cache_add_extends_without_replacing():
     cache.load({"gen-a": b"A" * 32})
     cache.add("gen-b", b"B" * 32)
     assert cache.secrets == {"gen-a": b"A" * 32, "gen-b": b"B" * 32}
+
+
+def test_a_vault_read_and_write_leave_no_content_store_open(graph_db, vaulted_set, tmp_path, monkeypatch):
+    """auto-bkv3p: every audited read opened a content-store connection that
+    nothing closed; a busy dashboard gained about ten a minute. Each read and
+    write now closes the store it opened."""
+    from tools.vault import db_content_store
+
+    opened = []
+    real_init = db_content_store.DbContentStore.__init__
+
+    def recording_init(self, db_path):
+        real_init(self, db_path)
+        opened.append(self)
+
+    monkeypatch.setattr(db_content_store.DbContentStore, "__init__", recording_init)
+    world, _cache = _world_with_production_holder(tmp_path)
+    # The harness keeps its own store open for the world's lifetime.
+    harness_store = getattr(world, "content_store", None)
+
+    settings_ops.add_setting(SET_ID, 1, KEY, {"secret_value": SECRET}, org=None, state="raw")
+    for _ in range(3):
+        resolved = settings_ops.read_set(SET_ID, org=None)
+        assert resolved.members[0].payload["secret_value"] == SECRET
+
+    reads = [store for store in opened if store is not harness_store]
+    assert len(reads) >= 3  # one per read
+    still_open = []
+    for store in reads:
+        try:
+            store._db.in_transaction
+        except Exception:
+            continue
+        still_open.append(store.db_path)
+    assert still_open == []

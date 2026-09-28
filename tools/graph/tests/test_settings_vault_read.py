@@ -559,6 +559,66 @@ def test_a_frozen_secured_setting_opens_to_plaintext_at_the_one_chokepoint(
         )
 
 
+def test_every_key_control_a_read_or_secured_open_obtains_is_closed(
+    graph_db_env, secured_schema, vault, monkeypatch
+):
+    """auto-bkv3p: the reader owns the content store the holder hands it.
+    Left to the garbage collector, one connection per vault read stayed
+    open. A read, the open bundle, a secured open and a secured open
+    refused for drift each close every control they obtained."""
+    from tools.graph.tests.vault_read_harness import PerReadStore
+
+    handed, closed = [], []
+
+    class ClosingStore(PerReadStore):
+        def close(self):
+            closed.append(self)
+
+    def holder(*, set_id, org):
+        control = vault.key_holder(set_id=set_id, org=org)
+        store = ClosingStore(control.content_store.path, control.content_store.tamper)
+        handed.append(store)
+        return settings_ops.VaultKeyControl(holdings=control.holdings, content_store=store)
+
+    monkeypatch.setattr(settings_ops, "_vault_key_holder", holder)
+    setting_id = ops.add_setting(
+        SECURED_SET, 1, "default", {"access_token": SECRET},
+        org=ops.CALLER_ORG,
+    )
+    with VaultStore(graph_db_env) as store:
+        store.put_class(vault.policy_class)
+    member = member_of(SECURED_SET)
+    assert member.vault_error is None, member.vault_error
+    digest = hashlib.sha256(
+        canonical_json(member.sealed_content_key)
+    ).hexdigest()
+    settings_ops.secured_open_bundle(
+        SECURED_SET, "default", setting_id=setting_id,
+        sealed_content_key_digest=digest, org=None,
+    )
+    content_key = open_cek(
+        vault.policy_class,
+        vault.opener_seeds,
+        member.sealed_content_key["sealed_cek"],
+        genesis_id=vault.genesis_id,
+        setting_name=object_id_for(vault.genesis_id, SECURED_SET, "default"),
+        required_policy=vault.policy_class.policy,
+    )
+    assert settings_ops.open_secured_setting(
+        SECURED_SET, "default", setting_id=setting_id,
+        sealed_content_key_digest=digest, content_key=content_key, org=None,
+    ) == {"access_token": SECRET}
+    with pytest.raises(VaultError, match="changed before approval"):
+        settings_ops.open_secured_setting(
+            SECURED_SET, "default", setting_id=setting_id,
+            sealed_content_key_digest="0" * 64, content_key=content_key,
+            org=None,
+        )
+
+    assert len(handed) >= 4
+    assert sorted(map(id, closed)) == sorted(map(id, handed))
+
+
 def test_a_secured_set_whose_row_names_the_audited_tier_is_refused(
     graph_db_env, secured_schema, vault_schema, vault
 ):

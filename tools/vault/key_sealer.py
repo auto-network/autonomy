@@ -216,7 +216,8 @@ def build_vault_sealer(
         from tools.vault.db_content_store import DbContentStore
 
         scoped = _scoped_db(set_id, org)
-        with KeyControlStore(scoped) as key_control:
+        with KeyControlStore(scoped) as key_control, \
+                DbContentStore(scoped) as content_store:
             holdings = Holdings(
                 secrets=cache.secrets,
                 descriptors=key_control.states,
@@ -238,7 +239,7 @@ def build_vault_sealer(
                 # neither top-level call — it is internal to the key-control
                 # store's own reachability.
                 ancestry=authority_ancestry,
-                content_store=DbContentStore(scoped),
+                content_store=content_store,
                 tier=tier,
                 policy_class=policy_class,
                 # Every credential published in this store receives a grant
