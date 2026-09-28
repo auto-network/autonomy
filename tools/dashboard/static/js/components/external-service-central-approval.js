@@ -6,8 +6,9 @@
  * sees it. Ported from components/service-approval.js (auto-fkhq0.26). */
 import {openApprovalDialog} from './approval-dialog.js';
 
-const durations = [['86400', '1 day'], ['604800', '7 days'], ['2592000', '30 days'],
-  ['31536000', '1 year'], ['315360000', '10 years'], ['', 'Never']];
+// When the access expires; "Never" reads as an expiry, not a duration.
+const durations = [['86400', 'In 1 day'], ['604800', 'In 7 days'], ['2592000', 'In 30 days'],
+  ['31536000', 'In 1 year'], ['315360000', 'In 10 years'], ['', 'Never']];
 
 async function readJson(url, init) {
   const response = await fetch(url, init);
@@ -54,12 +55,13 @@ export async function openExternalServiceCentralApproval(item, {onResolved = () 
 
   return openApprovalDialog({
     retained: true,
+    // Design of record: bc4d034a revision 42774731, state "Allow service access".
     review: {
-      kind: 'service', title: 'Allow service access', intro: '',
-      target: {type: 'Application', name: application, byline: 'Upload screenshots to your dropbox'},
-      requester: {kind: 'Requesting device', name: device},
-      facts: [], controls, durationLabel: 'Access lasts',
-      consequence: 'This allows screenshot uploads, not access to browse your dashboard.',
+      kind: 'service', title: 'Allow service access', intro: 'Let this device send screenshots to your dropbox.',
+      target: {type: 'Application', name: application, byline: 'Add screenshots to your dropbox'},
+      requester: {kind: 'Requesting device', name: device, byline: application},
+      facts: [], controls, durationLabel: 'Access expires',
+      consequence: 'This grants screenshot-upload access, not access to browse your dashboard.',
       unavailable: view.unavailable,
     },
     authorize: async (options) => { options.onAuthenticated(); return {}; },

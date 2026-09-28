@@ -25,23 +25,26 @@ test.beforeEach(()=>{
 test.afterEach(()=>{document.querySelector('[data-testid=approval-dialog]')?.remove();dom.window.close();});
 const posts=()=>calls.filter(c=>c.options?.method==='POST').map(c=>JSON.parse(c.options.body));
 
-test('the review shows who, to whom, and the whole message, untruncated',async()=>{
+// Design of record: bc4d034a revision 42774731, state "Approve a message".
+test('the review is the design state: destination, sender, one day, the whole message',async()=>{
   await openCrosstalkCentralApproval(item());
-  assert.equal(q('#title').textContent,'Message a session?');
-  assert.equal(q('#requester-kind').textContent,'From');
+  assert.equal(q('#title').textContent,'Allow this message?');
+  assert.equal(q('#intro').textContent,'Review the message and destination before allowing it.');
+  assert.equal(q('#requester-kind').textContent,'Requested by');
   assert.equal(q('#requester-name').textContent,'chatgpt:ops');
-  assert.match(q('#facts').textContent,/ToRelease checklist/);
-  assert.match(q('#facts').textContent,/Intentstatus check/);
+  assert.match(q('#facts').textContent,/FromChatgpt:ops|Fromchatgpt:ops/);
+  assert.match(q('#facts').textContent,/Permission lasts1 day/);
+  assert.doesNotMatch(q('#facts').textContent,/Intent/);
   assert.equal(q('#request-detail pre').textContent,MESSAGE);
   assert.equal(q('#request-detail .eyebrow').textContent,'Message');
-  assert.equal(q('#duration').value,'86400');
+  assert.equal(q('#duration'),null);
   assert.equal(q('#auth').hidden,true);
 });
 
-for(const value of ['3600','43200','86400','604800'])test('lifetime '+value+' reaches the Grant',async()=>{
-  await openCrosstalkCentralApproval(item());q('#duration').value=value;q('#primary').click();
-  await until(()=>q('#result-title').textContent==='Message approved');
-  assert.deepEqual(posts(),[{outcome:'granted',decision:{ttl_seconds:Number(value)}}]);
+test('allowing grants the channel for one day',async()=>{
+  await openCrosstalkCentralApproval(item());q('#primary').click();
+  await until(()=>q('#result-title').textContent==='Message sent');
+  assert.deepEqual(posts(),[{outcome:'granted',decision:{ttl_seconds:86400}}]);
 });
 
 test('decline records a decline with an empty decision',async()=>{

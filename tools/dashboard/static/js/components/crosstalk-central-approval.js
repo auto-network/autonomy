@@ -4,9 +4,8 @@
  * operator authorizes exactly this text, so the review shows the whole
  * message, never a summary; a long message makes the sheet scroll, as an email
  * review does. The Grant carries only how long the channel stays open. */
-import {openApprovalDialog} from './approval-dialog.js';
+import {openApprovalDialog, requestingSession} from './approval-dialog.js';
 
-const durations = [['3600', '1 hour'], ['43200', '12 hours'], ['86400', '1 day'], ['604800', '1 week']];
 
 async function readJson(url, init) {
   const response = await fetch(url, init);
@@ -38,14 +37,11 @@ export async function openCrosstalkCentralApproval(item, {onResolved = () => {},
   const itemUrl = '/api/attention/items/' + encodeURIComponent(item.id);
   const detail = await readJson(itemUrl);
   const view = crosstalkReviewState(detail.review?.application_result || null, item.actions, review);
-  const duration = document.createElement('select');
-  for (const [value, label] of durations) { const option = document.createElement('option'); option.value = value; option.textContent = label; duration.append(option); }
-  duration.value = '86400';
-  const controls = document.createElement('div'); controls.append(duration);
-  const handle = review.handle || review.requester_label || 'A chat';
+  const handle = review.handle || 'A chat';
   const target = review.target_label || review.target_session || 'a session';
-  const facts = [['To', target]];
-  if (review.intent) facts.push(['Intent', review.intent]);
+  // The organization is the destination session's.
+  const destination = await requestingSession(review.target_session, target);
+  const organization = destination.organization || null;
 
   async function decide(outcome, decision) {
     const response = await readJson(itemUrl + '/approval-decision', {
@@ -55,12 +51,18 @@ export async function openCrosstalkCentralApproval(item, {onResolved = () => {},
     if (response.resolution?.outcome !== outcome) throw new Error('This request was not completed.');
   }
 
+  // Design of record: bc4d034a revision 42774731, state "Approve a message".
+  // The permission lasts one day, as the design states it.
   return openApprovalDialog({
     retained: true,
     review: {
-      kind: 'operation', title: review.title || 'Message a session', intro: '',
-      requester: {kind: 'From', name: handle},
-      facts, controls, durationLabel: 'Keep this channel open for',
+      kind: 'operation', title: 'Allow this message', intro: 'Review the message and destination before allowing it.',
+      organization: organization
+        ? {name: organization.name, image: organization.favicon || organization.icon_data_uri || ''}
+        : undefined,
+      requester: {kind: 'Requested by', name: review.requester_label || 'ChatGPT relay', byline: organization?.name || ''},
+      target: {type: 'Subject', name: target},
+      facts: [['From', handle], ['Permission lasts', '1 day']],
       // Central strings carry no newlines, so the message arrives as lines.
       reviewLabel: 'Message', reviewText: Array.isArray(review.message_lines) ? review.message_lines.join('\n') : '',
       consequence: '',
@@ -68,14 +70,13 @@ export async function openCrosstalkCentralApproval(item, {onResolved = () => {},
     },
     authorize: async (options) => { options.onAuthenticated(); return {}; },
     execute: async () => {
-      // The dialog writes the chosen lifetime back into this select.
-      await decide('granted', {ttl_seconds: Number(duration.value)});
+      await decide('granted', {ttl_seconds: 86400});
       onResolved();
       return {approved: true, execution: {ok: true}};
     },
     decline: !view.unavailable && (item.actions || []).includes('declined')
       ? async () => { await decide('declined', {}); onResolved(); } : null,
-    result: {working: 'Approving message…', success: 'Message approved', copy: `It is delivered to ${target} next.`,
+    result: {working: 'Sending message\u2026', success: 'Message sent', copy: 'The message was sent to the requesting session.',
       fact: {name: target, byline: 'From ' + handle}},
     onClose,
   });
