@@ -1,19 +1,19 @@
-"""C3 share-link approval kinds: link_publish / link_revoke end-to-end.
+"""C3 share-link publish/revoke: planning, review and local verification.
 
-Drives the generalized approval primitive exactly the way the pieces do in
-production: the CLI's request shape on POST /api/approvals, the browser's
-enrichment GET (resolved target title, staged registry request), and a
-decision carrying a session-key-signed envelope. Execution rides the org
-tunnel (D19/auto-qol1v) and is covered in test_link_publish_tunnel.py; here
-the refusal seams short of the tunnel are what's under test, and the grant
-cache is real Settings rows in a tmp GRAPH_DB.
+A publish or revoke is planned (validated and frozen) before anyone reviews
+it, shown to the operator from trusted local stores, and verified against
+the frozen request when the signed envelope arrives (link_operations.plan /
+signing_view / verify, auto-fkhq0.10a). Execution rides the org tunnel
+(D19/auto-qol1v) and is covered in test_link_publish_tunnel.py; here the
+refusal seams short of the tunnel are what's under test, and the binding is
+a real Settings row in a tmp per-org tree.
 
 Invariant coverage: I6 (root-direct envelopes refused — a grant must trace
-to a named subject), staged-request freezing (the operator always reviews
-the frozen destination, with drift flagged), enrichment trust (titles and
-previews come from local stores the requester cannot spoof), and the C2
-seam (no envelope → clean error, nothing published). Token shape (I2) and
-grant caching are pinned on the tunnel path in test_link_publish_tunnel.py.
+to a named subject), staged-request freezing (the operator always signs the
+frozen destination, with drift flagged), review trust (titles and previews
+come from local stores the requester cannot spoof), and the C2 seam (no
+envelope → clean error, nothing published). Token shape (I2) and grant
+caching are pinned on the tunnel path in test_link_publish_tunnel.py.
 """
 
 from __future__ import annotations
@@ -22,11 +22,8 @@ import json
 import time
 
 import pytest
-from starlette.applications import Starlette
-from starlette.testclient import TestClient
-
-from tools.dashboard import approvals_routes, link_approvals
-from tools.dashboard.dao import approval_requests as ar
+from tools.dashboard import link_approvals
+from tools.dashboard import link_operations as ops
 from tools.graph import settings_ops
 from tools.graph.schemas.network_identity import (
     NETWORK_BINDING_SET_ID,
@@ -41,7 +38,6 @@ from tools.network.registry.signing import sign_request
 ORG = "netorg"  # dashboard-side org slug (Settings scope)
 ORG_UUID = "11111111-1111-4111-8111-111111111111"
 TARGET = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-SESSION = "auto-agent-1"
 REGISTRY_URL = "http://registry.test"
 
 SESSION_SCOPE = ("delegate:agent", "link:publish", "link:revoke",
@@ -107,10 +103,9 @@ def session_cert(root, session_key, founded_org):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch, root, founded_org):
-    """Approvals app + tmp Settings DB + a bound-org binding row."""
+    """Tmp per-org Settings + a bound-org binding row."""
     from tools.graph.db import GraphDB
 
-    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
     GraphDB.close_all_pooled()
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
@@ -127,8 +122,7 @@ def env(tmp_path, monkeypatch, root, founded_org):
         org=ORG,
     )
 
-    with TestClient(Starlette(routes=approvals_routes.ROUTES)) as client:
-        yield client
+    yield
     GraphDB.close_all_pooled()
 
 
@@ -136,10 +130,10 @@ def env(tmp_path, monkeypatch, root, founded_org):
 def present_target(tmp_path, monkeypatch):
     """A Present deck that really is in Design Studio, and its revision id.
 
-    Since 485efded, prepare_create resolves the target against the publish
-    org and raises before persisting, so a publish whose deck does not
-    exist never mints an approval. These tests are about what happens
-    AFTER an approval exists, so they need a target that resolves.
+    Since 485efded, planning resolves the target against the publish org
+    and refuses, so a publish whose deck does not exist is never offered
+    for signing. These tests are about what happens AFTER a publish is
+    planned, so they need a target that resolves.
     """
     from agents import design_db
     monkeypatch.setattr(design_db, "DB_PATH", tmp_path / "designs.db")
@@ -149,25 +143,27 @@ def present_target(tmp_path, monkeypatch):
         variants=[{"id": "a", "html": "<section>deck</section>"}])
 
 
-def _create_publish(client, target, meta=None):
-    """POST the approval exactly the way `graph link publish` does."""
-    r = client.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {"org": ORG, "target_uuid": target,
-                    "target_type": "present", "meta": meta or {}},
-    })
-    assert r.status_code == 200, r.text
-    return r.json()["id"]
+def _plan_publish(target, meta=None):
+    """Plan the publish exactly the way `graph link publish` requests it."""
+    return ops.plan("publish", {"org": ORG, "target_uuid": target,
+                                "target_type": "present", "meta": meta or {}})
 
 
-def _decide_and_wait(client, rid, body):
-    ok = client.post(f"/api/approvals/{rid}/decision", json=body)
-    assert ok.status_code == 200, ok.text
-    for _ in range(50):
-        d = client.get(f"/api/approvals/{rid}?wait=2").json()
-        if d["result"] is not None:
-            return d["result"]
-    raise AssertionError("decision result never landed")
+def _plan_refusal(request):
+    """Plan a publish that must be refused; return the reason it names."""
+    with pytest.raises(ops.LinkOperationError) as exc:
+        ops.plan("publish", request)
+    assert exc.value.code == "invalid_request"
+    assert isinstance(exc.value.detail, str) and exc.value.detail
+    return exc.value.detail
+
+
+def _verify_refusal(planned, body):
+    """Verify a signed body against a planned publish that must refuse it."""
+    with pytest.raises(ops.LinkOperationError) as exc:
+        ops.verify("publish", planned["request"], planned["staged"], body,
+                   not_before=time.time() - 60)
+    return exc.value
 
 
 def _cached_grants():
@@ -226,13 +222,6 @@ def test_cached_grant_uses_owning_scope_reader(monkeypatch):
     assert link_approvals._cached_grant("deadbeef", ORG) is None
 
 
-def _approve_body(envelope, rr=None):
-    """What the browser posts: just the verdict + the signed envelope. The
-    destination is frozen server-side at render; the decision cannot carry
-    or influence it."""
-    return {"approved": True, "envelope": envelope}
-
-
 def test_load_binding_ignores_other_orgs_binding(tmp_path, monkeypatch, root):
     """An unbound org must not inherit a binding from another org.
 
@@ -283,7 +272,7 @@ def test_load_binding_ignores_other_orgs_binding(tmp_path, monkeypatch, root):
     GraphDB.close_all_pooled()
 
 
-def test_enrichment_renders_target_and_ttl(env, tmp_path, monkeypatch):
+def test_review_renders_target_and_ttl(env, tmp_path, monkeypatch):
     """What the operator reviews: real title from Design Studio + the TTL."""
     from agents import design_db
     monkeypatch.setattr(design_db, "DB_PATH", tmp_path / "designs.db")
@@ -292,16 +281,13 @@ def test_enrichment_renders_target_and_ttl(env, tmp_path, monkeypatch):
         title="Widget Metrics briefing binder",
         variants=[{"id": "a", "html": "<section>hi</section>"}])
 
-    r = env.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {"org": ORG, "target_uuid": rev_id,
-                    "target_type": "present", "meta": {"ttl": 7 * 86400}},
-    })
-    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
-    assert enriched["target_title"] == "Widget Metrics briefing binder"
-    assert enriched["type_label"] == "Present deck"
-    assert enriched["ttl"] == 7 * 86400
-    assert enriched["registry_request"]["payload"]["target_uuid"] == rev_id
+    planned = _plan_publish(rev_id, meta={"ttl": 7 * 86400})
+    review = planned["review"]
+    assert review["target_title"] == "Widget Metrics briefing binder"
+    assert review["type_label"] == "Present deck"
+    assert review["ttl"] == 7 * 86400
+    view = ops.signing_view(planned["request"], planned["staged"])
+    assert view["registry_request"]["payload"]["target_uuid"] == rev_id
 
 
 def test_note_preview_comes_from_trusted_graph_target(env):
@@ -312,22 +298,20 @@ def test_note_preview_comes_from_trusted_graph_target(env):
         title="Release checklist",
         org=ORG,
     )
-    r = env.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {
-            "org": ORG,
-            "target_uuid": note["id"],
-            "target_type": "note",
-            "preview": "requester-controlled fake copy",
-        },
+    planned = ops.plan("publish", {
+        "org": ORG,
+        "target_uuid": note["id"],
+        "target_type": "note",
+        "preview": "requester-controlled fake copy",
     })
-    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
-    assert enriched["target_title"] == "Release checklist"
-    assert enriched["target_preview"] == {
+    assert planned["review"]["target_title"] == "Release checklist"
+    view = ops.signing_view(planned["request"], planned["staged"])
+    assert view["target_preview"] == {
         "title": "Release checklist",
         "content": "Trusted note body\n\n- first\n- second",
     }
-    assert "requester-controlled" not in str(enriched["target_preview"])
+    assert "requester-controlled" not in str(view["target_preview"])
+    assert "requester-controlled" not in str(planned["review"])
 
 
 def test_mission_title_comes_from_trusted_mission_store(env, tmp_path, monkeypatch):
@@ -335,18 +319,14 @@ def test_mission_title_comes_from_trusted_mission_store(env, tmp_path, monkeypat
     monkeypatch.setattr(mdb, "DB_PATH", tmp_path / "mission_control.db")
     mission = mdb.create_mission("Widget Metrics")
 
-    r = env.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {
-            "org": ORG,
-            "target_uuid": mission["mission_id"],
-            "target_type": "mission",
-            "preview": "requester-controlled fake title",
-        },
+    planned = ops.plan("publish", {
+        "org": ORG,
+        "target_uuid": mission["mission_id"],
+        "target_type": "mission",
+        "preview": "requester-controlled fake title",
     })
-    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
-    assert enriched["target_title"] == "Widget Metrics"
-    assert "requester-controlled" not in str(enriched.get("target_title"))
+    assert planned["review"]["target_title"] == "Widget Metrics"
+    assert "requester-controlled" not in str(planned["review"].get("target_title"))
 
 
 def test_unknown_mission_target_errors_cleanly(env, tmp_path, monkeypatch):
@@ -354,62 +334,51 @@ def test_unknown_mission_target_errors_cleanly(env, tmp_path, monkeypatch):
     monkeypatch.setattr(mdb, "DB_PATH", tmp_path / "mission_control.db")
     mdb.init_db(tmp_path / "mission_control.db")
 
-    # Since 485efded the refusal happens at creation, not at enrichment: a
-    # publish whose target does not resolve never mints an approval, so the
-    # operator is never asked to approve something that cannot work. Clean
-    # means a 400 naming the target, not a traceback and not an approval
-    # that carries its own error to the operator's device.
-    r = env.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {
-            "org": ORG,
-            "target_uuid": "nope-not-a-real-mission",
-            "target_type": "mission",
-        },
+    # The refusal happens at planning (485efded): a publish whose target
+    # does not resolve is never offered for signing, so the operator is
+    # never asked to approve something that cannot work. Clean means a
+    # refusal naming the target, not a traceback.
+    detail = _plan_refusal({
+        "org": ORG,
+        "target_uuid": "nope-not-a-real-mission",
+        "target_type": "mission",
     })
-    assert r.status_code == 400, r.text
-    assert "mission nope-not-a-real-mission not found" in r.json()["error"]
-    assert "Traceback" not in r.text
-
-
-def test_decline_surfaces_to_requester(env, present_target):
-    rid = _create_publish(env, present_target)
-    result = _decide_and_wait(env, rid, {"approved": False})
-    assert result == {"approved": False}          # the CLI's clean-deny state
-    assert _cached_grants() == {}                 # nothing published, nothing cached
-    assert ar.pending_for_session(SESSION) is None
+    assert "mission nope-not-a-real-mission not found" in detail
+    assert "Traceback" not in detail
 
 
 def test_no_envelope_has_an_actionable_error(env, present_target):
-    """Approving without a browser signature fails with operator wording."""
-    rid = _create_publish(env, present_target)
-    result = _decide_and_wait(env, rid, {"approved": True})
-    execution = result["execution"]
-    assert execution["ok"] is False
-    assert "unlock the organization" in execution["error"]
+    """Carrying out without a browser signature fails with operator wording."""
+    planned = _plan_publish(present_target)
+    refusal = _verify_refusal(planned, {"envelope": None})
+    assert refusal.code == "authority_refused"
+    assert "unlock the organization" in refusal.detail
+    # A body that carries no envelope at all is not a signed operation.
+    assert _verify_refusal(planned, {}).code == "invalid_request"
     assert _cached_grants() == {}
 
 
 def test_root_direct_envelope_refused_i6(env, root, present_target):
     """A certless (root-direct) envelope names no subject — refused."""
-    rid = _create_publish(env, present_target)
-    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    planned = _plan_publish(present_target)
+    rr = ops.signing_view(planned["request"], planned["staged"])["registry_request"]
     envelope = sign_request(root, rr["method"], rr["path"], rr["payload"],
                             ts=int(time.time()))
-    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
-    assert result["execution"]["ok"] is False
-    assert "I6" in result["execution"]["error"]
+    refusal = _verify_refusal(planned, {"envelope": envelope})
+    assert refusal.code == "authority_refused"
+    assert "I6" in refusal.detail
     assert _cached_grants() == {}
 
 
-def test_rerender_shows_frozen_destination_and_drift(env, session_key, present_target,
-                                                     session_cert):
+def test_signing_view_shows_frozen_destination_and_drift(env, session_key, present_target,
+                                                         session_cert):
     """A re-open after a binding swap still shows the FROZEN destination —
-    the operator can never see (and approve) a moved target — plus a drift
+    the operator can never see (and sign) a moved target — plus a drift
     flag the dialog turns into a warning."""
-    rid = _create_publish(env, present_target)
-    first = env.get(f"/api/approvals/{rid}").json()
+    planned = _plan_publish(present_target)
+    first = ops.signing_view(planned["request"], planned["staged"])
     assert first["registry_request"]["registry_url"] == REGISTRY_URL
+    assert first["org_uuid"] == ORG_UUID
     assert first["binding_drift"] is False
     settings_ops.upsert_by_key(
         NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
@@ -422,12 +391,12 @@ def test_rerender_shows_frozen_destination_and_drift(env, session_key, present_t
         },
         org=ORG,
     )
-    second = env.get(f"/api/approvals/{rid}").json()
+    second = ops.signing_view(planned["request"], planned["staged"])
     assert second["registry_request"]["registry_url"] == REGISTRY_URL  # frozen
     assert second["binding_drift"] is True
 
 
-# ── register-on-first-publish: enrich surfaces a graceful seam, not C1 ──
+# ── register-on-first-publish: planning names the org page, not C1 ──
 
 def _seed_org_key(org, root):
     """Store a keyed org WITHOUT a registry binding (the D3a autonomy state).
@@ -483,24 +452,28 @@ def _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, *test_orgs):
     )
 
 
-def test_keyed_unregistered_org_enrich_is_registerable_not_c1(tmp_path, monkeypatch, root):
-    """A keyed-but-unbound org: enrich flags registration_required, emits NO
-    blocking binding_error, never freezes a request (register-before-freeze),
-    and never leaks the C1 codename — even though a PEER has published a
-    binding (owning-scope read, P2)."""
+def _resolvable_target(monkeypatch):
+    """The present deck resolves, so planning reaches the binding check."""
+    import agents.design_db as _design_db
+    monkeypatch.setattr(
+        _design_db, "get_design",
+        lambda uuid: {"title": "test present deck"} if uuid == TARGET else None,
+    )
+
+
+def test_keyed_unregistered_org_plan_names_registration_not_c1(tmp_path, monkeypatch, root):
+    """A keyed-but-unbound org: planning refuses with the actionable next
+    step (register it from its organization page first), never freezes a
+    request, and never leaks the C1 codename — even though a PEER has
+    published a binding (owning-scope read, P2)."""
     _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, "unregorg")
     _seed_org_key("unregorg", root)   # unregorg owns a key, no binding of its own
-    enriched = link_approvals._enrich_link_publish({
-        "id": "r-unreg",
-        "request": {"org": "unregorg", "target_uuid": TARGET,
-                    "target_type": "present", "meta": {"ttl": 3600}},
-    })
-    assert enriched["registration_required"] is True
-    assert not enriched.get("binding_error")
-    # No staged request is frozen until a binding exists.
-    assert "registry_request" not in enriched
-    blob = json.dumps(enriched)
-    assert "C1" not in blob and "ceremony" not in blob
+    _resolvable_target(monkeypatch)
+    detail = _plan_refusal({"org": "unregorg", "target_uuid": TARGET,
+                            "target_type": "present", "meta": {"ttl": 3600}})
+    assert "not registered with auto.network yet" in detail
+    assert "/orgs/unregorg" in detail
+    assert "C1" not in detail and "ceremony" not in detail
     from tools.graph.db import GraphDB
     GraphDB.close_all_pooled()
 
@@ -508,44 +481,37 @@ def test_keyed_unregistered_org_enrich_is_registerable_not_c1(tmp_path, monkeypa
 def test_sealed_keyed_unregistered_org_is_registerable(tmp_path, monkeypatch, root):
     """Regression: an org keyed with the B4 Option-B SEALED scheme
     (sealed_root_key, no armored_private_key) — anchore's real state — must be
-    recognised as keyed and offered inline first-publish registration, exactly
-    like an armored org. Before the fix, _org_has_key checked only
-    armored_private_key, so registration_required stayed False and the publish
-    dialog dead-ended with 'not registered' + a disabled Approve button."""
+    recognised as keyed and pointed at registration, exactly like an armored
+    org. Before the fix, _org_has_key checked only armored_private_key, so
+    the publish dead-ended with a bare 'not registered'."""
     _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, "sealedorg")
     _seed_org_key_sealed("sealedorg", root)
-    # First publish must reach the approval that registers this key and
-    # provisions serving; demanding its certificate here deadlocks startup.
+    # First publish must not demand the serving certificate that registering
+    # this key provisions; demanding it here deadlocks startup.
     from tools.dashboard import link_serving_supervisor
     monkeypatch.setattr(link_serving_supervisor, "serve_cert_state",
                         lambda org: {"status": "missing"})
     link_approvals._require_startable_serving("sealedorg")
-    enriched = link_approvals._enrich_link_publish({
-        "id": "r-sealed",
-        "request": {"org": "sealedorg", "target_uuid": TARGET,
-                    "target_type": "present", "meta": {"ttl": 3600}},
-    })
-    assert enriched["registration_required"] is True
-    assert not enriched.get("binding_error")
-    assert "registry_request" not in enriched
+    _resolvable_target(monkeypatch)
+    detail = _plan_refusal({"org": "sealedorg", "target_uuid": TARGET,
+                            "target_type": "present", "meta": {"ttl": 3600}})
+    assert "not registered with auto.network yet" in detail
+    assert "/orgs/sealedorg" in detail
     from tools.graph.db import GraphDB
     GraphDB.close_all_pooled()
 
 
-def test_unkeyed_org_enrich_errors_cleanly_without_codename(tmp_path, monkeypatch, root):
+def test_unkeyed_org_plan_errors_cleanly_without_codename(tmp_path, monkeypatch, root):
     """An org with no key at all is a real error — but codename-free, and NOT
-    marked registerable (that's the new-key setup path, out of scope here).
-    A peer's binding must not spoof it into looking bound (owning-scope, P2)."""
+    pointed at registration (that's the new-key setup path, out of scope
+    here). A peer's binding must not spoof it into looking bound (P2)."""
     _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, "nokeyorg")
-    enriched = link_approvals._enrich_link_publish({
-        "id": "r-nokey",
-        "request": {"org": "nokeyorg", "target_uuid": TARGET,
-                    "target_type": "present", "meta": {"ttl": 3600}},
-    })
-    assert enriched["registration_required"] is False
-    assert enriched.get("binding_error")            # a real error remains
-    blob = json.dumps(enriched)
-    assert "C1" not in blob and "ceremony" not in blob
+    _resolvable_target(monkeypatch)
+    detail = _plan_refusal({"org": "nokeyorg", "target_uuid": TARGET,
+                            "target_type": "present", "meta": {"ttl": 3600}})
+    assert "not registered on auto.network" in detail   # the binding error
+    assert "/orgs/nokeyorg" not in detail
+    assert "C1" not in detail and "ceremony" not in detail
     from tools.graph.db import GraphDB
     GraphDB.close_all_pooled()
 
@@ -562,20 +528,16 @@ def test_mission_recipient_is_its_own_field_not_the_title(env, tmp_path, monkeyp
     mission = mdb.create_mission("Widget Metrics")
     guest = mdb.create_visitor_token("Priya (data partner)")
 
-    r = env.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {
-            "org": ORG,
-            "target_uuid": mission["mission_id"],
-            "target_type": "mission",
-            "meta": {"participant_id": guest["participant_id"]},
-        },
-    })
-    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
+    review = ops.plan("publish", {
+        "org": ORG,
+        "target_uuid": mission["mission_id"],
+        "target_type": "mission",
+        "meta": {"participant_id": guest["participant_id"]},
+    })["review"]
     # The target names the mission ALONE...
-    assert enriched["target_title"] == "Widget Metrics"
+    assert review["target_title"] == "Widget Metrics"
     # ...and the person is structured, resolvable, and separate.
-    assert enriched["recipient"] == {
+    assert review["recipient"] == {
         "participant_id": guest["participant_id"],
         "display_name": "Priya (data partner)",
         "avatar_url": None,  # no photo -> the initial-and-color avatar
@@ -587,18 +549,15 @@ def test_mission_link_bound_to_an_unknown_guest_errors(env, tmp_path, monkeypatc
     monkeypatch.setattr(mdb, "DB_PATH", tmp_path / "mission_control.db")
     mission = mdb.create_mission("Widget Metrics")
 
-    r = env.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {
-            "org": ORG,
-            "target_uuid": mission["mission_id"],
-            "target_type": "mission",
-            "meta": {"participant_id": "guest:not-a-real-participant"},
-        },
+    # A link bound to nobody real is refused at planning, before the
+    # operator is asked to sign it.
+    detail = _plan_refusal({
+        "org": ORG,
+        "target_uuid": mission["mission_id"],
+        "target_type": "mission",
+        "meta": {"participant_id": "guest:not-a-real-participant"},
     })
-    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
-    assert enriched["recipient"] is None
-    assert "not a known participant" in (enriched.get("target_error") or "")
+    assert "not a known participant" in detail
 
 
 def test_tunnel_meta_carries_participant_id():
@@ -676,19 +635,17 @@ def test_recipient_avatar_is_a_url_into_the_attachment_store(env, tmp_path, monk
     mission = mdb.create_mission("Widget Metrics")
     guest = mdb.create_visitor_token("Leon Zachery", avatar_attachment_id="att-123")
 
-    r = env.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {
-            "org": ORG,
-            "target_uuid": mission["mission_id"],
-            "target_type": "mission",
-            "meta": {"participant_id": guest["participant_id"]},
-        },
+    planned = ops.plan("publish", {
+        "org": ORG,
+        "target_uuid": mission["mission_id"],
+        "target_type": "mission",
+        "meta": {"participant_id": guest["participant_id"]},
     })
-    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
-    assert enriched["recipient"]["avatar_url"] == "/api/attachment/att-123"
-    # And nothing image-shaped is inlined anywhere in the payload.
-    assert "data:image" not in json.dumps(enriched)
+    assert planned["review"]["recipient"]["avatar_url"] == "/api/attachment/att-123"
+    # And nothing image-shaped is inlined anywhere in what is reviewed or signed.
+    assert "data:image" not in json.dumps(planned["review"])
+    assert "data:image" not in json.dumps(
+        ops.signing_view(planned["request"], planned["staged"]), default=str)
 
 
 # ── org:follow publish path (bead auto-akcr7, §10.1) ──────────

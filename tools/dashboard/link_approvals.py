@@ -1,31 +1,24 @@
-"""``link_publish`` / ``link_revoke`` approval kinds — the C3 share-link ceremony.
+"""Share-link publish and revoke: validation, local authority, and the
+tunnel executors (the Links application's own logic).
 
-The share-link publish flow rides the generalized approval primitive
-(``approvals_routes``) exactly the way commit signing does, with the roles
-split the same way:
+Two entry points share it through link_operations.py, and nothing else
+differs between them:
 
-* the **requester** (``graph link publish`` / ``revoke``, see
-  ``tools/graph/link_cmd.py``) posts a pending request and blocks on the
-  held GET;
-* the **operator's browser** reviews WHAT is being shared (the enrichment
-  below resolves the target's real title and preview from trusted local
-  stores — the requesting agent cannot spoof them), unlocks the existing
-  browser signer on demand, and posts the signed envelope in the decision;
-* the **executor** below verifies the envelope LOCALLY — the persona is
-  authenticated against the org's bound root and the authority ledger
-  grants the scope — then publishes/revokes the grant as a control frame
-  on the org's authenticated serving tunnel (register D19 / auto-qol1v;
-  the registry's HTTP write routes are retired). It caches the issued
-  grant to ``autonomy.network.link-grant`` (the I9 serving cache) and
-  returns the share URL through the approval result to the waiting CLI.
+* an agent's or the CLI's request (``graph link publish`` / ``revoke``,
+  tools/graph/link_cmd.py), approved by the operator in the Central inbox
+  (link_approval_central.py);
+* the operator publishing or revoking in their own browser
+  (link_operation_routes.py): the requester is the decider, so there is no
+  approval, only the review dialog they confirm before signing.
 
-Session-key seam (C2 dependency): the browser-side signature comes from
-``window.AutonomyNetworkSigner`` (see ``pages/worktrees.js``). Until the C2
-sign-on ceremony lands and installs a real signer, approving from a live
-browser yields a clean "no operator session key" error; the executor
-likewise refuses a decision that carries no envelope. Nothing here ever
-signs server-side — the session key must never exist outside the operator's
-browser (spec §3, I1 discipline applied to the delegated key).
+In both, the operator's browser signs the frozen registry request with the
+persona-certified org session key; nothing here signs server-side. The
+executor verifies the envelope LOCALLY (the persona chains to the org's
+bound root and the authority ledger grants the scope), then publishes or
+revokes the grant as a control frame on the org's authenticated serving
+tunnel (register D19 / auto-qol1v). It caches the issued grant in
+``autonomy.network.link-grant`` (the I9 serving cache) and returns the share
+URL.
 
 Invariants enforced here:
 
@@ -38,22 +31,18 @@ Invariants enforced here:
 * staged-request integrity — the envelope's payload must equal the payload
   derived from the *stored* request row; what the operator saw is exactly
   what gets published.
-* audience freezing (confused-deputy guard) — the FIRST render of the
-  dialog freezes the full staged request server-side (payload plus a
-  binding snapshot incl. ``root_pub``) onto the approval row, write-once.
-  Every later render shows that frozen snapshot and flags drift against
-  the live binding, so a binding swap between render and approval is
-  visible to the operator, never silent. Execution itself has no
-  client-controllable destination: the control frame goes to this org's
-  own serving tunnel (keyed by the org slug from the stored request row,
-  never from the decision body), and the persona's authority is verified
-  locally before any frame is emitted.
+* audience freezing (confused-deputy guard) — the request, its staged
+  registry payload and a binding snapshot (incl. ``root_pub``) are frozen
+  when the request is created (link_operations.plan). Execution refuses any
+  drift of the live binding from that snapshot, and it has no
+  client-controllable destination: the control frame goes to this org's own
+  serving tunnel, keyed by the org slug from the frozen request, and the
+  persona's authority is verified locally before any frame is emitted.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import copy
 import re
@@ -64,7 +53,6 @@ from urllib.parse import urlsplit
 
 
 from tools.dashboard.link_requirements import LinkRequirementError
-from tools.dashboard.dao import approval_requests as ar
 from tools.graph import settings_ops
 # Importing registers the autonomy.network.* Setting schemas (they
 # self-register on import), so grant-cache writes validate.
@@ -247,7 +235,7 @@ def _follow_publish_request(request: dict) -> dict:
     can name the org's scope. An org:follow link never expires unless revoked
     (TTL class indefinite), so ``meta.ttl`` is forbidden — as it is for
     org:join. Mutates *request* in place, the way the executor then reads it;
-    prepare_create freezes the enriched request onto the approval row."""
+    link_operations.plan freezes the enriched request when it is created."""
     # The request's whole shape is checked here, at creation, so a doomed
     # publish never reaches the operator (operator, 2026-09-28: "the
     # structure of the request should obviously be validated long before it
@@ -472,42 +460,6 @@ def _registry_payload(req: dict, binding: dict) -> dict:
     return payload
 
 
-# ── GET enrichment (what the operator reviews) ────────────────
-#
-# The first render FREEZES the staged request onto the approval row
-# (write-once, server-side). Every later render reads the frozen snapshot,
-# so a binding change after first render cannot move what the operator is
-# shown out from under them; it surfaces as a drift warning here. The
-# tunnel executor has no client-controllable destination to protect — the
-# frame goes to this org's own serving tunnel.
-
-
-def _staged_registry_request(row: dict, build) -> tuple[dict | None, str | None, bool]:
-    """The frozen staged request for *row* → (staged, binding_error, drift).
-
-    Freezes via *build(binding)* on first render; afterwards returns the
-    stored snapshot and flags drift against the current binding.
-    """
-    org = row["request"].get("org")
-    binding, binding_error = _load_binding(org)
-    staged = row.get("staged")
-    if staged is None:
-        if binding is None:
-            return None, binding_error, False
-        staged = build(binding)
-        staged["binding"] = {
-            "org_uuid": binding["org_uuid"],
-            "root_pub": binding["root_pub"],
-            "registry_url": binding["registry_url"],
-        }
-        ar.set_staged(row["id"], staged)
-        # Re-read: a concurrent first render may have won the write-once.
-        fresh = ar.get(row["id"])
-        staged = (fresh or {}).get("staged") or staged
-    drift = binding is not None and _binding_drift_error(staged, binding) is not None
-    return staged, None, drift
-
-
 def _link_recipient(req: dict) -> tuple[dict | None, str | None]:
     """Who a personalized link is being PREPARED FOR — resolved identity,
     not a decorated target name. Returns (recipient, error).
@@ -546,101 +498,6 @@ def _link_recipient(req: dict) -> tuple[dict | None, str | None]:
         # like any other image.
         "avatar_url": f"/api/attachment/{attachment_id}" if attachment_id else None,
     }, None
-
-
-def _enrich_link_publish(row: dict) -> dict:
-    req = row["request"]
-    org = req.get("org")
-    meta = req.get("meta") or {}
-    target = _resolve_target(
-        req.get("target_type", ""),
-        req.get("target_uuid", ""),
-        org,
-        req,
-    )
-    staged, binding_error, drift = _staged_registry_request(
-        row,
-        lambda binding: {
-            "method": "POST",
-            "path": "/v1/links",
-            "registry_url": binding["registry_url"],
-            "payload": _registry_payload(req, binding),
-        },
-    )
-    # Graceful seam: a keyed-but-unregistered org is NOT an error. The first
-    # publish registers its existing key inline (browser-side) and then the
-    # normal freeze/execute path runs against the now-live binding. We only
-    # surface the non-blocking flag here; no staged request is frozen until a
-    # binding exists, so the confused-deputy machinery is untouched.
-    registration_required = False
-    if staged is None and binding_error and _is_registerable_on_first_publish(org):
-        registration_required = True
-        binding_error = None
-    recipient, recipient_error = _link_recipient(req)
-    out = {
-        "target_title": target["title"],
-        "target_error": target["error"] or recipient_error,
-        "recipient": recipient,
-        "type_label": _TYPE_LABELS.get(req.get("target_type", ""), req.get("target_type")),
-        "ttl": meta.get("ttl"),
-        "label": meta.get("label"),
-        "absolute_expiry": req.get("expires_at"),
-        "binding_error": binding_error,
-        "binding_drift": drift,
-        "registration_required": registration_required,
-        **_approval_identities(org),
-    }
-    if target.get("preview"):
-        out["target_preview"] = target["preview"]
-    if staged:
-        out["registry_request"] = {k: staged[k]
-                                   for k in ("method", "path", "registry_url", "payload")}
-    return out
-
-
-def _enrich_link_revoke(row: dict) -> dict:
-    req = row["request"]
-    org = req.get("org")
-    token = req.get("token", "")
-    # Show which grant dies: resolve the token through the local grant cache.
-    grant = _cached_grant(token, org)
-    target_title, type_label = None, None
-    if grant:
-        resolved = _resolve_target(grant.get("target_type", ""),
-                                   grant.get("target_uuid", ""), org)
-        target_title = resolved["title"] or grant.get("target_uuid")
-        type_label = _TYPE_LABELS.get(grant.get("target_type", ""),
-                                      grant.get("target_type"))
-    staged, binding_error, drift = _staged_registry_request(
-        row,
-        lambda binding: {
-            "method": "DELETE",
-            "path": f"/v1/links/{token}",
-            "registry_url": binding["registry_url"],
-            "payload": {},
-        },
-    )
-    out = {
-        "target_title": target_title,
-        "type_label": type_label,
-        # The raw target type routes the browser's signature: a cached
-        # share link is signed over the tunnel proof-of-possession bytes;
-        # org:join (and any token not positively classifiable) is signed
-        # over the HTTP registry bytes — the same split the executor uses.
-        "target_type": grant.get("target_type") if grant else None,
-        "label": (grant.get("meta") or {}).get("label") if grant else None,
-        "cached": grant is not None,
-        "binding_error": binding_error,
-        "binding_drift": drift,
-    }
-    if staged:
-        # The revoke payload is empty by contract, so the browser cannot read
-        # the org uuid out of it the way publish does — expose the frozen
-        # binding's uuid so retained-session matching works for revoke too.
-        out["org_uuid"] = (staged.get("binding") or {}).get("org_uuid")
-        out["registry_request"] = {k: staged[k]
-                                   for k in ("method", "path", "registry_url", "payload")}
-    return out
 
 
 def _cached_grant(token: str, org: str | None) -> dict | None:
@@ -936,7 +793,7 @@ def _authorization_refusal(
 
 
 
-async def _execute_link_publish(row: dict, decision: dict) -> dict:
+async def _execute_link_publish(row: dict, decision: dict, *, grant_id: str | None = None) -> dict:
     req = row["request"]
     # org:join now rides the same authenticated org tunnel every other link
     # type uses (auto-qol1v): its persona-signed authority is proven LOCALLY,
@@ -948,7 +805,7 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
             _org_join_request(req)
         except ValueError as exc:
             return _fail(str(exc))
-    return await _execute_share_link_publish_tunnel(row, decision)
+    return await _execute_share_link_publish_tunnel(row, decision, grant_id=grant_id)
 
 
 # Control failures that occur BEFORE any frame reaches the registry — the
@@ -1036,7 +893,9 @@ def _local_serving_machine(org):
 _MACHINE_HEX_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 
-async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
+async def _execute_share_link_publish_tunnel(
+    row: dict, decision: dict, *, grant_id: str | None = None,
+) -> dict:
     """Publish a share link as a control frame on the org's authenticated
     tunnel (register D19). Authority is proven LOCALLY — the persona is
     authenticated against the org's bound root and the ledger fold grants
@@ -1067,9 +926,9 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     staged = row.get("staged")
     if not isinstance(staged, dict):
         return _fail(
-            "this request was never staged — the dialog render freezes the "
-            "exact request server-side, and publishing refuses to proceed "
-            "without that snapshot"
+            "this request was never staged — the request is frozen "
+            "server-side when it is created, and publishing refuses to "
+            "proceed without that snapshot"
         )
     signed_payload, payload_error = _publish_payload_for_decision(staged, decision)
     if payload_error:
@@ -1168,7 +1027,9 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         fragment_url,
         mint_channel_key,
     )
-    grant_id = secrets.token_hex(16)
+    # The caller may fix the grant id in advance so its once-only journal can
+    # name the row this publish writes first (auto-fkhq0.10a).
+    grant_id = grant_id or secrets.token_hex(16)
     channel_pub = None
     if req["target_type"] in CHANNEL_KEY_TARGET_TYPES:
         try:
@@ -1586,15 +1447,3 @@ def _drop_cached_grant(token: str, org: str | None) -> dict:
         except Exception:
             key_cleanup = False
     return {"grant_cleanup": grant_cleanup, "key_cleanup": key_cleanup}
-
-
-# Consumed by approvals_routes when building its ENRICH / EXECUTORS registries.
-ENRICH = {
-    "link_publish": _enrich_link_publish,
-    "link_revoke": _enrich_link_revoke,
-}
-
-EXECUTORS = {
-    "link_publish": _execute_link_publish,
-    "link_revoke": _execute_link_revoke,
-}

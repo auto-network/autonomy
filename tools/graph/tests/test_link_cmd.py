@@ -1,11 +1,13 @@
 """CLI integration for ``graph link publish|revoke|list`` (C3 acceptance).
 
-The CLI's single HTTP seam (``link_cmd._api_request``) is routed into a real
-approvals app (TestClient) whose test fixture plays the operator: as soon as
-the CLI posts an approval, the fixture fetches the enrichment, click-signs
-the staged request with a session key (what the C2 browser signer
-will do), and posts the decision, so the URL the CLI prints comes from an issued
-grant. Execution rides the org tunnel (D19/auto-qol1v): the supervisor
+The CLI's single HTTP seam (``link_cmd._api_request``) stands in for the
+Central approval round trip (auto-fkhq0.10a): when the CLI posts
+``{kind, request}`` (the org as ``org_slug``, no ``session``), the fixture
+plays the operator on the SAME code path a Central Grant takes. It plans and
+freezes the request (link_operations.plan), signs the frozen registry payload
+with a session key (what the browser signer does), and verifies and executes
+it once (link_operations.verify / execute). The CLI's held GET then reads the
+recorded execution, so the URL the CLI prints comes from an issued grant. Execution rides the org tunnel (D19/auto-qol1v): the supervisor
 control seam is stubbed to mint a well-formed grant. Covers: publish → URL
 printed; decline → clean message + exit 1; revoke → grant gone from
 ``graph link list``.
@@ -44,7 +46,7 @@ NOTE_TARGET = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 class OperatorFixture:
-    """Auto-resolves approvals the way the operator's browser would."""
+    """Plays the operator on the shared link-operation code path."""
 
     def __init__(
         self, client, session_key, session_cert, persona_pub, approve=True,
@@ -54,26 +56,40 @@ class OperatorFixture:
         self.session_cert = session_cert
         self.persona_pub = persona_pub
         self.approve = approve
+        self.results: dict = {}
+        self.bodies: list = []
 
-    def decide(self, rid: str) -> None:
+    def decide(self, kind: str, body: dict) -> str:
+        import asyncio
+        import secrets as _secrets
+
+        from tools.dashboard import link_operations as ops
+
+        self.bodies.append(body)
+        rid = "central-cli-" + _secrets.token_hex(6)
         if not self.approve:
-            self.client.post(f"/api/approvals/{rid}/decision",
-                             json={"approved": False})
-            return
-        enriched = self.client.get(f"/api/approvals/{rid}").json()
-        rr = enriched["registry_request"]
+            self.results[rid] = {"approved": False, "outcome": "declined"}
+            return rid
+        request = {("org" if k == "org_slug" else k): v for k, v in body.items()}
+        op = ops.op_for_kind(kind)
+        planned = ops.plan(op, request)
+        rr = planned["staged"]
         # D19/auto-qol1v: EVERY link publish/revoke rides the org tunnel, so
         # the executor verifies the signature over the fixed tunnel-control
-        # PoP bytes, not the registry method/path. Mirrors the browser's
-        # signing branch (worktrees.js) exactly.
-        is_revoke = rr["method"] == "DELETE"
-        path = "/control/revoke-link" if is_revoke else "/control/create-link"
+        # PoP bytes, not the registry method/path.
+        path = "/control/revoke-link" if op == ops.REVOKE else "/control/create-link"
+        granted_at = int(time.time())
         envelope = sign_request(
             self.session_key, "TUNNEL", path, rr["payload"],
-            ts=int(time.time()), cert=self.session_cert,
+            ts=granted_at, cert=self.session_cert,
         )
-        self.client.post(f"/api/approvals/{rid}/decision",
-                         json={"approved": True, "envelope": envelope})
+        entry = ops.prepare_entry(rid, op=op, initiator=f"approval:{rid}", planned=planned,
+                                  now=granted_at)
+        decision, persona = ops.verify(op, entry["request"], entry["staged"],
+                                       {"envelope": envelope}, not_before=granted_at)
+        execution = asyncio.run(ops.execute(rid, entry, decision, persona))
+        self.results[rid] = {"approved": True, "execution": execution}
+        return rid
 
 
 @pytest.fixture
@@ -233,14 +249,19 @@ def operator_env(tmp_path, monkeypatch):
         )
 
         def fake_api(method, path, *, body=None, timeout=None):
+            if method == "POST" and path == "/api/approvals":
+                # The Central requester bridge takes exactly {kind, request}.
+                assert set(body) == {"kind", "request"}, body
+                assert "org" not in body["request"] and "session" not in body
+                return {"id": operator.decide(body["kind"], body["request"])}
+            if method == "GET" and path.startswith("/api/approvals/"):
+                rid = path.split("/api/approvals/", 1)[1].split("?", 1)[0]
+                return {"id": rid, "result": operator.results.get(rid)}
             resp = client.request(method, path, json=body)
             if resp.status_code >= 400:
                 raise urllib.error.HTTPError(
                     path, resp.status_code, "error", {}, io.BytesIO(resp.content))
-            data = resp.json() if resp.content else {}
-            if method == "POST" and path == "/api/approvals":
-                operator.decide(data["id"])   # the operator acts immediately
-            return data
+            return resp.json() if resp.content else {}
 
         monkeypatch.setattr(link_cmd, "_api_request", fake_api)
         yield operator

@@ -177,9 +177,6 @@ def _enrich_commit_sign(row: dict) -> dict:
             "org": _org_for_approval(row.get("id")) }
 
 
-# Share-link approval kinds (link_publish / link_revoke) live in their own
-# module; it exports plain dicts so this file stays the single registry.
-from tools.dashboard import link_approvals as _link_approvals
 from tools.dashboard import dashboard_access_approvals as _dashboard_access
 from tools.dashboard import visitor_approvals as _visitor
 from tools.dashboard import mcp_peer_approvals as _mcp_peer
@@ -190,7 +187,6 @@ from tools.dashboard import external_service_approvals as _external_service
 # request plus a server-frozen staged context. Kinds absent here retain the
 # generalized primitive's historical pass-through behavior.
 PREPARE_CREATE = {
-    "link_publish": _link_approvals.prepare_create,
     **_dashboard_access.PREPARE_CREATE,
     **_visitor.PREPARE_CREATE,
     **_mcp_peer.PREPARE_CREATE,
@@ -209,7 +205,6 @@ AUTHORIZE_DECISION = {
 # the primitive. A kind whose stored request is self-describing needs no entry.
 ENRICH = {
     "commit_sign": _enrich_commit_sign,
-    **_link_approvals.ENRICH,
     **_dashboard_access.ENRICH,
     **_visitor.ENRICH,
     **_mcp_peer.ENRICH,
@@ -234,7 +229,6 @@ _decision_waiters: dict[str, asyncio.Event] = {}
 # executes anything. Kinds without an executor (commit_sign: the browser
 # itself produces the signature) store the verdict body directly.
 EXECUTORS: dict = {
-    **_link_approvals.EXECUTORS,
     **_dashboard_access.EXECUTORS,
     **_visitor.EXECUTORS,
     **_mcp_peer.EXECUTORS,

@@ -337,6 +337,7 @@ class AttentionRouteRuntime:
     link_receipt_forwarder: Any | None = None
     operator_result_projectors: Mapping[str, Any] | None = None
     vault_open_delivery: Any | None = None
+    link_operation_desk: Any | None = None
 
     def __post_init__(self) -> None:
         if self.operator_result_projectors is None:
@@ -460,12 +461,14 @@ def build_production_runtime() -> AttentionRouteRuntime:
     from tools.dashboard import fleet_enrollment_approvals as fleet
     from tools.dashboard import mailbox_central
     from tools.dashboard import vault_open_central
+    from tools.dashboard import link_approval_central as link_central
     dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
     approval_registry = build_production_registry(runtimes={
         dashboard_access_central.KIND: dashboard_approval_runtime,
         fleet.KIND: fleet.build_approval_runtime(),
         mailbox_central.KIND: mailbox_central.build_approval_runtime(),
         vault_open_central.KIND: vault_open_central.build_approval_runtime(),
+        **{kind: link_central.build_approval_runtime(kind) for kind in link_central.KINDS},
     })
     approval_waiters = ApprovalWaitHub()
     coordinator_holder: dict[str, Any] = {}
@@ -498,6 +501,8 @@ def build_production_runtime() -> AttentionRouteRuntime:
             mailbox_central.build_attention_runtime(approvals),
         (vault_open_central.KIND, vault_open_central.APPLICATION_SCOPE):
             vault_open_central.build_attention_runtime(approvals),
+        **{(kind, link_central.APPLICATION_SCOPE):
+           link_central.build_attention_runtime(approvals, kind) for kind in link_central.KINDS},
     }
     # The backup plugin's non-approval publication runtimes (auto-fnydv).
     # The registry rows are closed substrate code; the plugin supplies
@@ -558,10 +563,18 @@ def build_production_runtime() -> AttentionRouteRuntime:
             vault_open_central.KIND, vault_open_central.APPLICATION_SCOPE,
         ),
     )
+    link_desk = link_central.LinkApprovalDesk(approvals=approvals, index=index)
+    link_coordinators = [
+        link_central.LinkApprovalCoordinator(
+            kind=kind, approvals=approvals, index=index,
+            producer=attention_registry.producer(kind, link_central.APPLICATION_SCOPE),
+        )
+        for kind in link_central.KINDS
+    ]
     # One reconciler slot, one coordinator per migrated kind; each ignores
     # other kinds' approval ids.
     reconcilers = mailbox_central.ReconcilerGroup(
-        coordinator, email_coordinator, vault_coordinator,
+        coordinator, email_coordinator, vault_coordinator, *link_coordinators,
     )
     coordinator_holder["coordinator"] = reconcilers
     approval_http = ApprovalHttpBridge(
@@ -585,6 +598,12 @@ def build_production_runtime() -> AttentionRouteRuntime:
                         vault_delivery,
                         reconcile=vault_coordinator.reconcile_exact,
                     ),
+                **{
+                    c.kind: link_central.build_http_adapter(
+                        c.kind, link_desk, reconcile=c.reconcile_exact,
+                    )
+                    for c in link_coordinators
+                },
             },
         ),
         wait_hub=approval_waiters,
@@ -599,8 +618,11 @@ def build_production_runtime() -> AttentionRouteRuntime:
         operator_result_projectors={dashboard_access_central.KIND: consumer.project,
                                     fleet.KIND: fleet.project_result,
                                     mailbox_central.KIND: email_consumer.project,
-                                    vault_open_central.KIND: vault_delivery.operator_result},
+                                    vault_open_central.KIND: vault_delivery.operator_result,
+                                    **{kind: link_desk.operator_result
+                                       for kind in link_central.KINDS}},
         vault_open_delivery=vault_delivery,
+        link_operation_desk=link_desk,
     )
 
 
@@ -1223,6 +1245,64 @@ async def api_attention_vault_open_delivery(request: Request):
     return _no_store(dict(result))
 
 
+_LINK_OPERATION_STATUS = {
+    "invalid_request": 422, "not_found": 404, "not_actionable": 409,
+    "window_closed": 409, "elsewhere": 409, "stale_envelope": 409,
+    "authority_refused": 409, "running": 409, "unavailable": 503,
+}
+
+
+def _link_operation_refusal(exc: Exception) -> JSONResponse:
+    # A fixed code, plus the verifier's own words for authority_refused. The
+    # signed envelope is never echoed.
+    code = getattr(exc, "code", "unavailable")
+    if code not in _LINK_OPERATION_STATUS:
+        code = "unavailable"
+    body = {"error": code}
+    detail = getattr(exc, "detail", None)
+    if code in ("authority_refused", "invalid_request") and isinstance(detail, str):
+        body["detail"] = detail[:500]
+    return _no_store(body, status_code=_LINK_OPERATION_STATUS[code])
+
+
+async def api_attention_link_operation_bootstrap(request: Request):
+    """What the operator signs for one link item: the frozen registry request
+    (operator only, on the accepting machine, pending or awaiting operation)."""
+    denied = _operator_guard(request)
+    if denied is not None:
+        return denied
+    desk = _runtime.link_operation_desk
+    if desk is None:
+        return _no_store({"error": "not_found"}, status_code=404)
+    try:
+        result = await asyncio.to_thread(desk.bootstrap, request.path_params["attention_id"])
+    except Exception as exc:
+        return _link_operation_refusal(exc)
+    return _no_store(dict(result))
+
+
+async def api_attention_link_operation(request: Request):
+    """Carry out a granted link approval with the operator's signed envelope:
+    exactly ``{"envelope": ...}`` or ``{"envelope": ..., "ttl": ...}``."""
+    denied = operator_mutation_guard(request)
+    if denied is not None:
+        return denied
+    desk = _runtime.link_operation_desk
+    if desk is None:
+        return _no_store({"error": "not_found"}, status_code=404)
+    try:
+        body = await _strict_json_object(request)
+    except ValueError:
+        return _no_store({"error": "invalid_request"}, status_code=422)
+    try:
+        result = await desk.operate(request.path_params["attention_id"], body)
+    except Exception as exc:
+        return _link_operation_refusal(exc)
+    finally:
+        body.clear()
+    return _no_store(dict(result))
+
+
 async def _presentation_mutation(request: Request, operation: str):
     denied = operator_mutation_guard(request)
     if denied is not None:
@@ -1334,6 +1414,16 @@ routes = [
     Route(
         "/api/attention/items/{attention_id:path}/vault-open-delivery",
         api_attention_vault_open_delivery,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/attention/items/{attention_id:path}/link-operation-bootstrap",
+        api_attention_link_operation_bootstrap,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/attention/items/{attention_id:path}/link-operation",
+        api_attention_link_operation,
         methods=["POST"],
     ),
     Route(

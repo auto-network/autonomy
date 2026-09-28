@@ -1,11 +1,11 @@
 """D19: share-link publish/revoke over the org tunnel (auto-zudu9 §4).
 
 Share links no longer travel to the registry over HTTP. The dashboard
-authenticates the acting persona LOCALLY — the approval envelope's
-signature proves possession of the session key, its certificate chains to
-THE ACTING PERSONA with the required scope, and the ledger fold grants that
-scope — and then sends the mint/revoke as a control op on the
-already-authenticated serving tunnel. The registry never sees the persona.
+authenticates the acting persona LOCALLY — the envelope's signature proves
+possession of the session key, its certificate chains to THE ACTING PERSONA
+with the required scope, and the ledger fold grants that scope — and then
+sends the mint/revoke as a control op on the already-authenticated serving
+tunnel. The registry never sees the persona.
 
 The chain anchors at the persona, never at the org root: §7 rules that the
 org root is not a domain principal and that a chain terminating outside the
@@ -13,8 +13,13 @@ roster is void. Authentication and authorization are separate — the chain
 proves WHO signed, the authority ledger decides WHAT they may do.
 
 These tests found a real authority ledger, mock the tunnel control seam
-at ``link_serving_supervisor.control``, and drive the approval flow so the
-rewritten executor runs exactly as production would call it.
+at ``link_serving_supervisor.control``, and drive the operator's own link
+operation (``link_operation_routes``, auto-fkhq0.10a: prepare, then carry out
+with the signed envelope) so the executor runs exactly as production calls
+it. A refusal of authority happens before any effect and is answered 409
+``authority_refused`` with the verifier's words; a failure during the
+effect is a recorded execution with ``ok`` False; a request refused at
+prepare is 422 with its reason.
 """
 
 from __future__ import annotations
@@ -27,13 +32,14 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from tools.dashboard import (
-    approvals_routes,
+    attention_routes,
     link_channel_key,
     link_approvals,
+    link_operation_routes,
     link_serving_supervisor,
 )
-from tools.dashboard.dao import approval_requests as ar
 from tools.graph import settings_ops
+from tools.graph.schemas.link_operation import LINK_OPERATION_SET_ID
 from tools.graph.schemas.network_identity import (
     NETWORK_BINDING_REVISION,
     NETWORK_BINDING_SET_ID,
@@ -47,11 +53,11 @@ from tools.network.registry.signing import sign_request
 ORG = "netorg"
 ORG_UUID = "11111111-1111-4111-8111-111111111111"
 TARGET = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-SESSION = "auto-agent-1"
 REGISTRY_URL = "http://registry.test"
 PUBLIC_LINK_URL = "https://relay.auto.network"
 SESSION_SCOPE = ("delegate:agent", "link:publish", "link:revoke",
                  "tunnel:serve", "viewer:identify")
+OPERATIONS = "/api/links/operations"
 
 
 @pytest.fixture
@@ -68,6 +74,8 @@ def session_key():
 def founded_org(tmp_path, monkeypatch, root):
     from tools.graph.db import GraphDB
 
+    # The machine-homed link-operation journal roots beside this per-test
+    # orgs dir, so every test gets its own journal.
     orgs_dir = tmp_path / "orgs"
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     GraphDB.create_org_db(ORG, root=orgs_dir).close()
@@ -119,10 +127,13 @@ def session_cert(session_key, founder_persona):
 def env(tmp_path, monkeypatch, root, founded_org):
     from tools.graph.db import GraphDB
 
-    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
     GraphDB.close_all_pooled()
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
+    # The operator guard (operator principal + same-origin) is the route's
+    # concern, covered with the routes; these tests are about what the
+    # operator's signed operation may do.
+    monkeypatch.setattr(attention_routes, "operator_mutation_guard", lambda request: None)
     channel_key = KeyPair.from_private_hex("47" * 32)
     monkeypatch.setattr(
         link_channel_key, "mint_channel_key",
@@ -131,8 +142,8 @@ def env(tmp_path, monkeypatch, root, founded_org):
     async def live_probe(binding, token, org, **_kwargs):
         return {"live": True, "status": 200, "content_length": 42}
     monkeypatch.setattr(link_approvals, "_probe_serving", live_probe)
-    # prepare_create now resolves the target and fails closed if it does not
-    # exist (485efded); the present-deck fixture target must resolve in Design
+    # prepare resolves the target and fails closed if it does not exist
+    # (485efded); the present-deck fixture target must resolve in Design
     # Studio for the publish to be prepared.
     import agents.design_db as _design_db
     monkeypatch.setattr(
@@ -149,7 +160,7 @@ def env(tmp_path, monkeypatch, root, founded_org):
         },
         org=ORG,
     )
-    with TestClient(Starlette(routes=approvals_routes.ROUTES)) as client:
+    with TestClient(Starlette(routes=link_operation_routes.ROUTES)) as client:
         yield client
     GraphDB.close_all_pooled()
 
@@ -204,16 +215,15 @@ def _install_control(monkeypatch, recorder):
 
 
 class _SignStaged:
-    """A publish envelope still to be signed: over the payload the approval
-    staged when first rendered, with the decision's TTL applied — what the
-    browser signs, and the only payload a publish accepts (auto-uw39h)."""
+    """A publish envelope still to be signed: over the payload the operation
+    froze at prepare (what the review dialog signs), with the TTL the
+    operator chose applied — the only payload a publish accepts (auto-uw39h)."""
 
     def __init__(self, session_key, cert, pop_path):
         self.session_key, self.cert, self.pop_path = session_key, cert, pop_path
 
-    def sign(self, client, rid, decision=None):
-        shown = client.get(f"/api/approvals/{rid}").json()
-        staged = {"payload": shown["registry_request"]["payload"]}
+    def sign(self, client, op, decision=None):
+        staged = {"payload": op["signing"]["registry_request"]["payload"]}
         payload, error = link_approvals._publish_payload_for_decision(
             staged, decision or {})
         if error is not None:  # an edit the server refuses: sign as staged
@@ -226,41 +236,56 @@ class _SignStaged:
 
 def _tunnel_envelope(session_key, cert, pop_path, payload=None):
     """What the browser signs on the tunnel path. A publish with no explicit
-    payload signs the approval's staged payload at decision time."""
+    payload signs the operation's frozen payload when it is carried out."""
     if payload is None and pop_path == "/control/create-link":
         return _SignStaged(session_key, cert, pop_path)
     return sign_request(
         session_key, "TUNNEL", pop_path,
-        payload or {"target_uuid": TARGET, "target_type": "present"},
+        payload if payload is not None else {"target_uuid": TARGET, "target_type": "present"},
         ts=int(time.time()), cert=cert,
     )
 
 
+def _prepare(client, op, request):
+    return client.post(OPERATIONS, json={"op": op, "request": request})
+
+
 def _create_publish(client, meta=None, target_type="present"):
-    r = client.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {"org": ORG, "target_uuid": TARGET,
-                    "target_type": target_type, "meta": meta or {}},
-    })
+    r = _prepare(client, "publish", {"org": ORG, "target_uuid": TARGET,
+                                     "target_type": target_type, "meta": meta or {}})
     assert r.status_code == 200, r.text
-    return r.json()["id"]
+    return r.json()
 
 
-def _decision(client, rid, envelope, **fields):
+def _carry_out(client, op, envelope, **fields):
+    """POST the signed operation: exactly what the review dialog posts."""
     if isinstance(envelope, _SignStaged):
-        envelope = envelope.sign(client, rid, fields)
-    return {"approved": True, "envelope": envelope, **fields}
+        envelope = envelope.sign(client, op, fields)
+    return client.post(f"{OPERATIONS}/{op['operation_id']}",
+                       json={"envelope": envelope, **fields})
 
 
-def _decide_and_wait(client, rid, envelope):
-    ok = client.post(f"/api/approvals/{rid}/decision",
-                     json=_decision(client, rid, envelope))
-    assert ok.status_code == 200, ok.text
-    for _ in range(50):
-        d = client.get(f"/api/approvals/{rid}?wait=2").json()
-        if d["result"] is not None:
-            return d["result"]
-    raise AssertionError("decision result never landed")
+def _decide_and_wait(client, op, envelope, **fields):
+    """Carry the operation out; the verified operation runs to its recorded
+    execution (``{"execution": ...}``)."""
+    r = _carry_out(client, op, envelope, **fields)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _refused(client, op, envelope, **fields):
+    """Carry out an operation whose authority is refused BEFORE any effect:
+    409 authority_refused with the verifier's words. Returns the words."""
+    r = _carry_out(client, op, envelope, **fields)
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["error"] == "authority_refused", body
+    return body["detail"]
+
+
+def _journal_keys():
+    return {m.key for m in settings_ops.read_owned_set(
+        LINK_OPERATION_SET_ID, org="machine").members}
 
 
 def _cached_grants():
@@ -398,10 +423,9 @@ def test_publish_refused_without_scope_emits_no_frame(
 
     rid = _create_publish(env)
     envelope = _tunnel_envelope(session_key, cert, "/control/create-link")
-    result = _decide_and_wait(env, rid, envelope)
+    detail = _refused(env, rid, envelope)
 
-    assert result["execution"]["ok"] is False
-    assert "not authorized to publish" in result["execution"]["error"]
+    assert "not authorized to publish" in detail
     assert recorder.calls == []          # refused before any frame
     assert _cached_grants() == {}
 
@@ -417,10 +441,9 @@ def test_publish_refused_when_signature_forged(
     rid = _create_publish(env)
     envelope = _SignStaged(session_key, session_cert, "/control/create-link").sign(env, rid)
     envelope["sig"] = ("0" if envelope["sig"][0] != "0" else "1") + envelope["sig"][1:]
-    result = _decide_and_wait(env, rid, envelope)
+    detail = _refused(env, rid, envelope)
 
-    assert result["execution"]["ok"] is False
-    assert "signature does not verify" in result["execution"]["error"]
+    assert "signature does not verify" in detail
     assert recorder.calls == []
     assert _cached_grants() == {}
 
@@ -445,20 +468,18 @@ def test_an_envelope_signed_for_another_pending_request_is_refused(
     env, root, session_key, session_cert, monkeypatch,
 ):
     """auto-uw39h: a fresh, correctly chained link:publish envelope proves
-    the persona, not what it consented to. Signed over another pending
-    request's staged payload, it must not publish this one (the check lost
+    the persona, not what it consented to. Signed over another prepared
+    operation's frozen payload, it must not publish this one (the check lost
     with the registry HTTP path in 1355b191)."""
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
     shown = _create_publish(env, meta={"label": "the one shown"})
     other = _create_publish(env, meta={"label": "another request"})
     envelope = _SignStaged(session_key, session_cert, "/control/create-link").sign(env, shown)
-    env.get(f"/api/approvals/{other}")  # rendered, so staged
 
-    execution = _decide_and_wait(env, other, envelope)["execution"]
+    detail = _refused(env, other, envelope)
 
-    assert execution["ok"] is False
-    assert "signed payload does not match" in execution["error"]
+    assert "signed payload does not match" in detail
     assert recorder.calls == []
     assert _cached_grants() == {}
 
@@ -473,29 +494,23 @@ def test_an_envelope_signed_before_the_ttl_edit_is_refused(
     rid = _create_publish(env, meta={"ttl": 3600, "label": "binder"})
     envelope = _SignStaged(session_key, session_cert, "/control/create-link").sign(env, rid)
 
-    env.post(f"/api/approvals/{rid}/decision",
-             json={"approved": True, "envelope": envelope, "ttl": 86400})
-    for _ in range(50):
-        d = env.get(f"/api/approvals/{rid}?wait=2").json()
-        if d["result"] is not None:
-            break
+    detail = _refused(env, rid, envelope, ttl=86400)
 
-    assert d["result"]["execution"]["ok"] is False
-    assert "signed payload does not match" in d["result"]["execution"]["error"]
+    assert "signed payload does not match" in detail
     assert recorder.calls == []
 
 
 def test_a_binding_changed_since_the_render_is_refused(
     env, root, session_key, session_cert, founder_persona, monkeypatch,
 ):
-    """auto-0vfjc: the rendered payload names the organization as bound at
-    render. If the org re-registered before approval and the operator signed
-    on again under the new binding, the session proves authority there — so
-    only the payload shows the operator approved a different organization."""
+    """auto-0vfjc: the frozen payload names the organization as bound at
+    prepare. If the org re-registered before the operator signed, and they
+    signed on again under the new binding, the session proves authority
+    there — so only the frozen snapshot shows the operator reviewed a
+    different organization, and the operation is refused before any frame."""
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
-    rid = _create_publish(env)
-    env.get(f"/api/approvals/{rid}")  # rendered: staged under ORG_UUID
+    rid = _create_publish(env)  # frozen under ORG_UUID
     new_uuid = "22222222-2222-4222-8222-222222222222"
     settings_ops.upsert_by_key(
         NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
@@ -512,37 +527,12 @@ def test_a_binding_changed_since_the_render_is_refused(
                          org_uuid=new_uuid)
     envelope = _SignStaged(session_key, cert, "/control/create-link").sign(env, rid)
 
-    execution = _decide_and_wait(env, rid, envelope)["execution"]
+    detail = _refused(env, rid, envelope)
 
-    assert execution["ok"] is False
-    assert "organization changed after this request was prepared" in execution["error"]
+    assert "binding changed between review and approval" in detail
+    assert f"org_uuid: approved {ORG_UUID!r}, now {new_uuid!r}" in detail
     assert recorder.calls == []
     assert _cached_grants() == {}
-
-
-def test_an_unrendered_request_is_refused(
-    env, root, session_key, session_cert, monkeypatch,
-):
-    """Nothing staged means nothing the operator saw: refuse outright."""
-    recorder = _ControlRecorder()
-    _install_control(monkeypatch, recorder)
-    rid = _create_publish(env)
-    envelope = _tunnel_envelope(
-        session_key, session_cert, "/control/create-link",
-        {"target_uuid": TARGET, "target_type": "present", "meta": {}})
-    ok = env.post(f"/api/approvals/{rid}/decision",
-                  json={"approved": True, "envelope": envelope})
-    assert ok.status_code == 200, ok.text
-    assert ar.get(rid)["staged"] is None
-    for _ in range(50):
-        result = ar.get(rid)["result"]
-        if result is not None:
-            break
-        time.sleep(0.05)
-
-    assert result["execution"]["ok"] is False
-    assert "never staged" in result["execution"]["error"]
-    assert recorder.calls == []
 
 
 def test_create_link_over_tunnel_retries_until_the_tunnel_dials(monkeypatch):
@@ -608,11 +598,12 @@ def test_revoke_over_tunnel_drops_local_grant(
     recorder = _ControlRecorder(reply={"ok": True, "token": token,
                                        "revoked_at": 1})
     _install_control(monkeypatch, recorder)
-    created = env.post("/api/approvals", json={
-        "kind": "link_revoke", "session": SESSION,
-        "request": {"org": ORG, "token": token},
-    })
-    rid = created.json()["id"]
+    created = client_post_revoke(env, token)
+    assert created.status_code == 200, created.text
+    rid = created.json()
+    # A revoke signs the empty payload its frozen registry request names.
+    assert rid["signing"]["registry_request"]["payload"] == {}
+    assert rid["review"]["target_type"] == "present"
     envelope = _tunnel_envelope(session_key, session_cert,
                                "/control/revoke-link", payload={})
     result = _decide_and_wait(env, rid, envelope)
@@ -632,17 +623,14 @@ def test_revoke_refused_without_scope(
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
 
-    created = env.post("/api/approvals", json={
-        "kind": "link_revoke", "session": SESSION,
-        "request": {"org": ORG, "token": token},
-    })
-    rid = created.json()["id"]
+    created = client_post_revoke(env, token)
+    assert created.status_code == 200, created.text
+    rid = created.json()
     envelope = _tunnel_envelope(session_key, cert, "/control/revoke-link",
                                payload={})
-    result = _decide_and_wait(env, rid, envelope)
+    detail = _refused(env, rid, envelope)
 
-    assert result["execution"]["ok"] is False
-    assert "not authorized to revoke" in result["execution"]["error"]
+    assert "not authorized to revoke" in detail
     assert recorder.calls == []
     assert token in _cached_grants()     # nothing revoked
 
@@ -660,8 +648,8 @@ def test_expired_cert_is_refused(env, root, session_key, founded_org, founder_pe
     _install_control(monkeypatch, recorder)
     rid = _create_publish(env)
     envelope = _tunnel_envelope(session_key, cert, "/control/create-link")
-    result = _decide_and_wait(env, rid, envelope)
-    assert result["execution"]["ok"] is False
+    detail = _refused(env, rid, envelope)
+    assert "does not chain to its acting persona" in detail
     assert recorder.calls == []
     assert _cached_grants() == {}
 
@@ -676,8 +664,8 @@ def test_not_yet_valid_cert_is_refused(env, root, session_key, founded_org,
     _install_control(monkeypatch, recorder)
     rid = _create_publish(env)
     envelope = _tunnel_envelope(session_key, cert, "/control/create-link")
-    result = _decide_and_wait(env, rid, envelope)
-    assert result["execution"]["ok"] is False
+    detail = _refused(env, rid, envelope)
+    assert "does not chain to its acting persona" in detail
     assert recorder.calls == []
     assert _cached_grants() == {}
 
@@ -694,9 +682,8 @@ def test_non_operator_subject_kind_is_refused(env, root, session_key,
                             kind=kind)
         rid = _create_publish(env)
         envelope = _tunnel_envelope(session_key, cert, "/control/create-link")
-        result = _decide_and_wait(env, rid, envelope)
-        assert result["execution"]["ok"] is False, kind
-        assert "operator subjects only" in result["execution"]["error"]
+        detail = _refused(env, rid, envelope)
+        assert "operator subjects only" in detail, kind
     assert recorder.calls == []
     assert _cached_grants() == {}
 
@@ -706,22 +693,17 @@ def test_uncached_token_revoke_is_refused_naming_the_fault(
 ):
     """A token whose grant is not in this dashboard's cache cannot be
     classified or attributed, so the revoke is REFUSED with the fault named
-    (auto-qol1v: the HTTP fallback is retired) — and the tunnel control
-    seam is never called for it."""
+    (auto-qol1v: the HTTP fallback is retired) — at prepare, before the
+    operator is asked to sign — and the tunnel control seam is never called
+    for it."""
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
 
-    created = env.post("/api/approvals", json={
-        "kind": "link_revoke", "session": SESSION,
-        "request": {"org": ORG, "token": "deadbeef" * 4},  # not in cache
-    })
-    rid = created.json()["id"]
-    envelope = _tunnel_envelope(session_key, session_cert,
-                               "/control/revoke-link", payload={})
-    result = _decide_and_wait(env, rid, envelope)
-    execution = result["execution"]
-    assert execution["ok"] is False
-    assert "not in this dashboard's cache" in execution["error"]
+    created = client_post_revoke(env, "deadbeef" * 4)  # not in cache
+    assert created.status_code == 422, created.text
+    assert created.json()["error"] == "invalid_request"
+    assert "not in this dashboard's cache" in created.json()["detail"]
+    assert _journal_keys() == set()      # nothing prepared to sign
     # The tunnel control seam was never used for an unclassifiable token.
     assert recorder.calls == []
 
@@ -737,14 +719,9 @@ def test_ttl_override_from_decision_is_applied(env, root, session_key,
     _install_control(monkeypatch, recorder)
     rid = _create_publish(env, meta={"ttl": 3600, "label": "binder"})
     envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
-    ok = env.post(f"/api/approvals/{rid}/decision",
-                  json=_decision(env, rid, envelope, ttl=86400))
-    assert ok.status_code == 200
-    for _ in range(50):
-        d = env.get(f"/api/approvals/{rid}?wait=2").json()
-        if d["result"] is not None:
-            break
-    token = d["result"]["execution"]["token"]
+    d = _decide_and_wait(env, rid, envelope, ttl=86400)
+    assert d["execution"]["ok"] is True, d
+    token = d["execution"]["token"]
     assert recorder.calls[0][2]["meta"] == {"ttl": 86400, "label": "binder"}
     assert _cached_grants()[token]["meta"] == {"ttl": 86400, "label": "binder"}
 
@@ -755,12 +732,8 @@ def test_ttl_override_none_removes_expiry(env, root, session_key, session_cert,
     _install_control(monkeypatch, recorder)
     rid = _create_publish(env, meta={"ttl": 3600, "label": "binder"})
     envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
-    env.post(f"/api/approvals/{rid}/decision",
-             json=_decision(env, rid, envelope, ttl=None))
-    for _ in range(50):
-        d = env.get(f"/api/approvals/{rid}?wait=2").json()
-        if d["result"] is not None:
-            break
+    d = _decide_and_wait(env, rid, envelope, ttl=None)
+    assert d["execution"]["ok"] is True, d
     assert recorder.calls[0][2]["meta"] == {"label": "binder"}
 
 
@@ -770,14 +743,8 @@ def test_invalid_ttl_override_is_refused(env, root, session_key, session_cert,
     _install_control(monkeypatch, recorder)
     rid = _create_publish(env, meta={"ttl": 3600})
     envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
-    env.post(f"/api/approvals/{rid}/decision",
-             json=_decision(env, rid, envelope, ttl=-1))
-    for _ in range(50):
-        d = env.get(f"/api/approvals/{rid}?wait=2").json()
-        if d["result"] is not None:
-            break
-    assert d["result"]["execution"]["ok"] is False
-    assert "between 1 and 365 days" in d["result"]["execution"]["error"]
+    detail = _refused(env, rid, envelope, ttl=-1)
+    assert "between 1 and 365 days" in detail
     assert recorder.calls == []
     assert _cached_grants() == {}
 
@@ -822,10 +789,9 @@ def test_root_signed_certificate_is_refused(
     cert = _persona_cert(root, session_key, founder_persona.public_hex)
     rid = _create_publish(env)
     envelope = _tunnel_envelope(session_key, cert, "/control/create-link")
-    result = _decide_and_wait(env, rid, envelope)
+    detail = _refused(env, rid, envelope)
 
-    assert result["execution"]["ok"] is False
-    assert "does not chain to its acting persona" in result["execution"]["error"]
+    assert "does not chain to its acting persona" in detail
     assert recorder.calls == []
     assert _cached_grants() == {}
 
@@ -854,15 +820,11 @@ def _mint_bearer_invite(persona, expiry_ms, granted_role="owner"):
 
 
 def _create_org_join(client, invite_ref, expiry_ms, meta=None):
-    r = client.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {
-            "org": ORG, "target_uuid": ORG_UUID, "target_type": "org:join",
-            "invite_ref": invite_ref, "expires_at": expiry_ms,
-            "meta": meta or {},
-        },
+    return _prepare(client, "publish", {
+        "org": ORG, "target_uuid": ORG_UUID, "target_type": "org:join",
+        "invite_ref": invite_ref, "expires_at": expiry_ms,
+        "meta": meta or {},
     })
-    return r
 
 
 def _serving_ok(monkeypatch, status="ok"):
@@ -897,7 +859,7 @@ def test_org_join_publish_over_tunnel_caches_invite_grant(
     r = _create_org_join(env, invite_ref, expiry, meta={"label": "Join us"})
     assert r.status_code == 200, r.text
     envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
-    execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
+    execution = _decide_and_wait(env, r.json(), envelope)["execution"]
 
     assert execution["ok"] is True, execution
     org, op, args = recorder.calls[0]
@@ -932,14 +894,11 @@ def test_org_follow_publish_names_the_org_slug_and_keeps_its_uuid_local(
     })
     _install_control(monkeypatch, recorder)
 
-    r = env.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {"org": ORG, "target_type": "org:follow",
-                    "meta": {"label": "Follow us"}},
-    })
+    r = _prepare(env, "publish", {"org": ORG, "target_type": "org:follow",
+                                  "meta": {"label": "Follow us"}})
     assert r.status_code == 200, r.text
     envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
-    execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
+    execution = _decide_and_wait(env, r.json(), envelope)["execution"]
 
     assert execution["ok"] is True, execution
     org, op, args = recorder.calls[0]
@@ -974,7 +933,7 @@ def test_org_join_publish_refused_on_expiry_mismatch(
     r = _create_org_join(env, invite_ref, expiry)
     assert r.status_code == 200, r.text
     envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
-    execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
+    execution = _decide_and_wait(env, r.json(), envelope)["execution"]
 
     assert execution["ok"] is False
     assert execution["failed_stage"] == "invitation-expiry"
@@ -992,8 +951,10 @@ def test_org_join_publish_refused_without_serving_credential(
     invite_ref, _token = _mint_bearer_invite(founder_persona, expiry)
 
     r = _create_org_join(env, invite_ref, expiry)
-    assert r.status_code == 400
-    assert "no serving credential" in r.text
+    assert r.status_code == 422, r.text
+    assert r.json()["error"] == "invalid_request"
+    assert "no serving credential" in r.json()["detail"]
+    assert _journal_keys() == set()
 
 
 def test_org_join_publish_refused_meta_ttl(
@@ -1007,8 +968,9 @@ def test_org_join_publish_refused_meta_ttl(
     invite_ref, _token = _mint_bearer_invite(founder_persona, expiry)
 
     r = _create_org_join(env, invite_ref, expiry, meta={"ttl": 3600})
-    assert r.status_code == 400
-    assert "ttl" in r.text.lower()
+    assert r.status_code == 422, r.text
+    assert "ttl" in r.json()["detail"].lower()
+    assert _journal_keys() == set()
 
 
 def test_org_join_revoke_over_tunnel(
@@ -1025,25 +987,24 @@ def test_org_join_revoke_over_tunnel(
     })
     _install_control(monkeypatch, recorder)
     r = _create_org_join(env, invite_ref, expiry)
-    pub = _decide_and_wait(env, r.json()["id"], _tunnel_envelope(session_key, session_cert, "/control/create-link"))["execution"]
+    assert r.status_code == 200, r.text
+    pub = _decide_and_wait(env, r.json(), _tunnel_envelope(session_key, session_cert, "/control/create-link"))["execution"]
     assert pub["ok"] is True
 
     # Revoke rides the tunnel too; the cached org:join grant classifies it.
     rev_req = client_post_revoke(env, token)
     assert rev_req.status_code == 200, rev_req.text
+    assert rev_req.json()["review"]["target_type"] == "org:join"
+    # A revoke signs the empty payload its frozen registry request names.
     envelope = _tunnel_envelope(
-        session_key, session_cert, "/control/revoke-link",
-        payload={"token": token})
-    execution = _decide_and_wait(env, rev_req.json()["id"], envelope)["execution"]
+        session_key, session_cert, "/control/revoke-link", payload={})
+    execution = _decide_and_wait(env, rev_req.json(), envelope)["execution"]
     assert execution["ok"] is True
     assert ("netorg", "revoke-link", {"token": token}) in recorder.calls
 
 
 def client_post_revoke(client, token):
-    return client.post("/api/approvals", json={
-        "kind": "link_revoke", "session": SESSION,
-        "request": {"org": ORG, "token": token},
-    })
+    return _prepare(client, "revoke", {"org": ORG, "token": token})
 
 
 # ── auto-nh1po: machine-local targets are pinned to this machine ──────
@@ -1079,14 +1040,11 @@ def test_note_publish_stays_org_wide(env, root, session_key, session_cert, monke
         ),
     )
 
-    r = env.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION,
-        "request": {"org": ORG, "target_uuid": TARGET,
-                    "target_type": "note", "meta": {}},
-    })
+    r = _prepare(env, "publish", {"org": ORG, "target_uuid": TARGET,
+                                  "target_type": "note", "meta": {}})
     assert r.status_code == 200, r.text
     envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
-    execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
+    execution = _decide_and_wait(env, r.json(), envelope)["execution"]
     assert execution["ok"] is True, execution
 
     assert recorder.status_calls == []  # the org graph syncs: no pin needed
@@ -1150,16 +1108,15 @@ def test_an_unexpected_failure_before_create_link_leaves_no_grant(
 def test_org_follow_publish_with_a_duration_is_refused_at_creation(
     env, monkeypatch, extra, reason,
 ):
-    """auto-eky23: a doomed follow publish is refused when it is CREATED, with
-    its reason, so no approval ever reaches the operator."""
+    """auto-eky23: a doomed follow publish is refused when it is PREPARED,
+    with its reason, so the operator is never asked to sign it."""
     _serving_ok(monkeypatch)
     _channel_key_ok(monkeypatch)
     request = {"org": ORG, "target_type": "org:follow", "meta": {"label": "Follow us"}}
     request.update(extra)
-    before = ar.pending_count(kind="link_publish")
-    r = env.post("/api/approvals", json={
-        "kind": "link_publish", "session": SESSION, "request": request,
-    })
-    assert r.status_code == 400, r.text
-    assert reason in r.text
-    assert ar.pending_count(kind="link_publish") == before
+    r = _prepare(env, "publish", request)
+    assert r.status_code == 422, r.text
+    assert r.json()["error"] == "invalid_request"
+    assert reason in r.json()["detail"]
+    assert "operation_id" not in r.json()
+    assert _journal_keys() == set()      # nothing prepared to sign

@@ -257,13 +257,15 @@ def test_production_composition_shares_one_service_and_activates_dashboard_acces
     assert runtime.approval_http.registry.approvals is runtime.approvals.registry
     assert runtime.approval_http.registry.attention is runtime.index.registry
     assert set(runtime.approval_http.registry.adapters) == {
-        "dashboard_access", "email_send", "vault_open"}
+        "dashboard_access", "email_send", "vault_open", "link_publish", "link_revoke"}
     assert set(PRODUCTION_KIND_INVENTORY) == set(PRODUCTION_APPROVAL_REGISTRY.kinds)
     for kind, registration in PRODUCTION_APPROVAL_REGISTRY.kinds.items():
         assert runtime.approval_http.claims_kind(kind) is (
-            kind in {"dashboard_access", "fleet_machine_admission", "email_send", "vault_open"})
+            kind in {"dashboard_access", "fleet_machine_admission", "email_send", "vault_open",
+                     "link_publish", "link_revoke"})
         assert runtime.approval_http.migrated_kind(kind) is (
-            kind in {"dashboard_access", "email_send", "vault_open"})
+            kind in {"dashboard_access", "email_send", "vault_open", "link_publish",
+                     "link_revoke"})
         assert registration.runtime is None
 
 

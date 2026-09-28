@@ -82,10 +82,6 @@ def _api_request(method: str, path: str, *, body: dict | None = None,
     return json.loads(raw) if raw else {}
 
 
-def _requesting_session() -> str:
-    return os.environ.get("AUTONOMY_SESSION") or "cli"
-
-
 def _resolve_org(args) -> str:
     # org-scope: request — a link operation acts for one named org.
     org = getattr(args, "org", None)
@@ -327,8 +323,10 @@ def _await_decision(approval_id: str, verb: str) -> dict:
 
 def _post_approval(kind: str, request: dict) -> str:
     try:
+        # Central takes the organization as org_slug (it reserves ``org``).
+        body = {("org_slug" if k == "org" else k): v for k, v in request.items()}
         created = _api_request("POST", "/api/approvals", body={
-            "kind": kind, "session": _requesting_session(), "request": request,
+            "kind": kind, "request": body,
         })
     except urllib.error.HTTPError as e:
         _fail(f"the dashboard rejected the approval request: HTTP {e.code}")

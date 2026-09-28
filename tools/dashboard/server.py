@@ -162,6 +162,7 @@ from tools.dashboard import voice_commit_routes, voice_service_config
 from tools.dashboard import jira_routes
 from tools.dashboard import browser_routes
 from tools.dashboard import mailbox_routes
+from tools.dashboard import link_operation_routes
 from tools.dashboard import identity_routes
 from tools.dashboard import fleet_enrollment_routes
 from tools.dashboard import unlock_routes
@@ -21786,6 +21787,7 @@ routes = [
     *browser_routes.ROUTES,
     # Mailbox capability broker: read-only IMAP; sending is kind=email_send.
     *mailbox_routes.ROUTES,
+    *link_operation_routes.ROUTES,
 
     # Static (catch-all — plugin static mounts above take precedence)
     Mount("/static", app=_VersionedStatic(directory=str(STATIC_DIR)), name="static"),

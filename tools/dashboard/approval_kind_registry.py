@@ -38,6 +38,10 @@ class AuthorityRequirement(str, Enum):
     PERSONAL_ROOT = "personal_root"
     ORGANIZATION_SIGNING_KEY = "organization_signing_key"
     VAULT_POLICY = "vault_policy"
+    #: A persona-certified, scope-limited operator delegate (the org session
+    #: key the browser signs with), not the org's signing key and not a
+    #: per-action root ceremony (graph://263043dc-beb).
+    SCOPED_OPERATOR_DELEGATE = "scoped_operator_delegate"
 
 
 class ExpiryMode(str, Enum):
@@ -331,10 +335,10 @@ _PRODUCTION_ROWS = (
     ("email_send", "mailbox", RequesterPolicy.SESSION_PRINCIPAL,
      AuthorityRequirement.OPERATOR_SESSION, ApprovalExpiryPolicy(ExpiryMode.NEVER)),
     ("link_publish", "links", RequesterPolicy.SESSION_PRINCIPAL,
-     AuthorityRequirement.ORGANIZATION_SIGNING_KEY,
+     AuthorityRequirement.SCOPED_OPERATOR_DELEGATE,
      ApprovalExpiryPolicy(ExpiryMode.TRUSTED_SOURCE_DEADLINE)),
     ("link_revoke", "links", RequesterPolicy.SESSION_PRINCIPAL,
-     AuthorityRequirement.ORGANIZATION_SIGNING_KEY, ApprovalExpiryPolicy(ExpiryMode.NEVER)),
+     AuthorityRequirement.SCOPED_OPERATOR_DELEGATE, ApprovalExpiryPolicy(ExpiryMode.NEVER)),
     ("dashboard_access", "sessions", RequesterPolicy.SESSION_PRINCIPAL,
      AuthorityRequirement.PERSONAL_ROOT,
      ApprovalExpiryPolicy(ExpiryMode.FIXED, fixed_seconds=7200)),
