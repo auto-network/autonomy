@@ -262,7 +262,7 @@ def test_production_composition_shares_one_service_and_activates_dashboard_acces
     for kind, registration in PRODUCTION_APPROVAL_REGISTRY.kinds.items():
         assert runtime.approval_http.claims_kind(kind) is (
             kind in {"dashboard_access", "fleet_machine_admission", "email_send", "vault_open",
-                     "link_publish", "link_revoke"})
+                     "link_publish", "link_revoke", "external_service_access"})
         assert runtime.approval_http.migrated_kind(kind) is (
             kind in {"dashboard_access", "email_send", "vault_open", "link_publish",
                      "link_revoke"})

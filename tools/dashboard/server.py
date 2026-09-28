@@ -23124,6 +23124,31 @@ async def _lifespan(app):
     finally:
         await _on_shutdown()
 
+#: Path segments that are themselves a capability (a device's enrollment poll
+#: secret, auto-fkhq0.26) and must never reach a log line.
+_LOG_SECRET_PATH_RE = re.compile(r"(/api/dropbox/enrollments/)[^/?\s\"]+")
+
+
+def _redact_logged_path(text: str) -> str:
+    return _LOG_SECRET_PATH_RE.sub(r"\1[redacted]", text)
+
+
+class _SecretPathLogFilter(logging.Filter):
+    """Redacts capability path segments from uvicorn's access log lines, for a
+    server started without ``--no-access-log``."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact_logged_path(arg) if isinstance(arg, str) else arg
+                                for arg in record.args)
+        if isinstance(record.msg, str):
+            record.msg = _redact_logged_path(record.msg)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_SecretPathLogFilter())
+
+
 class _RequestDurationMiddleware(BaseHTTPMiddleware):
     # A request slower than this almost always means the event loop was
     # blocked (sync work on the loop, or CPU-bound to_thread holding the GIL),
@@ -23146,7 +23171,7 @@ class _RequestDurationMiddleware(BaseHTTPMiddleware):
         if len(query) > cls._QUERY_MAX:
             query = query[: cls._QUERY_MAX] + "…"
         target = f"{request.url.path}?{query}" if query else request.url.path
-        return request.method, target, status_code, dur_ms, _client_address(request)
+        return request.method, _redact_logged_path(target), status_code, dur_ms, _client_address(request)
 
     async def dispatch(self, request, call_next):
         t0 = time.monotonic()
@@ -23394,6 +23419,8 @@ def main():
         port=8080,
         log_level="info",
         log_config=_timestamped_log_config(),
+        # As both launchers: the request middleware is the access log.
+        access_log=False,
         reload=True,
         reload_dirs=["tools/dashboard"],
         reload_excludes=["tools/dashboard/tests"],

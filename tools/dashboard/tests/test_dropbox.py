@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import time
@@ -15,12 +14,10 @@ from starlette.testclient import TestClient
 
 from tools.dashboard import (
     api_auth,
-    approvals_routes,
     dropbox_routes,
-    external_service_approvals,
     unlock_routes,
 )
-from tools.dashboard.dao import approval_requests, auth_db
+from tools.dashboard.dao import auth_db
 from tools.dashboard.server import authenticate_service, authenticate_session_request
 
 
@@ -28,7 +25,6 @@ from tools.dashboard.server import authenticate_service, authenticate_session_re
 def dropbox_env(tmp_path, monkeypatch):
     saved = auth_db._conn
     auth_db.init_db(tmp_path / "auth.db")
-    monkeypatch.setattr(approval_requests, "DB_PATH", tmp_path / "approvals.db")
     monkeypatch.setenv("AUTONOMY_DROPBOX_DIR", str(tmp_path / "dropbox"))
     dropbox_routes._enrollment_attempts.clear()
     try:
@@ -209,102 +205,6 @@ def test_scoped_service_bearer_is_generic_over_exact_api_routes(dropbox_env):
     assert authenticate_service(
         request("POST", "/api/missions/mission-1/events"),
     ) is None
-
-
-@pytest.mark.asyncio
-async def test_approval_executor_mints_only_expiring_dropbox_service(dropbox_env):
-    request, staged = external_service_approvals.registered_request(
-        application_scope="dropbox",
-        source_approval_id="enroll-1",
-        requester_label="Jeremy's iPhone",
-        requested_ttl_seconds=86400,
-        resource_audience="global_operator_dropbox",
-        capabilities=[{"method": "POST", "path": "/api/dropbox"}],
-    )
-    assert request["capabilities"] == [{"method": "POST", "path": "/api/dropbox"}]
-    assert request["resource_audience"] == "global_operator_dropbox"
-
-    result = await external_service_approvals.execute(
-        {"id": "enroll-1", "request": request, "staged": staged},
-        {"approved": True, "ttl_seconds": 3600},
-    )
-    assert result["ok"] is True
-    assert result["sourceApprovalId"] == "enroll-1"
-    assert result["capabilities"] == [{"method": "POST", "path": "/api/dropbox"}]
-    assert auth_db.resolve_scoped_service_token(
-        _hash(result["token"]), method="POST", path="/api/dropbox",
-    )["name"] == "dropbox-upload:enroll-1"
-    assert auth_db.resolve_scoped_service_token(
-        _hash(result["token"]), method="GET", path="/api/dropbox",
-    ) is None
-    assert auth_db.resolve_token(_hash(result["token"])) is None
-
-
-def test_external_access_kind_rejects_caller_selected_capabilities(dropbox_env):
-    with pytest.raises(ValueError, match="registered enrollment route"):
-        external_service_approvals.reject_direct_create(
-            "untrusted caller",
-            {
-                "resource_audience": "sessions",
-                "capabilities": [{"method": "GET", "path": "/api/sessions"}],
-            },
-        )
-
-
-def test_public_enrollment_creates_central_approval_and_returns_credential(
-    dropbox_env, monkeypatch,
-):
-    async def noop(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(
-        approvals_routes.web_push, "register_approval_pending", noop,
-    )
-    monkeypatch.setattr(approvals_routes.event_bus, "broadcast", noop)
-
-    with TestClient(_app()) as client:
-        created = client.post(
-            "/api/dropbox/enrollments",
-            json={
-                "label": "Jeremy's iPhone",
-                "requested_ttl_seconds": 86400,
-                # These authority-bearing fields must be ignored in favor of
-                # the server registration.
-                "resource_audience": "sessions",
-                "capabilities": [{"method": "GET", "path": "/api/sessions"}],
-            },
-        )
-        assert created.status_code == 202, created.text
-        enrollment_id = created.json()["id"]
-        assert created.json()["sourceApprovalId"] == enrollment_id
-        row = approval_requests.get(enrollment_id)
-        assert row is not None
-        assert row["kind"] == "external_service_access"
-        assert row["request"]["sourceApprovalId"] == enrollment_id
-        assert row["request"]["resource_audience"] == "global_operator_dropbox"
-        assert row["request"]["capabilities"] == [
-            {"method": "POST", "path": "/api/dropbox"},
-        ]
-
-        execution = asyncio.run(
-            external_service_approvals.execute(
-                row, {"approved": True, "ttl_seconds": 3600},
-            )
-        )
-        assert approval_requests.set_result(
-            enrollment_id, {"approved": True, "execution": execution},
-        )
-        enrolled = client.get(f"/api/dropbox/enrollments/{enrollment_id}")
-        assert enrolled.status_code == 200
-        receipt = enrolled.json()
-        assert receipt["status"] == "approved"
-        assert receipt["sourceApprovalId"] == enrollment_id
-        assert receipt["capabilities"] == [
-            {"method": "POST", "path": "/api/dropbox"},
-        ]
-        assert auth_db.resolve_scoped_service_token(
-            _hash(receipt["token"]), method="POST", path="/api/dropbox",
-        )["name"] == f"dropbox-upload:{enrollment_id}"
 
 
 def test_metadata_is_json_and_never_contains_a_token(dropbox_env):

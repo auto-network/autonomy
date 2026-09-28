@@ -1,14 +1,19 @@
 """Auth DB — SQLite-backed token and message storage for CrossTalk.
 
 Database: data/auth.db
-Owned by the dashboard process, never mounted into agent containers.
+Owned by the dashboard process. Session containers never see it: they get
+the repo snapshot and, of data/, only data/uploads read-only
+(agents/session_launcher.py). A host terminal mounts the whole data root
+writable, by design -- it also holds the host Docker socket, i.e. the
+operator's own machine authority.
 Stores SHA-256 hashes of session and service tokens. Raw session tokens live
 in container environments; raw service tokens live only with their external
-caller and in the approval result that enrolled it.
+caller.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import sqlite3
@@ -54,6 +59,15 @@ CREATE TABLE IF NOT EXISTS crosstalk_messages (
 
 CREATE INDEX IF NOT EXISTS idx_crosstalk_target
     ON crosstalk_messages(target_session, id);
+
+-- An external device's pending enrollment (auto-fkhq0.26): the hash of the
+-- device's poll secret, bound to the public Central approval it opened. The
+-- secret itself is held only by the device.
+CREATE TABLE IF NOT EXISTS service_enrollments (
+    poll_hash       TEXT PRIMARY KEY,
+    approval_id     TEXT NOT NULL UNIQUE,
+    created_at      REAL NOT NULL
+);
 """
 
 
@@ -219,8 +233,8 @@ def insert_service_token(
     A service token has no organization (``org`` is NULL) and is marked with a
     ``kind`` so it never resolves as an ordinary session token. It is created by
     either an explicit install-time act or an operator-approved enrollment,
-    never per session, and is machine-local: auth.db is never mounted into
-    containers and never synced across the fleet.
+    never per session, and is machine-local: auth.db is never synced across
+    the fleet and never reaches a session container (see the module note).
     ``name`` is a stable identity label (e.g. ``mcp-relay-service``) used only
     for display and revocation.
     """
@@ -256,6 +270,28 @@ def resolve_service_token(token_hash: str, kind: str = MCP_SERVICE_KIND) -> str 
     return row["tmux_name"] if row else None
 
 
+def _scoped_service_scope(
+    capabilities: list[dict[str, str]],
+    application_scope: str,
+    resource_audience: str,
+    source_approval_id: str,
+) -> str:
+    fields = {
+        "application_scope": application_scope,
+        "resource_audience": resource_audience,
+        "source_approval_id": source_approval_id,
+    }
+    for field, value in fields.items():
+        if not isinstance(value, str) or not value or len(value) > 256:
+            raise ValueError(f"{field} must be a non-empty string up to 256 characters")
+    return json.dumps({
+        "application_scope": application_scope,
+        "resource_audience": resource_audience,
+        "sourceApprovalId": source_approval_id,
+        "capabilities": normalize_api_capabilities(capabilities),
+    }, sort_keys=True, separators=(",", ":"))
+
+
 def insert_scoped_service_token(
     token_hash: str,
     name: str,
@@ -272,27 +308,104 @@ def insert_scoped_service_token(
     server-side registration. No wildcard or prefix semantics exist: every
     route is an explicit ``{"method": "POST", "path": "/api/..."}`` pair.
     """
-    fields = {
-        "application_scope": application_scope,
-        "resource_audience": resource_audience,
-        "source_approval_id": source_approval_id,
-    }
-    for field, value in fields.items():
-        if not isinstance(value, str) or not value or len(value) > 256:
-            raise ValueError(f"{field} must be a non-empty string up to 256 characters")
-    normalized = normalize_api_capabilities(capabilities)
+    scope = _scoped_service_scope(capabilities, application_scope, resource_audience,
+                                  source_approval_id)
     insert_service_token(
         token_hash,
         name,
         kind=EXTERNAL_SERVICE_KIND,
         expires_at=expires_at,
-        service_scope={
-            "application_scope": application_scope,
-            "resource_audience": resource_audience,
-            "sourceApprovalId": source_approval_id,
-            "capabilities": normalized,
-        },
+        service_scope=json.loads(scope),
     )
+
+
+def rotate_scoped_service_token(
+    token_hash: str,
+    name: str,
+    *,
+    capabilities: list[dict[str, str]],
+    application_scope: str,
+    resource_audience: str,
+    source_approval_id: str,
+    expires_at: float | None = None,
+) -> None:
+    """Make ``token_hash`` the only live bearer named exactly ``name``.
+
+    Revoking every live external bearer of that exact name and inserting the
+    new one is one IMMEDIATE transaction, so concurrent rotations serialize
+    and never leave two live tokens. Nothing is pattern-matched.
+    """
+    scope = _scoped_service_scope(capabilities, application_scope, resource_audience,
+                                  source_approval_id)
+    conn = get_conn()
+    now = time.time()
+    # Every caller commits its own writes, so no implicit transaction is open
+    # here; a caller holding uncommitted DML on this handle would make this
+    # raise "cannot start a transaction within a transaction".
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            "UPDATE session_tokens SET revoked_at=?"
+            " WHERE tmux_name=? AND kind=? AND revoked_at IS NULL",
+            (now, name, EXTERNAL_SERVICE_KIND),
+        )
+        conn.execute(
+            "INSERT INTO session_tokens "
+            "(token_hash, tmux_name, created_at, org, kind, expires_at, service_scope)"
+            " VALUES (?, ?, ?, NULL, ?, ?, ?)",
+            (token_hash, name, now, EXTERNAL_SERVICE_KIND, expires_at, scope),
+        )
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
+
+
+def scoped_service_token_minted(name: str) -> bool:
+    """Whether any external bearer, live or revoked, was ever named ``name``."""
+    conn = get_conn()
+    return conn.execute(
+        "SELECT 1 FROM session_tokens WHERE tmux_name=? AND kind=? LIMIT 1",
+        (name, EXTERNAL_SERVICE_KIND),
+    ).fetchone() is not None
+
+
+# -- External service enrollments ----------------------------------------------
+
+
+def insert_service_enrollment(poll_hash: str, approval_id: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO service_enrollments (poll_hash, approval_id, created_at)"
+        " VALUES (?, ?, ?)",
+        (poll_hash, approval_id, time.time()),
+    )
+    conn.commit()
+
+
+def service_enrollment_for(poll_hash: str) -> str | None:
+    """The approval id a device's poll-secret hash opened, or None."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT poll_hash, approval_id FROM service_enrollments WHERE poll_hash=?",
+        (poll_hash,),
+    ).fetchone()
+    if row is None or not hmac.compare_digest(row["poll_hash"], poll_hash):
+        return None
+    return row["approval_id"]
+
+
+def service_enrollment_approvals() -> list[str]:
+    """Every enrollment's approval id (never a poll hash)."""
+    conn = get_conn()
+    return [r["approval_id"] for r in conn.execute(
+        "SELECT approval_id FROM service_enrollments ORDER BY created_at").fetchall()]
+
+
+def delete_service_enrollment(approval_id: str) -> None:
+    conn = get_conn()
+    conn.execute("DELETE FROM service_enrollments WHERE approval_id=?", (approval_id,))
+    conn.commit()
 
 
 def normalize_api_capabilities(

@@ -2040,12 +2040,6 @@
       // overlay state; the chrome and Decline are kind-agnostic (declining is
       // identical for every kind, so it lives in the shell).
       _approvalKinds: {
-        external_service_access: {
-          async open(self, r) {
-            const {openServiceApproval}=await import('../components/service-approval.js');
-            openServiceApproval(self,r);
-          },
-        },
         mcp_peer_link: {
           async open(self, r) {
             const req = r.request || {};

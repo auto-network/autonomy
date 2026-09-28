@@ -20,9 +20,7 @@ from starlette.routing import Route
 
 from tools.data_paths import resolve_store
 from tools.dashboard import api_auth
-from tools.dashboard import approvals_routes
-from tools.dashboard import external_service_approvals
-from tools.dashboard.dao import approval_requests as approval_db
+from tools.dashboard.approval_service import ApprovalServiceError
 
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -160,13 +158,26 @@ def _enrollment_rate_limited(request: Request) -> bool:
     return False
 
 
+def _enrollment_desk():
+    from tools.dashboard import attention_routes
+    desk = attention_routes.approval_runtime().enrollment_desk
+    if desk is None:
+        raise RuntimeError("the enrollment desk is not composed")
+    return desk
+
+
 async def create_enrollment(request: Request) -> JSONResponse:
+    """Open a Central approval for an Autonomy Capture device.
+
+    The returned ``id`` is the device's poll secret: it never leaves this
+    machine except in this response (only its hash is kept, in auth.db).
+    ``sourceApprovalId`` is the public Central approval id, which authorizes
+    nothing."""
     if _enrollment_rate_limited(request):
         return JSONResponse({"error": "too many enrollment requests"}, status_code=429)
-    if approval_db.pending_count(
-        kind=external_service_approvals.KIND,
-        application_scope="dropbox",
-    ) >= MAX_PENDING_ENROLLMENTS:
+    desk = _enrollment_desk()
+    await asyncio.to_thread(desk.prune)
+    if await asyncio.to_thread(desk.pending_count) >= MAX_PENDING_ENROLLMENTS:
         return JSONResponse({"error": "too many pending enrollment requests"}, status_code=429)
     raw_body = bytearray()
     try:
@@ -182,67 +193,49 @@ async def create_enrollment(request: Request) -> JSONResponse:
         return JSONResponse({"error": "valid JSON object required"}, status_code=400)
     if not isinstance(body, dict):
         return JSONResponse({"error": "JSON object required"}, status_code=400)
-    enrollment_id = secrets.token_urlsafe(24)
+    poll_secret = secrets.token_urlsafe(24)
+    label = body.get("label")
     try:
-        approval_request, staged = external_service_approvals.registered_request(
-            application_scope="dropbox",
-            source_approval_id=enrollment_id,
-            requester_label=body.get("label"),
-            requested_ttl_seconds=body.get(
-                "requested_ttl_seconds", 365 * 24 * 60 * 60,
-            ),
-            resource_audience="global_operator_dropbox",
-            capabilities=[{"method": "POST", "path": "/api/dropbox"}],
+        approval_id = await asyncio.to_thread(
+            desk.open, "dropbox", poll_secret, {
+                "label": label.strip() if isinstance(label, str) and label.strip()
+                else "External device",
+                "requested_ttl_seconds": body.get("requested_ttl_seconds", 365 * 24 * 60 * 60),
+            },
         )
-        rid = await approvals_routes.open_approval(
-            kind=external_service_approvals.KIND,
-            session="Autonomy Capture",
-            request_payload=approval_request,
-            request_id=enrollment_id,
-            prepared_staged=staged,
-        )
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+    except ApprovalServiceError as exc:
+        if exc.code == "invalid_request":
+            return JSONResponse({"error": "invalid enrollment request"}, status_code=400)
+        return JSONResponse({"error": "enrollment is unavailable"}, status_code=503)
     return JSONResponse({
-        "id": rid,
-        "sourceApprovalId": rid,
+        "id": poll_secret,
+        "sourceApprovalId": approval_id,
         "status": "pending",
     }, status_code=202)
 
 
+#: How often a held poll re-reads the approval.
+POLL_RECHECK_SECONDS = 1.0
+
+
 async def wait_enrollment(request: Request) -> JSONResponse:
-    rid = request.path_params["id"]
-    if len(rid) < 24 or len(rid) > 128:
+    """The device's poll, by its poll secret. An unknown secret and a wrong
+    one are the same 404. The bearer is in the minting response only."""
+    desk = _enrollment_desk()
+    approval_id = await asyncio.to_thread(desk.approval_for, request.path_params["id"])
+    if approval_id is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     try:
         wait = min(float(request.query_params.get("wait", "0")), 60.0)
     except ValueError:
         wait = 0.0
-    row = await approvals_routes.wait_for_approval(rid, max(0.0, wait))
-    if not row or row.get("kind") != external_service_approvals.KIND:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    result = row.get("result")
-    if result is None:
-        return JSONResponse({"id": rid, "status": "pending"})
-    if not result.get("approved"):
-        return JSONResponse({"id": rid, "status": "declined"})
-    execution = result.get("execution") or {}
-    if execution.get("ok") is not True:
-        return JSONResponse({
-            "id": rid,
-            "status": "failed",
-            "error": execution.get("error") or "credential mint failed",
-        }, status_code=500)
-    return JSONResponse({
-        "id": rid,
-        "status": "approved",
-        "token": execution["token"],
-        "expires_at": execution.get("expires_at"),
-        "sourceApprovalId": execution.get("sourceApprovalId") or rid,
-        "application_scope": execution.get("application_scope"),
-        "resource_audience": execution.get("resource_audience"),
-        "capabilities": execution.get("capabilities") or [],
-    })
+    deadline = time.monotonic() + max(0.0, wait)
+    while True:
+        answer = await asyncio.to_thread(desk.collect, approval_id)
+        if answer["status"] != "pending" or time.monotonic() >= deadline:
+            return JSONResponse({"id": request.path_params["id"], **answer},
+                                headers={"Cache-Control": "no-store"})
+        await asyncio.sleep(min(POLL_RECHECK_SECONDS, max(0.0, deadline - time.monotonic())))
 
 
 async def upload(request: Request) -> JSONResponse:

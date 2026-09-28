@@ -1,34 +1,105 @@
-"""Central approval kind for narrowly scoped external service credentials.
+"""Settings-native ``external_service_access``: a narrowly scoped device bearer.
 
-Producers own their enrollment transport and pass server-derived concrete API
-capabilities into this central kind. A public requester can never choose its
-own audience, methods, or paths. The approval row is the durable lifecycle
-record; no producer keeps a second approval queue.
+A registered producer (the dropbox enrollment route) opens a Central approval
+for an external device; the operator reviews the application, its exact API
+capabilities and the requested lifetime in the Central inbox, and grants it
+with a chosen ``{ttl_seconds}`` (auto-fkhq0.26, design checkpoint 2026-09-28).
+A public client never chooses its audience, methods or paths: they are the
+registration's (:data:`APPLICATIONS`).
+
+The bearer never rides Central. A Central request and resolution are personal
+Settings that replicate to every personal machine, so the bearer is minted
+lazily, on the accepting machine, when the DEVICE polls with its poll secret:
+
+- The poll secret is the id the device got back from enrollment. It never
+  leaves this machine: only its sha256, bound to the public Central approval
+  id, is kept in auth.db (``service_enrollments``). The Central approval id is
+  the public correlation id and mints nothing.
+- Each poll within :data:`DELIVERY_WINDOW_SECONDS` of the Grant (or the
+  granted lifetime, if shorter) rotates: the previous bearer of the exact name
+  ``<prefix>:<approval_id>`` is revoked and a new one inserted in one
+  transaction, and the raw bearer is returned in that response only. The
+  device is its only holder, so a rotation loses nothing and a stolen earlier
+  response stops working.
+- After the window a poll answers ``delivered`` or ``expired`` and mints
+  nothing; the enrollment row is pruned once its approval is terminal and past
+  the window.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
+import logging
 import secrets
 import time
+from collections.abc import Mapping
+from typing import Any, Callable
 
-from starlette.requests import Request
-
+from tools.dashboard.approval_kind_registry import (
+    ApprovalKindRuntime,
+    ApprovalPlanningContext,
+    ApprovalRequestPlan,
+    RegisteredApprovalProducer,
+)
+from tools.dashboard.approval_service import (
+    ApprovalService,
+    ApprovalServiceError,
+    ApprovalStatus,
+    _ApprovalLocks,
+)
+from tools.dashboard.attention_index_service import AttentionIndexError
+from tools.dashboard.attention_registry import (
+    AttentionProjectionPlan,
+    AttentionPublicationRuntime,
+    AttentionSourceEvidence,
+)
 from tools.dashboard.dao import auth_db
+from tools.dashboard.dashboard_access_central import (
+    DashboardAccessCoordinator,
+    _bounded_approval_id,
+    _opaque_digest,
+)
+from tools.dashboard.vault_open_central import this_machine_label
+from tools.graph import settings_ops
+from tools.graph.schemas.central_attention import APPROVAL_REQUEST_SET_ID, ApprovalRequestV1
 
+logger = logging.getLogger(__name__)
 
 KIND = "external_service_access"
+RENDERER_ID = "approval.external_service_access.review"
+CONSUMER_ID = "external_service_access.device_collect.v1"
 MAX_TTL_SECONDS = 10 * 365 * 24 * 60 * 60
+#: How long after the Grant the device may collect (and rotate) its bearer.
+DELIVERY_WINDOW_SECONDS = 1800
+_DESTINATION_DOMAIN = b"dashboard.external-service.collect-destination.v1"
+_ATTENTION_DOMAIN = "dashboard.attention.external-service-recipient"
 
-# Registry-owned application identity. The trusted producer supplies concrete
-# audience and API pairs as parameters; its public client never does.
+DROPBOX_PRODUCER = RegisteredApprovalProducer(
+    "external_service.dropbox_enrollment", "Autonomy Capture", frozenset({KIND}),
+)
+
+# Registry-owned application identity, audience and exact API capabilities,
+# keyed by the producer's application scope. The device supplies only a label
+# and a requested lifetime.
 APPLICATIONS = {
     "dropbox": {
+        "producer_id": DROPBOX_PRODUCER.producer_id,
         "application": "Autonomy Capture",
         "summary": "Add screenshots to the global operator dropbox",
-        "token_name_prefix": "dropbox-upload",
+        "bearer_name_prefix": "dropbox-upload",
+        "resource_audience": "global_operator_dropbox",
+        "capabilities": [{"method": "POST", "path": "/api/dropbox"}],
     },
 }
+
+#: Operator-facing states (review.application_result.state).
+PENDING = "pending"
+AWAITING = "awaiting_collection"
+DELIVERED = "delivered"
+EXPIRED = "expired_undelivered"
+ELSEWHERE = "elsewhere"
 
 
 def _valid_ttl(value: object, *, allow_none: bool = True) -> int | None:
@@ -42,127 +113,325 @@ def _valid_ttl(value: object, *, allow_none: bool = True) -> int | None:
     return value
 
 
-def registered_request(
+def result_destination_id(secret: bytes | None = None) -> str:
+    """This Dashboard's opaque identity as the machine the device polls."""
+    if secret is None:
+        from tools.dashboard import unlock_routes
+        secret = unlock_routes._session_secret()
+    if not isinstance(secret, bytes) or len(secret) < 32:
+        raise ValueError("Dashboard session secret is unavailable")
+    digest = hmac.new(secret, _DESTINATION_DOMAIN, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def external_service_attention_id(approval_id: str) -> str:
+    _bounded_approval_id(approval_id)
+    return "attention-" + _opaque_digest([_ATTENTION_DOMAIN, 1, approval_id])
+
+
+def poll_hash(poll_secret: str) -> str:
+    return hashlib.sha256(poll_secret.encode("utf-8")).hexdigest()
+
+
+def bearer_name(application_scope: str, approval_id: str) -> str:
+    return f"{APPLICATIONS[application_scope]['bearer_name_prefix']}:{approval_id}"
+
+
+def build_request_planner(
     *,
-    application_scope: str,
-    source_approval_id: str,
-    requester_label: object,
-    requested_ttl_seconds: object,
-    resource_audience: str,
-    capabilities: list[dict[str, str]],
-) -> tuple[dict, dict]:
-    """Build review and execution data from a server-owned registration."""
-    spec = APPLICATIONS.get(application_scope)
-    if spec is None:
-        raise ValueError("unknown external service application scope")
-    label = str(requester_label or "External device").strip()
-    if not label or len(label) > 120:
-        raise ValueError("requester label must be between 1 and 120 characters")
-    requested_ttl = _valid_ttl(requested_ttl_seconds)
-    if (
-        not isinstance(resource_audience, str)
-        or not resource_audience
-        or len(resource_audience) > 256
-    ):
-        raise ValueError("resource audience must be a non-empty string up to 256 characters")
-    normalized_capabilities = auth_db.normalize_api_capabilities(capabilities)
-    request = {
-        "sourceApprovalId": source_approval_id,
-        "application_scope": application_scope,
-        "requester": {
-            "kind": "device_enrollment",
-            "id": source_approval_id,
-            "label": label,
-        },
-        "requested_ttl_seconds": requested_ttl,
-        "application": spec["application"],
-        "summary": spec["summary"],
-        "resource_audience": resource_audience,
-        "capabilities": normalized_capabilities,
-    }
-    staged = {
-        **request,
-        "token_name_prefix": spec["token_name_prefix"],
-    }
-    return request, staged
+    destination_resolver: Callable[[], str] = result_destination_id,
+    machine_label: Callable[[], str] = this_machine_label,
+):
+    def plan(context: ApprovalPlanningContext, body: Mapping[str, Any]) -> ApprovalRequestPlan:
+        scope = context.application_scope
+        spec = APPLICATIONS.get(scope)
+        if spec is None or context.producer_id != spec["producer_id"]:
+            raise ValueError("unknown external service application scope")
+        if not isinstance(body, Mapping) or set(body) != {"label", "requested_ttl_seconds"}:
+            raise ValueError("an enrollment carries only a label and a requested lifetime")
+        raw_label = body.get("label")
+        label = raw_label.strip() if isinstance(raw_label, str) else ""
+        if not label or len(label) > 120:
+            raise ValueError("requester label must be between 1 and 120 characters")
+        requested_ttl = _valid_ttl(body.get("requested_ttl_seconds"))
+        destination = destination_resolver()
+        if not isinstance(destination, str) or len(destination) != 43:
+            raise ValueError("this Dashboard cannot enroll a device right now")
+        machine = machine_label()
+        capabilities = auth_db.normalize_api_capabilities(spec["capabilities"])
+        access = {
+            "application": spec["application"],
+            "summary": spec["summary"],
+            "resource_audience": spec["resource_audience"],
+            "capabilities": capabilities,
+            "requested_ttl_seconds": requested_ttl,
+        }
+        return ApprovalRequestPlan(
+            subject_ref=f"external-service:{context.approval_id}",
+            safe_review={
+                "title": "Allow service access",
+                "detail": f"{label} asks to {spec['summary'].lower()}.",
+                "requester_label": label,
+                "machine_label": machine,
+                **access,
+            },
+            request={"label": label, **access},
+            staged={"application_scope": scope, "result_destination_id": destination,
+                    "machine_label": machine},
+        )
+
+    return plan
 
 
-def reject_direct_create(_session: str, _request: dict) -> tuple[dict, dict]:
-    """Force this kind through a registered producer enrollment route."""
-    raise ValueError(
-        "external_service_access requests must use a registered enrollment route"
+def _validate_decision(_context, _request, decision, is_grant) -> dict[str, Any]:
+    # The chosen lifetime is not secret; the bearer is minted at the device's
+    # poll, never carried here.
+    if not is_grant:
+        if decision:
+            raise ValueError("a decline carries no payload")
+        return {}
+    if set(decision) != {"ttl_seconds"}:
+        raise ValueError("a grant carries exactly ttl_seconds")
+    return {"ttl_seconds": _valid_ttl(decision["ttl_seconds"])}
+
+
+def build_approval_runtime(**planner_options) -> ApprovalKindRuntime:
+    return ApprovalKindRuntime(
+        request_planner=build_request_planner(**planner_options),
+        decision_validator=_validate_decision,
+        resolution_consumer_id=CONSUMER_ID,
+        result_ref_builder=lambda approval_id, _request, _decision: f"external-service:{approval_id}",
     )
 
 
-def enrich(row: dict) -> dict:
-    return {"staged": row.get("staged")}
+def build_attention_runtime(approvals: ApprovalService) -> AttentionPublicationRuntime:
+    def plan(source: Any) -> AttentionProjectionPlan:
+        if not isinstance(source, ApprovalStatus):
+            raise ValueError("external_service_access projection requires approval status")
+        request = source.request.payload
+        if request.get("kind") != KIND:
+            raise ValueError("external_service_access projection kind mismatch")
+        resolution = source.resolution
+        review = request.get("safe_review") or {}
+        return AttentionProjectionPlan(
+            attention_id=external_service_attention_id(source.request.approval_id),
+            object_ref=source.request.approval_id,
+            participant_role="recipient",
+            attention_state="resolved" if resolution is not None else "needs_attention",
+            safe_title="Allow service access",
+            safe_summary=(f"{review.get('requester_label') or 'A device'} · "
+                          f"{review.get('application') or 'External service'}")[:240],
+            counterparty_ref=None,
+            occurred_at=(float(resolution.payload["resolved_at"]) if resolution is not None
+                         else float(request["created_at"])),
+            source_version=2 if resolution is not None else 1,
+        )
+
+    def evidence(object_ref: str, source_version: int) -> AttentionSourceEvidence:
+        status = approvals.status(_bounded_approval_id(object_ref))
+        actual = 2 if status.resolution is not None else 1
+        if actual != source_version or status.request.payload.get("kind") != KIND:
+            raise AttentionIndexError("stale_source")
+        return AttentionSourceEvidence(
+            source_guard={"kind": "approval", "ref": object_ref, "version": source_version},
+            source_expires_at=status.request.payload.get("expires_at"),
+        )
+
+    return AttentionPublicationRuntime(projection_planner=plan, source_evidence_builder=evidence)
 
 
-def authorize_decision(
-    request: Request, _row: dict, _decision: dict,
-) -> str | None:
-    """Only the unlocked human operator may mint an external credential."""
-    from tools.dashboard import unlock_routes
+class EnrollmentDesk:
+    """The accepting machine's enrollments: open, collect, state, prune."""
 
-    if unlock_routes.gate_disabled():
-        return None
-    session = unlock_routes.session_from_request(request)
-    if session is None or session.get("method") not in {
-        "bootstrap", "passkey", "password",
-    }:
-        return "unlock the dashboard before approving external service access"
-    return None
+    def __init__(
+        self,
+        *,
+        approvals: ApprovalService,
+        destination_resolver: Callable[[], str] = result_destination_id,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.approvals = approvals
+        self._destination_resolver = destination_resolver
+        self._clock = clock
+
+    # ── state ───────────────────────────────────────────────────────────
+
+    def _here(self, payload: Mapping[str, Any]) -> bool:
+        staged = payload.get("staged")
+        destination = staged.get("result_destination_id") if isinstance(staged, Mapping) else None
+        try:
+            ours = self._destination_resolver()
+        except Exception:
+            return False
+        return isinstance(destination, str) and hmac.compare_digest(destination, ours)
+
+    @staticmethod
+    def _collectable_until(status: ApprovalStatus) -> float | None:
+        resolution = status.resolution
+        if resolution is None or resolution.payload.get("outcome") != "granted":
+            return None
+        window = DELIVERY_WINDOW_SECONDS
+        ttl = (resolution.payload.get("decision") or {}).get("ttl_seconds")
+        if isinstance(ttl, int) and ttl < window:
+            window = ttl
+        return float(resolution.payload["resolved_at"]) + window
+
+    def _minted(self, status: ApprovalStatus) -> bool:
+        scope = (status.request.payload.get("staged") or {}).get("application_scope")
+        return scope in APPLICATIONS and auth_db.scoped_service_token_minted(
+            bearer_name(scope, status.request.approval_id))
+
+    def state(self, status: ApprovalStatus) -> str:
+        payload = status.request.payload
+        if payload.get("kind") != KIND:
+            raise ValueError("not an external_service_access approval")
+        here = self._here(payload)
+        resolution = status.resolution
+        if resolution is None:
+            return PENDING if here else ELSEWHERE
+        if resolution.payload.get("outcome") != "granted":
+            return str(resolution.payload.get("outcome"))
+        if not here:
+            return ELSEWHERE
+        if self._clock() < (self._collectable_until(status) or 0):
+            return DELIVERED if self._minted(status) else AWAITING
+        return DELIVERED if self._minted(status) else EXPIRED
+
+    def operator_result(self, status: ApprovalStatus) -> dict:
+        """review.application_result for the Central renderer. Never a bearer."""
+        result: dict[str, Any] = {
+            "state": self.state(status),
+            "machine_label": (status.request.payload.get("staged") or {}).get("machine_label") or "",
+        }
+        until = self._collectable_until(status)
+        if until is not None:
+            result["collectable_until"] = until
+        return result
+
+    # ── the device ──────────────────────────────────────────────────────
+
+    def open(self, application_scope: str, poll_secret: str, body: Mapping[str, Any]) -> str:
+        """Open a Central approval for a device; bind its poll secret's hash."""
+        spec = APPLICATIONS.get(application_scope)
+        if spec is None or spec["producer_id"] != DROPBOX_PRODUCER.producer_id:
+            raise ValueError("unknown external service application scope")
+        record = self.approvals.create_from_producer(KIND, DROPBOX_PRODUCER, dict(body))
+        auth_db.insert_service_enrollment(poll_hash(poll_secret), record.approval_id)
+        return record.approval_id
+
+    def approval_for(self, poll_secret: Any) -> str | None:
+        if not isinstance(poll_secret, str) or not 24 <= len(poll_secret) <= 128:
+            return None
+        return auth_db.service_enrollment_for(poll_hash(poll_secret))
+
+    def pending_count(self) -> int:
+        count = 0
+        for approval_id in auth_db.service_enrollment_approvals():
+            try:
+                if self.approvals.status(approval_id).resolution is None:
+                    count += 1
+            except ApprovalServiceError:
+                continue
+        return count
+
+    def prune(self) -> None:
+        """Forget enrollments whose approval is terminal and past its window."""
+        now = self._clock()
+        for approval_id in auth_db.service_enrollment_approvals():
+            try:
+                status = self.approvals.status(approval_id)
+            except ApprovalServiceError as exc:
+                if exc.code == "not_found":
+                    auth_db.delete_service_enrollment(approval_id)
+                continue
+            resolution = status.resolution
+            if resolution is None:
+                continue
+            ends = self._collectable_until(status) or (
+                float(resolution.payload["resolved_at"]) + DELIVERY_WINDOW_SECONDS)
+            if now >= ends:
+                auth_db.delete_service_enrollment(approval_id)
+
+    def collect(self, approval_id: str) -> dict:
+        """What the device's poll answers. Mints (rotating) only on a Grant,
+        on this machine, inside the window; the bearer is in this return only."""
+        with _ApprovalLocks.for_id(_bounded_approval_id(approval_id)):
+            status = self.approvals.status(approval_id)
+            state = self.state(status)
+            if state in (PENDING, ELSEWHERE):
+                return {"status": "pending"}
+            if state in ("declined", "canceled"):
+                return {"status": "declined"}
+            if state in ("expired", EXPIRED):
+                return {"status": "expired"}
+            until = self._collectable_until(status)
+            if until is None or self._clock() >= until:
+                return {"status": "delivered"}
+            payload = status.request.payload
+            scope = payload["staged"]["application_scope"]
+            spec = APPLICATIONS[scope]
+            ttl = status.resolution.payload["decision"].get("ttl_seconds")
+            raw = secrets.token_urlsafe(32)
+            expires_at = self._clock() + ttl if ttl is not None else None
+            auth_db.rotate_scoped_service_token(
+                hashlib.sha256(raw.encode()).hexdigest(),
+                bearer_name(scope, approval_id),
+                capabilities=spec["capabilities"],
+                application_scope=scope,
+                resource_audience=spec["resource_audience"],
+                source_approval_id=approval_id,
+                expires_at=expires_at,
+            )
+            logger.info("external_service_access: bearer issued for %s", approval_id)
+            return {
+                "status": "approved",
+                "token": raw,
+                "expires_at": expires_at,
+                "sourceApprovalId": approval_id,
+                "application_scope": scope,
+                "resource_audience": spec["resource_audience"],
+                "capabilities": auth_db.normalize_api_capabilities(spec["capabilities"]),
+            }
 
 
-async def execute(row: dict, decision: dict) -> dict:
-    staged = row.get("staged") or {}
-    application_scope = staged.get("application_scope")
-    spec = APPLICATIONS.get(application_scope)
-    if spec is None:
-        return {"ok": False, "error": "unregistered external service capability"}
-    # The staged envelope came from a registered server producer, never its
-    # public client. Validate it again before minting; request JSON is ignored.
-    if (
-        staged.get("application") != spec["application"]
-        or not isinstance(staged.get("resource_audience"), str)
-        or not staged["resource_audience"]
-        or len(staged["resource_audience"]) > 256
-    ):
-        return {"ok": False, "error": "external service capability mismatch"}
-    try:
-        capabilities = auth_db.normalize_api_capabilities(staged.get("capabilities"))
-    except ValueError as exc:
-        return {"ok": False, "error": str(exc)}
-    try:
-        ttl = _valid_ttl(decision.get("ttl_seconds"))
-    except ValueError as exc:
-        return {"ok": False, "error": str(exc)}
+class EnrollmentCoordinator(DashboardAccessCoordinator):
+    """The dashboard-access wake coordinator, publishing the attention item.
+    It never mints: only the device's poll does."""
 
-    raw = secrets.token_urlsafe(32)
-    expires_at = time.time() + ttl if ttl is not None else None
-    source_id = str(staged.get("sourceApprovalId") or row["id"])
-    name = f"{spec['token_name_prefix']}:{source_id}"
-    auth_db.insert_scoped_service_token(
-        hashlib.sha256(raw.encode()).hexdigest(),
-        name,
-        capabilities=capabilities,
-        application_scope=application_scope,
-        resource_audience=staged["resource_audience"],
-        source_approval_id=source_id,
-        expires_at=expires_at,
-    )
-    return {
-        "ok": True,
-        "token": raw,
-        "expires_at": expires_at,
-        "sourceApprovalId": source_id,
-        "application_scope": application_scope,
-        "resource_audience": staged["resource_audience"],
-        "capabilities": capabilities,
-    }
+    def __init__(self, *, desk: EnrollmentDesk, **kwargs) -> None:
+        super().__init__(consumer=None, **kwargs)
+        self.desk = desk
+
+    def reconcile_exact(self, approval_id: str) -> ApprovalStatus | None:
+        try:
+            status = self.approvals.status(_bounded_approval_id(approval_id))
+        except ApprovalServiceError as exc:
+            if exc.code == "not_found":
+                return None
+            raise
+        if status.request.payload.get("kind") != KIND:
+            return None
+        self.index.publish(self.producer, status)
+        return status
+
+    def _scan_ids(self) -> tuple[str, ...]:
+        self.desk.prune()
+        rows = settings_ops.read_set(APPROVAL_REQUEST_SET_ID, org=None, peers=[])
+        if any(rows.dropped.values()):
+            raise RuntimeError("partial Central approval request read")
+        selected = []
+        for row in rows:
+            if not isinstance(row.payload, dict):
+                raise RuntimeError("invalid Central approval request row")
+            ApprovalRequestV1.validate(row.payload)
+            if row.payload.get("kind") == KIND:
+                selected.append(_bounded_approval_id(row.key))
+        return tuple(sorted(set(selected)))
 
 
-PREPARE_CREATE = {KIND: reject_direct_create}
-ENRICH = {KIND: enrich}
-AUTHORIZE_DECISION = {KIND: authorize_decision}
-EXECUTORS = {KIND: execute}
+__all__ = [
+    "APPLICATIONS", "CONSUMER_ID", "DELIVERY_WINDOW_SECONDS", "DROPBOX_PRODUCER", "KIND",
+    "RENDERER_ID", "EnrollmentCoordinator", "EnrollmentDesk", "bearer_name",
+    "build_approval_runtime", "build_attention_runtime", "external_service_attention_id",
+    "poll_hash", "result_destination_id",
+]

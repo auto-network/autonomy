@@ -331,6 +331,7 @@ class AttentionRouteRuntime:
     operator_result_projectors: Mapping[str, Any] | None = None
     vault_open_delivery: Any | None = None
     link_operation_desk: Any | None = None
+    enrollment_desk: Any | None = None
 
     def __post_init__(self) -> None:
         if self.operator_result_projectors is None:
@@ -455,12 +456,14 @@ def build_production_runtime() -> AttentionRouteRuntime:
     from tools.dashboard import mailbox_central
     from tools.dashboard import vault_open_central
     from tools.dashboard import link_approval_central
+    from tools.dashboard import external_service_approvals as external
     dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
     approval_registry = build_production_registry(runtimes={
         dashboard_access_central.KIND: dashboard_approval_runtime,
         fleet.KIND: fleet.build_approval_runtime(),
         mailbox_central.KIND: mailbox_central.build_approval_runtime(),
         vault_open_central.KIND: vault_open_central.build_approval_runtime(),
+        external.KIND: external.build_approval_runtime(),
         **{kind: link_approval_central.build_approval_runtime(kind) for kind in link_approval_central.KINDS},
     })
     approval_waiters = ApprovalWaitHub()
@@ -494,6 +497,8 @@ def build_production_runtime() -> AttentionRouteRuntime:
             mailbox_central.build_attention_runtime(approvals),
         (vault_open_central.KIND, vault_open_central.APPLICATION_SCOPE):
             vault_open_central.build_attention_runtime(approvals),
+        **{(external.KIND, scope): external.build_attention_runtime(approvals)
+           for scope in external.APPLICATIONS},
         **{(kind, link_approval_central.APPLICATION_SCOPE):
            link_approval_central.build_attention_runtime(approvals, kind) for kind in link_approval_central.KINDS},
     }
@@ -556,6 +561,15 @@ def build_production_runtime() -> AttentionRouteRuntime:
             vault_open_central.KIND, vault_open_central.APPLICATION_SCOPE,
         ),
     )
+    enrollment_desk = external.EnrollmentDesk(approvals=approvals)
+    enrollment_coordinator = external.EnrollmentCoordinator(
+        desk=enrollment_desk,
+        approvals=approvals,
+        index=index,
+        producer=attention_registry.producer(
+            external.KIND, "dropbox", external.DROPBOX_PRODUCER.producer_id,
+        ),
+    )
     link_desk = link_approval_central.LinkApprovalDesk(approvals=approvals, index=index)
     link_coordinators = [
         link_approval_central.LinkApprovalCoordinator(
@@ -567,7 +581,8 @@ def build_production_runtime() -> AttentionRouteRuntime:
     # One reconciler slot, one coordinator per migrated kind; each ignores
     # other kinds' approval ids.
     reconcilers = mailbox_central.ReconcilerGroup(
-        coordinator, email_coordinator, vault_coordinator, *link_coordinators,
+        coordinator, email_coordinator, vault_coordinator, enrollment_coordinator,
+        *link_coordinators,
     )
     coordinator_holder["coordinator"] = reconcilers
     approval_http = ApprovalHttpBridge(
@@ -612,10 +627,12 @@ def build_production_runtime() -> AttentionRouteRuntime:
                                     fleet.KIND: fleet.project_result,
                                     mailbox_central.KIND: email_consumer.project,
                                     vault_open_central.KIND: vault_delivery.operator_result,
+                                    external.KIND: enrollment_desk.operator_result,
                                     **{kind: link_desk.operator_result
                                        for kind in link_approval_central.KINDS}},
         vault_open_delivery=vault_delivery,
         link_operation_desk=link_desk,
+        enrollment_desk=enrollment_desk,
     )
 
 
