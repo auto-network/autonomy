@@ -85,7 +85,7 @@ def release(lease: store.Lease, reason: str, *, epoch_: int) -> bool:
             store.transition(lease.lease_hash, epoch=epoch_, to="failed",
                              audit_op="release", result=reason, diagnostic=reason)
             return store.transition(lease.lease_hash, epoch=epoch_, to="gone")
-    containers.stop(lease.container_name)
+    containers.stop(lease.container_name, lease_hash=lease.lease_hash)
     return store.transition(lease.lease_hash, epoch=epoch_, to="gone", audit_op="gone", result=reason)
 
 
@@ -95,6 +95,16 @@ def release_async(lease: store.Lease, reason: str) -> None:
         return
     threading.Thread(target=_release_logged, args=(lease, reason, epoch_), daemon=True,
                      name=f"browser-release-{lease.container_name}").start()
+
+
+def _release_isolated(lease: store.Lease, reason: str, epoch_: int) -> None:
+    """Release one lease inside a reconciler pass without letting it stall or
+    abort the pass for every other lease; it stays releasing and is retried."""
+    try:
+        release(lease, reason, epoch_=epoch_)
+    except Exception:
+        logger.exception("browser broker: releasing %s failed; retrying next tick",
+                         lease.container_name)
 
 
 def _release_logged(lease: store.Lease, reason: str, epoch_: int) -> None:
@@ -143,7 +153,7 @@ def activate() -> int:
         if lease is not None and container.state == "running":
             adopted += store.adopt(lease.lease_hash, epoch=_epoch)
         elif lease is None:
-            containers.stop(container.name)
+            containers.stop(container.name, lease_hash=container.lease_hash)
             orphans += 1
     logger.info("browser broker: epoch %d, adopted %d lease(s), stopped %d orphan container(s)",
                 _epoch, adopted, orphans)
@@ -171,7 +181,7 @@ def reconcile_once(now: Optional[float] = None) -> None:
     for lease in leases:
         reason = _end_reason(lease, now, limits, capability_cache)
         if reason:
-            release(lease, reason, epoch_=epoch_)
+            _release_isolated(lease, reason, epoch_)
             continue
         if lease.state in ("starting", "ready", "busy", "locked", "unhealthy") and lease.address:
             _health_pass(lease, epoch_, now)
@@ -183,14 +193,14 @@ def _docker_pass(epoch_: int, now: float) -> None:
     for lease_hash, container in listed.items():
         if lease_hash not in rows:
             logger.warning("browser broker: stopping %s, which has no lease record", container.name)
-            containers.stop(container.name)
+            containers.stop(container.name, lease_hash=container.lease_hash)
     for lease in rows.values():
         container = listed.get(lease.lease_hash)
         if container is not None and container.state in ("running", "created"):
             continue
         if lease.state == "requested" and now - lease.created_at < START_TIMEOUT_S:
             continue  # its container is being created right now
-        release(lease, "container-gone", epoch_=epoch_)
+        _release_isolated(lease, "container-gone", epoch_)
 
 
 def _end_reason(lease: store.Lease, now: float, limits: dict, capability_cache: dict) -> Optional[str]:
@@ -237,7 +247,7 @@ def _health_pass(lease: store.Lease, epoch_: int, now: float) -> None:
                              audit_op="health", result="unhealthy")
         fresh = store.get(lease.lease_hash)
         if fresh is not None:
-            release(fresh, "unhealthy", epoch_=epoch_)
+            _release_isolated(fresh, "unhealthy", epoch_)
 
 
 async def run_forever() -> None:

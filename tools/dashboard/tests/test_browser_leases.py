@@ -315,7 +315,7 @@ def test_two_failed_health_checks_release(db, live, monkeypatch):
     store.transition(h, epoch=epoch, to="starting", address="172.30.0.9")
     store.transition(h, epoch=epoch, to="ready")
     stopped = []
-    monkeypatch.setattr(containers, "stop", lambda name: stopped.append(name))
+    monkeypatch.setattr(containers, "stop", lambda name, *, lease_hash: stopped.append(name))
     monkeypatch.setattr(reconciler, "_healthy", lambda lease: False)
     monkeypatch.setattr(reconciler, "_tick", 1)  # skip the docker pass
     reconciler.reconcile_once()
@@ -335,10 +335,10 @@ def test_activation_adopts_and_stops_orphans(db, monkeypatch):
     monkeypatch.setattr(containers, "ensure_network", lambda: None)
     monkeypatch.setattr(containers, "isolate_dashboard", lambda: None)
     monkeypatch.setattr(containers, "list_containers", lambda: listed)
-    monkeypatch.setattr(containers, "stop", lambda name: stopped.append(name))
+    monkeypatch.setattr(containers, "stop", lambda name, *, lease_hash: stopped.append((name, lease_hash)))
     new = reconciler.activate()
     assert new == old + 1 and store.get(h).epoch == new
-    assert stopped == ["brw-e-orphan"]
+    assert stopped == [("brw-e-orphan", "o" * 64)]
     assert not store.transition(h, epoch=old, to="ready")
 
 
@@ -349,7 +349,7 @@ def test_a_record_whose_container_vanished_is_closed(db, live, monkeypatch):
     store.transition(h, epoch=epoch, to="starting", address="172.30.0.9")
     store.transition(h, epoch=epoch, to="ready")
     monkeypatch.setattr(containers, "list_containers", lambda: [])
-    monkeypatch.setattr(containers, "stop", lambda name: None)
+    monkeypatch.setattr(containers, "stop", lambda name, *, lease_hash: None)
     monkeypatch.setattr(reconciler, "_tick", 0)  # the docker pass runs
     reconciler.reconcile_once()
     assert store.get(h).state == "gone"
@@ -406,20 +406,80 @@ def test_isolation_needs_a_containerized_dashboard(monkeypatch):
         containers.isolate_dashboard()
 
 
-def test_stop_returns_only_once_the_name_is_free(monkeypatch):
+def _fake_container_lifecycle(monkeypatch, *, removal_polls=3, daemon_error=False):
+    """A container named N with id OLD that disappears after a few polls, after
+    which a NEW lease's container takes the same name with id NEW."""
     import subprocess
 
-    inspections = {"left": 3}
+    state = {"old_polls": removal_polls, "old_gone": False}
     calls = []
 
     def fake(*args, check=True, **kw):
-        calls.append(args[0])
+        calls.append(args)
+        target = args[-1]
         if args[0] == "inspect":
-            inspections["left"] -= 1
-            return subprocess.CompletedProcess(args, 0 if inspections["left"] >= 0 else 1, "", "")
+            if daemon_error:
+                return subprocess.CompletedProcess(args, 1, "", "Cannot connect to the Docker daemon")
+            if target == "brw-p-0123456789abcdef":
+                holder = ("NEW " + "n" * 64) if state["old_gone"] else ("OLD " + "o" * 64)
+                return subprocess.CompletedProcess(args, 0, holder + "\n", "")
+            if target == "OLD":
+                state["old_polls"] -= 1
+                if state["old_polls"] < 0:
+                    state["old_gone"] = True  # --rm finished; the name is free and gets reused
+                    return subprocess.CompletedProcess(args, 1, "", "Error: No such object: OLD")
+                return subprocess.CompletedProcess(args, 0, "OLD\n", "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(containers, "_docker", fake)
     monkeypatch.setattr("time.sleep", lambda s: None)
-    containers.stop("brw-p-0123456789abcdef")
-    assert calls.count("inspect") == 4 and calls[:2] == ["stop", "rm"]
+    return calls, state
+
+
+def test_stop_waits_for_removal_and_only_ever_touches_that_container(monkeypatch):
+    calls, state = _fake_container_lifecycle(monkeypatch)
+    containers.stop("brw-p-0123456789abcdef", lease_hash="o" * 64)
+    assert state["old_gone"]
+    assert calls[0][0] == "inspect" and calls[0][-1] == "brw-p-0123456789abcdef"
+    for call in calls[1:]:
+        assert call[-1] == "OLD", call        # never the name, never the new container
+    assert not any(call[-1] == "NEW" for call in calls)
+
+
+def test_stop_is_idempotent_and_does_not_mistake_a_daemon_error_for_removal(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(containers, "_docker", lambda *a, **k: subprocess.CompletedProcess(
+        a, 1, "", "Error: No such object: brw-e-x"))
+    containers.stop("brw-e-x", lease_hash="x" * 64)  # already gone: returns quietly
+    _fake_container_lifecycle(monkeypatch, daemon_error=True)
+    with pytest.raises(containers.DockerUnavailable):
+        containers.stop("brw-p-0123456789abcdef", lease_hash="o" * 64)
+
+
+def test_a_retried_release_never_stops_a_new_lease_holding_the_name(monkeypatch):
+    calls, state = _fake_container_lifecycle(monkeypatch)
+    state["old_gone"] = True  # ours finished removal between ticks; a new lease took the name
+    containers.stop("brw-p-0123456789abcdef", lease_hash="o" * 64)
+    assert [c[0] for c in calls] == ["inspect"]  # looked, saw another lease's label, left it alone
+
+
+def test_one_stuck_release_does_not_stall_the_pass(db, live, monkeypatch):
+    epoch = store.take_epoch()
+    monkeypatch.setattr(reconciler, "_epoch", epoch)
+    stuck, fine = _admit(epoch, "a" * 64), _admit(epoch, "b" * 64)
+    for h in (stuck, fine):
+        store.transition(h, epoch=epoch, to="starting", address="172.30.0.9")
+        store.transition(h, epoch=epoch, to="ready")
+        store.update(h, epoch=epoch, last_activity=0)  # both past their idle limit
+
+    def stop(name, *, lease_hash):
+        if stop.calls == 0:
+            stop.calls += 1
+            raise RuntimeError("not removed within 20 s")
+    stop.calls = 0
+    monkeypatch.setattr(containers, "stop", stop)
+    monkeypatch.setattr(reconciler, "_tick", 1)
+    reconciler.reconcile_once()
+    states = sorted(store.get(h).state for h in (stuck, fine))
+    assert states == ["gone", "releasing"]  # the second lease was still released

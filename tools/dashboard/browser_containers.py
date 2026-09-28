@@ -245,23 +245,49 @@ def address(name: str) -> str:
     return proc.stdout.strip()
 
 
-def stop(name: str, grace_s: int = 5, removal_timeout_s: float = 20.0) -> None:
-    """Stop and remove a lease container, returning only once its name is free.
+def _missing(proc: subprocess.CompletedProcess) -> bool:
+    return "No such object" in proc.stderr or "No such container" in proc.stderr
+
+
+def stop(name: str, *, lease_hash: str, grace_s: int = 5, removal_timeout_s: float = 20.0) -> None:
+    """Stop and remove a lease container, returning only once it no longer exists.
 
     ``docker stop`` returns when the container exits, but ``--rm`` removes it
     asynchronously, so without the wait a lease could be recorded gone while
     its persistent profile's name is still held (measured on the node: the
-    next request for the profile got 409). Idempotent."""
+    next request for the profile got 409). Everything after the first lookup
+    uses the container's ID, never its name: once the name frees, a new lease
+    for the same profile may take it, and must not be touched. The first lookup
+    also reads the container's lease label: a container carrying another lease
+    (ours already went, and a retry found the name reused) is left alone.
+    Idempotent. A
+    docker error other than "no such container" raises DockerUnavailable, so
+    the lease stays releasing and is retried."""
     import time
 
-    _docker("stop", "-t", str(grace_s), name, check=False, timeout=grace_s + 20)
-    _docker("rm", "-f", name, check=False)
+    found = _docker("inspect", "--format",
+                    '{{.Id}} {{index .Config.Labels "%s.lease"}}' % LABEL, name, check=False)
+    if found.returncode != 0:
+        if _missing(found):
+            return
+        raise DockerUnavailable(f"docker inspect {name}: {found.stderr.strip()[:200]}")
+    container_id, _, labelled = found.stdout.strip().partition(" ")
+    if labelled.strip() != lease_hash:
+        return  # the name now belongs to another lease; ours is already gone
+    _docker("stop", "-t", str(grace_s), container_id, check=False, timeout=grace_s + 20)
+    _docker("rm", "-f", container_id, check=False)
     deadline = time.monotonic() + removal_timeout_s
-    while _docker("inspect", "--format", "{{.Id}}", name, check=False).returncode == 0:
+    while True:
+        probe = _docker("inspect", "--format", "{{.Id}}", container_id, check=False)
+        if probe.returncode != 0:
+            if _missing(probe):
+                return
+            raise DockerUnavailable(f"docker inspect {container_id[:12]}: {probe.stderr.strip()[:200]}")
         if time.monotonic() >= deadline:
-            raise RuntimeError(f"{name} was not removed within {removal_timeout_s:.0f} s")
+            raise RuntimeError(f"{name} ({container_id[:12]}) was not removed within "
+                               f"{removal_timeout_s:.0f} s")
         time.sleep(0.2)
-        _docker("rm", "-f", name, check=False)
+        _docker("rm", "-f", container_id, check=False)
 
 
 @dataclass(frozen=True)
