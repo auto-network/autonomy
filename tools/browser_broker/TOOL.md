@@ -58,20 +58,11 @@ graph://c330323d-986; epic `auto-8q7oe`.
   Removing the rule, adding a plain-HTTP listener, or ignoring certificate
   errors would expose the dashboard — and on a node whose human gate is not
   yet enforced, operator authority — to web content.
-- **Leases reach only the public internet** (`auto-i5okc`). Host rules drop
-  every new connection from the lease bridge to 10/8, 172.16/12, 192.168/16,
-  100.64/10, 169.254/16 and 127/8 (Docker's `DOCKER-USER` chain), and to the
-  node itself (`INPUT`: its LAN address, gateway and published ports).
-  Traffic within the bridge (dashboard <-> lease) is untouched, and the
-  dashboard's own address on the bridge is exempt: Docker older than 28
-  ignores `--gw-priority`, so its default route, and its LAN/NAS traffic, runs
-  through this bridge. Rules carry the comment `autonomy-browser-egress`;
-  each activation installs, verifies and prunes them
-  (`browser_containers.restrict_egress`), and leases are refused until they
-  hold. Why host rules rather than rules in each lease's namespace: they are
-  in place before any lease starts, so no page (e.g. a restored tab) can load
-  ahead of them. Needs Docker's iptables firewall backend; with nftables,
-  leases are refused.
+- **Leases have egress from the node's network.** A page in a lease can reach
+  the node's LAN (routers, internal services, link-local metadata), limited
+  only by Chrome's Private Network Access. An egress policy for leases
+  (drop RFC1918 and link-local) is the P1 follow-up that lands before
+  `auto-8q7oe.6`.
 
 ## Lease image
 

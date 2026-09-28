@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import shutil
 import sqlite3
 import subprocess
@@ -173,106 +172,6 @@ def isolate_dashboard() -> None:
     proc = _docker(*helper, "-I", *rule, check=False)
     if proc.returncode != 0 or _docker(*helper, "-C", *rule, check=False).returncode != 0:
         raise IsolationUnavailable(f"cannot install the lease refusal rule: {proc.stderr.strip()[:300]}")
-
-
-#: Destinations a lease may never open a connection to: private, carrier-grade
-#: NAT, link-local (cloud metadata) and loopback ranges (auto-i5okc). Public
-#: internet egress still leaves from the node's own address.
-EGRESS_BLOCKED = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
-                  "169.254.0.0/16", "127.0.0.0/8")
-
-
-def _bridge_name() -> str:
-    proc = _docker("network", "inspect", "--format",
-                   '{{.Id}} {{index .Options "com.docker.network.bridge.name"}}', NETWORK)
-    net_id, _, custom = proc.stdout.strip().partition(" ")
-    custom = custom.strip()
-    if custom == "<no value>":  # Go's template output for a missing option
-        custom = ""
-    name = custom or f"br-{net_id[:12]}"
-    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", name) or (not custom and len(net_id) < 12):
-        raise IsolationUnavailable(f"cannot name the bridge of {NETWORK}: {proc.stdout.strip()!r}")
-    return name
-
-
-EGRESS_TAG = "autonomy-browser-egress"
-
-
-def egress_rules(bridge: str, dashboard_ip: str) -> list[list[str]]:
-    """The host rules, each as ``[chain, *spec]``.
-
-    FORWARD (DOCKER-USER): new connections leaving the lease bridge for a
-    blocked range are dropped; ``! -o <bridge>`` leaves traffic within the
-    bridge (dashboard <-> lease) alone. INPUT: new connections from the lease
-    bridge to the node itself (its published ports, its LAN address, the
-    gateway) are dropped. The dashboard's own address on the bridge is exempt
-    from both: on Docker < 28 its default route, and so its egress to the LAN
-    and the NAS, leaves through this bridge."""
-    common = ["-i", bridge, "!", "-s", f"{dashboard_ip}/32"]
-    tag = ["-m", "comment", "--comment", EGRESS_TAG]
-    rules = [["DOCKER-USER", *common, "!", "-o", bridge, "-d", cidr,
-              "-m", "conntrack", "--ctstate", "NEW", *tag, "-j", "DROP"] for cidr in EGRESS_BLOCKED]
-    rules.append(["INPUT", *common, "-m", "conntrack", "--ctstate", "NEW", *tag, "-j", "DROP"])
-    return rules
-
-
-def _dashboard_ip_on_lease_network(own: str) -> str:
-    return _docker("inspect", "--format",
-                   "{{(index .NetworkSettings.Networks \"%s\").IPAddress}}" % NETWORK,
-                   own).stdout.strip()
-
-
-def restrict_egress() -> None:
-    """Install and verify the lease egress policy on the node (auto-i5okc).
-
-    A short-lived helper on the host network with NET_ADMIN writes the rules
-    into Docker's DOCKER-USER chain and the host INPUT chain. Tagged rules that
-    are no longer wanted (an old dashboard address, a recreated network) are
-    removed. Raises IsolationUnavailable when the policy cannot be verified;
-    leases are then refused."""
-    from agents.mount_plan import _own_container_id
-
-    backend = _docker("info", "--format", "{{.FirewallBackend.Driver}}", check=False).stdout.strip()
-    if backend and backend != "iptables":
-        raise IsolationUnavailable(f"docker firewall backend {backend!r} has no DOCKER-USER chain")
-    own = _own_container_id()
-    if not own:
-        raise IsolationUnavailable("the dashboard is not a container; lease egress policy needs one")
-    dashboard_ip = _dashboard_ip_on_lease_network(own)
-    if not dashboard_ip:
-        raise IsolationUnavailable(f"the dashboard has no address on {NETWORK}")
-    helper = ["run", "--rm", "--network", "host", "--cap-drop", "ALL", "--cap-add", "NET_ADMIN",
-              "--user", "0", "--entrypoint", "iptables", IMAGE, "-w"]
-    wanted = egress_rules(_bridge_name(), dashboard_ip)
-    for chain in ("DOCKER-USER", "INPUT"):
-        want = {frozenset(r[1:]) for r in wanted if r[0] == chain}
-        appended = [line for line in _docker(*helper, "-S", chain, check=False).stdout.splitlines()
-                    if line.startswith(f"-A {chain} ")]
-        stale = [number for number, line in enumerate(appended, start=1)
-                 if EGRESS_TAG in line and _normalize(line[len(f"-A {chain} "):]) not in want]
-        # Delete by position, highest first, so a rule iptables prints oddly
-        # (e.g. an interface it cannot resolve) is still removed.
-        for number in sorted(stale, reverse=True):
-            _docker(*helper, "-D", chain, str(number), check=False)
-    for rule in wanted:
-        chain, spec = rule[0], rule[1:]
-        if _docker(*helper, "-C", chain, *spec, check=False).returncode == 0:
-            continue
-        proc = _docker(*helper, "-I", chain, "1", *spec, check=False)
-        if proc.returncode != 0 or _docker(*helper, "-C", chain, *spec, check=False).returncode != 0:
-            raise IsolationUnavailable(f"cannot install the lease egress rule {rule}: "
-                                       f"{proc.stderr.strip()[:300]}")
-
-
-def _normalize(spec: str) -> frozenset:
-    # iptables -S prints matches in its own order and quoting; compare as a set
-    # of tokens, which is enough to tell our tagged rules apart. A line that
-    # does not parse is never "wanted".
-    import shlex
-    try:
-        return frozenset(shlex.split(spec))
-    except ValueError:
-        return frozenset({"<unparseable>", spec})
 
 
 def profile_mount_argv(org: str, workspace: str, name: str) -> list[str]:
