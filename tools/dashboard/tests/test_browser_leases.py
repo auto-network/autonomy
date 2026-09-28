@@ -372,14 +372,30 @@ def test_isolation_rule_is_checked_inserted_and_verified(monkeypatch):
     calls, rules = [], set()
     ipv6 = {"on": "false"}
 
+    chain = []  # the namespace's INPUT chain, top first
+
     def fake_docker(*args, check=True, **kw):
         calls.append(args)
         if args[:2] == ("network", "inspect"):
-            return subprocess.CompletedProcess(args, 0, f"172.19.0.0/16 {ipv6['on']}\n", "")
+            return subprocess.CompletedProcess(
+                args, 0, f"172.19.0.0/16 172.19.0.1 {ipv6['on']}\n", "")
         if args[0] == "run":
-            op, rule = args[args.index("-w") + 1], args[args.index("-w") + 2:]
-            if op == "-I":
+            op, rest = args[args.index("-w") + 1], args[args.index("-w") + 2:]
+            if op == "-I" and rest[1] == "1":  # iptables -I CHAIN 1 <rule>
+                rule = (rest[0], *rest[2:])
+                chain.insert(0, rule)
                 rules.add(rule)
+                return subprocess.CompletedProcess(args, 0, "", "")
+            rule = rest
+            if op == "-I":
+                chain.insert(0, rule)
+                rules.add(rule)
+            if op == "-D":
+                found = rule in rules
+                rules.discard(rule)
+                if found:
+                    chain.remove(rule)
+                return subprocess.CompletedProcess(args, 0 if found else 1, "", "")
             return subprocess.CompletedProcess(args, 0 if rule in rules else 1, "", "")
         raise AssertionError(args)
 
@@ -387,15 +403,23 @@ def test_isolation_rule_is_checked_inserted_and_verified(monkeypatch):
     monkeypatch.setattr("agents.mount_plan._own_container_id", lambda: "dash123")
     containers.isolate_dashboard()
     run = [c for c in calls if c[0] == "run"]
-    assert [c[c.index("-w") + 1] for c in run] == ["-C", "-I", "-C"]
+    # refusal: checked, inserted, verified; gateway exemption: stale copy
+    # removed, inserted at the top, verified
+    assert [c[c.index("-w") + 1] for c in run] == ["-C", "-I", "-C", "-D", "-I", "-C"]
     helper = run[1]
     assert helper[helper.index("--network") + 1] == "container:dash123"
     assert "NET_ADMIN" in helper and helper[helper.index("--cap-drop") + 1] == "ALL"
     assert helper[helper.index("-w") + 2:] == ("INPUT", "-s", "172.19.0.0/16", "-m", "conntrack",
                                                "--ctstate", "NEW", "-j", "DROP")
+    # The host's gateway address sits above the refusal: docker-proxy forwards
+    # the published port from it, so the host's own path in is never dropped.
+    assert chain == [("INPUT", "-s", "172.19.0.1", "-j", "ACCEPT"),
+                     ("INPUT", "-s", "172.19.0.0/16", "-m", "conntrack",
+                      "--ctstate", "NEW", "-j", "DROP")]
     calls.clear()
-    containers.isolate_dashboard()  # idempotent: one check, no second insert
-    assert [c[c.index("-w") + 1] for c in calls if c[0] == "run"] == ["-C"]
+    containers.isolate_dashboard()  # idempotent: one check, no second refusal insert
+    assert [c[c.index("-w") + 1] for c in calls if c[0] == "run"] == ["-C", "-D", "-I", "-C"]
+    assert chain[0] == ("INPUT", "-s", "172.19.0.1", "-j", "ACCEPT") and len(chain) == 2
     ipv6["on"] = "true"  # an IPv6-enabled lease network fails closed
     with pytest.raises(containers.IsolationUnavailable):
         containers.isolate_dashboard()
