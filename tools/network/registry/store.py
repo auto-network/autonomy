@@ -47,7 +47,7 @@ import secrets
 import sqlite3
 import threading
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 from tools.network.idkit import RevocationRecord, RevocationSet
 
@@ -120,31 +120,6 @@ CREATE TABLE IF NOT EXISTS links (
     grant_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_links_org ON links (org_uuid);
-
-CREATE TABLE IF NOT EXISTS link_operations (
-    org_uuid                  TEXT NOT NULL,
-    operation_id              TEXT NOT NULL,
-    operation                 TEXT NOT NULL,
-    binding_root_pub          TEXT NOT NULL,
-    binding_generation        TEXT NOT NULL,
-    receipt_request_digest    TEXT NOT NULL,
-    acceptance_envelope_digest TEXT NOT NULL,
-    registry_input_digest     TEXT NOT NULL,
-    local_intent_digest       TEXT NOT NULL,
-    operand_digest            TEXT,
-    origin_proof_commitment   TEXT NOT NULL,
-    source_expires_at_ms      INTEGER,
-    accepted_at               INTEGER NOT NULL,
-    signer_pub                TEXT NOT NULL,
-    subject_kind              TEXT NOT NULL,
-    subject_id                TEXT NOT NULL,
-    receipt_json              TEXT NOT NULL,
-    receipt_signature         TEXT NOT NULL,
-    state                     TEXT NOT NULL,
-    result_token              TEXT,
-    completed_at              INTEGER,
-    PRIMARY KEY (org_uuid, operation_id)
-);
 
 CREATE TABLE IF NOT EXISTS revocations (
     org_uuid       TEXT NOT NULL,
@@ -568,31 +543,6 @@ class LinkChallenge:
     redeemed_at: Optional[int]
 
 
-@dataclass(frozen=True)
-class LinkOperation:
-    org_uuid: str
-    operation_id: str
-    operation: str
-    binding_root_pub: str
-    binding_generation: str
-    receipt_request_digest: str
-    acceptance_envelope_digest: str
-    registry_input_digest: str
-    local_intent_digest: str
-    operand_digest: Optional[str]
-    origin_proof_commitment: str
-    source_expires_at_ms: Optional[int]
-    accepted_at: int
-    signer_pub: str
-    subject_kind: str
-    subject_id: str
-    receipt_json: str
-    receipt_signature: str
-    state: str = "accepted"
-    result_token: Optional[str] = None
-    completed_at: Optional[int] = None
-
-
 def _locked(method):
     """Serialize a store method under the instance lock.
 
@@ -792,7 +742,6 @@ class RegistryStore:
             self._conn.execute("DELETE FROM link_sessions WHERE org_uuid = ?", (org_uuid,))
             self._conn.execute("DELETE FROM consumed_assertions WHERE org_uuid = ?", (org_uuid,))
             self._conn.execute("DELETE FROM link_view_attributions WHERE org_uuid = ?", (org_uuid,))
-            self._conn.execute("DELETE FROM link_operations WHERE org_uuid = ?", (org_uuid,))
         self._conn.execute(
             "INSERT INTO orgs (org_uuid, root_pub, recovery_policy, recovery_pub,"
             " created_at, expires_at, renewed_at, endpoint_hints, policy_epoch,"
@@ -981,256 +930,6 @@ class RegistryStore:
         ).fetchone()
         self._conn.commit()
         return row["revoked_at"] if row is not None else None
-
-    # -- Central Link operation receipts -----------------------------------
-
-    @staticmethod
-    def _operation_from_row(row: sqlite3.Row) -> LinkOperation:
-        return LinkOperation(
-            **{name: row[name] for name in LinkOperation.__dataclass_fields__}
-        )
-
-    @_locked
-    def get_link_operation(
-        self, org_uuid: str, operation_id: str
-    ) -> Optional[LinkOperation]:
-        row = self._conn.execute(
-            "SELECT * FROM link_operations WHERE org_uuid = ? AND operation_id = ?",
-            (org_uuid, operation_id),
-        ).fetchone()
-        return self._operation_from_row(row) if row is not None else None
-
-    @_locked
-    def claim_link_operation(
-        self,
-        candidate: LinkOperation,
-        *,
-        now: int,
-        trusted_now_ms: Callable[[], int],
-    ) -> tuple[str, Optional[LinkOperation]]:
-        """Atomically create or replay one immutable accepted operation.
-
-        The first fresh authorized envelope is retained for audit. A later
-        freshly authorized delivery may use another valid signer, but can only
-        retrieve the original receipt when every semantic coordinate matches.
-        """
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            existing = self.get_link_operation(
-                candidate.org_uuid, candidate.operation_id
-            )
-            semantic_fields = (
-                "operation",
-                "binding_root_pub",
-                "binding_generation",
-                "receipt_request_digest",
-                "registry_input_digest",
-                "local_intent_digest",
-                "operand_digest",
-                "origin_proof_commitment",
-                "source_expires_at_ms",
-            )
-            if existing is not None:
-                exact = all(
-                    getattr(existing, name) == getattr(candidate, name)
-                    for name in semantic_fields
-                )
-                self._conn.commit()
-                return ("replay", existing) if exact else ("conflict", existing)
-
-            # The source deadline is part of the same transaction-level
-            # first-claim decision as the absence check above.  Keeping this
-            # here (rather than in the HTTP handler) means a receipt accepted
-            # just before the deadline and an exact delivery arriving at the
-            # boundary converge on either the stored receipt or one stable
-            # refusal; there is no lookup/insert race.
-            if (
-                candidate.source_expires_at_ms is not None
-                and candidate.source_expires_at_ms <= trusted_now_ms()
-            ):
-                self._conn.commit()
-                return "source_expired", None
-
-            binding = self.get_org(candidate.org_uuid)
-            if (
-                binding is None
-                or binding.expires_at < now
-                or binding.root_pub != candidate.binding_root_pub
-                or binding.binding_generation != candidate.binding_generation
-            ):
-                self._conn.commit()
-                return "binding_mismatch", None
-            self._conn.execute(
-                "INSERT INTO link_operations (org_uuid, operation_id, operation,"
-                " binding_root_pub, binding_generation, receipt_request_digest,"
-                " acceptance_envelope_digest, registry_input_digest, local_intent_digest,"
-                " operand_digest, origin_proof_commitment, source_expires_at_ms,"
-                " accepted_at, signer_pub, subject_kind, subject_id, receipt_json,"
-                " receipt_signature, state, result_token, completed_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                " 'accepted', NULL, NULL)",
-                (
-                    candidate.org_uuid,
-                    candidate.operation_id,
-                    candidate.operation,
-                    candidate.binding_root_pub,
-                    candidate.binding_generation,
-                    candidate.receipt_request_digest,
-                    candidate.acceptance_envelope_digest,
-                    candidate.registry_input_digest,
-                    candidate.local_intent_digest,
-                    candidate.operand_digest,
-                    candidate.origin_proof_commitment,
-                    candidate.source_expires_at_ms,
-                    candidate.accepted_at,
-                    candidate.signer_pub,
-                    candidate.subject_kind,
-                    candidate.subject_id,
-                    candidate.receipt_json,
-                    candidate.receipt_signature,
-                ),
-            )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-        return "created", self.get_link_operation(
-            candidate.org_uuid, candidate.operation_id
-        )
-
-    def _operation_binding_is_live(self, operation: LinkOperation, now: int) -> bool:
-        binding = self.get_org(operation.org_uuid)
-        return bool(
-            binding is not None
-            and binding.expires_at >= now
-            and binding.root_pub == operation.binding_root_pub
-            and binding.binding_generation == operation.binding_generation
-        )
-
-    @_locked
-    def execute_publish_operation(
-        self,
-        org_uuid: str,
-        operation_id: str,
-        grant: LinkGrant,
-        *,
-        now: int,
-    ) -> tuple[str, Optional[LinkOperation]]:
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            operation = self.get_link_operation(org_uuid, operation_id)
-            if operation is None or operation.operation != "publish":
-                self._conn.commit()
-                return "not_found", operation
-            if operation.state == "succeeded":
-                link = self.get_link(operation.result_token or "")
-                self._conn.commit()
-                if (
-                    link is None
-                    or link.org_uuid != org_uuid
-                    or link.operation_id != operation_id
-                    or link.token != operation.result_token
-                ):
-                    return "inconsistent", operation
-                return "replay", operation
-            if operation.state != "accepted":
-                self._conn.commit()
-                return "conflict", operation
-            if not self._operation_binding_is_live(operation, now):
-                self._conn.commit()
-                return "binding_mismatch", operation
-            if grant.org_uuid != org_uuid or grant.operation_id != operation_id:
-                self._conn.commit()
-                return "conflict", operation
-            self._conn.execute(
-                "INSERT INTO links (token, org_uuid, target_uuid, target_type,"
-                " invite_ref, meta, created_at, expires_at, expires_at_ms,"
-                " revoked_at, signer_pub, subject_kind, subject_id, operation_id,"
-                " serving_machine, requires, grant_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    grant.token,
-                    grant.org_uuid,
-                    grant.target_uuid,
-                    grant.target_type,
-                    grant.invite_ref,
-                    json.dumps(grant.meta),
-                    grant.created_at,
-                    grant.expires_at,
-                    grant.expires_at_ms,
-                    grant.signer_pub,
-                    grant.subject_kind,
-                    grant.subject_id,
-                    grant.operation_id,
-                    grant.serving_machine,
-                    json.dumps(grant.requires, sort_keys=True) if grant.requires else None,
-                    grant.grant_id,
-                ),
-            )
-            self._conn.execute(
-                "UPDATE link_operations SET state = 'succeeded', result_token = ?,"
-                " completed_at = ? WHERE org_uuid = ? AND operation_id = ?"
-                " AND state = 'accepted'",
-                (grant.token, now, org_uuid, operation_id),
-            )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-        return "created", self.get_link_operation(org_uuid, operation_id)
-
-    @_locked
-    def execute_revoke_operation(
-        self,
-        org_uuid: str,
-        operation_id: str,
-        token: str,
-        *,
-        now: int,
-    ) -> tuple[str, Optional[LinkOperation]]:
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            operation = self.get_link_operation(org_uuid, operation_id)
-            if operation is None or operation.operation != "revoke":
-                self._conn.commit()
-                return "not_found", operation
-            if operation.state in ("succeeded", "not_found"):
-                self._conn.commit()
-                return "replay", operation
-            if operation.state != "accepted":
-                self._conn.commit()
-                return "conflict", operation
-            if not self._operation_binding_is_live(operation, now):
-                self._conn.commit()
-                return "binding_mismatch", operation
-            link = self.get_link(token)
-            if link is None or link.org_uuid != org_uuid:
-                self._conn.execute(
-                    "UPDATE link_operations SET state = 'not_found', completed_at = ?"
-                    " WHERE org_uuid = ? AND operation_id = ?"
-                    " AND state = 'accepted'",
-                    (now, org_uuid, operation_id),
-                )
-                self._conn.commit()
-                return "created", self.get_link_operation(org_uuid, operation_id)
-            self._conn.execute(
-                "UPDATE links SET revoked_at = ? WHERE token = ? AND revoked_at IS NULL",
-                (now, token),
-            )
-            row = self._conn.execute(
-                "SELECT revoked_at FROM links WHERE token = ?", (token,)
-            ).fetchone()
-            revoked_at = row["revoked_at"]
-            self._conn.execute(
-                "UPDATE link_operations SET state = 'succeeded', completed_at = ?"
-                " WHERE org_uuid = ? AND operation_id = ? AND state = 'accepted'",
-                (revoked_at, org_uuid, operation_id),
-            )
-            self._conn.commit()
-            return "created", self.get_link_operation(org_uuid, operation_id)
-        except Exception:
-            self._conn.rollback()
-            raise
 
     # -- revocations ---------------------------------------------------------
 

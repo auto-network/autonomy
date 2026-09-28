@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry.signing import sign_recovery_succession, sign_request
+from tools.network.registry.store import RegistryStore
 
 from .conftest import DAY, HOUR, NOW, ORG, ORG_NONE, SESSION_SCOPE, register, signed
 
@@ -114,8 +117,7 @@ class TestEnvelopeGateI4:
     so nothing here depends on a scope. The chain law itself (scope and
     target_type narrowing, expired hops, revoked hops, tampering) is unit-
     tested in ``tools/network/idkit/tests/test_chain_verify.py``; scoped-
-    route enforcement is pinned per route (topics, link-operation
-    receipts)."""
+    route enforcement is pinned per route (topics)."""
 
     def test_fake_chain_to_foreign_root_403(self, client, clock, bound_org):
         """A key with NO relationship to the org — even wrapping itself in a
@@ -494,3 +496,97 @@ class TestRecoveryFactorDistinctFromRoot:
              "policy_epoch": 1}, clock,
         )
         assert response.status_code == 400, response.json()
+
+
+# -- binding generation: the registry-authoritative binding identity ----------
+
+def test_existing_registry_database_backfills_one_stable_generation(tmp_path):
+    path = tmp_path / "registry.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE orgs (org_uuid TEXT PRIMARY KEY, root_pub TEXT NOT NULL, "
+        "recovery_policy TEXT NOT NULL, recovery_pub TEXT, created_at INTEGER NOT NULL, "
+        "expires_at INTEGER NOT NULL, renewed_at INTEGER, endpoint_hints TEXT, "
+        "policy_epoch INTEGER NOT NULL DEFAULT 0)"
+    )
+    conn.execute(
+        "CREATE TABLE links (token TEXT PRIMARY KEY, org_uuid TEXT NOT NULL, "
+        "target_uuid TEXT NOT NULL, target_type TEXT NOT NULL, meta TEXT NOT NULL, "
+        "created_at INTEGER NOT NULL, expires_at INTEGER, revoked_at INTEGER, "
+        "signer_pub TEXT NOT NULL, subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO orgs VALUES (?, ?, 'none', NULL, 1, 9999999999, NULL, NULL, 0)",
+        (ORG, "ab" * 32),
+    )
+    other_org = "77777777-7777-4777-8777-777777777777"
+    conn.execute(
+        "INSERT INTO orgs VALUES (?, ?, 'none', NULL, 1, 9999999999, NULL, NULL, 0)",
+        (other_org, "cd" * 32),
+    )
+    conn.commit()
+    conn.close()
+
+    first_store = RegistryStore(str(path))
+    generation = first_store.get_org(ORG).binding_generation
+    other_generation = first_store.get_org(other_org).binding_generation
+    assert len(generation) == 64
+    assert len(other_generation) == 64
+    assert other_generation != generation
+    int(generation, 16)
+    first_store.close()
+    second_store = RegistryStore(str(path))
+    assert second_store.get_org(ORG).binding_generation == generation
+    assert second_store.get_org(other_org).binding_generation == other_generation
+    second_store.close()
+
+
+def test_binding_generation_and_closed_policy_are_authoritative(
+    client, app, clock, root, recovery
+):
+    first = register(
+        client, clock, root, policy="recovery-key", recovery_pub=recovery.public_hex
+    )
+    assert first.status_code == 201
+    body = first.json()
+    generation = body["binding_generation"]
+    assert body == {
+        "outcome": "claimed",
+        "org_uuid": ORG,
+        "root_pub": root.public_hex,
+        "binding_generation": generation,
+        "expires_at": clock.now + 30 * DAY,
+        "recovery_policy": {
+            "mode": "recovery-key",
+            "recovery_pub": recovery.public_hex,
+        },
+    }
+
+    retry = register(
+        client, clock, root, policy="recovery-key", recovery_pub=recovery.public_hex
+    )
+    assert retry.status_code == 201
+    assert retry.json()["outcome"] == "already_bound_self"
+    assert retry.json()["binding_generation"] == generation
+    assert retry.json()["recovery_policy"] == body["recovery_policy"]
+
+    renewed = signed(
+        client,
+        "POST",
+        f"/v1/orgs/{ORG}/renew",
+        root,
+        {},
+        clock,
+        expect=200,
+    ).json()
+    assert renewed["binding_generation"] == generation
+    assert renewed["root_pub"] == root.public_hex
+    assert renewed["recovery_policy"] == body["recovery_policy"]
+
+    clock.advance(31 * DAY)
+    reclaimed = register(
+        client, clock, root, policy="recovery-key", recovery_pub=recovery.public_hex
+    )
+    assert reclaimed.status_code == 201
+    assert reclaimed.json()["outcome"] == "reclaimed_expired"
+    assert reclaimed.json()["binding_generation"] != generation

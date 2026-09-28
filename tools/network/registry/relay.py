@@ -24,10 +24,8 @@ the accepted metadata set: token, org, timing, volume.
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import hashlib
-import hmac
 import logging
 import re
 import uuid as _uuid
@@ -85,7 +83,7 @@ from tools.network.ledger.membership_commitment import (
 )
 
 from .abuse import ChannelLease, RelayAbuseLimiter
-from .signing import MAX_CLOCK_SKEW, link_operation_receipt_input
+from .signing import MAX_CLOCK_SKEW
 from .store import LinkGrant, RegistryStore
 
 # WS close codes (4000-4999 = application-defined). One value per reason:
@@ -1563,9 +1561,6 @@ _ORG_SLUG_RE = _re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}")
 #: without tools.graph, so this is a copy; test_tunnel_control pins it to
 #: tools.data_paths.LOCAL_STORE_KEYS and tools.graph.db._STRINGIFIED_ABSENCE.
 _RESERVED_ORG_SLUGS = frozenset({"personal", "machine", "none", "null", "nil", "undefined"})
-_CENTRAL_LINK_FIELDS = frozenset(
-    {"operation_id", "receipt", "signature", "origin_proof"}
-)
 
 
 def _parse_persona_map(value, what: str) -> "dict[str, int] | None":
@@ -1681,60 +1676,8 @@ def _ctrl_reprove_membership(tunnel: "Tunnel", args: dict,
     return {"seq": state.seq}
 
 
-def _central_operation(
-    tunnel: "Tunnel", args: dict, store: RegistryStore, witness_key
-):
-    present = _CENTRAL_LINK_FIELDS & set(args)
-    if not present:
-        return None
-    if present != _CENTRAL_LINK_FIELDS or witness_key is None:
-        raise _CtrlError("Central Link execution requires the complete receipt and origin proof")
-    operation_id = args.get("operation_id")
-    if not isinstance(operation_id, str) or not _re.fullmatch(r"[0-9a-f]{64}", operation_id):
-        raise _CtrlError("operation_id must be 64 lowercase hex characters")
-    receipt = args.get("receipt")
-    signature = args.get("signature")
-    if not isinstance(receipt, dict) or not isinstance(signature, str):
-        raise _CtrlError("Central receipt is malformed")
-    operation = store.get_link_operation(tunnel.org, operation_id)
-    if operation is None:
-        raise _CtrlError("unknown Link operation")
-    try:
-        receipt_json = canonical_json(receipt).decode("utf-8")
-        verify_signature(
-            witness_key.public_hex,
-            signature,
-            link_operation_receipt_input(receipt),
-        )
-    except Exception as exc:
-        raise _CtrlError("Central receipt signature is invalid") from exc
-    if not hmac.compare_digest(receipt_json, operation.receipt_json) or not hmac.compare_digest(
-        signature, operation.receipt_signature
-    ):
-        raise _CtrlError("Central receipt does not match accepted operation")
-    proof_wire = args.get("origin_proof")
-    if not isinstance(proof_wire, str) or len(proof_wire) != 43 or "=" in proof_wire:
-        raise _CtrlError("origin proof is malformed")
-    try:
-        proof = base64.urlsafe_b64decode(proof_wire + "=")
-    except Exception as exc:
-        raise _CtrlError("origin proof is malformed") from exc
-    commitment = hashlib.sha256(
-        b"autonomy.link.origin-proof-commitment.v1\n" + proof
-    ).hexdigest()
-    if (
-        len(proof) != 32
-        or base64.urlsafe_b64encode(proof).decode("ascii").rstrip("=") != proof_wire
-        or not hmac.compare_digest(
-            commitment, operation.origin_proof_commitment
-        )
-    ):
-        raise _CtrlError("origin proof does not match accepted operation")
-    return operation
-
-
 def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
-                      base_url: str, now: int, witness_key=None) -> dict:
+                      base_url: str, now: int) -> dict:
     if not isinstance(args, dict):
         raise _CtrlError("args must be a JSON object")
     target_uuid = args.get("target_uuid")
@@ -1832,68 +1775,6 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
     ):
         raise _CtrlError("grant_id must be 32 lowercase hex")
 
-    central = _central_operation(tunnel, args, store, witness_key)
-    if central is not None:
-        allowed = (
-            {"target_uuid", "target_type", "meta", "serving_machine", "requires", "grant_id"}
-            | _CENTRAL_LINK_FIELDS
-        )
-        if set(args) - allowed:
-            raise _CtrlError("Central create-link carries unknown or local-only fields")
-        if central.operation != "publish":
-            raise _CtrlError("Central receipt is not a publish operation")
-        if set(meta) - {"ttl", "label"}:
-            raise _CtrlError("Central Link meta permits only ttl and label")
-        if link_ttl is not None and link_ttl > 365 * 24 * 60 * 60:
-            raise _CtrlError("Central Link ttl must not exceed 365 days")
-        label = meta.get("label")
-        if label is not None:
-            try:
-                valid_label = isinstance(label, str) and len(label.encode("utf-8")) <= 256
-            except UnicodeError:
-                valid_label = False
-            if not valid_label:
-                raise _CtrlError("Central Link label must be at most 256 UTF-8 bytes")
-        registry_input = {
-            "operation_id": args["operation_id"],
-            "target_uuid": target_uuid,
-            "target_type": target_type,
-            "meta": meta,
-        }
-        if not hmac.compare_digest(
-            hashlib.sha256(canonical_json(registry_input)).hexdigest(),
-            central.registry_input_digest,
-        ):
-            raise _CtrlError("create-link input differs from Central receipt")
-        token = generate_token()
-        grant = LinkGrant(
-            token=token,
-            org_uuid=tunnel.org,
-            target_uuid=target_uuid,
-            target_type=target_type,
-            meta=meta,
-            created_at=now,
-            expires_at=now + link_ttl if link_ttl is not None else None,
-            revoked_at=None,
-            signer_pub=central.signer_pub,
-            subject_kind=central.subject_kind,
-            subject_id=central.subject_id,
-            operation_id=args["operation_id"],
-            serving_machine=serving_machine,
-            requires=requires,
-            grant_id=grant_id,
-        )
-        status, completed = store.execute_publish_operation(
-            tunnel.org, args["operation_id"], grant, now=now
-        )
-        if status in ("binding_mismatch", "conflict", "inconsistent") or completed is None:
-            raise _CtrlError("Central Link operation cannot execute")
-        _pin_fresh_link(tunnel, completed.result_token, serving_machine, now)
-        return {
-            "token": completed.result_token,
-            "url": f"{base_url}/l/{completed.result_token}",
-        }
-
     token = generate_token()
     store.create_link(
         LinkGrant(
@@ -1925,53 +1806,23 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
 
 
 def _pin_fresh_link(tunnel: "Tunnel", token: str, serving_machine, now) -> None:
-    """Rank the publishing tunnel first for FRESH_LINK_PIN_S. Called by BOTH
-    create-link branches: from 2026-09-15 it lived only in the Central-receipt
-    branch, which no production publisher uses, so no dashboard-published
-    link was ever pinned and a fresh link with requirements was refused 4431."""
+    """Rank the publishing tunnel first for FRESH_LINK_PIN_S. Every
+    create-link pins: from 2026-09-15 to its fix this lived only in a
+    receipt-gated branch no production publisher used, so no
+    dashboard-published link was ever pinned and a fresh link with
+    requirements was refused 4431."""
     hub = getattr(tunnel, "hub", None)
     if hub is not None and serving_machine is None:
         hub.pin_fresh_link(token, tunnel.machine, float(now))
 
 
 def _ctrl_revoke_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
-                      now: int, witness_key=None) -> dict:
+                      now: int) -> dict:
     if not isinstance(args, dict):
         raise _CtrlError("args must be a JSON object")
     token = args.get("token")
     if not isinstance(token, str) or not token:
         raise _CtrlError("token must be a non-empty string")
-    central = _central_operation(tunnel, args, store, witness_key)
-    if central is not None:
-        allowed = {"token"} | _CENTRAL_LINK_FIELDS
-        if set(args) - allowed:
-            raise _CtrlError("Central revoke-link carries unknown or local-only fields")
-        if central.operation != "revoke":
-            raise _CtrlError("Central receipt is not a revoke operation")
-        if _re.fullmatch(r"[0-9a-f]{32}", token) is None:
-            raise _CtrlError("Central revoke token must be 32 lowercase hex characters")
-        registry_input = {"operation_id": args["operation_id"]}
-        if not hmac.compare_digest(
-            hashlib.sha256(canonical_json(registry_input)).hexdigest(),
-            central.registry_input_digest,
-        ):
-            raise _CtrlError("revoke-link input differs from Central receipt")
-        operand_digest = hashlib.sha256(
-            canonical_json(["autonomy.link.operand", 1, "revoke", token])
-        ).hexdigest()
-        if central.operand_digest is None or not hmac.compare_digest(
-            operand_digest, central.operand_digest
-        ):
-            raise _CtrlError("revoke operand differs from Central receipt")
-        status, completed = store.execute_revoke_operation(
-            tunnel.org, args["operation_id"], token, now=now
-        )
-        if status in ("binding_mismatch", "conflict") or completed is None:
-            raise _CtrlError("Central Link operation cannot execute")
-        return {
-            "state": completed.state,
-            "revoked_at": completed.completed_at if completed.state == "succeeded" else None,
-        }
     link = store.get_link(token)
     if link is None:
         raise _CtrlError("unknown link")
@@ -2233,7 +2084,7 @@ def _ctrl_host_op(tunnel: "Tunnel", op: str, args: dict,
 
 async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
                              store: RegistryStore, base_url: str,
-                             now: int, turn_issuer=None, witness_key=None,
+                             now: int, turn_issuer=None,
                              host_routes: "HostRoutes | None" = None,
                              directed_streams=None) -> None:
     """Parse one control request and reply on the control channel. A
@@ -2255,9 +2106,9 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
     # — the tunnel keeps serving until it is either re-proven or closed.
     try:
         if op == "create-link":
-            result = _ctrl_create_link(tunnel, args, store, base_url, now, witness_key)
+            result = _ctrl_create_link(tunnel, args, store, base_url, now)
         elif op == "revoke-link":
-            result = _ctrl_revoke_link(tunnel, args, store, now, witness_key)
+            result = _ctrl_revoke_link(tunnel, args, store, now)
         elif op == "re-prove-membership":
             result = _ctrl_reprove_membership(tunnel, args, store, now)
         elif op == "sync-frontier":
@@ -2342,7 +2193,7 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
 
 async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                           store: RegistryStore, now_fn,
-                          base_url: str = "", turn_issuer=None, witness_key=None,
+                          base_url: str = "", turn_issuer=None,
                           host_routes: "HostRoutes | None" = None,
                           directed_streams=None) -> None:
     """Handle one dashboard tunnel connection for its whole lifetime."""
@@ -2424,7 +2275,7 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                 try:
                     await _handle_ctrl_frame(
                         tunnel, frame.payload, store, base_url, int(now_fn()),
-                        turn_issuer=turn_issuer, witness_key=witness_key,
+                        turn_issuer=turn_issuer,
                         host_routes=host_routes,
                         directed_streams=directed_streams,
                     )
