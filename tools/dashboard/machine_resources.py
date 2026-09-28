@@ -7,7 +7,8 @@ constantly and presence rows must never become a heartbeat.
 
 * RAM: ``MemAvailable`` / ``MemTotal`` from /proc/meminfo, unless this
   dashboard runs under a cgroup memory limit, in which case the limit is the
-  total and ``limit - usage`` is what is free (``ram_limited`` says which).
+  total and ``limit - (usage - inactive_file)`` is what is free
+  (``ram_limited`` says which).
 * Disk: free space on the volume holding the data root, where sessions'
   worktrees and run directories live -- the disk a new session consumes.
 * Load: the 1-minute load average and the CPU count; the chooser shows
@@ -37,7 +38,11 @@ def _meminfo(path: Path = Path("/proc/meminfo")) -> dict[str, int]:
 
 
 def _cgroup_memory(root: Path = Path("/sys/fs/cgroup")) -> tuple[int, int] | None:
-    """(limit, usage) in bytes under a cgroup v2 memory limit, else None."""
+    """(limit, usage) in bytes under a cgroup v2 memory limit, else None.
+
+    Usage excludes inactive file cache (memory.stat ``inactive_file``), which
+    the kernel reclaims on demand -- the same sense in which MemAvailable
+    counts it as available."""
     try:
         limit = (root / "memory.max").read_text().strip()
         usage = (root / "memory.current").read_text().strip()
@@ -45,7 +50,16 @@ def _cgroup_memory(root: Path = Path("/sys/fs/cgroup")) -> tuple[int, int] | Non
         return None
     if limit == "max" or not limit.isdigit() or not usage.isdigit():
         return None
-    return int(limit), int(usage)
+    inactive = 0
+    try:
+        for line in (root / "memory.stat").read_text().splitlines():
+            key, _, value = line.partition(" ")
+            if key == "inactive_file" and value.strip().isdigit():
+                inactive = int(value)
+                break
+    except OSError:
+        pass
+    return int(limit), max(0, int(usage) - inactive)
 
 
 def sample(data_root: str | os.PathLike | None = None, *,

@@ -43,7 +43,14 @@ TAIL_QUERY_KEYS = ("tail_lines", "tail_entries", "before", "before_file",
 UNREACHABLE_REFUSALS = frozenset({
     "destination-slot-absent", "session-control-timeout",
     "peer-refused-session-control", "personal-connector-unavailable",
-    "session-control-not-negotiated", "session-control-failed",
+    "session-control-failed",
+})
+#: Refusals that mean remote sessions are not ENABLED (as opposed to the
+#: machine being down): this machine's relay or connector lacks the
+#: capability, or a machine holds no session:control grant (it needs a
+#: re-sign-in there, not patience).
+NOT_ENABLED_REFUSALS = frozenset({
+    "session-control-not-negotiated", "session-cap-missing",
 })
 
 

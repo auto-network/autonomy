@@ -7030,6 +7030,14 @@ async def _remote_session_tail(request, project: str, address: str):
     reply = await remote_view.fetch_tail(machine, name, project, query)
     if not reply.get("ok"):
         refusal = reply.get("refusal")
+        if refusal in remote_view.NOT_ENABLED_REFUSALS:
+            return JSONResponse({
+                "entries": [], "is_live": False, "session_id": address,
+                "tmux_session": address, "tmux_name": address,
+                "machine": machine, "machine_reachable": False,
+                "machine_not_enabled": {"machine": machine, "reason": refusal},
+                "live_updates": False,
+            })
         if refusal in remote_view.UNREACHABLE_REFUSALS:
             # The machine, not the session, is missing: the viewer shows
             # "<machine> unreachable since <t>" and no transcript
@@ -23778,7 +23786,9 @@ async def _activate_worker(reason: str) -> None:
                 ops={"send": _inbound_session_send, "stop": _inbound_session_stop,
                      "output": _inbound_session_output,
                      "fetch-branch": _inbound_session_fetch_branch,
-                     "tail": _inbound_session_tail})
+                     "tail": _inbound_session_tail,
+                     "sessions": session_control_client.sessions_op(
+                         session_monitor.get_registry)})
         except Exception:
             logger.exception("session-control inbound pump failed to start")
 

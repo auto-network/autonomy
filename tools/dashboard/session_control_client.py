@@ -185,21 +185,31 @@ def status_op(limits_provider: Callable[[], dict]) -> OpHandler:
     return status
 
 
-#: Fields of a session:registry row that never leave this machine: the
-#: harness credential identity (an account id) and its alias.
-_PRIVATE_ROW_FIELDS = ("harness_token", "harness_token_alias")
+#: The ONLY fields of a session:registry row that leave this machine: what
+#: an Active card renders. An allow-list, so a column added to the row later
+#: (a host path, an error text, a credential id) never crosses by default.
+SESSIONS_ROW_FIELDS = (
+    "session_id", "project", "type", "is_live", "started_at", "label", "role",
+    "entry_count", "context_tokens", "last_activity", "last_input_at",
+    "last_message", "topics", "activity_state", "harness", "model", "resolved",
+    "startup_state", "state", "attention", "lifecycle_state", "phase_progress",
+    "org",
+)
 
 
-async def sessions_op(_body: dict, _peer: str) -> dict:
-    """``sessions``: this machine's Active rows exactly as its own
-    session:registry payload builds them (bead auto-mje3g), so a remote card
-    carries the same fields as a local one. Read-only."""
-    from tools.dashboard.dao import sessions as dao_sessions
+def sessions_op(registry: Callable[[], list]) -> OpHandler:
+    """``sessions``: this machine's live sessions exactly as its own
+    ``session:registry`` payload carries them (*registry* is the session
+    monitor's get_registry), so a remote card shows the same fields as a
+    local one (bead auto-mje3g). Read-only."""
 
-    rows = await asyncio.to_thread(dao_sessions.get_active_sessions)
-    clean = [{k: v for k, v in row.items() if k not in _PRIVATE_ROW_FIELDS}
-             for row in rows]
-    return ok({"sessions": clean})
+    async def sessions(_body: dict, _peer: str) -> dict:
+        rows = await asyncio.to_thread(registry)
+        clean = [{k: row[k] for k in SESSIONS_ROW_FIELDS if k in row}
+                 for row in rows]
+        return ok({"sessions": clean})
+
+    return sessions
 
 
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
@@ -349,7 +359,6 @@ def install(limits_provider: Callable[[], dict],
     """Register the built-in ops, plus the server-owned *ops*, and start the
     pump (worker activation)."""
     register_op("status", status_op(limits_provider))
-    register_op("sessions", sessions_op)
     if create is not None:
         register_op("launch", launch_op(create))
     for name, handler in (ops or {}).items():
