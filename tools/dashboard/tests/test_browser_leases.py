@@ -486,3 +486,114 @@ def test_one_stuck_release_does_not_stall_the_pass(db, live, monkeypatch):
     reconciler.reconcile_once()
     states = sorted(store.get(h).state for h in (stuck, fine))
     assert states == ["gone", "releasing"]  # the second lease was still released
+
+
+# ── lease egress policy (auto-i5okc) ───────────────────────────────────
+
+
+def test_egress_rules_exempt_the_dashboard_and_stay_off_intra_bridge_traffic():
+    rules = containers.egress_rules("br-0123456789ab", "172.19.0.2")
+    forward = [r for r in rules if r[0] == "DOCKER-USER"]
+    assert sorted(r[r.index("-d") + 1] for r in forward) == sorted(containers.EGRESS_BLOCKED)
+    for rule in rules:
+        text = " ".join(rule)
+        assert "-i br-0123456789ab" in text and "! -s 172.19.0.2/32" in text
+        assert "--ctstate NEW" in text and rule[-2:] == ["-j", "DROP"]
+        assert f"--comment {containers.EGRESS_TAG}" in text
+    for rule in forward:
+        assert "! -o br-0123456789ab" in " ".join(rule)
+    assert [r for r in rules if r[0] == "INPUT"] and "-d" not in [r for r in rules if r[0] == "INPUT"][0]
+    for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10"):
+        assert cidr in containers.EGRESS_BLOCKED
+
+
+def _fake_iptables_docker(monkeypatch, *, backend="iptables", options="<no value>", existing=()):
+    import subprocess
+
+    chains = {"DOCKER-USER": list(existing), "INPUT": []}
+    calls = []
+
+    def fake(*args, check=True, **kw):
+        calls.append(args)
+        if args[0] == "info":
+            return subprocess.CompletedProcess(args, 0, backend + "\n", "")
+        if args[0] == "inspect":
+            return subprocess.CompletedProcess(args, 0, "172.19.0.2\n", "")
+        if args[:2] == ("network", "inspect"):
+            return subprocess.CompletedProcess(args, 0, f"97e82cc8791a55aa {options}\n", "")
+        op = args[args.index("-w") + 1]
+        chain = args[args.index("-w") + 2]
+        spec = list(args[args.index("-w") + 3:])
+        if op == "-S":
+            lines = [f"-N {chain}"] + [f"-A {chain} " + " ".join(r) for r in chains[chain]]
+            return subprocess.CompletedProcess(args, 0, "\n".join(lines), "")
+        if op == "-C":
+            return subprocess.CompletedProcess(args, 0 if spec in chains[chain] else 1, "", "")
+        if op == "-I":
+            chains[chain].insert(0, spec[1:])
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if op == "-D":
+            del chains[chain][int(spec[0]) - 1]
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(containers, "_docker", fake)
+    monkeypatch.setattr("agents.mount_plan._own_container_id", lambda: "dash123")
+    return chains, calls
+
+
+def test_restrict_egress_installs_verifies_and_is_idempotent(monkeypatch):
+    chains, calls = _fake_iptables_docker(monkeypatch)
+    containers.restrict_egress()
+    wanted = containers.egress_rules("br-97e82cc8791a", "172.19.0.2")
+    assert sorted(map(tuple, chains["DOCKER-USER"])) == sorted(tuple(r[1:]) for r in wanted if r[0] == "DOCKER-USER")
+    assert len(chains["INPUT"]) == 1
+    helper = next(c for c in calls if c[0] == "run")
+    assert helper[helper.index("--network") + 1] == "host" and "NET_ADMIN" in helper
+    before = {k: list(v) for k, v in chains.items()}
+    containers.restrict_egress()
+    assert chains == before
+
+
+def test_restrict_egress_prunes_stale_tagged_rules_but_not_others(monkeypatch):
+    stale = containers.egress_rules("br-97e82cc8791a", "172.19.0.9")[0][1:]     # an old dashboard address
+    foreign = ["-s", "10.9.9.9/32", "-j", "DROP"]                                # someone else's rule
+    broken = ["-i", "<no", "value>", "-m", "comment", "--comment", containers.EGRESS_TAG, "-j", "DROP"]
+    chains, _ = _fake_iptables_docker(monkeypatch, existing=[stale, foreign, broken])
+    containers.restrict_egress()
+    assert stale not in chains["DOCKER-USER"] and broken not in chains["DOCKER-USER"]
+    assert foreign in chains["DOCKER-USER"]
+
+
+@pytest.mark.parametrize("options,expected", [("<no value>", "br-97e82cc8791a"), ("", "br-97e82cc8791a"),
+                                              ("leasebr0", "leasebr0")])
+def test_bridge_name(monkeypatch, options, expected):
+    _fake_iptables_docker(monkeypatch, options=options)
+    assert containers._bridge_name() == expected
+
+
+def test_egress_policy_fails_closed(monkeypatch):
+    _fake_iptables_docker(monkeypatch, backend="nftables")
+    with pytest.raises(containers.IsolationUnavailable):
+        containers.restrict_egress()
+    _fake_iptables_docker(monkeypatch, options="bad name with spaces")
+    with pytest.raises(containers.IsolationUnavailable):
+        containers.restrict_egress()
+    _fake_iptables_docker(monkeypatch)
+    monkeypatch.setattr("agents.mount_plan._own_container_id", lambda: None)
+    with pytest.raises(containers.IsolationUnavailable):
+        containers.restrict_egress()
+
+
+def test_leases_are_refused_until_both_policies_hold(db, monkeypatch):
+    monkeypatch.setattr(containers, "isolate_dashboard", lambda: None)
+
+    def no_egress():
+        raise containers.IsolationUnavailable("no DOCKER-USER")
+
+    monkeypatch.setattr(containers, "restrict_egress", no_egress)
+    reconciler._ensure_isolation()
+    assert reconciler.isolated() is False
+    monkeypatch.setattr(containers, "restrict_egress", lambda: None)
+    reconciler._ensure_isolation()
+    assert reconciler.isolated() is True

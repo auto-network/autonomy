@@ -40,8 +40,8 @@ ISOLATION_RETRY_TICKS = 6
 
 
 def isolated() -> bool:
-    """Whether the lease -> dashboard refusal is verified in place; leases are
-    not started without it."""
+    """Whether the lease -> dashboard refusal and the lease egress policy are
+    verified in place; leases are not started without them."""
     return _isolated
 
 
@@ -49,6 +49,7 @@ def _ensure_isolation() -> None:
     global _isolated
     try:
         containers.isolate_dashboard()
+        containers.restrict_egress()
         _isolated = True
     except Exception as exc:
         _isolated = False
