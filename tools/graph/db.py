@@ -11,6 +11,7 @@ import secrets
 import functools
 import sqlite3
 import threading
+import weakref
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -739,6 +740,9 @@ class GraphDB:
         self._thread_conns: threading.local | None = None
         self._thread_conn_list: list[sqlite3.Connection] = []
         self._thread_conn_lock = threading.Lock()
+        #: id(conn) -> weakref to the thread it was opened for, so a thread
+        #: that has ended gets its connection closed (_reap_dead_locked).
+        self._conn_thread: dict[int, "weakref.ref[threading.Thread]"] = {}
         self._owner_thread: int | None = None
         if mode == "ro":
             self._open_ro()
@@ -906,8 +910,37 @@ class GraphDB:
             conn = self._connect_ro()
             local.conn = conn
             with self._thread_conn_lock:
+                self._reap_dead_locked()
                 self._thread_conn_list.append(conn)
+                self._conn_thread[id(conn)] = weakref.ref(threading.current_thread())
         return conn
+
+    def _reap_dead_locked(self) -> int:
+        """Close the per-thread connections of threads that have ended.
+
+        Pool workers are not all long-lived: anyio's worker threads, which
+        Starlette runs sync work on, exit after 10 idle seconds, and several
+        paths start short-lived threads. Each new thread opened its own
+        connection and none was ever closed, so a busy dashboard's open
+        connections to orgs/autonomy.db grew by about ten a minute. A dead
+        thread cannot use its connection again, so it is closed here, on the
+        next per-thread open. The lock is held by the caller."""
+        closed = 0
+        keep = []
+        for conn in self._thread_conn_list:
+            ref = self._conn_thread.get(id(conn))
+            thread = ref() if ref is not None else None
+            if ref is not None and (thread is None or not thread.is_alive()):
+                self._conn_thread.pop(id(conn), None)
+                try:
+                    conn.close()
+                except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                    pass
+                closed += 1
+            else:
+                keep.append(conn)
+        self._thread_conn_list = keep
+        return closed
 
     @conn.setter
     def conn(self, value: sqlite3.Connection) -> None:
@@ -944,6 +977,7 @@ class GraphDB:
         with self._thread_conn_lock:
             conns = list(self._thread_conn_list)
             self._thread_conn_list = []
+            self._conn_thread.clear()
         if self._conn is not None and self._conn not in conns:
             conns.append(self._conn)
         for conn in conns:

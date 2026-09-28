@@ -253,3 +253,66 @@ def test_pooled_rw_handle_refuses_another_thread(orgs_root):
     t.start()
     t.join()
     assert len(caught) == 1 and isinstance(caught[0], sqlite3.ProgrammingError)
+
+
+def test_short_lived_threads_do_not_leak_connections(orgs_root):
+    """A pooled read-only handle opens one connection per thread. anyio's
+    worker threads exit after 10 idle seconds and new ones replace them, so
+    without reaping, every new thread left a connection open for the life
+    of the process: the dashboard's connections to autonomy.db grew about
+    ten a minute under load. A dead thread's connection is closed on the
+    next per-thread open, so open connections stay bounded by live threads.
+    """
+    import threading
+
+    _seed("alpha")
+    db = GraphDB.for_org("alpha", mode="ro")
+    opened = []
+
+    def read_once():
+        conn = db.conn
+        conn.execute("SELECT 1").fetchone()
+        opened.append(conn)
+
+    for _ in range(25):
+        t = threading.Thread(target=read_once)
+        t.start()
+        t.join()
+
+    # Every connection but the most recent thread's (and the opener's) was
+    # closed when a later thread opened its own.
+    live = []
+    for conn in opened:
+        try:
+            conn.execute("SELECT 1")
+            live.append(conn)
+        except sqlite3.ProgrammingError:
+            pass
+    assert len(live) <= 1
+    assert len(db._thread_conn_list) <= 2
+
+
+def test_a_live_threads_connection_is_never_reaped(orgs_root):
+    import threading
+
+    _seed("beta")
+    db = GraphDB.for_org("beta", mode="ro")
+    ready, release = threading.Event(), threading.Event()
+    held = {}
+
+    def long_lived():
+        held["conn"] = db.conn
+        ready.set()
+        release.wait(10)
+        held["conn"].execute("SELECT 1").fetchone()   # still usable
+
+    worker = threading.Thread(target=long_lived)
+    worker.start()
+    assert ready.wait(10)
+    for _ in range(5):                                 # other threads come and go
+        t = threading.Thread(target=lambda: db.conn.execute("SELECT 1").fetchone())
+        t.start()
+        t.join()
+    release.set()
+    worker.join(10)
+    held["conn"].execute("SELECT 1")                   # not closed under it
