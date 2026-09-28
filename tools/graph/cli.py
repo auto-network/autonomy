@@ -5624,23 +5624,37 @@ def cmd_session_auth(args):
     print(f"  approval {approval_id} pending — waiting for the operator "
           f"(up to {args.wait}s)...", file=sys.stderr)
 
+    def _cancel() -> str:
+        # The ephemeral key dies with this process, so a later Grant could
+        # never be redeemed: withdraw the request rather than leave it for
+        # the operator (auto-fkhq0.11). Best effort; natural expiry covers a
+        # lost dashboard.
+        try:
+            _call(f"/api/approvals/{approval_id}/cancel", {})
+            return "the request was withdrawn"
+        except Exception:
+            return "the request could not be withdrawn and will expire"
+
     deadline = time.time() + args.wait
     result = None
-    while time.time() < deadline:
-        chunk = max(5, min(60, int(deadline - time.time())))
-        try:
-            row, _ = _call(f"/api/approvals/{approval_id}?wait={chunk}")
-        except urllib.error.URLError as exc:
-            print(f"session-auth: lost the dashboard while waiting: {exc}",
-                  file=sys.stderr)
-            sys.exit(1)
-        result = row.get("result")
-        if result is not None:
-            break
+    try:
+        while time.time() < deadline:
+            chunk = max(5, min(60, int(deadline - time.time())))
+            try:
+                row, _ = _call(f"/api/approvals/{approval_id}?wait={chunk}")
+            except urllib.error.URLError as exc:
+                print(f"session-auth: lost the dashboard while waiting: {exc}; "
+                      f"{_cancel()}", file=sys.stderr)
+                sys.exit(1)
+            result = row.get("result")
+            if result is not None:
+                break
+    except KeyboardInterrupt:
+        print(f"session-auth: interrupted; {_cancel()}", file=sys.stderr)
+        sys.exit(130)
     if result is None:
-        print(f"session-auth: no decision after {args.wait}s — the request "
-              f"({approval_id}) stays pending; re-run to keep waiting",
-              file=sys.stderr)
+        print(f"session-auth: no decision after {args.wait}s; {_cancel()} "
+              f"({approval_id}). Re-run to ask again.", file=sys.stderr)
         sys.exit(3)
     if not result.get("approved"):
         print("session-auth: the operator declined the request", file=sys.stderr)

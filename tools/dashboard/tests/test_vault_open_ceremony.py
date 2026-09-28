@@ -26,12 +26,10 @@ def test_vault_open_browser_ceremony():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_vault_uses_shared_control_not_legacy_debug_readout():
+def test_vault_open_renders_only_on_central():
+    """vault_open is a Central approval (auto-fkhq0.27): the legacy worktrees
+    overlay no longer opens it, and its legacy adapter is gone."""
     source = APPROVAL_RENDERER.read_text()
-    assert "await openVaultApproval(self, r)" in source
-    assert "'Setting: ' + setting.set_id" not in source
-    adapter = (APPROVAL_RENDERER.parent.parent / 'components/vault-approval.js').read_text()
-    assert "openApprovalDialog({" in adapter
-    assert "name:setting.key" in adapter
-    assert "requestingSession(requester.session" in adapter
-    assert "['Delivered file available for',duration]" in adapter
+    assert "vault_open:" not in source
+    assert "openVaultApproval" not in source
+    assert not (APPROVAL_RENDERER.parent.parent / "components/vault-approval.js").exists()

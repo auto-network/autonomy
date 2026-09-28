@@ -30,7 +30,6 @@ from starlette.routing import Route
 
 from tools.dashboard import api_auth
 from tools.dashboard import attention_routes
-from tools.dashboard import session_notify
 from tools.dashboard import web_push
 from tools.dashboard.approval_http_bridge import (
     CENTRAL_APPROVAL_ID_PREFIX,
@@ -186,7 +185,6 @@ from tools.dashboard import visitor_approvals as _visitor
 from tools.dashboard import mcp_peer_approvals as _mcp_peer
 from tools.dashboard import secure_setting_approvals as _secure_setting
 from tools.dashboard import external_service_approvals as _external_service
-from tools.dashboard import vault_open_approvals as _vault_open
 
 # Optional per-kind request preparation. A handler returns the normalized
 # request plus a server-frozen staged context. Kinds absent here retain the
@@ -199,22 +197,12 @@ PREPARE_CREATE = {
     **_secure_setting.PREPARE_CREATE,
     **_external_service.PREPARE_CREATE,
 }
-# Kinds in this registry must derive their requester identity from the
-# middleware-established principal.  The historical caller-claimed ``session``
-# field is passed only so the handler can explicitly ignore/reject it.
-PREPARE_CREATE_FROM_REQUEST = {
-    **_vault_open.PREPARE_CREATE_FROM_REQUEST,
-}
 AUTHORIZE_DECISION = {
     **_dashboard_access.AUTHORIZE_DECISION,
     **_visitor.AUTHORIZE_DECISION,
     **_mcp_peer.AUTHORIZE_DECISION,
     **_secure_setting.AUTHORIZE_DECISION,
     **_external_service.AUTHORIZE_DECISION,
-    **_vault_open.AUTHORIZE_DECISION,
-}
-AUTHORIZE_GET = {
-    **_vault_open.AUTHORIZE_GET,
 }
 
 # Per-kind GET enrichment — the only kind-specific hook on the server side of
@@ -227,9 +215,6 @@ ENRICH = {
     **_mcp_peer.ENRICH,
     **_secure_setting.ENRICH,
     **_external_service.ENRICH,
-}
-ENRICH_FROM_REQUEST = {
-    **_vault_open.ENRICH_FROM_REQUEST,
 }
 
 
@@ -255,20 +240,6 @@ EXECUTORS: dict = {
     **_mcp_peer.EXECUTORS,
     **_secure_setting.EXECUTORS,
     **_external_service.EXECUTORS,
-    **_vault_open.EXECUTORS,
-}
-RESULT_BUILDERS: dict = {
-    **_vault_open.RESULT_BUILDERS,
-}
-WAIT_RESULT_BUILDERS: dict = {
-    **_vault_open.WAIT_RESULT_BUILDERS,
-}
-# Per-kind wake: (row-with-committed-result) -> notification spec | None. A kind
-# registered here wakes its requesting session by task-notification when the
-# decision is committed, so a requester that posted and returned (no held GET)
-# learns the outcome without polling.
-SESSION_NOTIFIERS: dict = {
-    **_vault_open.SESSION_NOTIFIERS,
 }
 
 
@@ -277,7 +248,6 @@ def push_eligible_kind(kind: str) -> bool:
     return (
         kind == "commit_sign"
         or kind in PREPARE_CREATE
-        or kind in PREPARE_CREATE_FROM_REQUEST
         or kind in AUTHORIZE_DECISION
         or kind in ENRICH
     )
@@ -313,25 +283,7 @@ def _finalize_decision(rid: str, kind: str, session: str) -> None:
         ev.set()
     event_bus.broadcast_sync("approval:decided",
                              {"id": rid, "kind": kind, "session": session})
-    notifier = SESSION_NOTIFIERS.get(kind)
-    if notifier and session:
-        # Wake the requesting session by task-notification. Best-effort and
-        # deduped: a wake failure must never roll back the committed decision,
-        # and a held ?wait= GET that already delivered is harmless to duplicate.
-        try:
-            row = ar.get(rid)
-            spec = notifier(row) if row else None
-            if spec:
-                session_notify.deliver_task_notification_sync(
-                    session,
-                    spec["notification_id"],
-                    kind=spec.get("kind", "system"),
-                    status=spec.get("status", "complete"),
-                    summary=spec["summary"],
-                    body=spec.get("body", ""),
-                )
-        except Exception:
-            pass
+
 
 # Cap on ?wait= so a stuck client can't hold a connection open indefinitely;
 # requesters (e.g. the signing shim) loop on the held GET instead.
@@ -428,27 +380,16 @@ async def _create_approval_legacy(request: Request) -> JSONResponse:
                 "non-empty object"
             )},
             status_code=400)
-    staged = None
-    prepare_from_request = PREPARE_CREATE_FROM_REQUEST.get(kind)
-    if prepare_from_request:
-        try:
-            session, req, staged = prepare_from_request(request, session, req)
-        except PermissionError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=401)
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-    else:
-        if not isinstance(session, str) or not session or len(session) > 256:
-            return JSONResponse(
-                {"error": "session must be a short non-empty string"},
-                status_code=400,
-            )
+    if not isinstance(session, str) or not session or len(session) > 256:
+        return JSONResponse(
+            {"error": "session must be a short non-empty string"},
+            status_code=400,
+        )
     try:
         rid = await open_approval(
             kind=kind,
             session=session,
             request_payload=req,
-            prepared_staged=staged,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -470,11 +411,6 @@ async def _get_approval_legacy(request: Request) -> JSONResponse:
     if not r:
         return JSONResponse({"error": "not found"}, status_code=404)
     wait = request.query_params.get("wait")
-    authorize_get = AUTHORIZE_GET.get(r["kind"])
-    if authorize_get:
-        error = authorize_get(request, r, wait is not None)
-        if error:
-            return JSONResponse({"error": error}, status_code=403)
     if wait is not None:
         if r["result"] is None:
             try:
@@ -482,28 +418,13 @@ async def _get_approval_legacy(request: Request) -> JSONResponse:
             except ValueError:
                 pass
         result = r["result"]
-        build_wait_result = WAIT_RESULT_BUILDERS.get(r["kind"])
-        if result is not None and build_wait_result:
-            result = build_wait_result(r, result)
         return JSONResponse({
             "id": r["id"], "kind": r["kind"], "session": r["session"],
             "request": r["request"], "result": result,
         })
     extra = {}
-    enrich_from_request = ENRICH_FROM_REQUEST.get(r["kind"])
-    if enrich_from_request:
-        try:
-            extra = enrich_from_request(request, r) or {}
-        except PermissionError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=403)
-        except Exception:
-            return JSONResponse(
-                {"error": "vault factor bootstrap is unavailable"},
-                status_code=400,
-            )
-    else:
-        enrich = ENRICH.get(r["kind"])
-    if not enrich_from_request and enrich:
+    enrich = ENRICH.get(r["kind"])
+    if enrich:
         try:
             # Enrichers do blocking store reads (e.g. the mcp-peer link/
             # crosstalk enrichers open org stores via list_orgs + a
@@ -577,11 +498,7 @@ async def _decide_approval_legacy(request: Request) -> JSONResponse:
                 outcome = {"ok": False, "error": str(e)}
             finally:
                 _executing.discard(rid)
-            build_result = RESULT_BUILDERS.get(r["kind"])
-            result = (
-                build_result(r, body, outcome) if build_result
-                else {**body, "execution": outcome}
-            )
+            result = {**body, "execution": outcome}
             if ar.set_result(rid, result):
                 _finalize_decision(rid, r["kind"], r["session"])
 

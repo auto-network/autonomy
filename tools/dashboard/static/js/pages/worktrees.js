@@ -2306,12 +2306,6 @@
       // overlay state; the chrome and Decline are kind-agnostic (declining is
       // identical for every kind, so it lives in the shell).
       _approvalKinds: {
-        vault_open: {
-          async open(self, r) {
-            const {openVaultApproval} = await import('../components/vault-approval.js');
-            await openVaultApproval(self, r);
-          },
-        },
         external_service_access: {
           async open(self, r) {
             const {openServiceApproval}=await import('../components/service-approval.js');

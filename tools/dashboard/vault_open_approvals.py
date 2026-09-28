@@ -1,12 +1,12 @@
-"""Human-factor release of one secured vault Setting.
+"""Human-factor release of one secured vault Setting: the vault side.
 
-``vault_open`` is a kind on the generic approval rendezvous.  The requesting
-agent names only a secured set member and a short delivery TTL.  This module
-derives the real session/workspace from its bearer, freezes the selected
-Setting and policy generation, serves factor bootstrap material only to the
-operator-cookie browser, and writes the opened Setting payload only into the
-requesting session's isolated memory-backed delivery directory.  The approval
-result carries the value-free delivery receipt.
+The ``vault_open`` approval runs on Central (vault_open_central.py). This
+module is what it calls into the vault for: freezing one secured Setting and
+its policy generation for an authenticated session (:func:`freeze_request`),
+the operator's factor ceremony and open bundle (:func:`ceremony_for`), the
+frozen-context check (:func:`assert_frozen`), and opening the frozen revision
+with the operator's content key into the requester's private ramfs
+(:func:`open_and_deliver`). vault_routes also uses :func:`_setting_route`.
 
 No content-encryption key, factor seed, password, armor, or vault locator is
 ever placed in the requester-visible request/result.  The one factor gesture
@@ -19,8 +19,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import time
-
-from starlette.requests import Request
 
 from tools.dashboard import api_auth
 from tools.dashboard import vault_release_delivery
@@ -243,23 +241,23 @@ def _ceremony_bootstrap(class_snapshot: dict, org: str | None) -> dict:
     }
 
 
-def prepare_create_from_request(
-    http_request: Request,
-    _claimed_session: object,
-    request: dict,
-) -> tuple[str, dict, dict]:
-    """Freeze a request under the authenticated launcher's identity.
+def freeze_request(principal: api_auth.ApiPrincipal, request: dict) -> tuple[dict, dict]:
+    """Freeze a release of one secured Setting for an authenticated session.
 
-    The caller-supplied ``session`` is deliberately ignored.  A bearer may
-    request release only for the dashboard launcher record that minted it.
+    ``principal`` is the requesting session, proven by the caller from its
+    bearer; nothing in ``request`` names a session, organization or scope.
+    Returns the requester-visible request (target, access, requester, delivery
+    lifetime) and the staged context. The staged context holds only
+    identifiers and digests: the policy snapshot and factor roster are
+    re-derived and compared at bootstrap and delivery (:func:`assert_frozen`),
+    so no policy generation rides the replicated Central row.
     """
-    principal = api_auth.principal_from_request(http_request)
     if principal.kind not in {
         api_auth.ApiPrincipalKind.ORG_SESSION,
         api_auth.ApiPrincipalKind.LOCAL_SESSION,
     } or not principal.subject:
         raise PermissionError("vault_open requires an authenticated session bearer")
-    if set(request) - _ALLOWED_REQUEST_FIELDS:
+    if not isinstance(request, dict) or set(request) - _ALLOWED_REQUEST_FIELDS:
         raise ValueError(
             "vault_open request accepts only set_id, key, and ttl_seconds"
         )
@@ -321,30 +319,31 @@ def prepare_create_from_request(
             "session": principal.subject,
             "organization": principal.org or "local",
             "workspace": workspace,
-            "label": str(launcher.get("label") or principal.subject),
+            "label": str(launcher.get("label") or principal.subject)[:120],
         },
         "target": f"{set_id}/{routed_key}",
         "delivery": "plaintext Setting value to the requesting session",
         "release_mode": "delivered",
-        "access": (
+        "access": str(
             (class_snapshot.get("governance") or {}).get("display_name")
             or class_snapshot.get("policy")
-        ),
+        )[:200],
         # ttl_seconds is the delivered credential's ramfs LIFETIME (delivery
         # applies it from delivery time). The pending-approval window is the
         # kind's FIXED policy, not this value — see approval_kind_registry.
         "ttl_seconds": ttl,
     }
     staged = {
-        "v": 1,
+        "v": 2,
         "org": member.org,
         "setting_id": member.id,
         "sealed_digest": _digest(sealed),
-        "class_snapshot": class_snapshot,
+        "class_id": class_id,
+        "gen_id": gen_id,
         "class_digest": _digest(class_snapshot),
         "factor_digest": _digest(ceremony_bootstrap),
     }
-    return principal.subject, safe_request, staged
+    return safe_request, staged
 
 
 def _passkey_for_public_key(public_key: str) -> dict | None:
@@ -364,30 +363,35 @@ def _passkey_for_public_key(public_key: str) -> dict | None:
     return None
 
 
-def enrich_from_request(http_request: Request, row: dict) -> dict:
-    """Return factor armor/PRF bootstrap AND the open bundle to the operator.
+def _frozen_snapshot(staged: dict) -> dict:
+    """The policy snapshot the request froze, re-derived and digest-checked."""
+    snapshot, _record = _class_snapshot(
+        staged["class_id"], staged.get("org"), gen_id=staged["gen_id"],
+    )
+    if not hmac.compare_digest(_digest(snapshot), str(staged.get("class_digest") or "")):
+        raise VaultError("the vault policy changed before approval")
+    return snapshot
 
-    B-1: the operator's browser opens the policy class locally, so besides the
-    factor ceremony it needs the inner-blob inputs that ``open_cek`` used to
-    consume server-side — the frozen factor ``generation`` (wraps + sealing
-    public key), the sealed CEK, and the genesis/setting identifiers the seal
-    binds. Nothing here opens more than this one revision: no content key, no
-    opener seed, and no class key ever appears. All of it is served only to the
-    operator cookie, and the generation is taken from the digest-frozen policy
-    snapshot so the browser opens exactly what the approval committed to.
+
+def ceremony_for(request: dict, staged: dict) -> dict:
+    """The operator's factor ceremony inputs AND the open bundle.
+
+    The operator's browser opens the policy class locally, so besides the
+    factor ceremony it needs the inner-blob inputs: the frozen factor
+    ``generation`` (wraps + sealing public key), the sealed CEK, and the
+    genesis/setting identifiers the seal binds. Nothing here opens more than
+    this one revision: no content key, no opener seed, and no class key ever
+    appears. The caller serves it only to the operator, and the generation is
+    re-derived from the digest-frozen snapshot so the browser opens exactly
+    what the request committed to.
     """
-    principal = api_auth.principal_from_request(http_request)
-    if principal.kind is not api_auth.ApiPrincipalKind.OPERATOR_COOKIE:
-        raise PermissionError("operator-cookie authority is required for vault factors")
-    staged = row.get("staged") or {}
-    snapshot = staged.get("class_snapshot") or {}
+    snapshot = _frozen_snapshot(staged)
     ceremony = _ceremony_bootstrap(snapshot, staged.get("org"))
     if not hmac.compare_digest(
         _digest(ceremony), str(staged.get("factor_digest") or ""),
     ):
         raise VaultError("the vault factors changed before approval")
-
-    setting = (row.get("request") or {}).get("setting") or {}
+    setting = request.get("setting") or {}
     bundle = settings_ops.secured_open_bundle(
         setting.get("set_id"),
         setting.get("key"),
@@ -397,175 +401,61 @@ def enrich_from_request(http_request: Request, row: dict) -> dict:
     )
     if bundle["class_id"] != snapshot.get("class_id"):
         raise VaultError("the vault policy changed before approval")
-    # Serve the browser exactly the frozen generation the approval committed to.
     bundle["generation"] = snapshot.get("generation")
     bundle["policy"] = snapshot.get("policy")
     return {"ceremony": ceremony, "bundle": bundle}
 
 
-def authorize_decision(
-    http_request: Request,
-    row: dict,
-    decision: dict,
-) -> str | None:
-    """The key-bearing decision is accepted only from the operator cookie.
+def assert_frozen(request: dict, staged: dict) -> None:
+    """Refuse when the requesting session or the frozen policy changed.
 
-    B-1: the operator's browser opens the policy class locally and returns only
-    ``content_key`` — this one revision's already-unwrapped CEK. The server
-    receives no opener seeds and no class key, so there is no seed roster or
-    policy shape to re-check here: a content key that does not open the FROZEN
-    body fails closed at :func:`execute` (the object/revision AEAD binds the
-    identifiers, and the frozen digest is re-verified before the open). Authority
-    is the operator cookie; correctness is the crypto.
+    No wall-clock check here: the request's own expiry and the delivery
+    window bound the time. This catches what actually changed: the session's
+    workspace binding, the policy snapshot and the factor roster.
     """
-    principal = api_auth.principal_from_request(http_request)
-    if principal.kind is not api_auth.ApiPrincipalKind.OPERATOR_COOKIE:
-        return "operator-cookie authority is required to open a secured Setting"
-    if decision.get("approved") is False:
-        return None if set(decision) == {"approved"} else (
-            "a declined vault_open decision must carry only approved"
-        )
-    if set(decision) != {"approved", "content_key"}:
-        return "vault_open approval must carry only approved and content_key"
-    content_key = decision.get("content_key")
-    if (
-        not isinstance(content_key, str)
-        or len(content_key) != _HEX_CEK_LEN
-        or any(ch not in "0123456789abcdef" for ch in content_key)
-    ):
-        return "vault_open content_key must be a 32-byte lowercase hex key"
-    return None
-
-
-def authorize_get(
-    http_request: Request,
-    row: dict,
-    waiting: bool,
-) -> str | None:
-    """Bind review to the operator and delivery to the exact requester."""
-    principal = api_auth.principal_from_request(http_request)
-    if waiting:
-        if principal.kind not in {
-            api_auth.ApiPrincipalKind.ORG_SESSION,
-            api_auth.ApiPrincipalKind.LOCAL_SESSION,
-        } or principal.subject != row.get("session"):
-            return "this vault release belongs to another requesting session"
-        return None
-    if principal.kind is not api_auth.ApiPrincipalKind.OPERATOR_COOKIE:
-        return "operator-cookie authority is required to review vault factors"
-    return None
-
-
-def _assert_frozen(row: dict) -> tuple[dict, dict]:
-    req = row.get("request") or {}
-    staged = row.get("staged") or {}
-    if staged.get("v") != 1 or not isinstance(req.get("setting"), dict):
+    requester = request.get("requester") or {}
+    if staged.get("v") != 2 or not isinstance(request.get("setting"), dict):
         raise VaultError("this request has no frozen vault-open context")
-    # No wall-clock expiry here: the operator's approval IS the
-    # authorization, and the frozen-context checks below (policy snapshot,
-    # factor digest, unchanged requesting session) catch anything that
-    # actually changed. A time budget that starts at REQUEST creation only
-    # rejected approvals the operator was slow to tap — punishing the human
-    # for the ceremony, never closing a real hole.
-    launcher = dashboard_db.get_session(row.get("session"))
-    requester = req.get("requester") or {}
+    launcher = dashboard_db.get_session(requester.get("session"))
     if launcher is None or str(launcher.get("project") or "").strip() != (
         requester.get("workspace")
     ):
         raise VaultError("the requesting session changed before approval")
-    snapshot, _record = _class_snapshot(
-        staged["class_snapshot"]["class_id"],
-        staged.get("org"),
-        gen_id=staged["class_snapshot"]["generation"]["gen_id"],
-    )
-    if not hmac.compare_digest(_digest(snapshot), str(staged.get("class_digest") or "")):
-        raise VaultError("the vault policy changed before approval")
+    snapshot = _frozen_snapshot(staged)
     ceremony = _ceremony_bootstrap(snapshot, staged.get("org"))
     if not hmac.compare_digest(
         _digest(ceremony), str(staged.get("factor_digest") or ""),
     ):
         raise VaultError("the vault factors changed before approval")
-    return req, staged
 
 
-async def execute(row: dict, decision: dict) -> dict:
-    """Decrypt the frozen body with the browser-supplied CEK; materialise only
-    in requester ramfs. The CEK opens this one revision and nothing else."""
-    req, staged = _assert_frozen(row)
-    content_key = bytearray.fromhex(decision.get("content_key") or "")
-    try:
-        payload = settings_ops.open_secured_setting(
-            req["setting"]["set_id"],
-            req["setting"]["key"],
-            setting_id=staged["setting_id"],
-            sealed_content_key_digest=staged["sealed_digest"],
-            content_key=content_key,
-            org=staged.get("org"),
-        )
-        try:
-            receipt = vault_release_delivery.deliver_payload(row, payload)
-            return {"ok": True, "receipt": receipt}
-        finally:
-            # Drop every nested value reference as soon as the ramfs writer
-            # returns. Immutable Python strings cannot be overwritten, but the
-            # executor retains no payload object after this chokepoint.
-            payload.clear()
-    finally:
-        content_key[:] = b"\x00" * len(content_key)
-        # The parsed JSON body otherwise keeps the immutable hex string captured
-        # by the executor task until it exits; drop it at the earliest boundary.
-        if isinstance(decision, dict) and "content_key" in decision:
-            decision["content_key"] = ""
+def open_and_deliver(release_id: str, request: dict, staged: dict,
+                     content_key: bytearray) -> dict:
+    """Open the frozen revision with the operator's CEK and write the value
+    only into the requester's private ramfs; return the value-free receipt.
 
-
-def result(_row: dict, decision: dict, outcome: dict) -> dict:
-    """Persist only the value-free ramfs receipt and execution outcome."""
-    return {"approved": bool(decision.get("approved")), "execution": outcome}
-
-
-def notify_session(row: dict) -> dict | None:
-    """The wake a decided secured read sends to its requesting session.
-
-    A secured read returns immediately with a pending receipt and does not
-    poll; the operator's decision is what wakes the agent. The material is
-    already at ``/run/secrets/<name>`` (materialized at decision time, TTL
-    started), so the wake only has to say the release is ready — or that it was
-    declined. Never carries the value. ``None`` means "nothing to wake".
+    The CEK opens this one revision and nothing else. The caller owns
+    ``content_key`` and zeroes it; the opened payload is cleared here as soon
+    as the ramfs writer returns.
     """
-    request = row.get("request") or {}
-    result_payload = row.get("result") or {}
-    setting = request.get("setting") or {}
-    name = setting.get("key") or request.get("target") or "secret"
-    approval_id = row.get("id")
-    if not isinstance(approval_id, str) or not approval_id:
-        return None
-    execution = result_payload.get("execution") or {}
-    receipt = execution.get("receipt") or {}
-    spec = {"notification_id": f"vault-open:{approval_id}", "kind": "vault-open"}
-    if result_payload.get("approved") is True and execution.get("ok") is True:
-        path = receipt.get("path") or f"/run/secrets/{name}"
-        spec.update(
-            status="released",
-            summary=f"Vault secret released: {name}",
-            body=(
-                f"The approved secret is at {path}. It was materialized at "
-                "decision time, so its TTL clock has started."
-            ),
-        )
-        return spec
-    spec.update(
-        status="declined",
-        summary=f"Vault secret release declined: {name}",
-        body="The operator declined the release. Re-run the read to ask again.",
+    assert_frozen(request, staged)
+    payload = settings_ops.open_secured_setting(
+        request["setting"]["set_id"],
+        request["setting"]["key"],
+        setting_id=staged["setting_id"],
+        sealed_content_key_digest=staged["sealed_digest"],
+        content_key=content_key,
+        org=staged.get("org"),
     )
-    return spec
-
-
-PREPARE_CREATE_FROM_REQUEST = {KIND: prepare_create_from_request}
-ENRICH_FROM_REQUEST = {KIND: enrich_from_request}
-AUTHORIZE_DECISION = {KIND: authorize_decision}
-AUTHORIZE_GET = {KIND: authorize_get}
-EXECUTORS = {KIND: execute}
-RESULT_BUILDERS = {KIND: result}
-WAIT_RESULT_BUILDERS = {}
-SESSION_NOTIFIERS = {KIND: notify_session}
+    try:
+        row = {
+            "id": release_id,
+            "session": (request.get("requester") or {}).get("session"),
+            "request": request,
+        }
+        return vault_release_delivery.deliver_payload(row, payload)
+    finally:
+        # Drop every nested value reference as soon as the ramfs writer
+        # returns. Immutable Python strings cannot be overwritten, but no
+        # payload object outlives this chokepoint.
+        payload.clear()
