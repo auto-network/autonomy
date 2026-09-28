@@ -730,7 +730,8 @@ class TestMobileToolbarLayout:
             var actions = toolbar.querySelector('.sessions-toolbar-actions');
             var page = toolbar.parentElement;
             var content = document.getElementById('content');
-            var value = document.querySelector('.sessions-org-filter-value');
+            // The filter is the shared x-org-picker (4c627dd8): its label.
+            var value = document.querySelector('.sessions-org-filter .org-picker-label');
             var tr = toolbar.getBoundingClientRect();
             var lr = launch.getBoundingClientRect();
             var ar = actions.getBoundingClientRect();

@@ -68,6 +68,12 @@
   flex: 0 1 240px;
   min-width: 0;
 }
+/* The filter is the shared x-org-picker (4c627dd8), whose trigger is 36px;
+   the sessions toolbar's primary controls are 32px (the create button), so
+   size the trigger to the toolbar here. */
+.sessions-org-filter .org-picker-trigger {
+  height: 32px;
+}
 .sessions-org-filter-toggle {
   box-sizing: border-box;
   min-height: 32px;
