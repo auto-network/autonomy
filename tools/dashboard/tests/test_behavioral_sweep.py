@@ -366,7 +366,9 @@ SWEEP_BEADS = [
     {
         "id": "auto-sweep-b1", "title": "Sweep alpha task",
         "priority": 1, "status": "open", "issue_type": "task",
-        "labels": ["readiness:approved"], "created_by": "terminal:auto-sweep-alpha",
+        # Every real bead carries its org label, and a bead's agent actions
+        # follow it (auto-2v6ay.2): this is the autonomy-org bead.
+        "labels": ["readiness:approved", "org:autonomy"], "created_by": "terminal:auto-sweep-alpha",
         "description": "First test bead for behavioral sweep",
     },
     {
@@ -11829,21 +11831,23 @@ class TestPluginOrgScoping:
         # Clean both legacy unscoped rows and per-org rows so each test
         # starts from a known dormant state.
         _set_plugin_setting(sweep_server["fixture_path"], None)
-        _clear_org_plugin_settings(sweep_server["fixture_path"], "autonomy")
-        _clear_org_plugin_settings(sweep_server["fixture_path"], "anchore")
+        for org in ("personal", "autonomy", "anchore"):
+            _clear_org_plugin_settings(sweep_server["fixture_path"], org)
         yield
         _set_plugin_setting(sweep_server["fixture_path"], None)
-        _clear_org_plugin_settings(sweep_server["fixture_path"], "autonomy")
-        _clear_org_plugin_settings(sweep_server["fixture_path"], "anchore")
+        for org in ("personal", "autonomy", "anchore"):
+            _clear_org_plugin_settings(sweep_server["fixture_path"], org)
 
-    def test_plugin_request_carries_manifest_org_header(
+    def test_plugin_request_carries_the_shell_org_without_an_override(
         self, browser, sweep_server,
     ):
-        # Enable the example plugin in its manifest org (autonomy), no
-        # payload override. /api/plugins must report org=autonomy.
+        # Toggles live in the operator's personal store and a manifest's org
+        # scopes nothing (auto-2v6ay.2): with no override, /api/plugins
+        # reports no org and plugin fetches carry the shell's org
+        # (autonomy in this mock).
         _set_plugin_setting_for_org(
             sweep_server["fixture_path"], "example",
-            {"enabled": True}, org="autonomy",
+            {"enabled": True}, org="personal",
         )
 
         # Bounce through /sessions so app.js refetches /api/plugins.
@@ -11855,11 +11859,11 @@ class TestPluginOrgScoping:
         plugins = json.loads(body).get("plugins", [])
         by_id = {p["id"]: p for p in plugins}
         assert "example" in by_id, (
-            f"/api/plugins did not list 'example' when enabled in autonomy: {plugins}"
+            f"/api/plugins did not list 'example' when enabled in personal: {plugins}"
         )
-        assert by_id["example"].get("org") == "autonomy", (
-            f"expected org=autonomy in /api/plugins entry; got "
-            f"{by_id['example'].get('org')!r}"
+        assert by_id["example"].get("org") is None, (
+            f"expected no org (the shell's scope applies) in /api/plugins "
+            f"entry; got {by_id['example'].get('org')!r}"
         )
 
         # Install spy, navigate, exercise Autonomy.fetch — must carry header.
@@ -11867,9 +11871,9 @@ class TestPluginOrgScoping:
             _PLUGIN_FETCH_SPY_AND_PROBE_TEMPLATE.format(path="/example"),
         )
         assert "error" not in result, f"async eval failed: {result}"
-        assert result.get("active_plugin_org") == "autonomy", (
-            f"expected Autonomy._activePluginOrg=autonomy after rendering "
-            f"plugin page; got {result.get('active_plugin_org')!r}"
+        assert result.get("active_plugin_org") in (None, ""), (
+            f"expected no plugin org without an override; got "
+            f"{result.get('active_plugin_org')!r}"
         )
         calls = result.get("calls") or []
         autonomy_calls = [c for c in calls if c.get("org") == "autonomy"]
@@ -11889,10 +11893,10 @@ class TestPluginOrgScoping:
     def test_setting_payload_overrides_manifest_org_in_header(
         self, browser, sweep_server,
     ):
-        # Manifest org = autonomy, payload override → anchore.
+        # The toggle (in personal) carries an explicit override -> anchore.
         _set_plugin_setting_for_org(
             sweep_server["fixture_path"], "example",
-            {"enabled": True, "org": "anchore"}, org="autonomy",
+            {"enabled": True, "org": "anchore"}, org="personal",
         )
 
         _navigate_and_check("/sessions", "", wait_ms=600)
@@ -11931,10 +11935,11 @@ class TestPluginOrgScoping:
     def test_shell_routes_carry_shell_default_org_header(
         self, browser, sweep_server,
     ):
-        # Enable example in autonomy so we can land on a plugin page first.
+        # Enable example (toggles live in personal) so we can land on a
+        # plugin page first.
         _set_plugin_setting_for_org(
             sweep_server["fixture_path"], "example",
-            {"enabled": True}, org="autonomy",
+            {"enabled": True}, org="personal",
         )
 
         # Bounce to /sessions first so the next /example navigation actually
@@ -11947,9 +11952,8 @@ class TestPluginOrgScoping:
         first = _run_async_eval(
             _PLUGIN_FETCH_SPY_AND_PROBE_TEMPLATE.format(path="/example"),
         )
-        assert first.get("active_plugin_org") == "autonomy", (
-            f"setup precondition: did not stamp autonomy on plugin page "
-            f"({first})"
+        assert "error" not in first, (
+            f"setup precondition: plugin page did not render ({first})"
         )
 
         # Step 2: navigate to /sessions. ``_activePluginOrg`` must clear
