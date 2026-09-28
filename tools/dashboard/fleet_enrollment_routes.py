@@ -608,7 +608,10 @@ def connector_cache_payload(complete: dict, *, org_uuid: str | None) -> dict | N
     THAT org's serving seed under ``serving_machine_private_seed`` plus the
     org sync certificates. None when the complete payload carries no seed for
     the org (never provisioned to serve it). Never the seed map, never
-    another org's seed.
+    another org's seed, and never the ``session:control`` delegation: that
+    grant drives sessions on the operator's own machines, so only the
+    personal connector holds it (graph://7eb29bc8-31a §6.3; org members are
+    admitted by the org hello, not by this certificate).
 
     This is the only place a connector payload is derived; the field set is
     pinned by test_serving_org_arming.py.
@@ -619,6 +622,7 @@ def connector_cache_payload(complete: dict, *, org_uuid: str | None) -> dict | N
         base["org_sync_certs"] = certs
     if org_uuid is None:
         return base
+    base.pop("session_control_cert", None)
     seed = (complete.get("serving_machine_private_seeds") or {}).get(org_uuid)
     if not isinstance(seed, str) or not seed:
         return None

@@ -258,6 +258,7 @@ COMPLETE = {
     "reachability_cert": {"v": 1, "scope": ["node:announce", "node:lookup"]},
     "serving_machine_private_seeds": {"uuid-anchore": "11" * 32, "uuid-dynbench": "22" * 32},
     "org_sync_certs": {"anchore": {"child_pub": "a1" * 32}, "dynbench": {"child_pub": "d1" * 32}},
+    "session_control_cert": {"v": 1, "scope": ["session:control"]},
 }
 BASE_FIELDS = {"machine_id", "machine_pub", "process_private_seed", "delegation_cert",
                "machine_private_seed", "reachability_cert"}
@@ -265,7 +266,7 @@ BASE_FIELDS = {"machine_id", "machine_pub", "process_private_seed", "delegation_
 
 def test_the_personal_connector_receives_base_and_certificates_and_no_seed():
     personal = fer.connector_cache_payload(COMPLETE, org_uuid=None)
-    assert set(personal) == BASE_FIELDS | {"org_sync_certs"}
+    assert set(personal) == BASE_FIELDS | {"org_sync_certs", "session_control_cert"}
     assert personal["org_sync_certs"] == COMPLETE["org_sync_certs"]
 
 
@@ -275,6 +276,9 @@ def test_an_org_connector_receives_base_certificates_and_exactly_its_own_seed():
     assert anchore["serving_machine_private_seed"] == "11" * 32
     assert "22" * 32 not in repr(anchore), "another org's seed must never reach this connector"
     assert "serving_machine_private_seeds" not in anchore
+    # session:control drives the operator's own machines; an org connector
+    # never holds it (graph://7eb29bc8-31a §6.3).
+    assert "session_control_cert" not in anchore
 
 
 def test_an_org_without_a_seed_gets_no_payload():
