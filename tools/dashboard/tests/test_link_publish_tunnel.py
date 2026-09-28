@@ -202,9 +202,32 @@ def _install_control(monkeypatch, recorder):
     return started
 
 
+class _SignStaged:
+    """A publish envelope still to be signed: over the payload the approval
+    staged when first rendered, with the decision's TTL applied — what the
+    browser signs, and the only payload a publish accepts (auto-uw39h)."""
+
+    def __init__(self, session_key, cert, pop_path):
+        self.session_key, self.cert, self.pop_path = session_key, cert, pop_path
+
+    def sign(self, client, rid, decision=None):
+        shown = client.get(f"/api/approvals/{rid}").json()
+        staged = {"payload": shown["registry_request"]["payload"]}
+        payload, error = link_approvals._publish_payload_for_decision(
+            staged, decision or {})
+        if error is not None:  # an edit the server refuses: sign as staged
+            payload = staged["payload"]
+        return sign_request(
+            self.session_key, "TUNNEL", self.pop_path, payload,
+            ts=int(time.time()), cert=self.cert,
+        )
+
+
 def _tunnel_envelope(session_key, cert, pop_path, payload=None):
-    """What the browser signs on the tunnel path: a proof-of-possession
-    signature over fixed bytes, not a destination-bound registry request."""
+    """What the browser signs on the tunnel path. A publish with no explicit
+    payload signs the approval's staged payload at decision time."""
+    if payload is None and pop_path == "/control/create-link":
+        return _SignStaged(session_key, cert, pop_path)
     return sign_request(
         session_key, "TUNNEL", pop_path,
         payload or {"target_uuid": TARGET, "target_type": "present"},
@@ -222,9 +245,15 @@ def _create_publish(client, meta=None, target_type="present"):
     return r.json()["id"]
 
 
+def _decision(client, rid, envelope, **fields):
+    if isinstance(envelope, _SignStaged):
+        envelope = envelope.sign(client, rid, fields)
+    return {"approved": True, "envelope": envelope, **fields}
+
+
 def _decide_and_wait(client, rid, envelope):
     ok = client.post(f"/api/approvals/{rid}/decision",
-                     json={"approved": True, "envelope": envelope})
+                     json=_decision(client, rid, envelope))
     assert ok.status_code == 200, ok.text
     for _ in range(50):
         d = client.get(f"/api/approvals/{rid}?wait=2").json()
@@ -311,10 +340,7 @@ def test_fleet_rendezvous_publication_uses_tunnel_acknowledgment(
     monkeypatch.setattr(link_channel_key, "mint_channel_key", unexpected_channel_key)
     monkeypatch.setattr(link_approvals, "_probe_serving", unexpected_content_probe)
     rid = _create_publish(env, target_type="fleet:join")
-    envelope = _tunnel_envelope(
-        session_key, session_cert, "/control/create-link",
-        {"target_uuid": TARGET, "target_type": "fleet:join"},
-    )
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
     execution = _decide_and_wait(env, rid, envelope)["execution"]
 
     assert execution["ok"] is True, execution
@@ -388,7 +414,7 @@ def test_publish_refused_when_signature_forged(
     _install_control(monkeypatch, recorder)
 
     rid = _create_publish(env)
-    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
+    envelope = _SignStaged(session_key, session_cert, "/control/create-link").sign(env, rid)
     envelope["sig"] = ("0" if envelope["sig"][0] != "0" else "1") + envelope["sig"][1:]
     result = _decide_and_wait(env, rid, envelope)
 
@@ -412,6 +438,75 @@ def test_publish_starts_tunnel_and_fails_if_it_never_comes_up(
     assert "serving tunnel did not come up" in result["execution"]["error"]
     assert _cached_grants() == {}        # no grant for an unminted link
     assert started == [ORG]              # the publish DID start the tunnel first
+
+
+def test_an_envelope_signed_for_another_pending_request_is_refused(
+    env, root, session_key, session_cert, monkeypatch,
+):
+    """auto-uw39h: a fresh, correctly chained link:publish envelope proves
+    the persona, not what it consented to. Signed over another pending
+    request's staged payload, it must not publish this one (the check lost
+    with the registry HTTP path in 1355b191)."""
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    shown = _create_publish(env, meta={"label": "the one shown"})
+    other = _create_publish(env, meta={"label": "another request"})
+    envelope = _SignStaged(session_key, session_cert, "/control/create-link").sign(env, shown)
+    env.get(f"/api/approvals/{other}")  # rendered, so staged
+
+    execution = _decide_and_wait(env, other, envelope)["execution"]
+
+    assert execution["ok"] is False
+    assert "signed payload does not match" in execution["error"]
+    assert recorder.calls == []
+    assert _cached_grants() == {}
+
+
+def test_an_envelope_signed_before_the_ttl_edit_is_refused(
+    env, root, session_key, session_cert, monkeypatch,
+):
+    """The decision's TTL is part of what is signed: an envelope over the
+    staged payload cannot carry a different duration in its decision."""
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    rid = _create_publish(env, meta={"ttl": 3600, "label": "binder"})
+    envelope = _SignStaged(session_key, session_cert, "/control/create-link").sign(env, rid)
+
+    env.post(f"/api/approvals/{rid}/decision",
+             json={"approved": True, "envelope": envelope, "ttl": 86400})
+    for _ in range(50):
+        d = env.get(f"/api/approvals/{rid}?wait=2").json()
+        if d["result"] is not None:
+            break
+
+    assert d["result"]["execution"]["ok"] is False
+    assert "signed payload does not match" in d["result"]["execution"]["error"]
+    assert recorder.calls == []
+
+
+def test_an_unrendered_request_is_refused(
+    env, root, session_key, session_cert, monkeypatch,
+):
+    """Nothing staged means nothing the operator saw: refuse outright."""
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    rid = _create_publish(env)
+    envelope = _tunnel_envelope(
+        session_key, session_cert, "/control/create-link",
+        {"target_uuid": TARGET, "target_type": "present", "meta": {}})
+    ok = env.post(f"/api/approvals/{rid}/decision",
+                  json={"approved": True, "envelope": envelope})
+    assert ok.status_code == 200, ok.text
+    assert ar.get(rid)["staged"] is None
+    for _ in range(50):
+        result = ar.get(rid)["result"]
+        if result is not None:
+            break
+        time.sleep(0.05)
+
+    assert result["execution"]["ok"] is False
+    assert "never staged" in result["execution"]["error"]
+    assert recorder.calls == []
 
 
 def test_create_link_over_tunnel_retries_until_the_tunnel_dials(monkeypatch):
@@ -607,7 +702,7 @@ def test_ttl_override_from_decision_is_applied(env, root, session_key,
     rid = _create_publish(env, meta={"ttl": 3600, "label": "binder"})
     envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
     ok = env.post(f"/api/approvals/{rid}/decision",
-                  json={"approved": True, "envelope": envelope, "ttl": 86400})
+                  json=_decision(env, rid, envelope, ttl=86400))
     assert ok.status_code == 200
     for _ in range(50):
         d = env.get(f"/api/approvals/{rid}?wait=2").json()
@@ -625,7 +720,7 @@ def test_ttl_override_none_removes_expiry(env, root, session_key, session_cert,
     rid = _create_publish(env, meta={"ttl": 3600, "label": "binder"})
     envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
     env.post(f"/api/approvals/{rid}/decision",
-             json={"approved": True, "envelope": envelope, "ttl": None})
+             json=_decision(env, rid, envelope, ttl=None))
     for _ in range(50):
         d = env.get(f"/api/approvals/{rid}?wait=2").json()
         if d["result"] is not None:
@@ -640,7 +735,7 @@ def test_invalid_ttl_override_is_refused(env, root, session_key, session_cert,
     rid = _create_publish(env, meta={"ttl": 3600})
     envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
     env.post(f"/api/approvals/{rid}/decision",
-             json={"approved": True, "envelope": envelope, "ttl": -1})
+             json=_decision(env, rid, envelope, ttl=-1))
     for _ in range(50):
         d = env.get(f"/api/approvals/{rid}?wait=2").json()
         if d["result"] is not None:
@@ -765,9 +860,7 @@ def test_org_join_publish_over_tunnel_caches_invite_grant(
 
     r = _create_org_join(env, invite_ref, expiry, meta={"label": "Join us"})
     assert r.status_code == 200, r.text
-    envelope = _tunnel_envelope(
-        session_key, session_cert, "/control/create-link",
-        payload={"target_uuid": ORG_UUID, "target_type": "org:join"})
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
     execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
 
     assert execution["ok"] is True, execution
@@ -811,9 +904,7 @@ def test_org_follow_publish_keeps_org_identity_off_the_wire(
                     "meta": {"label": "Follow us"}},
     })
     assert r.status_code == 200, r.text
-    envelope = _tunnel_envelope(
-        session_key, session_cert, "/control/create-link",
-        payload={"target_uuid": ORG_UUID, "target_type": "org:follow"})
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
     execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
 
     assert execution["ok"] is True, execution
@@ -848,9 +939,7 @@ def test_org_join_publish_refused_on_expiry_mismatch(
 
     r = _create_org_join(env, invite_ref, expiry)
     assert r.status_code == 200, r.text
-    envelope = _tunnel_envelope(
-        session_key, session_cert, "/control/create-link",
-        payload={"target_uuid": ORG_UUID, "target_type": "org:join"})
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
     execution = _decide_and_wait(env, r.json()["id"], envelope)["execution"]
 
     assert execution["ok"] is False
@@ -902,9 +991,7 @@ def test_org_join_revoke_over_tunnel(
     })
     _install_control(monkeypatch, recorder)
     r = _create_org_join(env, invite_ref, expiry)
-    pub = _decide_and_wait(env, r.json()["id"], _tunnel_envelope(
-        session_key, session_cert, "/control/create-link",
-        payload={"target_uuid": ORG_UUID, "target_type": "org:join"}))["execution"]
+    pub = _decide_and_wait(env, r.json()["id"], _tunnel_envelope(session_key, session_cert, "/control/create-link"))["execution"]
     assert pub["ok"] is True
 
     # Revoke rides the tunnel too; the cached org:join grant classifies it.

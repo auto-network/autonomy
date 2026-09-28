@@ -1045,6 +1045,26 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         envelope, subject, org, binding, "link:publish", _TUNNEL_POP_PATH)
     if refusal:
         return _fail(refusal)
+    # Staged-request integrity: the signature must be over exactly what this
+    # row staged (and the dialog showed), with the decision's TTL applied —
+    # otherwise any fresh link:publish envelope from the persona would
+    # authorize whichever request it is posted to. Lost with the registry
+    # HTTP path in 1355b191; restored by auto-uw39h.
+    staged = row.get("staged")
+    if not isinstance(staged, dict):
+        return _fail(
+            "this request was never staged — the dialog render freezes the "
+            "exact request server-side, and publishing refuses to proceed "
+            "without that snapshot"
+        )
+    signed_payload, payload_error = _publish_payload_for_decision(staged, decision)
+    if payload_error:
+        return _fail(payload_error)
+    if envelope.get("payload") != signed_payload:
+        return _fail(
+            "the signed payload does not match this request — refusing to "
+            "publish; reopen the approval and sign it again"
+        )
 
     meta, meta_error = _tunnel_link_meta(req, decision)
     if meta_error:
