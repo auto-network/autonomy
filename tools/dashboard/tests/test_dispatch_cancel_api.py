@@ -91,3 +91,41 @@ def test_cancel_unknown_bead_is_404(test_app, monkeypatch):
     r = client.post("/api/dispatch/cancel/auto-missing")
     assert r.status_code == 404
     assert r.json()["error"] == "bead not found"
+
+
+def test_cancel_before_launch_withdraws_the_approval(test_app, monkeypatch, tmp_path):
+    """auto-diqwv: an approved bead whose launch keeps failing has no run
+    row; cancel withdraws its approval and backoff instead of answering
+    'no running dispatch' (removing the label by hand was the only stop)."""
+    import agents.dispatcher as dispatcher
+    monkeypatch.setattr(dispatcher, "LAUNCH_BACKOFF_PATH", tmp_path / "backoff.json")
+    dispatcher._write_launch_backoff({"auto-loop": {"count": 2, "next_at": 9e12}})
+    updates, _recorded, _killed = _wire(
+        monkeypatch,
+        bead={"id": "auto-loop", "labels": ["org:autonomy", "readiness:approved"]},
+        running=None,
+    )
+    r = TestClient(test_app).post("/api/dispatch/cancel/auto-loop")
+    assert r.status_code == 200 and r.json()["status"] == "APPROVAL_WITHDRAWN"
+    assert any("--remove-label" in c and "readiness:approved" in c for c in updates)
+    assert not dispatcher.launch_backoff_active("auto-loop")
+
+
+def test_cancel_before_launch_reports_a_failed_withdrawal(test_app, monkeypatch, tmp_path):
+    """Review of 1155d6a6: bd failing to remove the label is a 502, and the
+    backoff stays, so the still-approved bead does not launch next cycle."""
+    import agents.dispatcher as dispatcher
+    from tools.dashboard import server
+    monkeypatch.setattr(dispatcher, "LAUNCH_BACKOFF_PATH", tmp_path / "backoff.json")
+    dispatcher._write_launch_backoff({"auto-loop": {"count": 2, "next_at": 9e12}})
+    _wire(monkeypatch,
+          bead={"id": "auto-loop", "labels": ["org:autonomy", "readiness:approved"]},
+          running=None)
+
+    async def failing_run_cli(cmd, *a, **k):
+        return ("", "bd: connection refused", 1)
+    monkeypatch.setattr(server, "run_cli", failing_run_cli)
+    r = TestClient(test_app).post("/api/dispatch/cancel/auto-loop")
+    assert r.status_code == 502
+    assert "connection refused" in r.json()["detail"]
+    assert dispatcher.launch_backoff_active("auto-loop", now=0.0)

@@ -442,7 +442,8 @@ class TestDispatchCycle:
         self, mock_poll, mock_ready, mock_claimed,
         mock_start, mock_release, mock_find_wt, mock_cleanup
     ):
-        """If start_agent fails, bead is released as FAILED."""
+        """If start_agent fails, the bead goes on launch backoff rather than
+        being released FAILED into the very next cycle (auto-diqwv)."""
         running = []
         config = DispatcherConfig()
 
@@ -453,12 +454,13 @@ class TestDispatchCycle:
         mock_start.return_value = None
         mock_find_wt.return_value = ""
 
-        dispatch_cycle(config, running, [])
+        with patch("agents.dispatcher.record_launch_failure") as mock_backoff, \
+                patch("agents.dispatcher.launch_backoff_active", return_value=False):
+            dispatch_cycle(config, running, [])
 
         assert len(running) == 0
-        mock_release.assert_called_once_with(
-            "auto-fail", "FAILED", "Container launch failed"
-        )
+        mock_backoff.assert_called_once_with("auto-fail", "container launch failed")
+        mock_release.assert_not_called()
 
 
 # ── recover_running_agents ──────────────────────────────────────

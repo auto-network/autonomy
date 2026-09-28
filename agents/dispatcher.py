@@ -619,6 +619,100 @@ def _read_dispatch_state() -> dict:
         return {}
 
 
+#: Beads whose launch failed before a container existed (credentials, image,
+#: worktree), with their backoff (auto-diqwv). Its own file: dispatch.state
+#: maps labels to paused, and any key there reads as a paused label.
+LAUNCH_BACKOFF_PATH = DATA_ROOT / "dispatch-launch-backoff.json"
+#: Wait after the 1st, 2nd and 3rd consecutive launch failure; the next one
+#: holds the bead (readiness:approved removed, one note). At most three
+#: attempts in the first half hour, where a failing launch used to be
+#: reselected every cycle (1,488 attempts in 3 h on 2026-09-23).
+LAUNCH_BACKOFF_S = (60.0, 300.0, 1500.0)
+
+
+def _read_launch_backoff() -> dict:
+    try:
+        data = json.loads(LAUNCH_BACKOFF_PATH.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_launch_backoff(state: dict) -> None:
+    try:
+        LAUNCH_BACKOFF_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LAUNCH_BACKOFF_PATH.with_name(LAUNCH_BACKOFF_PATH.name + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+        os.replace(tmp, LAUNCH_BACKOFF_PATH)
+    except OSError as exc:
+        print(f"  WARNING: could not persist launch backoff: {exc}", file=sys.stderr)
+
+
+def launch_backoff_active(bead_id: str, now: float | None = None) -> bool:
+    """True while a bead waits out the backoff after a failed launch."""
+    entry = _read_launch_backoff().get(bead_id)
+    if not isinstance(entry, dict):
+        return False
+    return float(entry.get("next_at") or 0) > (time.time() if now is None else now)
+
+
+def clear_launch_backoff(bead_id: str) -> None:
+    state = _read_launch_backoff()
+    if state.pop(bead_id, None) is not None:
+        _write_launch_backoff(state)
+
+
+def record_launch_failure(bead_id: str, reason: str, now: float | None = None) -> str:
+    """Reopen a bead whose launch failed before a container existed and put
+    it on backoff; the failure is noted on the bead once, not per attempt,
+    and the attempt after the last backoff holds it. Returns "backoff",
+    "held", or "hold_failed" (the approval could not be removed; the bead
+    stays backed off and the hold is retried)."""
+    now = time.time() if now is None else now
+    state = _read_launch_backoff()
+    entry = state.get(bead_id) if isinstance(state.get(bead_id), dict) else {}
+    count = int(entry.get("count") or 0) + 1
+    try:
+        _retry_bd(["update", bead_id, "-s", "open"])
+    except BdCommandError as exc:
+        print(f"  WARNING: could not reopen {bead_id}: {exc}", file=sys.stderr)
+    if count > len(LAUNCH_BACKOFF_S):
+        try:
+            _retry_bd(["update", bead_id, "--remove-label", "readiness:approved",
+                       "--append-notes",
+                       f"Launch failed {count} times before a container existed "
+                       f"(last: {reason}); held: readiness:approved removed so the "
+                       f"dispatcher stops retrying. Fix the cause and re-approve."])
+        except BdCommandError as exc:
+            # The hold did not happen: the bead is still approved. Keep it
+            # backed off at the longest wait with its count, and try the hold
+            # again then, rather than report a hold and restart the count
+            # (review of 1155d6a6).
+            state[bead_id] = {"count": count - 1,
+                              "next_at": now + LAUNCH_BACKOFF_S[-1],
+                              "reason": reason[:500]}
+            _write_launch_backoff(state)
+            print(f"  Launch hold FAILED for {bead_id} ({exc}); still backed off, "
+                  f"retrying the hold in {int(LAUNCH_BACKOFF_S[-1])} s",
+                  file=sys.stderr)
+            return "hold_failed"
+        state.pop(bead_id, None)
+        _write_launch_backoff(state)
+        print(f"  Launch held: {bead_id} after {count} failures")
+        return "held"
+    if count == 1:
+        run_bd(["update", bead_id, "--append-notes",
+                f"Launch failed before a container existed: {reason}. Retrying "
+                f"after {', '.join(f'{int(s // 60)} min' for s in LAUNCH_BACKOFF_S)}, "
+                f"then holding."])
+    state[bead_id] = {"count": count, "next_at": now + LAUNCH_BACKOFF_S[count - 1],
+                      "reason": reason[:500]}
+    _write_launch_backoff(state)
+    print(f"  Launch backoff: {bead_id} failure {count}, next try in "
+          f"{int(LAUNCH_BACKOFF_S[count - 1])} s")
+    return "backoff"
+
+
 def is_label_paused(label: str | None) -> bool:
     """Return True if the given queue label is paused in dispatch.state."""
     if not label:
@@ -3481,9 +3575,12 @@ def dispatch_cycle(
             # Filter out already-claimed and currently-running beads
             claimed = get_claimed_beads()
             running_bead_ids = {a.bead_id for a in running}
+            # A bead waiting out a failed-launch backoff is not selected
+            # until its time comes (auto-diqwv).
             candidates = [b for b in ready
                           if b.get("id") not in claimed
-                          and b.get("id") not in running_bead_ids]
+                          and b.get("id") not in running_bead_ids
+                          and not launch_backoff_active(b.get("id") or "")]
 
             # When no queue filter, also skip beads whose labels are paused
             if config.label_filter is None:
@@ -3616,10 +3713,14 @@ def dispatch_cycle(
             _record_launch(agent)
             running.append(agent)
             dispatched += 1
+            clear_launch_backoff(bead_id)
             print(f"  Dispatched: {bead_id} → {agent.container_name}")
         else:
+            # No container ever existed, so no run is recorded and the
+            # reopen cap (which counts runs) never fires: back off here
+            # instead of reopening into the next cycle (auto-diqwv).
             print(f"  Launch failed: {bead_id}")
-            release_bead(bead_id, "FAILED", "Container launch failed")
+            record_launch_failure(bead_id, "container launch failed")
             wt = find_worktree_for_bead(bead_id)
             if wt:
                 cleanup_worktree(wt)

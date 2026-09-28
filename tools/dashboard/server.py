@@ -1446,6 +1446,28 @@ async def api_dispatch_cancel(request):
     # State-before-side-effect: mark CANCELLING (only if a RUNNING row exists).
     row = await asyncio.to_thread(mark_run_cancelling, bead_id)
     if row is None:
+        # Nothing running: an approved bead the dispatcher keeps selecting
+        # (a launch that fails before any container exists never gets a run
+        # row) is cancelled by withdrawing its approval and its launch
+        # backoff (auto-diqwv). Answering "no running dispatch" left removing
+        # the label by hand as the only stop.
+        if "readiness:approved" in (bead.get("labels") or []):
+            _out, err, rc = await run_cli(["bd", "update", bead_id,
+                           "--remove-label", "readiness:approved",
+                           "--append-notes",
+                           "Dispatch cancelled via dashboard/API before launch: "
+                           "approval withdrawn."], **kwargs)
+            if rc != 0:
+                # Not withdrawn: say so, and leave the backoff in place so the
+                # still-approved bead does not launch on the next cycle.
+                return JSONResponse(
+                    {"error": "could not withdraw the approval",
+                     "detail": (err or "")[:500], "bead_id": bead_id},
+                    status_code=502)
+            from agents.dispatcher import clear_launch_backoff
+            await asyncio.to_thread(clear_launch_backoff, bead_id)
+            return JSONResponse({"ok": True, "bead_id": bead_id,
+                                 "status": "APPROVAL_WITHDRAWN"})
         return JSONResponse(
             {"error": "no running dispatch for bead", "bead_id": bead_id},
             status_code=404)
