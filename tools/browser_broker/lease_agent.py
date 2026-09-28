@@ -227,6 +227,58 @@ def validate_command(body: Any) -> tuple[str, dict]:
     return op, out
 
 
+# ── sign-in helpers (pure; unit-tested) ────────────────────────────────
+
+
+def exact_origin(value: str) -> Optional[tuple[str, str, int]]:
+    """``(scheme, host, port)`` of an origin or URL, or None. A bare hostname
+    (how a credential's origin is stored) means ``https://<host>:443``."""
+    if not isinstance(value, str) or not value:
+        return None
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    if not parsed.hostname or parsed.scheme not in ("http", "https"):
+        return None
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None
+    return parsed.scheme, parsed.hostname.lower(), port
+
+
+def same_https_origin(url: str, credential_origin: tuple[str, str, int]) -> bool:
+    """HTTPS, and scheme, host and port equal to the credential's origin."""
+    return credential_origin[0] == "https" and exact_origin(url) == credential_origin
+
+
+VERIFICATION_TERMS = ("verification code", "security code", "one-time code", "two-factor",
+                      "multi-factor", "2-step", "enter the code")
+REFUSAL_TERMS = ("incorrect", "invalid", "didn't match", "did not match", "try again",
+                 "not recognized", "wrong password")
+
+
+def parse_login_request(body: Any) -> dict:
+    """The page-work part of a sign-in: origin, fields and submit as semantic
+    locators (label or role+name), optional success_text."""
+    if not isinstance(body, dict):
+        raise BadRequest("body must be an object")
+    origin = exact_origin(body.get("origin", ""))
+    if origin is None or origin[0] != "https":
+        raise BadRequest("origin must be an https origin")
+    fields, submit = body.get("fields"), body.get("submit")
+    if not isinstance(fields, dict) or not fields or len(fields) > 4:
+        raise BadRequest("fields must map 1-4 credential keys to locators")
+    for key, spec in list(fields.items()) + [("submit", submit)]:
+        if not isinstance(key, str) or not isinstance(spec, dict):
+            raise BadRequest("every locator must be an object")
+        if spec.get("kind") not in ("label", "role") or not isinstance(spec.get("name"), str) \
+                or not spec["name"] or (spec["kind"] == "role" and not isinstance(spec.get("role"), str)):
+            raise BadRequest("locators are {kind: label|role, name, role?}; CSS is not accepted")
+    success = body.get("success_text") or []
+    if not isinstance(success, list) or not all(isinstance(t, str) and t for t in success):
+        raise BadRequest("success_text must be a list of strings")
+    return {"origin": origin, "fields": fields, "submit": submit, "success_text": success[:5]}
+
+
 # ── raw CDP, for the HTTP threads ──────────────────────────────────────
 
 
@@ -407,6 +459,9 @@ class LeaseAgent(BrowserController):
             self._abort.clear()
             self._idle.clear()
             try:
+                if op == "__internal__":
+                    reply.put({"ok": True, "result": self.run_internal(args["op"], args["payload"])})
+                    continue
                 if self._locked.is_set():  # locked while this command waited in the queue
                     raise Aborted()
                 reply.put({"ok": True, "result": self.run(op, args)})
@@ -447,6 +502,26 @@ class LeaseAgent(BrowserController):
         if kind == "role":
             return self._semantic_locator(page, "role", target[2], target[1])
         return self._semantic_locator(page, kind, target[1])
+
+    def run_internal(self, op: str, payload: dict) -> Any:
+        """Broker-only jobs (never caller commands): sign-in page work."""
+        if op == "login_check":
+            return self.login_check(payload["req"])
+        if op == "login_submit":
+            return self.login_submit(payload["req"], payload["credentials"])
+        if op == "login_cleanup":
+            return self.login_cleanup()
+        raise CommandError(f"unknown internal job: {op}")
+
+    def submit_internal(self, op: str, payload: dict, timeout_s: float) -> dict:
+        """Queue a broker job. Runs even while the lease is locked (the lock is
+        against the caller, and sign-in runs under it)."""
+        reply: queue.Queue = queue.Queue(maxsize=1)
+        try:
+            self._jobs.put_nowait(("__internal__", {"op": op, "payload": payload}, reply))
+        except queue.Full:
+            raise CommandError("busy") from None
+        return reply.get(timeout=timeout_s)
 
     def run(self, op: str, args: dict) -> Any:
         page = self._need_page()
@@ -500,6 +575,130 @@ class LeaseAgent(BrowserController):
         if op == "download":
             return self._download(page, args, timeout)
         raise CommandError(f"unknown operation: {op}")  # unreachable after validation
+
+    # sign-in (auto-8q7oe.9) — run as jobs on the Playwright thread
+
+    def _login_locator(self, page, spec: dict):
+        kind, name = spec["kind"], spec["name"]
+        return self._semantic_locator(page, kind, name, spec.get("role"))
+
+    def login_check(self, req: dict) -> dict:
+        """Step 2: the page is on the credential's exact HTTPS origin and every
+        locator resolves to exactly one element. No secret exists yet."""
+        page = self._need_page()
+        if not same_https_origin(page.url, req["origin"]):
+            return {"ok": False, "reason": "origin"}
+        for spec in list(req["fields"].values()) + [req["submit"]]:
+            if self._login_locator(page, spec).count() != 1:
+                return {"ok": False, "reason": "locator"}
+        return {"ok": True}
+
+    def login_submit(self, req: dict, credentials: dict) -> dict:
+        """Steps 4-6: re-check, type with real input events, submit, wait, and
+        clean up (unless the page asks for a verification code)."""
+        page = self._need_page()
+        origin = req["origin"]
+        handover = False
+
+        def guard(route):
+            request = route.request
+            if (request.is_navigation_request() or request.method != "GET") \
+                    and not same_https_origin(request.url, origin):
+                route.abort()  # a submission (or navigation) to another origin
+            else:
+                route.continue_()
+
+        page.route("**/*", guard)
+        tainted = False
+        try:
+            for key, spec in req["fields"].items():
+                if key not in credentials:
+                    return {"authenticated": False, "reason": "field-not-provisioned"}
+                if not same_https_origin(page.url, origin):
+                    return {"authenticated": False, "reason": "origin"}
+                locator = self._login_locator(page, spec)
+                if locator.count() != 1:
+                    return {"authenticated": False, "reason": "locator"}
+                action = locator.evaluate(
+                    "el => el.form ? (el.form.getAttribute('action') === null ? location.href"
+                    " : el.form.action) : location.href")
+                if not same_https_origin(action, origin):
+                    return {"authenticated": False, "reason": "form-action"}
+                input_type = (locator.get_attribute("type") or "text").lower()
+                allowed = {"password"} if key == "password" else {"text", "email", "tel"}
+                if input_type not in allowed:
+                    return {"authenticated": False, "reason": "field-type"}
+                # Type into THIS element, not whatever has focus: a page script
+                # that moves focus must not receive the secret.
+                locator.fill("", timeout=5000)
+                locator.focus(timeout=5000)
+                if not locator.evaluate("el => el === document.activeElement"):
+                    return {"authenticated": False, "reason": "focus"}
+                locator.press_sequentially(credentials[key], timeout=15000)
+                if not locator.evaluate("el => el === document.activeElement"):
+                    # Part of the secret may have gone elsewhere: the reload in
+                    # `finally` discards every typed value, wherever it landed.
+                    tainted = True
+                    return {"authenticated": False, "reason": "focus"}
+            if not same_https_origin(page.url, origin):
+                return {"authenticated": False, "reason": "origin"}
+            self._login_locator(page, req["submit"]).click(timeout=5000)
+            outcome = self._login_wait(page, req)
+            handover = outcome.get("human_required", False)
+            return outcome
+        except Exception as exc:
+            return {"authenticated": False, "reason": "error", "detail": _error_text(exc)[:120]}
+        finally:
+            credentials.clear()
+            try:
+                page.unroute("**/*", guard)
+            except Exception:
+                pass
+            if not handover:
+                self.login_cleanup()
+            if tainted:
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=30_000)
+                except Exception:
+                    pass
+
+    def _login_wait(self, page, req: dict) -> dict:
+        origin, deadline = req["origin"], time.monotonic() + 30
+        start_url = page.url
+        while time.monotonic() < deadline:
+            page.wait_for_timeout(500)
+            if not same_https_origin(page.url, origin):
+                return {"authenticated": False, "reason": "redirect-to-other-origin"}
+            for text in req["success_text"]:
+                landmark = page.get_by_text(text, exact=False).first
+                if landmark.count() and landmark.is_visible():
+                    return {"authenticated": True, "reason": "success-text"}
+            body = page.locator("body").inner_text().lower()
+            if any(term in body for term in VERIFICATION_TERMS):
+                return {"authenticated": False, "human_required": True, "reason": "verification-required"}
+            password_visible = page.locator("input[type=password]:visible").count() > 0
+            if not req["success_text"] and page.url != start_url and not password_visible:
+                return {"authenticated": True, "reason": "left-login-page"}
+            if password_visible and any(term in body for term in REFUSAL_TERMS):
+                return {"authenticated": False, "reason": "refused"}
+        return {"authenticated": False, "reason": "timeout"}
+
+    def login_cleanup(self) -> dict:
+        """Step 6: clear every password input in every frame and confirm it;
+        reload the page when that cannot be confirmed."""
+        page = self._need_page()
+        clear = ("() => { for (const el of document.querySelectorAll('input[type=password]'))"
+                 " { el.value = ''; } return [...document.querySelectorAll('input[type=password]')]"
+                 ".every(el => el.value === ''); }")
+        confirmed = True
+        for frame in page.frames:
+            try:
+                confirmed = frame.evaluate(clear) and confirmed
+            except Exception:
+                confirmed = False
+        if not confirmed:
+            page.reload(wait_until="domcontentloaded", timeout=30_000)
+        return {"cleaned": True, "reloaded": not confirmed}
 
     def _wait(self, page, args: dict, timeout: int) -> dict:
         if "ms" in args:
@@ -616,6 +815,25 @@ class LeaseHandler(BaseHTTPRequestHandler):
                 except CommandError:
                     return self._json(409, {"error": "busy"})
                 return self._json(200, result)
+            if self.path in ("/login/check", "/login/submit"):
+                req = parse_login_request(body)
+                if self.path == "/login/check":
+                    return self._json(200, self.agent.submit_internal(
+                        "login_check", {"req": req}, 30)["result"])
+                credentials = body.get("credentials")
+                if not isinstance(credentials, dict) or not all(
+                        isinstance(k, str) and isinstance(v, str) for k, v in credentials.items()):
+                    raise BadRequest("credentials must map keys to strings")
+                try:
+                    reply = self.agent.submit_internal(
+                        "login_submit", {"req": req, "credentials": credentials}, 90)
+                finally:
+                    credentials.clear()
+                    body.clear()
+                return self._json(200, reply["result"] if reply.get("ok") else
+                                  {"authenticated": False, "reason": "error"})
+            if self.path == "/login/cleanup":
+                return self._json(200, self.agent.submit_internal("login_cleanup", {}, 60)["result"])
             if self.path == "/lock":
                 if not isinstance(body, dict) or not isinstance(body.get("locked"), bool):
                     raise BadRequest('body must be {"locked": true|false}')

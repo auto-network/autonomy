@@ -309,3 +309,21 @@ def agent_request(address_: str, secret: str, method: str, path: str,
             return exc.code, json.load(exc)
         except ValueError:
             return exc.code, {}
+
+
+def agent_lock(lease, locked: bool) -> bool:
+    """Set a lease agent's lock; True only when the agent confirms it. A
+    timeout, an error, or 404 from an image without /lock is a failure, so
+    callers fail closed."""
+    if not lease.address:
+        return False
+    try:
+        status, reply = agent_request(lease.address, lease.secret, "POST", "/lock",
+                                      {"locked": locked}, timeout=3)
+    except Exception:
+        status, reply = 0, {}
+    confirmed = status == 200 and reply.get("locked") is locked
+    if not confirmed:
+        logger.warning("browser lease: agent %s not confirmed for %s (status %s)",
+                       "lock" if locked else "unlock", lease.container_name, status)
+    return confirmed

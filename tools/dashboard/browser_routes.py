@@ -16,6 +16,8 @@ import secrets
 import threading
 import time
 
+from typing import Optional
+
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -284,6 +286,145 @@ async def post_command(request: Request) -> JSONResponse:
                         request.path_params["lease"], body)
 
 
+# ── password sign-in (auto-8q7oe.9) ────────────────────────────────────
+
+_TARGET_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+#: Credentials are decrypted here, never on a request thread.
+_SECRETS = None
+
+
+def _secrets_pool():
+    global _SECRETS
+    if _SECRETS is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _SECRETS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="browser-secrets")
+    return _SECRETS
+
+
+def _stored_origin(org: str, target_key: str) -> Optional[str]:
+    """The credential's stored origin, read without decrypting anything."""
+    from tools.connectors.repl_login import SECURE_SETTING_SET_ID, SECURE_SETTING_V2_REVISION
+    from tools.graph import ops as graph_ops
+
+    members = graph_ops.read_set(SECURE_SETTING_SET_ID, org=org, peers=[],
+                                 min_revision=SECURE_SETTING_V2_REVISION)
+    match = next((m for m in members.members if m.key == target_key), None)
+    return (match.payload or {}).get("origin") if match is not None else None
+
+
+def _decrypt(org: str, workspace: str, target_key: str, stored_origin: str) -> dict:
+    from tools.connectors.repl_login import load_credentials
+    from tools.data_paths import REPO_ROOT, resolve_store
+
+    return load_credentials(autonomy_root=REPO_ROOT, key_file=resolve_store("repl_login_key"),
+                            org=org, target_key=target_key, expected_origin=stored_origin,
+                            caller_workspace=workspace)
+
+
+def secure_login(authorization, lease_id: str, body) -> tuple[int, dict]:
+    """Sign in with a stored credential the caller never sees (the design's
+    seven steps: lock, check the page, decrypt, type, wait, clean up, unlock)."""
+    from tools.browser_broker.lease_agent import exact_origin
+    from tools.dashboard.capability_gate import capability_enabled
+
+    scope = _scope(authorization)
+    if not capability_enabled(scope.org, scope.workspace, "repl_login"):
+        raise _Reply(403, {"error": f"workspace {scope.workspace!r} does not enable repl_login"})
+    lease = store.get(store.lease_hash(lease_id)) if _LEASE_RE.fullmatch(lease_id) else None
+    if lease is None or lease.session != scope.session:
+        raise _Reply(404, {"error": "not found"})
+    if not isinstance(body, dict) or set(body) - {"target_key", "fields", "submit", "success_text"}:
+        raise _Reply(400, {"error": "body is {target_key, fields, submit, success_text?}"})
+    target_key = body.get("target_key")
+    if not isinstance(target_key, str) or not _TARGET_KEY_RE.fullmatch(target_key):
+        raise _Reply(400, {"error": "target_key is invalid"})
+    epoch = _epoch()
+    stored = _stored_origin(scope.org, target_key)
+    origin = exact_origin(stored or "")
+    if stored is None:
+        return 200, {"authenticated": False, "human_required": False, "reason": "not-provisioned"}
+    if origin is None or origin[0] != "https":
+        return 200, {"authenticated": False, "human_required": False, "reason": "origin-not-https"}
+    page_work = {"origin": f"https://{origin[1]}:{origin[2]}", "fields": body.get("fields"),
+                 "submit": body.get("submit"), "success_text": body.get("success_text") or []}
+    from tools.browser_broker.lease_agent import BadRequest, parse_login_request
+    try:
+        parse_login_request(page_work)
+    except BadRequest as exc:
+        raise _Reply(400, {"error": str(exc)}) from exc
+
+    # 1. Lock against the caller (row, then the agent; fail closed).
+    refusal = _command_refusal(lease)
+    if refusal:
+        raise _Reply(409, refusal)
+    if not store.transition(lease.lease_hash, epoch=epoch, to="locked", expect=("ready",),
+                            lock_holder="privileged", last_activity=time.time()):
+        raise _Reply(409, _command_refusal(store.get(lease.lease_hash)) or {"error": "busy"})
+    handed_over = False
+    agent_locked = False
+    reason = "error"
+    try:
+        agent_locked = containers.agent_lock(lease, True)
+        if not agent_locked:
+            reason = "agent-lock-failed"
+            return 502, {"authenticated": False, "human_required": False, "reason": reason}
+        # 2. Check the page before any secret exists.
+        status, checked = containers.agent_request(lease.address, lease.secret, "POST",
+                                                   "/login/check", page_work, timeout=35)
+        if status != 200 or not checked.get("ok"):
+            reason = checked.get("reason", "check-failed") if status == 200 else "agent-error"
+            return 200, {"authenticated": False, "human_required": False, "reason": reason}
+        # 3. Decrypt in the secrets pool; the plaintext never touches this frame's
+        #    logs, responses or audit rows.
+        try:
+            credentials = _secrets_pool().submit(
+                _decrypt, scope.org, scope.workspace, target_key, stored).result(timeout=30)
+        except Exception as exc:
+            reason = "credential-unavailable"
+            logger.warning("secure-login: credential %s unavailable for %s: %s",
+                           target_key, scope.workspace, type(exc).__name__)
+            return 200, {"authenticated": False, "human_required": False, "reason": reason}
+        # 4-6. Type, wait and clean up in the lease agent.
+        try:
+            status, outcome = containers.agent_request(
+                lease.address, lease.secret, "POST", "/login/submit",
+                {**page_work, "credentials": credentials}, timeout=95)
+        finally:
+            credentials.clear()
+        if status != 200:
+            reason = "agent-error"
+            return 502, {"authenticated": False, "human_required": False, "reason": reason}
+        reason = str(outcome.get("reason", "unknown"))[:40]
+        handed_over = bool(outcome.get("human_required"))
+        return 200, {"authenticated": bool(outcome.get("authenticated")),
+                     "human_required": handed_over, "reason": reason}
+    finally:
+        # 7. Unlock — or, on a verification-code request, pass to the operator
+        #    (still locked against the caller; cleanup runs on their return).
+        if handed_over:
+            store.transition(lease.lease_hash, epoch=epoch, to="locked", expect=("locked",),
+                             lock_holder="human", audit_op="secure-login", result=reason)
+        elif not agent_locked or containers.agent_lock(lease, False):
+            # (An agent that never confirmed the lock has nothing to unlock.)
+            store.transition(lease.lease_hash, epoch=epoch, to="ready", expect=("locked",),
+                             lock_holder=None, audit_op="secure-login", result=reason,
+                             last_activity=time.time())
+        else:
+            # The agent may still be locked: keep the row locked (privileged) so
+            # the reconciler's reclaim retries, rather than showing a false ready.
+            store.transition(lease.lease_hash, epoch=epoch, to="locked", expect=("locked",),
+                             audit_op="secure-login", result=f"{reason}:unlock-unconfirmed")
+
+
+async def post_secure_login(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "body is not JSON"}, status_code=400)
+    return await _serve(secure_login, request.headers.get("Authorization"),
+                        request.path_params["lease"], body)
+
+
 async def _serve(fn, *args) -> JSONResponse:
     try:
         status, payload = await asyncio.to_thread(fn, *args)
@@ -315,4 +456,5 @@ ROUTES = [
     Route("/api/browser/leases/{lease}", get_lease, methods=["GET"]),
     Route("/api/browser/leases/{lease}", delete_lease, methods=["DELETE"]),
     Route("/api/browser/leases/{lease}/commands", post_command, methods=["POST"]),
+    Route("/api/browser/leases/{lease}/secure-login", post_secure_login, methods=["POST"]),
 ]

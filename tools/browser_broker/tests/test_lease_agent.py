@@ -208,3 +208,48 @@ def test_chrome_goes_out_only_through_the_egress_proxy():
     assert "--proxy-bypass-list=<-loopback>" in options["args"]  # loopback and link-local via the proxy too
     assert lease_agent.proxy_args("") == []
     assert lease_agent.proxy_args("http://evil.example:3128 --no-sandbox") == []
+
+
+# ── sign-in page rules (auto-8q7oe.9) ──────────────────────────────────
+
+
+def test_exact_origin_parses_urls_and_bare_hostnames():
+    assert lease_agent.exact_origin("www.eversource.com") == ("https", "www.eversource.com", 443)
+    assert lease_agent.exact_origin("https://Login.Example.com/path?q=1") == ("https", "login.example.com", 443)
+    assert lease_agent.exact_origin("https://login.example.com:8443") == ("https", "login.example.com", 8443)
+    assert lease_agent.exact_origin("http://login.example.com") == ("http", "login.example.com", 80)
+    for bad in ("", "javascript:alert(1)", "https://", "ftp://x", "https://x:99999"):
+        assert lease_agent.exact_origin(bad) is None
+
+
+@pytest.mark.parametrize("url,ok", [
+    ("https://login.example.com/signin", True),
+    ("http://login.example.com/signin", False),          # HTTP on the credential's host
+    ("https://login.example.com:8443/signin", False),     # another port
+    ("https://evil.login.example.com/signin", False),     # a subdomain
+    ("https://example.com/signin", False),                # the parent domain
+    ("https://login.example.com.evil.net/signin", False),
+])
+def test_same_https_origin_is_exact(url, ok):
+    assert lease_agent.same_https_origin(url, ("https", "login.example.com", 443)) is ok
+
+
+def test_an_http_credential_origin_never_matches():
+    assert not lease_agent.same_https_origin("http://x.example/", ("http", "x.example", 80))
+
+
+def test_login_request_accepts_only_semantic_locators_and_https():
+    good = {"origin": "https://login.example.com:443",
+            "fields": {"username": {"kind": "label", "name": "Email"},
+                       "password": {"kind": "label", "name": "Password"}},
+            "submit": {"kind": "role", "role": "button", "name": "Sign in"}}
+    assert lease_agent.parse_login_request(good)["origin"] == ("https", "login.example.com", 443)
+    for bad in (
+        {**good, "origin": "http://login.example.com"},
+        {**good, "fields": {"password": {"kind": "css", "name": "#pw"}}},
+        {**good, "submit": {"kind": "role", "name": "Sign in"}},          # role without a role
+        {**good, "fields": {}},
+        {**good, "success_text": "Welcome"},
+    ):
+        with pytest.raises(BadRequest):
+            lease_agent.parse_login_request(bad)

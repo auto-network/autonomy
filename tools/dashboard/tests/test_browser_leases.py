@@ -4,6 +4,7 @@ Docker and the caller's token are stand-ins; the containment thresholds are
 proven by real runs on the node.
 """
 
+import json
 import time
 
 import pytest
@@ -668,3 +669,165 @@ def test_a_failed_activation_is_retried_whole_and_then_adopts(db, monkeypatch):
     assert reconciler.epoch() is None  # not published: the loop will retry activation
     epoch = reconciler.activate()
     assert reconciler.epoch() == epoch and store.get(h).epoch == epoch  # adopted
+
+
+# ── password sign-in (auto-8q7oe.9) ────────────────────────────────────
+
+MARKER = "pw-MARKER-5c1e"
+LOGIN = {"target_key": "connector.example.login",
+         "fields": {"username": {"kind": "label", "name": "Email"},
+                    "password": {"kind": "label", "name": "Password"}},
+         "submit": {"kind": "role", "role": "button", "name": "Sign in"}}
+
+
+@pytest.fixture
+def signin(ready_lease, monkeypatch):
+    lease_id, h, _, _ = ready_lease
+    grants = {"browser": True, "repl_login": True}
+    monkeypatch.setattr("tools.dashboard.capability_gate.capability_enabled",
+                        lambda org, ws, cap: grants[cap])
+    monkeypatch.setattr(routes, "_stored_origin", lambda org, key: "login.example.com")
+    decrypts = []
+    monkeypatch.setattr(routes, "_decrypt", lambda org, ws, key, origin: decrypts.append(key) or
+                        {"username": "me@example.com", "password": MARKER})
+    calls, script = [], {"check": (200, {"ok": True}),
+                         "submit": (200, {"authenticated": True, "reason": "success-text"})}
+
+    def agent_request(address, secret, method, path, body=None, timeout=5):
+        calls.append((path, dict(body or {})))
+        if path == "/lock":
+            return 200, {"locked": body["locked"]}
+        if path == "/login/check":
+            return script["check"]
+        if path == "/login/submit":
+            return script["submit"]
+        return 200, {}
+
+    monkeypatch.setattr(containers, "agent_request", agent_request)
+    return lease_id, h, grants, decrypts, calls, script
+
+
+def test_sign_in_runs_the_steps_in_order_and_unlocks(signin, caplog):
+    lease_id, h, _, decrypts, calls, _ = signin
+    status, body = _call(routes.secure_login, "owner", lease_id, LOGIN)
+    assert (status, body) == (200, {"authenticated": True, "human_required": False, "reason": "success-text"})
+    assert [p for p, _ in calls] == ["/lock", "/login/check", "/login/submit", "/lock"]
+    assert calls[1][1]["origin"] == "https://login.example.com:443" and "credentials" not in calls[1][1]
+    assert store.get(h).state == "ready" and store.get(h).lock_holder is None
+    assert MARKER not in json.dumps(body) and MARKER not in store.get(h).audit
+    assert MARKER not in caplog.text
+    assert "secure-login" in store.get(h).audit
+
+
+def test_a_wrong_page_never_decrypts(signin):
+    lease_id, h, _, decrypts, calls, script = signin
+    script["check"] = (200, {"ok": False, "reason": "origin"})
+    assert _call(routes.secure_login, "owner", lease_id, LOGIN)[1] == {
+        "authenticated": False, "human_required": False, "reason": "origin"}
+    assert decrypts == [] and "/login/submit" not in [p for p, _ in calls]
+    assert store.get(h).state == "ready"
+
+
+def test_a_verification_code_hands_the_lease_to_the_operator(signin):
+    lease_id, h, _, _, calls, script = signin
+    script["submit"] = (200, {"authenticated": False, "human_required": True, "reason": "verification-required"})
+    assert _call(routes.secure_login, "owner", lease_id, LOGIN)[1]["human_required"] is True
+    assert (store.get(h).state, store.get(h).lock_holder) == ("locked", "human")
+    assert [p for p, _ in calls][-1] == "/login/submit"  # the agent stays locked
+    assert _call(routes.run_command, "owner", lease_id, {"op": "title"})[0] == 409
+
+
+def test_sign_in_requires_repl_login_and_ownership(signin):
+    lease_id, _, grants, decrypts, calls, _ = signin
+    assert _call(routes.secure_login, "other", lease_id, LOGIN)[0] == 404
+    grants["repl_login"] = False
+    assert _call(routes.secure_login, "owner", lease_id, LOGIN)[0] == 403
+    assert decrypts == [] and calls == []
+
+
+def test_sign_in_fails_closed_when_the_agent_does_not_lock(signin, monkeypatch):
+    lease_id, h, _, decrypts, _, _ = signin
+    monkeypatch.setattr(containers, "agent_request", lambda *a, **k: (404, {"error": "not found"}))
+    status, body = _call(routes.secure_login, "owner", lease_id, LOGIN)
+    assert status == 502 and decrypts == [] and store.get(h).state == "ready"
+
+
+def test_sign_in_refuses_css_locators_and_unknown_keys(signin):
+    lease_id, _, _, decrypts, calls, _ = signin
+    bad = {**LOGIN, "fields": {"password": {"kind": "css", "name": "#pw"}}}
+    assert _call(routes.secure_login, "owner", lease_id, bad)[0] == 400
+    assert _call(routes.secure_login, "owner", lease_id, {**LOGIN, "origin": "https://evil"})[0] == 400
+    assert decrypts == [] and calls == []
+
+
+def test_an_http_credential_origin_is_refused(signin, monkeypatch):
+    lease_id, _, _, decrypts, calls, _ = signin
+    monkeypatch.setattr(routes, "_stored_origin", lambda org, key: "http://login.example.com")
+    assert _call(routes.secure_login, "owner", lease_id, LOGIN)[1]["reason"] == "origin-not-https"
+    assert decrypts == [] and calls == []
+
+
+def _locked(ready_lease, holder, age_s):
+    lease_id, h, _, _ = ready_lease
+    store.transition(h, epoch=reconciler.epoch(), to="locked", lock_holder=holder,
+                     last_activity=time.time() - age_s)
+    return h
+
+
+@pytest.fixture
+def agent_calls(monkeypatch):
+    calls, answers = [], {"/login/cleanup": (200, {"cleaned": True}), "/lock": None}
+
+    def agent_request(address, secret, method, path, body=None, timeout=5):
+        calls.append((path, body))
+        if path == "/lock":
+            return answers["/lock"] or (200, {"locked": body["locked"]})
+        return answers.get(path, (200, {}))
+
+    monkeypatch.setattr(containers, "agent_request", agent_request)
+    return calls, answers
+
+
+def test_a_sign_in_interrupted_by_a_reload_is_reclaimed(ready_lease, live, agent_calls, monkeypatch):
+    calls, _ = agent_calls
+    h = _locked(ready_lease, "privileged", reconciler.SIGN_IN_LIMIT_S + 1)
+    monkeypatch.setattr(reconciler, "_tick", 1)
+    monkeypatch.setattr(reconciler, "_healthy", lambda lease: True)
+    reconciler.reconcile_once()
+    assert (store.get(h).state, store.get(h).lock_holder) == ("ready", None)
+    assert [p for p, _ in calls] == ["/login/cleanup", "/lock"] and calls[1][1] == {"locked": False}
+    assert "secure-login:interrupted" in store.get(h).audit
+
+
+def test_the_operators_lock_is_never_reclaimed(ready_lease, live, agent_calls, monkeypatch):
+    calls, _ = agent_calls
+    h = _locked(ready_lease, "human", reconciler.SIGN_IN_LIMIT_S + 100)  # stale for a sign-in, not idle
+    monkeypatch.setattr(reconciler, "_tick", 1)
+    monkeypatch.setattr(reconciler, "_healthy", lambda lease: True)
+    reconciler.reconcile_once()
+    assert (store.get(h).state, store.get(h).lock_holder) == ("locked", "human") and calls == []
+
+
+@pytest.mark.parametrize("path,answer", [("/login/cleanup", (404, {})), ("/lock", (0, {}))])
+def test_an_unconfirmed_reclaim_keeps_the_lock(ready_lease, live, agent_calls, monkeypatch, path, answer):
+    calls, answers = agent_calls
+    answers[path] = answer
+    h = _locked(ready_lease, "privileged", reconciler.SIGN_IN_LIMIT_S + 1)
+    monkeypatch.setattr(reconciler, "_tick", 1)
+    monkeypatch.setattr(reconciler, "_healthy", lambda lease: True)
+    reconciler.reconcile_once()
+    assert (store.get(h).state, store.get(h).lock_holder) == ("locked", "privileged")
+
+
+def test_sign_in_keeps_the_lock_when_the_agent_unlock_is_unconfirmed(signin, monkeypatch):
+    lease_id, h, _, _, calls, _ = signin
+    real = containers.agent_request
+
+    def no_unlock(address, secret, method, path, body=None, timeout=5):
+        if path == "/lock" and body == {"locked": False}:
+            return 0, {}
+        return real(address, secret, method, path, body, timeout)
+
+    monkeypatch.setattr(containers, "agent_request", no_unlock)
+    _call(routes.secure_login, "owner", lease_id, LOGIN)
+    assert (store.get(h).state, store.get(h).lock_holder) == ("locked", "privileged")

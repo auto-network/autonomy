@@ -39,6 +39,10 @@ EXPIRY_GRACE_S = 15.0
 #: older than this belongs to a request that died (a worker reload or crash
 #: while the command ran, or a stuck agent).
 BUSY_LIMIT_S = 60.0 + 35.0 + 15.0
+#: The longest a sign-in can hold its privileged lock: check (35 s), decrypt
+#: (30 s) and submit (95 s), plus margin. Older means the sign-in's request died
+#: (a reload mid-sign-in); human locks are the operator's and never reclaimed.
+SIGN_IN_LIMIT_S = 200.0
 
 _epoch: Optional[int] = None
 _tick = 0
@@ -121,6 +125,26 @@ def _free_interrupted(lease: store.Lease, epoch_: int) -> None:
                            lease.container_name)
     store.transition(lease.lease_hash, epoch=epoch_, to="ready", expect=("busy",),
                      audit_op="command:interrupted", result="freed", last_activity=time.time())
+
+
+def _free_interrupted_sign_in(lease: store.Lease, epoch_: int) -> None:
+    """A privileged lock left by a sign-in whose request died: clear any typed
+    secret, unlock the agent, and only then make the lease usable again."""
+    cleaned = False
+    if lease.address:
+        try:
+            status, reply = containers.agent_request(lease.address, lease.secret, "POST",
+                                                     "/login/cleanup", {}, timeout=65)
+            cleaned = status == 200 and reply.get("cleaned") is True
+        except Exception:
+            cleaned = False
+    if not cleaned or not containers.agent_lock(lease, False):
+        logger.warning("browser broker: interrupted sign-in on %s not yet reclaimable; retrying",
+                       lease.container_name)
+        return
+    store.transition(lease.lease_hash, epoch=epoch_, to="ready", expect=("locked",),
+                     audit_op="secure-login:interrupted", result="freed", lock_holder=None,
+                     last_activity=time.time())
 
 
 def _release_isolated(lease: store.Lease, reason: str, epoch_: int) -> None:
@@ -214,6 +238,10 @@ def reconcile_once(now: Optional[float] = None) -> None:
             continue
         if lease.state == "busy" and now - lease.last_activity >= BUSY_LIMIT_S:
             _free_interrupted(lease, epoch_)
+            continue
+        if lease.state == "locked" and lease.lock_holder == "privileged" \
+                and now - lease.last_activity >= SIGN_IN_LIMIT_S:
+            _free_interrupted_sign_in(lease, epoch_)
             continue
         if lease.state in ("starting", "ready", "busy", "locked", "unhealthy") and lease.address:
             _health_pass(lease, epoch_, now)
