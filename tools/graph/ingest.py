@@ -1004,6 +1004,30 @@ def _org_from_host_project_path(file_path: Path) -> str | None:
     return _HOST_PROJECT_TO_ORG.get(parent_name)
 
 
+def _org_from_codex_rollout_cwd(file_path: Path) -> str | None:
+    """Return the org slug for a Codex rollout by the cwd it recorded, or ``None``.
+
+    A rollout's directory is only a date, so the routing signal is the
+    working directory in its leading ``session_meta`` line (``payload.cwd``,
+    present in codex-cli 0.155.0), looked up in :data:`_HOST_PROJECT_TO_ORG`.
+    Reads the first line only.
+    """
+    if detect_session_format(file_path) != "codex":
+        return None
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            raw = json.loads(f.readline())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("type") != "session_meta":
+        return None
+    payload = raw.get("payload")
+    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+    if not isinstance(cwd, str) or not cwd.startswith("/"):
+        return None
+    return _HOST_PROJECT_TO_ORG.get(_encode_project_cwd(cwd.rstrip("/") or "/"))
+
+
 def _host_home_mount() -> Path | None:
     """The operator-home mount (:data:`HOST_HOME_MOUNT`) when present and
     distinct from this process's own home (natively the two roots are the
@@ -1030,6 +1054,8 @@ def session_target_org(file_path: Path | str, default: str | None = None) -> str
     2. Claude-Code host project dir lookup
        (:data:`_HOST_PROJECT_TO_ORG`) — for bare host ``.jsonl`` files
        that have no meta alongside them.
+    2b. A Codex rollout's recorded ``payload.cwd``, looked up in the same
+       table (a rollout's directory is only a date).
     3. ``personal`` for any other transcript under the operator-home mount
        (:data:`HOST_HOME_MOUNT`): the operator's own history, filed where
        only they read it.
@@ -1049,6 +1075,9 @@ def session_target_org(file_path: Path | str, default: str | None = None) -> str
     from_host = _org_from_host_project_path(file_path)
     if from_host:
         return from_host
+    from_cwd = _org_from_codex_rollout_cwd(file_path)
+    if from_cwd:
+        return from_cwd
     mount = _host_home_mount()
     if mount is not None and file_path.is_relative_to(mount):
         return "personal"
