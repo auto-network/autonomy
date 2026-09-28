@@ -229,6 +229,11 @@
     // every open gets a fresh snapshot. loadUnlockState's in-flight guard also
     // covers the panel renderer's first-load call below.
     if (panelOpen) loadUnlockState();
+    // Same for the software tile: the preference or the scheduled check may
+    // have changed since the last opening (a still-open tab kept showing the
+    // tile for a preference that had been switched off — S7 witness,
+    // 2026-09-28), and ?fetch=0 is a cheap cached read that never reaches GitHub.
+    if (panelOpen && !updateBusy) loadUpdateStatus();
     render();
   }
 
@@ -442,12 +447,15 @@
       });
   }
 
+  var updateLoading = false;
   function loadUpdateStatus() {
     // ONE cheap read (fetch=0): opening the panel never reaches GitHub
     // (graph://89d3c8df-544 §6). The comparison is against the origin ref as
     // of the last fetch — the dashboard's scheduled check keeps it fresh when
     // "Automatically check" is on; otherwise the operator's "Check for
     // updates" click fetches. The preference rides along (auto_check).
+    if (updateLoading) return Promise.resolve();
+    updateLoading = true;
     return fetch('/api/software/update-status?fetch=0', {
       credentials: 'same-origin', headers: { 'Accept': 'application/json' },
     })
@@ -457,7 +465,8 @@
         updateStatus = body;
         if (panelOpen) render();
       })
-      .catch(function () { /* no tile is fine — never block the panel */ });
+      .catch(function () { /* no tile is fine — never block the panel */ })
+      .then(function () { updateLoading = false; });
   }
 
   function onSoftwareUpdateEvent() {

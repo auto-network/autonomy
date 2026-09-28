@@ -168,6 +168,32 @@ describe('software update tile', () => {
   });
 });
 
+describe('software update tile across openings', () => {
+  afterEach(() => { delete global.window; delete global.document; delete global.fetch; });
+
+  it('re-reads the cached status on every opening, so a changed preference shows', async () => {
+    // S7 witness 2026-09-28: a tab open since an earlier check kept the old
+    // status; after auto_check was switched off the reopened menu had no tile.
+    let current = Object.assign({}, BASE, { auto_check: true, behind: 0, can_update: false });
+    const { dom, ind, requests } = boot(null, {
+      'GET /api/software/update-status?fetch=0': () => current,
+    });
+    await openPanel(dom, ind);
+    assert.equal(tile(dom), null, 'auto_check on, nothing pending: no tile');
+
+    const trigger = () => dom.window.document.querySelector('[data-testid="identity-trigger"]');
+    trigger().click();                  // close
+    await settle();
+    current = Object.assign({}, current, { auto_check: false, fetched: true, checked_at: '2026-09-28T01:13:40Z' });
+    trigger().click();                  // reopen
+    await settle();
+    assert.ok(tile(dom), 'the check tile appears for the switched-off preference');
+    assert.match(tile(dom).textContent, /Check for updates/);
+    assert.ok(!requests.some((r) => r === 'GET /api/software/update-status'),
+      'reopening still never issues the fetching request');
+  });
+});
+
 describe('welcome software-update preference', () => {
   // Objects made inside the jsdom realm have its prototypes; compare plain copies.
   const plain = (o) => JSON.parse(JSON.stringify(o));
