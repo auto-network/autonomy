@@ -847,3 +847,53 @@ body.zoom-compact .sc-phase-chip {
     animation: none;
   }
 }
+
+/* ── Fleet machines (auto-mje3g, design 64906530) ────────────────────────
+   A remote session's card names the machine it runs on. Its reachability is
+   the session's own status dot, which goes grey when that machine cannot be
+   reached; the card itself is unchanged and still opens the viewer. Local
+   sessions carry nothing. */
+/* The machine badge: an icon in the machine's identity color, the name in
+   text ink, on a faint tint of that color with a hairline border in it. */
+.sc-machine { display: inline-flex; align-items: center; gap: .3rem; padding: 0 .4375rem 0 .3125rem;
+  height: 1.125rem; border-radius: .25rem; text-transform: capitalize;
+  background: color-mix(in srgb, var(--machine, #6b7280) 24%, transparent);
+  color: #e5e7eb; font-size: .6875rem; font-weight: 600; white-space: nowrap; flex: none; }
+.sc-machine-icon { width: .75rem; height: .75rem; color: var(--machine, #9ca3af); flex: none; }
+/* Machine chooser in the + menu */
+.launch-back { color: #9ca3af; font-size: .875rem; line-height: 1; padding: 0 .25rem;
+  border-radius: .25rem; margin-left: -.25rem; text-transform: none; }
+.launch-back:hover { color: #fff; background: #374151; }
+.launch-machine-row[disabled] { opacity: .45; cursor: not-allowed; }
+.launch-machine-row[disabled]:hover { background: transparent; }
+.launch-machine-here { font-weight: 400; color: #6b7280; font-size: .75rem; }
+/* Viewer: a remote session whose machine cannot be reached */
+.sv-machine-state { margin: 3rem auto 0; text-align: center; color: #9ca3af; font-size: .875rem; }
+.sv-input-row.sv-input-disabled { opacity: .5; pointer-events: none; }
+/* Machine tiles in the chooser: capacity and current load per machine.
+   Meter fill = used fraction; severity by ramp (accent < 70%, warning < 90%,
+   danger above); the unfilled track is a darker step of the same hue. */
+.sessions-launch-menu.sessions-launch-menu--machines { width: 22rem; }
+.launch-machine-tiles { display: flex; flex-direction: column; gap: .5rem; padding: .25rem .5rem .5rem; }
+.launch-machine-tile { display: block; width: 100%; text-align: left; padding: .625rem .75rem;
+  border: 1px solid #374151; border-radius: .5rem; background: #111827; color: #e5e7eb;
+  transition: border-color .12s, background-color .12s; }
+.launch-machine-tile:hover:not([disabled]) { border-color: #6b7280; background: #1f2937; }
+.launch-machine-tile[disabled] { opacity: .55; cursor: not-allowed; }
+.lmt-head { display: flex; align-items: baseline; gap: .5rem; }
+.lmt-name { display: inline-flex; align-items: center; gap: .375rem; font-size: .875rem;
+  font-weight: 600; color: #f3f4f6; text-transform: capitalize; }
+.lmt-icon { width: .875rem; height: .875rem; color: var(--machine, #9ca3af); flex: none; }
+.lmt-live { margin-left: auto; font-size: .6875rem; color: #9ca3af; white-space: nowrap; }
+.lmt-capacity { margin: .125rem 0 .5rem; font-size: .6875rem; color: #9ca3af; }
+.lmt-meter + .lmt-meter { margin-top: .4375rem; }
+.lmt-meter-row { display: flex; justify-content: space-between; gap: .5rem;
+  font-size: .6875rem; line-height: 1rem; }
+.lmt-meter-label { color: #d1d5db; font-weight: 500; }
+.lmt-meter-value { color: #9ca3af; font-variant-numeric: tabular-nums; }
+.lmt-track { height: .375rem; border-radius: 9999px; overflow: hidden; margin-top: .1875rem; }
+.lmt-fill { height: 100%; border-radius: 9999px; min-width: 2px; }
+.lmt-track.lmt-accent  { background: #1e3a5f; } .lmt-accent  .lmt-fill { background: #3b82f6; }
+.lmt-track.lmt-warning { background: #4a3410; } .lmt-warning .lmt-fill { background: #f59e0b; }
+.lmt-track.lmt-danger  { background: #4c1d1d; } .lmt-danger  .lmt-fill { background: #ef4444; }
+.lmt-reason { margin-top: .25rem; font-size: .75rem; color: #9ca3af; }

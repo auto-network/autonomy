@@ -201,6 +201,7 @@ def test_an_unreachable_machines_sessions_come_from_presence(home, monkeypatch):
     (row,) = asyncio.run(fleet_machines.remote_sessions())
     assert row["session_id"] == "auto-9@sjc-2" and row["label"] == "Sweep"
     assert row["machine_reachable"] is False and row["machine_state"] == "unreachable"
+    assert row["machine_not_enabled_reason"] == "session-control-timeout"
     assert row["machine_unreachable_since"] == 1_800_000_000
 
 

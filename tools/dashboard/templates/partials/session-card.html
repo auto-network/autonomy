@@ -32,16 +32,16 @@
     <!-- Compact-only row: dot + bell + type badge + role badge + merged org/actions + resume -->
     <div class="sc-compact-row">
       <button type="button"
-              x-show="!!s.is_live"
+              x-show="!!s.is_live || (s.machine && s.machine_reachable === false)"
               class="sc-dot voice-dot-button"
-              :class="window.Autonomy.voice.ui.cardDotClasses(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live, isWorking: !!(s.is_live && (s.attention || s.activity_state) && (s.attention || s.activity_state) !== 'idle') })"
-              :title="window.Autonomy.voice.ui.dotTitle(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
-              :aria-label="window.Autonomy.voice.ui.dotAriaLabel(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
-              :disabled="window.Autonomy.voice.ui.dotDisabled(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
-              @pointerdown.stop="window.Autonomy.voice.ui.onPointerDown($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              :class="window.Autonomy.voice.ui.cardDotClasses(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false, isWorking: !!(s.is_live && (s.attention || s.activity_state) && (s.attention || s.activity_state) !== 'idle') })"
+              :title="window.Autonomy.voice.ui.dotTitle(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
+              :aria-label="window.Autonomy.voice.ui.dotAriaLabel(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
+              :disabled="window.Autonomy.voice.ui.dotDisabled(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
+              @pointerdown.stop="window.Autonomy.voice.ui.onPointerDown($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
               @pointerup.stop="window.Autonomy.voice.ui.onPointerUp($event)"
               @pointercancel.stop="window.Autonomy.voice.ui.onPointerCancel($event)"
-              @click.stop="window.Autonomy.voice.ui.onClick($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              @click.stop="window.Autonomy.voice.ui.onClick($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
               data-testid="voice-session-dot">
         <!-- Pending-message ring overlay (auto-xkdoi). pointer-events:none, sits
              outside the voice module's pseudo-rings; signal owned by session-store. -->
@@ -50,7 +50,7 @@
               :class="window.outboxPendingState(window.Autonomy.voice.ui.voiceBindKey(s)) === 'unconfirmed' ? 'sc-pending-ring--unconfirmed' : 'sc-pending-ring--sending'"
               data-testid="session-pending-ring"
               aria-hidden="true"></span>
-        <svg x-show="window.Autonomy.voice.ui.showMicGlyph(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+        <svg x-show="window.Autonomy.voice.ui.showMicGlyph(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
              class="voice-dot-glyph"
              viewBox="0 0 16 16"
              fill="none"
@@ -63,7 +63,7 @@
           <path d="M4.8 7.8a3.2 3.2 0 0 0 6.4 0"></path>
           <path d="M8 11v2.1"></path>
           <path d="M6.2 13.1h3.6"></path>
-          <path x-show="window.Autonomy.voice.ui.showMuteSlash(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+          <path x-show="window.Autonomy.voice.ui.showMuteSlash(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
                 class="voice-dot-glyph__slash"
                 d="M3.4 12.6 12.6 3.4"></path>
         </svg>
@@ -98,6 +98,13 @@
             x-effect="harness = s.harness; model = s.model">
         {% include 'partials/session-harness-badge.html' %}
       </span>
+      <!-- The machine a remote session runs on (auto-mje3g). Its
+           reachability is the session's own status dot (grey when the
+           machine cannot be reached), not a second indicator. -->
+      <span class="sc-machine" x-show="s.machine" x-cloak
+            :style="{ '--machine': window.machineColor(s.machine) }"
+            :title="typeof machineTitle === 'function' ? machineTitle(s) : s.machine"
+            data-testid="sc-machine"><svg class="sc-machine-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="4.5" rx="1.2"></rect><rect x="2.5" y="9" width="11" height="4.5" rx="1.2"></rect><path d="M5 4.75h.01M5 11.25h.01"></path></svg><span x-text="s.machine"></span></span>
       <span class="sc-session-contributions"
             x-show="!(window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.startupVisible(s))">
         {% include 'partials/session-contributions.html' %}
@@ -154,16 +161,16 @@
     <!-- Stats row: dot + bell + type badge + role badge + T3 + merged org/actions -->
     <div class="sc-stats">
       <button type="button"
-              x-show="!!s.is_live"
+              x-show="!!s.is_live || (s.machine && s.machine_reachable === false)"
               class="sc-dot voice-dot-button"
-              :class="window.Autonomy.voice.ui.cardDotClasses(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live, isWorking: !!(s.is_live && (s.attention || s.activity_state) && (s.attention || s.activity_state) !== 'idle') })"
-              :title="window.Autonomy.voice.ui.dotTitle(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
-              :aria-label="window.Autonomy.voice.ui.dotAriaLabel(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
-              :disabled="window.Autonomy.voice.ui.dotDisabled(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
-              @pointerdown.stop="window.Autonomy.voice.ui.onPointerDown($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              :class="window.Autonomy.voice.ui.cardDotClasses(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false, isWorking: !!(s.is_live && (s.attention || s.activity_state) && (s.attention || s.activity_state) !== 'idle') })"
+              :title="window.Autonomy.voice.ui.dotTitle(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
+              :aria-label="window.Autonomy.voice.ui.dotAriaLabel(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
+              :disabled="window.Autonomy.voice.ui.dotDisabled(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
+              @pointerdown.stop="window.Autonomy.voice.ui.onPointerDown($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
               @pointerup.stop="window.Autonomy.voice.ui.onPointerUp($event)"
               @pointercancel.stop="window.Autonomy.voice.ui.onPointerCancel($event)"
-              @click.stop="window.Autonomy.voice.ui.onClick($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              @click.stop="window.Autonomy.voice.ui.onClick($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
               data-testid="voice-session-dot">
         <!-- Pending-message ring overlay (auto-xkdoi). pointer-events:none, sits
              outside the voice module's pseudo-rings; signal owned by session-store. -->
@@ -172,7 +179,7 @@
               :class="window.outboxPendingState(window.Autonomy.voice.ui.voiceBindKey(s)) === 'unconfirmed' ? 'sc-pending-ring--unconfirmed' : 'sc-pending-ring--sending'"
               data-testid="session-pending-ring"
               aria-hidden="true"></span>
-        <svg x-show="window.Autonomy.voice.ui.showMicGlyph(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+        <svg x-show="window.Autonomy.voice.ui.showMicGlyph(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
              class="voice-dot-glyph"
              viewBox="0 0 16 16"
              fill="none"
@@ -185,7 +192,7 @@
           <path d="M4.8 7.8a3.2 3.2 0 0 0 6.4 0"></path>
           <path d="M8 11v2.1"></path>
           <path d="M6.2 13.1h3.6"></path>
-          <path x-show="window.Autonomy.voice.ui.showMuteSlash(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+          <path x-show="window.Autonomy.voice.ui.showMuteSlash(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live && s.machine_reachable !== false })"
                 class="voice-dot-glyph__slash"
                 d="M3.4 12.6 12.6 3.4"></path>
         </svg>
@@ -221,6 +228,13 @@
             x-effect="harness = s.harness; model = s.model">
         {% include 'partials/session-harness-badge.html' %}
       </span>
+      <!-- The machine a remote session runs on (auto-mje3g). Its
+           reachability is the session's own status dot (grey when the
+           machine cannot be reached), not a second indicator. -->
+      <span class="sc-machine" x-show="s.machine" x-cloak
+            :style="{ '--machine': window.machineColor(s.machine) }"
+            :title="typeof machineTitle === 'function' ? machineTitle(s) : s.machine"
+            data-testid="sc-machine"><svg class="sc-machine-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="4.5" rx="1.2"></rect><rect x="2.5" y="9" width="11" height="4.5" rx="1.2"></rect><path d="M5 4.75h.01M5 11.25h.01"></path></svg><span x-text="s.machine"></span></span>
       <span class="sc-session-contributions"
             x-show="!(window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.startupVisible(s))">
         {% include 'partials/session-contributions.html' %}

@@ -172,6 +172,7 @@ async def remote_sessions() -> list[dict]:
             **machine,
             "machine_reachable": False,
             "machine_state": machine_state(reply)["state"],
+            "machine_not_enabled_reason": machine_state(reply)["reason"],
             "machine_unreachable_since": since,
         } for r in presence if r["machine_pub"] == pub]
 

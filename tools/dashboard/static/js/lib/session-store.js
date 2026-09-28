@@ -487,6 +487,23 @@ if (typeof window.addEventListener === 'function') {
 // warrant a glanceable indicator. 'capturing' is intentionally excluded (live
 // dictation: the user is right there, nothing is at risk). Read-only — never
 // creates a store, safe to call per-card in a render loop.
+/**
+ * The identity color of a fleet machine (auto-mje3g): one of the first three
+ * slots of the validated categorical palette (blue, orange, aqua; distinct
+ * all-pairs for normal and color-deficient vision on the dark surface).
+ * Green and red are reserved for status (the live dot, the danger meter).
+ * Derived from the machine's name so every surface -- card badge, viewer
+ * header, chooser tile -- paints one machine the same way. The badge always
+ * carries the name too, so identity never rests on color alone.
+ */
+window.MACHINE_COLORS = ['#3987e5', '#d95926', '#199e70'];
+window.machineColor = function(name) {
+  var s = String(name || '').toLowerCase();
+  var h = 0;
+  for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return window.MACHINE_COLORS[h % window.MACHINE_COLORS.length];
+};
+
 window.outboxPendingState = function(sessionId) {
   if (!sessionId) return '';
   try {

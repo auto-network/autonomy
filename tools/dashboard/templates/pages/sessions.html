@@ -11,7 +11,7 @@
     <div class="sessions-org-filter" data-testid="org-filter"
          x-org-picker="{orgs: orgFilterList, value: selectedOrg, allowAll: true, allLabel: 'All Orgs', testId: 'org-filter-toggle', menuTestId: 'org-filter-menu', optionTestPrefix: 'org-filter-option-', onChange: slug => pickOrgFilter(slug)}"></div>
     <div x-data="{ open: false }" class="relative sessions-launch-control" data-testid="session-launch-dropdown">
-      <button @click="open = !open; if (open) _fetchProjects()"
+      <button @click="open = !open; if (open) { _fetchProjects(); _fetchLaunchTargets(); launchPanel = 'workspaces'; }"
               class="w-8 h-8 flex items-center justify-center rounded-lg
                      bg-green-600 hover:bg-green-500 text-white text-lg font-bold
                      transition-colors">+</button>
@@ -22,9 +22,11 @@
            x-transition:leave="transition ease-in duration-75"
            x-transition:leave-start="opacity-100 scale-100"
            x-transition:leave-end="opacity-0 scale-95"
+           :class="launchPanel === 'machines' ? 'sessions-launch-menu--machines' : ''"
            class="sessions-launch-menu absolute mt-1 w-72 bg-gray-800 border border-gray-700
                   rounded-lg shadow-lg overflow-hidden z-30">
 
+        <div x-show="launchPanel !== 'machines'" data-panel="workspaces">
         <!-- Workspace groups follow the page-level org filter. Host Terminal
              stays outside this loop so it is available for every filter. -->
         <template x-for="group in visibleOrgGroups" :key="group.org.slug">
@@ -49,7 +51,7 @@
               <span x-text="group.org.resolved ? group.org.name : '?'"></span>
             </div>
             <template x-for="p in group.projects" :key="p.id">
-              <button @click="$dispatch('create-terminal', {project: p.id}); open = false"
+              <button @click="if (pickWorkspace(p)) open = false"
                       class="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors group"
                       :data-testid="'workspace-' + p.id">
                 <div class="flex items-center gap-2">
@@ -81,6 +83,54 @@
               <span>Host Terminal</span>
             </div>
           </button>
+        </div>
+        </div>
+
+        <!-- Machine chooser (auto-mje3g, design f984e30b): after a workspace
+             is picked, when this dashboard can launch on other fleet
+             machines. Figures were collected when + opened. -->
+        <div x-show="launchPanel === 'machines'" x-cloak data-panel="machines"
+             data-testid="launch-machine-chooser">
+          <div class="py-1">
+            <div class="px-3 py-1.5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-gray-300"
+                 data-testid="launch-machine-header">
+              <button type="button" class="launch-back" @click.stop="launchPanel = 'workspaces'"
+                      aria-label="Back to workspaces">&larr;</button>
+              <span x-text="launchWorkspace ? 'Launch ' + launchWorkspace.name + ' on' : ''"></span>
+            </div>
+            <div class="launch-machine-tiles">
+            <template x-for="t in launchTargets" :key="t.machine_pub">
+              <button type="button" @click="if (launchOn(t)) open = false"
+                      :disabled="!t.reachable"
+                      class="launch-machine-tile"
+                      :data-testid="'launch-machine-' + t.label">
+                <div class="lmt-head">
+                  <span class="lmt-name" :style="{ '--machine': t.local ? '#9ca3af' : window.machineColor(t.label) }"><svg class="lmt-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="4.5" rx="1.2"></rect><rect x="2.5" y="9" width="11" height="4.5" rx="1.2"></rect><path d="M5 4.75h.01M5 11.25h.01"></path></svg><span x-text="t.label"></span></span>
+                  <span class="sc-role" x-show="t.local" data-testid="launch-this-machine">This machine</span>
+                  <span class="lmt-live" x-show="t.reachable"
+                        x-text="t.live_sessions + (t.live_sessions === 1 ? ' live session' : ' live sessions')"></span>
+                </div>
+                <template x-if="t.reachable">
+                  <div>
+                    <div class="lmt-capacity" x-text="machineCapacity(t)"></div>
+                    <template x-for="m in [{k: 'cpu', label: 'CPU'}, {k: 'ram', label: 'Memory'}, {k: 'disk', label: 'Disk'}]" :key="m.k">
+                      <div class="lmt-meter" :title="m.label + ': ' + machineMeter(t, m.k).pct + '% used'">
+                        <div class="lmt-meter-row">
+                          <span class="lmt-meter-label" x-text="m.label"></span>
+                          <span class="lmt-meter-value" x-text="machineMeter(t, m.k).text"></span>
+                        </div>
+                        <div class="lmt-track" :class="'lmt-' + machineMeter(t, m.k).tone">
+                          <div class="lmt-fill" :style="'width:' + machineMeter(t, m.k).pct + '%'"></div>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <div class="lmt-reason" x-show="!t.reachable" x-text="launchTargetStats(t)"></div>
+              </button>
+            </template>
+            </div>
+          </div>
         </div>
       </div>
     </div>

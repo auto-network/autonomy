@@ -355,6 +355,16 @@
 
     Alpine.data('sessionsPage', () => ({
       interactive: [],
+      // Fleet machines this dashboard can launch on, with each one's live
+      // sessions, free RAM/disk and load (auto-mje3g, design f984e30b).
+      // Fetched when + opens so the chooser is ready when a workspace is
+      // picked; empty or local-only means no chooser at all.
+      launchTargets: [],
+      launchPanel: 'workspaces',
+      launchWorkspace: null,
+      // Sessions on the operator's other machines, as Active-list rows
+      // addressed <name>@<machine> (GET /api/sessions/remote).
+      remoteSessions: [],
       recent: [],
       recentLoading: true,
       recentError: '',
@@ -1225,6 +1235,8 @@
         });
       },
       init() {
+        this._fetchRemoteSessions();
+        this._remoteSweep = setInterval(() => this._fetchRemoteSessions(), 20000);
         this.$watch('activeSort', (v) => {
           localStorage.setItem('sessionsActiveSort', v);
           this._updateFromStore();
@@ -1418,6 +1430,9 @@
             var body = {};
             if (detail.project) body.project = detail.project;
             else if (detail.type === 'host') body.type = 'host';
+            // Launch on another fleet machine (auto-mje3g): the dashboard
+            // sends it there over session-control.
+            if (detail.machine) body.machine = detail.machine;
             var res = await fetch('/api/session/create', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
@@ -1436,7 +1451,10 @@
             // re-fired _updateFromStore to expire it).
             if (created && created.tmux_name) {
               var ph = Alpine.store('sessions')[pendingId];
-              if (ph) ph._realSession = created.tmux_name;
+              // A remote launch's real row is addressed <name>@<machine>.
+              if (ph) ph._realSession = detail.machineLabel
+                ? created.tmux_name + '@' + detail.machineLabel : created.tmux_name;
+              if (detail.machine) this._fetchRemoteSessions();
             }
           } catch (err) {
             // Create failed — drop the optimistic tile immediately so it
@@ -1451,6 +1469,147 @@
           }
         };
         window.addEventListener('create-terminal', this._onCreateTerminal);
+      },
+
+      get remoteLaunchTargets() {
+        return this.launchTargets.filter(function(t) { return !t.local; });
+      },
+
+      async _fetchLaunchTargets() {
+        try {
+          var data = await fetch('/api/fleet/launch-targets').then(function(r) { return r.json(); });
+          this.launchTargets = Array.isArray(data.targets) ? data.targets : [];
+        } catch (e) {
+          this.launchTargets = [];
+        }
+      },
+
+      // Both not_enabled reasons are raised on THIS machine before any
+      // request leaves it, so they describe this machine, not the target.
+      _notEnabledText(reason) {
+        if (reason === 'session-cap-missing') return 'this machine is not armed for remote launch';
+        if (reason === 'session-control-not-negotiated') return "this machine's relay does not offer remote launch yet";
+        return 'remote launch is not enabled';
+      },
+
+      launchTargetStats(t) {
+        if (t.state === 'not_enabled') return this._notEnabledText(t.reason);
+        if (!t.reachable) {
+          return t.unreachable_since
+            ? 'unreachable since ' + new Date(t.unreachable_since * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
+            : 'unreachable';
+        }
+        if (t.live_sessions == null) return 'checking\u2026';
+        var load = t.cpus ? (t.load_1m / t.cpus).toFixed(2) : String(t.load_1m);
+        return t.live_sessions + ' live \u00b7 ' + (t.ram_free_gb != null ? t.ram_free_gb : '?') +
+          ' GB RAM free \u00b7 ' + Math.round(t.disk_free_gb || 0) + ' GB disk free \u00b7 load ' + load;
+      },
+
+      _gbText(gb) {
+        if (gb == null) return '?';
+        return gb >= 1000 ? (gb / 1024).toFixed(1) + ' TB' : (gb >= 100 ? Math.round(gb) : gb.toFixed(1)) + ' GB';
+      },
+
+      // One tile meter: the used fraction drives the fill and its severity
+      // (accent under 70%, warning to 90%, danger above); the text carries
+      // the exact figure so the state never rests on color alone.
+      machineMeter(t, kind) {
+        var used = 0, text = '';
+        if (kind === 'cpu') {
+          var f = t.cpus ? t.load_1m / t.cpus : 0;
+          used = f;
+          text = Math.round(f * 100) + '% busy \u00b7 load ' + (t.load_1m != null ? t.load_1m.toFixed(1) : '?');
+        } else if (kind === 'ram') {
+          used = t.ram_total_gb ? 1 - (t.ram_free_gb / t.ram_total_gb) : 0;
+          text = this._gbText(t.ram_free_gb) + ' free';
+        } else {
+          used = t.disk_total_gb ? 1 - (t.disk_free_gb / t.disk_total_gb) : 0;
+          text = this._gbText(t.disk_free_gb) + ' free';
+        }
+        var pct = Math.max(0, Math.min(100, Math.round(used * 100)));
+        var tone = used >= 0.9 ? 'danger' : (used >= 0.7 ? 'warning' : 'accent');
+        return { pct: pct, tone: tone, text: text };
+      },
+
+      machineCapacity(t) {
+        var parts = [];
+        if (t.cpus) parts.push(t.cpus + ' cores');
+        if (t.ram_total_gb) parts.push(this._gbText(t.ram_total_gb) + ' RAM');
+        if (t.disk_total_gb) parts.push(this._gbText(t.disk_total_gb) + ' disk');
+        return parts.join(' \u00b7 ');
+      },
+
+      // Picking a workspace launches here directly when there is nowhere
+      // else to launch; otherwise it opens the machine chooser. Returns true
+      // when the menu should close.
+      pickWorkspace(p) {
+        if (!this.remoteLaunchTargets.length) {
+          window.dispatchEvent(new CustomEvent('create-terminal', {detail: {project: p.id}}));
+          return true;
+        }
+        this.launchWorkspace = p;
+        this.launchPanel = 'machines';
+        return false;
+      },
+
+      launchOn(t) {
+        if (!t.reachable || !this.launchWorkspace) return false;
+        var detail = {project: this.launchWorkspace.id};
+        if (!t.local) { detail.machine = t.machine_pub; detail.machineLabel = t.label; }
+        window.dispatchEvent(new CustomEvent('create-terminal', {detail: detail}));
+        this.launchPanel = 'workspaces';
+        this.launchWorkspace = null;
+        return true;
+      },
+
+      async _fetchRemoteSessions() {
+        try {
+          var res = await fetch('/api/sessions/remote');
+          if (!res.ok) return;
+          var data = await res.json();
+          this.remoteSessions = Array.isArray(data.sessions) ? data.sessions : [];
+        } catch (e) {
+          return;
+        }
+        this._updateFromStore();
+      },
+
+      // A remote Active-list row in the card shape _updateFromStore builds.
+      _remoteCard(r) {
+        return {
+          id: r.session_id, session_id: r.session_id, tmux_session: r.session_id,
+          project: r.project || '', label: r.label || '', role: r.role || '',
+          is_live: r.is_live !== false,
+          created_at: r.started_at || r.created_at || 0,
+          last_activity: r.last_activity || 0, last_input_at: r.last_input_at || 0,
+          latest: (r.last_message || '').slice(0, 150),
+          type: r.type || 'container', session_type: 'interactive',
+          graph_source_id: '', bead_id: '',
+          entry_count: r.entry_count || 0, context_tokens: r.context_tokens || 0,
+          topics: Array.isArray(r.topics) ? r.topics : [],
+          nag_enabled: false, nag_interval: 15, nag_message: '', dispatch_nag_enabled: false,
+          activity_state: r.activity_state || 'idle', org: r.org || null,
+          resumable: false, harness: r.harness || null, model: r.model || null,
+          startup_state: r.startup_state || null, state: r.state || null,
+          attention: r.attention || null, harness_state: {}, resolved: true,
+          phase_progress: r.phase_progress || null, _launching: false, _hasData: true,
+          machine: r.machine, machine_pub: r.machine_pub,
+          machine_reachable: r.machine_reachable !== false,
+          machine_state: r.machine_state || 'reachable',
+          machine_not_enabled_reason: r.machine_not_enabled_reason || null,
+          machine_unreachable_since: r.machine_unreachable_since || null,
+        };
+      },
+
+      machineTitle(s) {
+        if (!s || !s.machine) return '';
+        if (s.machine_state === 'not_enabled') return s.machine + ': ' + this._notEnabledText(s.machine_not_enabled_reason);
+        if (s.machine_reachable === false) {
+          return s.machine + ' unreachable' + (s.machine_unreachable_since
+            ? ' since ' + new Date(s.machine_unreachable_since * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
+            : '');
+        }
+        return 'Runs on ' + s.machine;
       },
 
       async _fetchProjects() {
@@ -1509,7 +1668,8 @@
           // LIVE OR DEAD. This is the stuck-tile fix: the fuzzy match below
           // only sees LIVE reals, so a session that died left the tile
           // orphaned as a "starting up" card until a manual refresh.
-          var bound = !!(p._realSession && allSessions[p._realSession]);
+          var bound = !!(p._realSession && (allSessions[p._realSession] ||
+            this.remoteSessions.some(function(r) { return r.session_id === p._realSession; })));
           // A real session created at/after this tile (5s skew tolerance)
           // means the launch resolved — retire the placeholder.
           var matched = bound || (realByKey[pk] !== undefined && realByKey[pk] >= (p.startedAt || 0) - 5);
@@ -1612,6 +1772,9 @@
             _launching: s._launching === true,
             _hasData: !!hasData,
           });
+        }
+        for (var ri = 0; ri < this.remoteSessions.length; ri++) {
+          all.push(this._remoteCard(this.remoteSessions[ri]));
         }
         if (all.length > 0 || !this.loading) {
           // Sort by creation time descending — stable across navigations
@@ -1818,6 +1981,7 @@
 
       destroy() {
         if (this._launchSweep) { clearInterval(this._launchSweep); this._launchSweep = null; }
+        if (this._remoteSweep) { clearInterval(this._remoteSweep); this._remoteSweep = null; }
         if (this._onStoreChanged) window.removeEventListener('sessions:store-changed', this._onStoreChanged);
         if (this._onRecentHistoryChanged) window.removeEventListener('recent-sessions:changed', this._onRecentHistoryChanged);
         if (this._onSessionsNavigated) window.removeEventListener('app:navigated', this._onSessionsNavigated);

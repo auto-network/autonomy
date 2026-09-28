@@ -985,6 +985,9 @@
 
       // API path
       _tailUrl: '',
+      // A session on another fleet machine (<name>@<machine>, auto-mje3g):
+      // {name, state: 'reachable'|'unreachable'|'not_enabled', since, reason}.
+      remoteMachine: null,
 
       // ── State machine ───────────────────────────────────────────
       // Source of truth: store.loaded, store.isLive, store.resolved
@@ -1336,6 +1339,7 @@
               window.mergeSessionEntries(store, data, 'fetch');
             }
             if (data.cursor) store.committed = data.cursor;
+            this._applyMachine(data);
             store.isLive = isLiveHint !== undefined ? !!isLiveHint : !!data.is_live;
             if (data.resolved !== undefined) store.resolved = !!data.resolved;
             store.sessionType = data.type || '';
@@ -1474,7 +1478,12 @@
           //     was ever meant to cover — a brand-new session has no backlog);
           //   • dead (isLive=false) → fetch, and _fetchBacklog's 404 probe
           //     degrades a genuinely-empty/pruned session to the empty state.
-          if (store.resolved || !store.isLive) try {
+          // A session on another fleet machine (<name>@<machine>) never
+          // passes through this machine's registry, so it is never seeded
+          // resolved; its far machine serves the backlog (auto-fd68i).
+          var remoteAddress = String(sessionId).indexOf('@') !== -1;
+          if (remoteAddress) await this._seedRemoteStore(store, sessionId);
+          if (store.resolved || !store.isLive || remoteAddress) try {
             await this._fetchBacklog(store);
             try { console.log('[lc] '+JSON.stringify({event:'cfg-after-fetchBacklog',wallt:Date.now()})); } catch(e){}
           } catch (e) {
@@ -2256,8 +2265,59 @@
         };
       },
 
+      // Label, role and org of a remote session come from the Sessions
+      // page's remote rows (GET /api/sessions/remote, cached server-side).
+      async _seedRemoteStore(store, sessionId) {
+        try {
+          var res = await fetch('/api/sessions/remote');
+          if (!res.ok) return;
+          var data = await res.json();
+          var row = (data.sessions || []).find(function(r) { return r.session_id === sessionId; });
+          if (!row) return;
+          if (row.label && !store.label) store.label = row.label;
+          if (row.role && !store.role) store.role = row.role;
+          if (row.org && !store.org) store.org = row.org;
+          store.resolved = true;
+        } catch (e) { /* the tail still renders without it */ }
+      },
+
+      _applyMachine(data) {
+        if (!data || !data.machine) return;
+        if (data.machine_unreachable) {
+          this.remoteMachine = {name: data.machine, state: 'unreachable',
+                                since: data.machine_unreachable.since || null};
+        } else if (data.machine_not_enabled) {
+          this.remoteMachine = {name: data.machine, state: 'not_enabled',
+                                reason: data.machine_not_enabled.reason || null};
+        } else {
+          this.remoteMachine = {name: data.machine, state: 'reachable'};
+        }
+      },
+
+      get machineDown() {
+        return !!(this.remoteMachine && this.remoteMachine.state !== 'reachable');
+      },
+
+      machineText() {
+        var m = this.remoteMachine;
+        if (!m) return '';
+        if (m.state === 'unreachable') {
+          return m.name + ' unreachable' + (m.since
+            ? ' since ' + new Date(m.since * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
+            : '');
+        }
+        if (m.state === 'not_enabled') {
+          // Raised on this machine before the request left it.
+          return m.reason === 'session-control-not-negotiated'
+            ? "This machine's relay does not offer remote sessions yet"
+            : 'This machine is not armed for remote sessions';
+        }
+        return 'Runs on ' + m.name;
+      },
+
       _applyTailPayload(store, data) {
         if (!store || !data) return;
+        this._applyMachine(data);
         if (data.offset !== undefined) store.offset = data.offset || 0;
         if (data.is_live !== undefined) store.isLive = !!data.is_live;
         if (data.resolved !== undefined) store.resolved = !!data.resolved;

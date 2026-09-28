@@ -121,6 +121,11 @@
             <span class="sc-role sv-identity-placeholder"
                   x-show="isLive && sessionType !== 'host' && !role"
                   data-testid="session-role-placeholder">New Session</span>
+            <!-- The machine a remote session runs on (auto-mje3g); the
+                 status dot at the start of this row carries reachability. -->
+            <span class="sc-machine" x-show="remoteMachine" x-cloak
+                  :style="{ '--machine': window.machineColor(remoteMachine && remoteMachine.name) }"
+                  :title="machineText()" data-testid="sv-machine"><svg class="sc-machine-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="4.5" rx="1.2"></rect><rect x="2.5" y="9" width="11" height="4.5" rx="1.2"></rect><path d="M5 4.75h.01M5 11.25h.01"></path></svg><span x-text="remoteMachine && remoteMachine.name"></span></span>
             <template x-for="item in sessionContributionBadges" :key="item.id">
               <a class="sc-session-contribution sc-session-contribution--badge sv-session-contribution-badge"
                  :href="item.href"
@@ -405,7 +410,11 @@
 
       <!-- Row 2: Scrollable entries (tap to dismiss keyboard) -->
       <div class="sv-transcript" x-show="!showTerminal">
-      <div class="sv-entries" x-show="!showTerminal" x-ref="entriesContainer"
+      <!-- A remote session whose machine cannot be reached, or on which
+           remote sessions are not enabled: that fact, no transcript. -->
+      <div class="sv-machine-state" x-show="machineDown && !showTerminal" x-cloak
+           x-text="machineText()" data-testid="sv-machine-state"></div>
+      <div class="sv-entries" x-show="!showTerminal && !machineDown" x-ref="entriesContainer"
            @scroll="onScroll()"
            onclick="var el = document.querySelector('.sv-editable'); if (el) el.blur()">
 
@@ -491,7 +500,7 @@
             </template>
           </div>
 
-          <div class="sv-input-row">
+          <div class="sv-input-row" :class="{ 'sv-input-disabled': machineDown }">
             <!-- Hidden file input -->
             <input type="file"
                    x-ref="fileInput"
