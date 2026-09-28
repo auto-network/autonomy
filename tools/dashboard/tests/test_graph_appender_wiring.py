@@ -282,7 +282,7 @@ class TestFinalGraphCatchup:
         sessions_dir.mkdir()
         jsonl = sessions_dir / "sess.jsonl"
         jsonl.write_bytes(_entry_bytes("Never tailed", "2026-05-01T10:00:00Z", uuid="u1"))
-        (sessions_dir / ".session_meta.json").write_text(json.dumps({"graph_org": "autonomy"}))
+        (sessions_dir / ".session_meta.json").write_text(json.dumps({"org": "autonomy"}))
         _insert_row(db_path, "auto-untailed", jsonl_path=str(jsonl))
 
         sm_mod, mon = _fresh_monitor()

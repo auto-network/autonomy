@@ -19,7 +19,7 @@ from tools.graph.ingest import catch_up_sweep
 
 def _write_session(path: Path, org: str, text: str = "hello") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    (path.parent / ".session_meta.json").write_text(json.dumps({"graph_org": org}))
+    (path.parent / ".session_meta.json").write_text(json.dumps({"org": org}))
     entry = {
         "type": "user", "uuid": "u1",
         "message": {"role": "user", "content": text},

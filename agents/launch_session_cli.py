@@ -277,10 +277,6 @@ def main() -> int:
             meta_doc["harness_token"] = creds["harness_token"]
         if metadata:
             meta_doc.update(metadata)
-            if "graph_org" not in meta_doc:
-                resolved = meta_doc.get("org") or meta_doc.get("graph_project")
-                if resolved:
-                    meta_doc["graph_org"] = resolved
         (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
 
         auth_args: list[str] = []

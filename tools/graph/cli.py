@@ -2089,7 +2089,7 @@ def cmd_sessions(args):
         path = Path(jsonl_path)
         session_db = _open_db_for_session(path)
         if session_db is None:
-            print(f"Error: no resolvable graph_org for session {session_target!r}", file=sys.stderr)
+            print(f"Error: no resolvable org for session {session_target!r}", file=sys.stderr)
             sys.exit(1)
         try:
             result = ingest_session_file(session_db, path, force=args.force)
@@ -2103,7 +2103,7 @@ def cmd_sessions(args):
     db = GraphDB(args.db)
 
     # Per-session routing (post-txg5.3): each session lands in its own
-    # org DB based on .session_meta.json.graph_org. GRAPH_DB env still
+    # org DB based on .session_meta.json's org. GRAPH_DB env still
     # pins every write to a single path (test / maintenance override).
     route_per_session = os.environ.get("GRAPH_DB") is None
     sessions_db = None if route_per_session else db

@@ -9,6 +9,7 @@ runtime cannot perform safely on its own. Each script is invokable as
 | Script | Purpose | Bead |
 |---|---|---|
 | `backfill_compact_summary_role` | Re-tag pre-2026 compact-summary thoughts to `role='compact_summary'`. | (legacy) |
+| `stamp_session_meta_org` | Stamp `org` (= `graph_org` or `graph_project`) into legacy-only `.session_meta.json` files under `data/agent-runs`; additive, keeps the legacy keys. Needed on any node with run dirs from before 2026-08-30, since ingest reads `org` only. | auto-5eu2s |
 
 `migrate_to_per_org` (split `data/graph.db` into `data/orgs/<slug>.db`
 per-org files, auto-9iq2s/txg5.2) ran once and was removed — it routed

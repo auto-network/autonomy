@@ -63,7 +63,7 @@ def test_load_session_meta_finds_meta_three_levels_up(tmp_path):
     """Codex rollout layout: meta at ``sessions/.session_meta.json``,
     JSONL at ``sessions/YYYY/MM/DD/rollout-*.jsonl``."""
     sessions = tmp_path / "agent-runs" / "auto-x-1" / "sessions"
-    _write_meta(sessions, {"graph_org": "autonomy", "harness": "codex"})
+    _write_meta(sessions, {"org": "autonomy", "harness": "codex"})
 
     rollout_dir = sessions / "2026" / "04" / "28"
     rollout_dir.mkdir(parents=True)
@@ -71,14 +71,14 @@ def test_load_session_meta_finds_meta_three_levels_up(tmp_path):
     rollout.touch()
 
     meta = _load_session_meta(rollout)
-    assert meta.get("graph_org") == "autonomy"
+    assert meta.get("org") == "autonomy"
     assert session_target_org(rollout) == "autonomy"
 
 
 def test_load_session_meta_finds_meta_two_levels_up(tmp_path):
     """Backward-compat with the old two-level walk shape."""
     sessions = tmp_path / "agent-runs" / "auto-y" / "sessions"
-    _write_meta(sessions, {"graph_org": "autonomy"})
+    _write_meta(sessions, {"org": "autonomy"})
 
     project_dir = sessions / "-workspace-repo"
     project_dir.mkdir()
@@ -90,7 +90,7 @@ def test_load_session_meta_finds_meta_two_levels_up(tmp_path):
 
 def test_load_session_meta_finds_meta_in_same_dir(tmp_path):
     sessions = tmp_path / "sessions"
-    _write_meta(sessions, {"graph_org": "anchore"})
+    _write_meta(sessions, {"org": "anchore"})
     jsonl = sessions / "abc.jsonl"
     jsonl.touch()
 
@@ -104,10 +104,10 @@ def test_load_session_meta_deepest_meta_wins(tmp_path):
     authoritative even if a stray meta sits higher up.
     """
     outer = tmp_path / "agent-runs" / "auto-z" / "sessions"
-    _write_meta(outer, {"graph_org": "personal"})  # higher, should lose
+    _write_meta(outer, {"org": "personal"})  # higher, should lose
 
     inner = outer / "nested"
-    _write_meta(inner, {"graph_org": "autonomy"})  # closer, should win
+    _write_meta(inner, {"org": "autonomy"})  # closer, should win
     jsonl = inner / "uuid.jsonl"
     jsonl.touch()
 
@@ -123,7 +123,7 @@ def test_load_session_meta_stops_at_agent_runs_boundary(tmp_path):
     runs_root = tmp_path / "agent-runs"
     runs_root.mkdir()
     # A poisoned meta one level above agent-runs: must NOT be read.
-    _write_meta(tmp_path, {"graph_org": "should-not-pick-this"})
+    _write_meta(tmp_path, {"org": "should-not-pick-this"})
 
     sessions = runs_root / "auto-q" / "sessions"
     sessions.mkdir(parents=True)
@@ -166,11 +166,11 @@ def test_ingest_session_routed_skips_when_meta_missing(orgs_root, tmp_path):
 
     result = _ingest_session_routed(jsonl, force=False)
     assert result["status"] == "skipped"
-    assert "no graph_org" in result["reason"]
+    assert "no org in meta" in result["reason"]
 
 
-def test_ingest_session_routed_skips_when_meta_lacks_graph_org(orgs_root, tmp_path):
-    """Meta exists but contains neither ``graph_org`` nor ``graph_project``."""
+def test_ingest_session_routed_skips_when_meta_lacks_org(orgs_root, tmp_path):
+    """Meta exists but contains no ``org``."""
     GraphDB.create_org_db("personal", type_="personal").close()
 
     sessions = tmp_path / "agent-runs" / "auto-thin" / "sessions"
@@ -185,13 +185,13 @@ def test_ingest_session_routed_skips_when_meta_lacks_graph_org(orgs_root, tmp_pa
 def test_ingest_session_routed_routes_when_codex_meta_three_dirs_up(
     orgs_root, tmp_path,
 ):
-    """End-to-end: codex layout routes to the meta's graph_org once
+    """End-to-end: codex layout routes to the meta's org once
     the walk-up can see the meta."""
     GraphDB.create_org_db("autonomy").close()
     GraphDB.create_org_db("personal", type_="personal").close()
 
     sessions = tmp_path / "agent-runs" / "auto-codex" / "sessions"
-    _write_meta(sessions, {"graph_org": "autonomy", "harness": "codex"})
+    _write_meta(sessions, {"org": "autonomy", "harness": "codex"})
 
     rollout_dir = sessions / "2026" / "04" / "28"
     rollout_dir.mkdir(parents=True)
@@ -200,28 +200,10 @@ def test_ingest_session_routed_routes_when_codex_meta_three_dirs_up(
 
     # Empty rollout → parser produces no turns, but we should see the
     # session route through to autonomy.db (skipped="no content turns",
-    # not skipped="no graph_org in meta").
+    # not skipped="no org in meta").
     db = _open_db_for_session(rollout)
     assert db is not None
     try:
         assert Path(db.db_path) == orgs_root / "autonomy.db"
-    finally:
-        db.close()
-
-
-def test_ingest_session_routed_legacy_graph_project_field(orgs_root, tmp_path):
-    """Pre-rename meta uses ``graph_project`` instead of ``graph_org`` —
-    the back-compat read path still routes correctly."""
-    GraphDB.create_org_db("anchore").close()
-
-    sessions = tmp_path / "agent-runs" / "auto-legacy" / "sessions"
-    _write_meta(sessions, {"graph_project": "anchore"})
-    jsonl = sessions / "x.jsonl"
-    jsonl.touch()
-
-    db = _open_db_for_session(jsonl)
-    assert db is not None
-    try:
-        assert Path(db.db_path) == orgs_root / "anchore.db"
     finally:
         db.close()

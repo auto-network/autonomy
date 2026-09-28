@@ -2040,13 +2040,8 @@ def launch_session(
     sessions_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Write .session_meta.json (skip for resumed sessions) ──
-    # org / graph_tags come in via `metadata` and are also exported as
-    # GRAPH_ORG / GRAPH_TAGS env vars below so the in-container graph CLI
-    # routes to the right org DB and applies tags.
-    #
-    # graph_org (the per-org DB routing slug ingest.py reads) is derived
-    # from "org" (canonical, auto-nuupw) or the legacy "graph_project" key
-    # if the caller didn't supply "graph_org" explicitly.
+    # org (canonical, auto-nuupw; the per-org DB routing slug ingest.py
+    # reads) and graph_tags come in via `metadata`.
     if not resume_uuid:
         meta_doc: dict = {
             "type": session_type,
@@ -2077,10 +2072,6 @@ def launch_session(
                 meta_doc["harness_token"] = _acct.id
         if metadata:
             meta_doc.update(metadata)
-            if "graph_org" not in meta_doc:
-                resolved = meta_doc.get("org") or meta_doc.get("graph_project")
-                if resolved:
-                    meta_doc["graph_org"] = resolved
         (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
 
     if grok_profile is not None:
@@ -2139,9 +2130,7 @@ def launch_session(
         harness=harness,
         working_dir=working_dir,
         caller_mounts=mounts,
-        org=(metadata or {}).get("graph_org")
-            or (metadata or {}).get("org")
-            or (metadata or {}).get("graph_project"),
+        org=(metadata or {}).get("org"),
         include_capabilities=True,
         capabilities=capabilities,
         global_claude_md=global_claude_md,
@@ -2221,9 +2210,7 @@ def launch_session(
     # ── Session token ────────────────────────────────────────────
     from tools.dashboard.dao import auth_db
     # A container token is authoritative for the caller's organization, so it is
-    # stamped ONLY from the canonical metadata["org"] key — never the
-    # graph_org/graph_project fallback chain that feeds the advisory GRAPH_ORG
-    # env below. A container that cannot be assigned an org must not receive a
+    # stamped ONLY from the canonical metadata["org"] key. A container that cannot be assigned an org must not receive a
     # token: fail the launch loudly rather than mint an org-less container token
     # (which the caller-org guard would refuse anyway). No backfill exists, so
     # this is the only thing keeping every live container token org-stamped.
@@ -2306,10 +2293,7 @@ def launch_session(
         # root user). The credentials.env sits inside whichever beads
         # dir this session's /data/.beads mount resolves to — shared or
         # per-org — so the pair always matches the mounted tracker.
-        *_beads_credential_env_args(
-            (metadata or {}).get("graph_org")
-            or (metadata or {}).get("org")
-            or (metadata or {}).get("graph_project")),
+        *_beads_credential_env_args((metadata or {}).get("org")),
         *(["-e", f"BEADS_DOLT_SERVER_HOST={beads_dolt_host}"]
           if beads_dolt_host else []),
         "-e", f"GRAPH_API={graph_api}",

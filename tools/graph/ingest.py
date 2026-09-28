@@ -1049,8 +1049,7 @@ def session_target_org(file_path: Path | str, default: str | None = None) -> str
     Resolution order:
 
     1. ``.session_meta.json`` near *file_path* (container sessions) —
-       returns ``org`` (canonical, auto-nuupw), else the legacy
-       ``graph_org`` or ``graph_project`` if set.
+       returns ``org`` (canonical, auto-nuupw).
     2. Claude-Code host project dir lookup
        (:data:`_HOST_PROJECT_TO_ORG`) — for bare host ``.jsonl`` files
        that have no meta alongside them.
@@ -1069,7 +1068,7 @@ def session_target_org(file_path: Path | str, default: str | None = None) -> str
     """
     file_path = Path(file_path)
     meta = _load_session_meta(file_path)
-    from_meta = meta.get("org") or meta.get("graph_org") or meta.get("graph_project")
+    from_meta = meta.get("org")
     if from_meta:
         return from_meta
     from_host = _org_from_host_project_path(file_path)
@@ -1090,7 +1089,7 @@ def _open_db_for_session(
     """Open the GraphDB that *file_path*'s session should write to.
 
     Returns ``None`` when the session has no resolvable org (no meta or
-    meta lacking ``org``/``graph_org``/``graph_project``). The caller is expected
+    meta lacking ``org``). The caller is expected
     to skip ingest in that case so an unscoped session can never be
     silently filed in ``personal.db``.
     """
@@ -1925,7 +1924,7 @@ def _ingest_session_routed(jsonl_file: Path, force: bool) -> dict:
     session lands in the DB named by its own ``.session_meta.json``.
 
     Fail-closed: if the session has no resolvable org (missing meta or
-    meta without ``org``/``graph_org``/``graph_project``), the file is skipped
+    meta without ``org``), the file is skipped
     rather than dumped into ``personal.db``. This prevents the cross-org
     duplicates we got when re-ingest passes filed autonomy sessions
     twice — once routed correctly at session-end, once into personal
@@ -1933,7 +1932,7 @@ def _ingest_session_routed(jsonl_file: Path, force: bool) -> dict:
     """
     db = _open_db_for_session(jsonl_file)
     if db is None:
-        return {"status": "skipped", "reason": "no graph_org in meta"}
+        return {"status": "skipped", "reason": "no org in meta"}
     try:
         return ingest_session_file(db, jsonl_file, force=force)
     finally:
@@ -1948,7 +1947,7 @@ def ingest_claude_code_project(
     """Ingest all Claude Code sessions for a project (or the current one).
 
     ``db=None`` (the norm) routes each session to its own per-org DB based
-    on ``.session_meta.json.graph_org``. Passing a ``db`` handle forces
+    on ``.session_meta.json``'s ``org``. Passing a ``db`` handle forces
     every session into that connection — legacy / test behaviour.
     """
     if project_path is None:
@@ -2024,7 +2023,7 @@ def ingest_all_claude_code(
     """Ingest all Claude Code sessions across all projects.
 
     Org routing comes from each session's ``.session_meta.json``
-    (``org`` / legacy ``graph_org``/``graph_project`` field). Sessions launched
+    (``org`` field). Sessions launched
     via the autonomy infrastructure always carry meta; sessions without
     meta default to ``personal.db`` (auto-txg5.3 scopeless convergence).
     Passing an explicit ``db`` short-circuits routing — every session is

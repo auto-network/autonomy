@@ -2400,7 +2400,7 @@ def _run_org(output_dir, jsonl_file: Path) -> str:
         except (OSError, ValueError, TypeError):
             meta = {}
         if isinstance(meta, dict):
-            org = meta.get("org") or meta.get("graph_org")
+            org = meta.get("org")
             if isinstance(org, str) and org.strip():
                 return org.strip()
     return "personal"
@@ -2833,7 +2833,6 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
         metadata={
             "job_id": job_id,
             "job_type": job_type,
-            "graph_project": librarian_org,
             "org": librarian_org,
         },
         detach=True,
@@ -3665,7 +3664,7 @@ def dispatch_cycle(
 
         # Launch agent container (blocks until container starts).
         # When the bead's labels match no project, the session still needs a
-        # graph_org in its .session_meta.json, or ingest cannot route it:
+        # org in its .session_meta.json, or ingest cannot route it:
         # dispatch_org_for_bead, from the tracker the bead came from, never a
         # literal org a fresh node does not have (auto-2v6ay.2, D5).
         graph_project = (

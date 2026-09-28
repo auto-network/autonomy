@@ -392,25 +392,25 @@ def _write_session_meta(dir_path: Path, meta: dict) -> Path:
     return f
 
 
-def test_session_target_org_prefers_graph_org(tmp_path):
+def test_session_target_org_reads_org(tmp_path):
     sessions = tmp_path / "sessions"
-    _write_session_meta(sessions, {
-        "graph_org": "anchore",
-        "graph_project": "autonomy",  # legacy, should lose to graph_org
-    })
+    _write_session_meta(sessions, {"org": "anchore", "graph_org": "autonomy"})
     jsonl = sessions / "abc.jsonl"
     jsonl.touch()
 
     assert session_target_org(jsonl) == "anchore"
 
 
-def test_session_target_org_falls_back_to_graph_project(tmp_path):
+def test_session_target_org_ignores_the_retired_legacy_keys(tmp_path):
+    """graph_org / graph_project no longer route (auto-5eu2s): a meta holding
+    only them resolves to the caller's default."""
     sessions = tmp_path / "sessions"
-    _write_session_meta(sessions, {"graph_project": "anchore"})
+    _write_session_meta(sessions, {"graph_org": "anchore", "graph_project": "anchore"})
     jsonl = sessions / "abc.jsonl"
     jsonl.touch()
 
-    assert session_target_org(jsonl) == "anchore"
+    assert session_target_org(jsonl) is None
+    assert session_target_org(jsonl, default="personal") == "personal"
 
 
 def test_session_target_org_returns_none_when_no_meta(tmp_path):
@@ -453,7 +453,7 @@ def test_open_db_for_session_routes_to_graph_org_db(orgs_root, tmp_path):
     GraphDB.create_org_db("personal", type_="personal").close()
 
     sessions = tmp_path / "sessions"
-    _write_session_meta(sessions, {"graph_org": "anchore"})
+    _write_session_meta(sessions, {"org": "anchore"})
     jsonl = sessions / "s.jsonl"
     jsonl.touch()
 
@@ -497,7 +497,7 @@ def test_open_db_for_session_refuses_graph_db_pin_conflicting_with_session_org(
     monkeypatch.setenv("GRAPH_DB", str(pinned))
 
     sessions = tmp_path / "sessions"
-    _write_session_meta(sessions, {"graph_org": "anchore"})
+    _write_session_meta(sessions, {"org": "anchore"})
     jsonl = sessions / "s.jsonl"
     jsonl.touch()
 
@@ -505,12 +505,12 @@ def test_open_db_for_session_refuses_graph_db_pin_conflicting_with_session_org(
         _open_db_for_session(jsonl)
 
 
-# ── session_launcher emits graph_org in session meta + GRAPH_ORG env ──
+# ── session_launcher writes the canonical org into session meta ──
 
 
-def test_session_launcher_writes_graph_org_in_meta(tmp_path, monkeypatch):
-    """``launch_session()`` bakes ``graph_org`` into ``.session_meta.json``
-    (derived from ``graph_project`` when the caller did not supply it).
+def test_session_launcher_writes_only_the_canonical_org_in_meta(tmp_path, monkeypatch):
+    """``launch_session()`` writes the caller's ``org`` into
+    ``.session_meta.json`` and derives no legacy ``graph_org`` (auto-5eu2s).
 
     We stub ``_resolve_credentials`` and ``subprocess.run`` so the test
     doesn't need docker; we just inspect the meta file the launcher wrote.
@@ -550,7 +550,7 @@ def test_session_launcher_writes_graph_org_in_meta(tmp_path, monkeypatch):
         session_type="dispatch",
         name="test-session",
         prompt=None,
-        metadata={"graph_project": "anchore", "graph_tags": ["x"]},
+        metadata={"org": "anchore", "graph_tags": ["x"]},
         detach=True,
     )
 
@@ -559,50 +559,9 @@ def test_session_launcher_writes_graph_org_in_meta(tmp_path, monkeypatch):
     candidates = list(meta_path.glob("test-session*/sessions/.session_meta.json"))
     assert candidates, f"no session meta written under {meta_path}"
     meta = json.loads(candidates[0].read_text())
-    assert meta.get("graph_project") == "anchore"
-    # graph_org should be derived from graph_project when absent.
-    assert meta.get("graph_org") == "anchore"
-
-
-def test_session_launcher_preserves_explicit_graph_org(tmp_path, monkeypatch):
-    """When the caller passes ``graph_org`` in metadata, the launcher
-    does not overwrite it with ``graph_project``."""
-    import agents.session_launcher as launcher
-
-    # See test_session_launcher_writes_graph_org_in_meta: route the run dir into
-    # tmp (outside the node roots) rather than patching REPO_ROOT, so the
-    # agent-runs mount is not refused under the mount-reconciliation refactor.
-    monkeypatch.setenv("DASHBOARD_AGENT_RUNS_DIR", str(tmp_path / "data" / "agent-runs"))
-    monkeypatch.setattr(launcher, "_resolve_credentials",
-                        lambda: {"type": "token", "token": "x"})
-    monkeypatch.setattr(launcher, "_setup_auth_docker_args",
-                        lambda creds, run_dir: [])
-
-    import subprocess
-
-    def _fake_run(*a, **kw):
-        class R:
-            returncode = 0
-            stdout = "CONTAINER_ID=test\n"
-            stderr = ""
-        return R()
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
-
-    launcher.launch_session(
-        session_type="dispatch",
-        name="explicit-session",
-        prompt=None,
-        metadata={"graph_project": "autonomy", "graph_org": "anchore"},
-        detach=True,
-    )
-
-    meta_path = tmp_path / "data" / "agent-runs"
-    candidates = list(meta_path.glob("explicit-session*/sessions/.session_meta.json"))
-    assert candidates
-    meta = json.loads(candidates[0].read_text())
-    assert meta.get("graph_project") == "autonomy"
-    assert meta.get("graph_org") == "anchore"
+    assert meta.get("org") == "anchore"
+    assert "graph_org" not in meta
+    assert "graph_project" not in meta
 
 
 def test_session_launcher_refuses_legacy_only_org_metadata(tmp_path, monkeypatch):
@@ -613,6 +572,8 @@ def test_session_launcher_refuses_legacy_only_org_metadata(tmp_path, monkeypatch
     import agents.session_launcher as launcher
 
     monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
+    # Keep the refused launch's run dir out of the checkout's data/agent-runs.
+    monkeypatch.setenv("DASHBOARD_AGENT_RUNS_DIR", str(tmp_path / "data" / "agent-runs"))
     monkeypatch.setattr(launcher, "_resolve_credentials",
                         lambda: {"type": "token", "token": "x"})
     monkeypatch.setattr(launcher, "_setup_auth_docker_args",
