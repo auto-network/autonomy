@@ -347,19 +347,6 @@
       }).catch(function(e){self.zoneStatus={kind:'error',text:self.zoneReason(e)};self.render();});
     }
   };
-  // The revoke only takes effect when the operator approves it, so the list
-  // must be re-fetched on approval:decided, not at POST time.
-  Controller.prototype.refreshWhenDecided = function (id) {
-    var self = this;
-    if (!id || typeof window.registerHandler !== 'function') return;
-    var handler = function (d) {
-      if (!d || d.id !== id) return;
-      if (typeof window.unregisterHandler === 'function') window.unregisterHandler('approval:decided', handler);
-      if (self.root && self.root.isConnected === false) return;
-      self.refresh();
-    };
-    window.registerHandler('approval:decided', handler);
-  };
   Controller.prototype.refresh = function () { var self=this; return request('/api/network/published-links',{headers:{'X-Graph-Org':this.slug}}).then(function(d){self.absorb(d);self.status={};self.open=null;self.error='';self.errorDetail='';self.render();}); };
   Controller.prototype.serviceAction = function (action,s,card,button) {
     if(action==='access-edit'){this.open='access:'+s.reservation_id;return this.render();}
@@ -390,7 +377,8 @@
     }
   };
   Controller.prototype.transition = function(s,state){var self=this;return request('/api/network/service-reservations/'+encodeURIComponent(s.reservation_id)+'/state',{method:'PUT',headers:{'Content-Type':'application/json','X-Graph-Org':this.slug},body:JSON.stringify({state:state})}).then(function(){return self.refresh();}).catch(function(e){self.fail(e);});};
-  Controller.prototype.shareAction = function(action,s,button){var self=this;if(action==='view'){api.close();return window.navigateTo?window.navigateTo(s.platform_url):window.location.assign(s.platform_url);}if(action==='share')return shareUrl(s.title,s.url,button).catch(function(e){self.fail(e);});if(action==='visit')return window.open(s.url,'_blank','noopener');if(action==='cancel'){this.open=null;return this.render();}if(action==='revoke'){this.open='revoke:'+s.token;return this.render();}if(action==='extend'){this.error='This link’s signed expiry cannot be changed in place yet.';return this.render();}if(action==='confirm-revoke'){return request('/api/approvals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'link_revoke',session:'dashboard-ui',request:{org:this.slug,token:s.token}})}).then(function(r){self.open=null;self.render();self.refreshWhenDecided(r.id);if(window.openApprovalOverlay)return window.openApprovalOverlay(r.id);}).catch(function(e){self.fail(e);});}};
+  Controller.prototype.shareAction = function(action,s,button){var self=this;if(action==='view'){api.close();return window.navigateTo?window.navigateTo(s.platform_url):window.location.assign(s.platform_url);}if(action==='share')return shareUrl(s.title,s.url,button).catch(function(e){self.fail(e);});if(action==='visit')return window.open(s.url,'_blank','noopener');if(action==='cancel'){this.open=null;return this.render();}if(action==='revoke'){this.open='revoke:'+s.token;return this.render();}if(action==='extend'){this.error='This link’s signed expiry cannot be changed in place yet.';return this.render();}if(action==='confirm-revoke'){// The operator is here: they sign the revoke themselves, so there is no request to wait on.
+    return import('/static/js/components/link-central-approval.js').then(function(links){return links.operateLinkDirectly({op:'revoke',request:{org:self.slug,token:s.token},requester:'Published links'});}).then(function(execution){self.open=null;if(execution)return self.refresh();self.render();}).catch(function(e){self.fail(e);});}};
 
 
   Controller.prototype.authPanel=function(){
