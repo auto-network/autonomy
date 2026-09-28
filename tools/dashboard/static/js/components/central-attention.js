@@ -382,7 +382,8 @@
         item.decisionError = '';
         // Migrated reviews never flash the legacy right-hand detail panel.
         const shared = ['approval.dashboard_access.review', 'approval.fleet_machine_admission.review',
-          'approval.email_send.review', 'approval.vault_open.review'].includes(item.rendererId);
+          'approval.email_send.review', 'approval.vault_open.review',
+          'approval.link_publish.review', 'approval.link_revoke.review'].includes(item.rendererId);
         this.selectedItem = shared ? null : item;
         try {
           const payload = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id));
@@ -410,7 +411,14 @@
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
           }).catch(() => {});
           if (shared) {
-            if (item.rendererId === 'approval.vault_open.review') {
+            if (item.rendererId === 'approval.link_publish.review' || item.rendererId === 'approval.link_revoke.review') {
+              const { openLinkCentralApproval } = await import('./link-central-approval.js');
+              this._sharedApprovalItem = item;
+              this._sharedApprovalDialog = await openLinkCentralApproval(item, {
+                onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+              });
+            } else if (item.rendererId === 'approval.vault_open.review') {
               const { openVaultCentralApproval } = await import('./vault-central-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = await openVaultCentralApproval(item, {

@@ -1247,61 +1247,45 @@ class TestWorktreePage:
         assert "data-testid', 'fatal-modal-refresh'" in app_js
 
     def test_link_decision_handlers_forward_both_arguments(self):
-        """Every approval-kind decision handler must call
-        ``_signLinkDecision(self, req)`` with BOTH arguments. The revoke
-        handler once passed only ``req``, which landed in the ``self``
-        parameter and left ``req`` undefined — every revoke Approve then
-        crashed client-side ("undefined is not an object (evaluating
-        'req.registryRequest')"), which read as an operator decline."""
-        js = (JS_DIR / "pages" / "worktrees.js").read_text()
-        assert "_signLinkDecision(req)" not in js
-        assert js.count("=> _signLinkDecision(self, req)") == 2
+        """The link signer takes ``(self, req, options)``. A handler once
+        passed only ``req``, which landed in ``self`` and left ``req``
+        undefined, so every revoke Approve crashed client-side and read as a
+        decline. The signer now lives in components/link-signing.js
+        (auto-fkhq0.10a) and its one caller is the Central link review."""
+        worktrees = (JS_DIR / "pages" / "worktrees.js").read_text()
+        signing = (JS_DIR / "components" / "link-signing.js").read_text()
+        central = (JS_DIR / "components" / "link-central-approval.js").read_text()
+        assert "_signLinkDecision" not in worktrees
+        assert "export async function _signLinkDecision(self, req, {" in signing
+        assert "sign(null, approval, options)" in central
 
     def test_revoke_decision_path_has_its_own_shape(self):
-        """The revoke approve path is not the publish path: its envelope
-        payload must be EMPTY (the server refuses anything else), its
-        retained-authority match reads the enrich's org_uuid (the empty
-        payload carries none), it unlocks through the ONE shared factor-aware
-        control rather than a password field of its own, and the simple
-        sheet surfaces the execution error inline. Every one of these was
-        missing when revoke approval first became reachable (2026-07-30)
-        and each absence broke the approve."""
-        js = (JS_DIR / "pages" / "worktrees.js").read_text()
-        template = (
-            TEMPLATE_DIR / "partials" / "worktree-review-overlays.html"
-        ).read_text()
-        assert "const isRevoke = req.op === 'revoke';" in js
-        assert "req.orgUuid || (" in js
-        assert "orgUuid: r.org_uuid || null," in js
-        # No factor field on the sheet: Approve opens ceremony/open-root.js
-        # and signs on from the seed it produced (password, passkey, or both).
-        assert "approval.needsPassword = !approval.allowSessionApprovals;" not in js
-        assert "needsPassword: false," in js
-        assert "await import('../ceremony/open-root.js')" in js
-        assert "session.signOnWithRootSeed(opened.seed, opened.rootPub, {\n" in js
-        assert "org: req.orgSlug, requireServingRuntime: true," in js
-        assert "(isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl }" in js
-        assert "req.gate2 || req.op === 'revoke'" in js
-        assert 'data-testid="approval-revoke-password"' in template
-        assert 'data-testid="approval-simple-error"' in template
+        """The revoke path is not the publish path: its envelope payload must
+        be EMPTY (the server refuses anything else), its retained-authority
+        match reads the frozen org_uuid (the empty payload carries none), and
+        it unlocks through the ONE shared factor-aware control. Each absence
+        once broke the approve (2026-07-30)."""
+        signing = (JS_DIR / "components" / "link-signing.js").read_text()
+        central = (JS_DIR / "components" / "link-central-approval.js").read_text()
+        assert "const isRevoke = req.op === 'revoke';" in signing
+        assert "req.orgUuid || (" in signing
+        assert "orgUuid: bootstrap?.org_uuid || null," in central
+        assert "await import('../ceremony/open-root.js')" in signing
+        assert "session.signOnWithRootSeed(opened.seed, opened.rootPub, {\n" in signing
+        assert "org: req.orgSlug, requireServingRuntime: true," in signing
+        assert "(isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl }" in signing
 
     def test_share_links_sign_tunnel_pop_bytes_not_registry_bytes(self):
         """D19 (Codex finding #3): a share-link approval must sign the tunnel
         proof-of-possession bytes (TUNNEL + a /control path) that the
-        dashboard's _verify_local_publish_authority reconstructs — NOT the
-        registry method/path. org:join keeps the HTTP registry bytes. The
-        browser and executor must agree on these exact strings."""
-        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+        dashboard's _verify_local_publish_authority reconstructs, not the
+        registry method/path. The browser and executor must agree on these
+        exact strings. The signer lives in components/link-signing.js."""
+        js = (JS_DIR / "components" / "link-signing.js").read_text()
         assert "const signMethod = 'TUNNEL'" in js
         assert "'/control/revoke-link' : '/control/create-link'" in js
-        # Routing matches the executor: org:join is distinguished from a plain
-        # share link so its payload/return differ, but ALL publishes/revokes
-        # now sign the tunnel PoP bytes (auto-qol1v retired the org:join HTTP
-        # path). org:join is detected from the cached payload target_type.
         assert "const isOrgJoin = !isRevoke && rr.payload && rr.payload.target_type === 'org:join'" in js
         assert "(isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl }" in js
-        # Vault B-1 (01b5e75d) added the org option and wrapped the call, so
-        # match the argument list rather than one exact source line.
         assert "signer.signRegistryRequest(" in js
         assert "signMethod, signPath, payload, { org: req.orgSlug }" in js
 
