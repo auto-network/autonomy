@@ -59,19 +59,24 @@ def resolve_caller(authorization: str | None) -> CallerScope:
                        session=session)
 
 
-def require_capability(authorization: str | None, capability: str) -> CallerScope:
-    """Resolve the caller and require a fresh, explicitly enabled grant."""
-    scope = resolve_caller(authorization)
+def capability_enabled(org: str, workspace: str, capability: str) -> bool:
+    """Whether the workspace's grant for *capability* is present and enabled,
+    read fresh from ``autonomy.workspace.capability.enable``."""
     from agents.workspace_settings import WORKSPACE_CAPABILITY_ENABLE_SET_ID
     from tools.graph import ops as graph_ops
 
-    members = graph_ops.read_set(
-        WORKSPACE_CAPABILITY_ENABLE_SET_ID, org=scope.org, peers=[])
-    wanted = f"{scope.workspace}:{capability}"
+    members = graph_ops.read_set(WORKSPACE_CAPABILITY_ENABLE_SET_ID, org=org, peers=[])
+    wanted = f"{workspace}:{capability}"
     for member in members.members:
         if member.key == wanted:
-            if member.payload.get("enabled", True) is True:
-                return scope
-            break
+            return member.payload.get("enabled", True) is True
+    return False
+
+
+def require_capability(authorization: str | None, capability: str) -> CallerScope:
+    """Resolve the caller and require a fresh, explicitly enabled grant."""
+    scope = resolve_caller(authorization)
+    if capability_enabled(scope.org, scope.workspace, capability):
+        return scope
     raise CapabilityRefused(
         f"workspace {scope.workspace!r} does not enable {capability}", status=403)

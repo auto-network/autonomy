@@ -160,6 +160,7 @@ from tools.dashboard import mcp_relay_routes
 from tools.dashboard import dropbox_routes
 from tools.dashboard import voice_commit_routes, voice_service_config
 from tools.dashboard import jira_routes
+from tools.dashboard import browser_routes
 from tools.dashboard import mailbox_routes
 from tools.dashboard import identity_routes
 from tools.dashboard import fleet_enrollment_routes
@@ -21782,6 +21783,7 @@ routes = [
     # Jira broker (issue_tracker capability): host-side reads; writes ride the
     # approval rendezvous as kind=jira_write
     *jira_routes.ROUTES,
+    *browser_routes.ROUTES,
     # Mailbox capability broker: read-only IMAP; sending is kind=email_send.
     *mailbox_routes.ROUTES,
 
@@ -22055,6 +22057,7 @@ async def _design_lifecycle_sweeper() -> None:
 
 
 _design_lifecycle_task: asyncio.Task | None = None
+_browser_reconciler_task: asyncio.Task | None = None
 
 
 async def _on_startup():
@@ -22767,6 +22770,15 @@ async def _on_shutdown():
         except (asyncio.CancelledError, Exception):
             pass
         _design_lifecycle_task = None
+    global _browser_reconciler_task
+    if _browser_reconciler_task is not None:
+        # Stops reconciling only; lease containers keep running for the next worker.
+        _browser_reconciler_task.cancel()
+        try:
+            await _browser_reconciler_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _browser_reconciler_task = None
     try:
         await image_build_worker.stop_worker()
     except Exception:
@@ -23036,6 +23048,16 @@ async def _activate_worker(reason: str) -> None:
             )
         except Exception:
             logger.exception("design-lifecycle: sweeper failed to start")
+
+    # Browser broker (auto-czoc0): take the lease epoch, adopt running lease
+    # containers and reconcile them. Activation-only, so one reconciler per
+    # machine; lease containers outlive worker reloads and restarts.
+    global _browser_reconciler_task
+    if not os.environ.get("DASHBOARD_MOCK"):
+        from tools.dashboard import browser_reconciler
+        _browser_reconciler_task = asyncio.create_task(
+            browser_reconciler.run_forever(), name="browser-reconciler",
+        )
 
     # Migrate every org store to the running code's schema (one read-write
     # open each, off the loop, in the background). The inventory listing did

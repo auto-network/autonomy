@@ -25,6 +25,26 @@ graph://c330323d-986; epic `auto-8q7oe`.
   (`BROWSER_LEASE_EXPIRES_AT`, or the newest value from `POST /expiry`) with
   no request from the dashboard.
 
+## Dashboard side (`auto-czoc0`)
+
+- `tools/dashboard/browser_routes.py` — `POST /api/browser/leases`,
+  `GET|DELETE /api/browser/leases/{lease}`; session token plus the
+  workspace's `browser` capability. Admission: fewer than `max_leases` active
+  and `min_free_gib` free, else 503 with the reason; a busy persistent profile
+  is 409.
+- `tools/dashboard/browser_containers.py` — `docker create/start` with the
+  caps (memory = memory-swap, CPUs, pids, 1 GiB shm), `--rm`, restart `no`,
+  `no-new-privileges`, the seccomp profile, no published ports, on the
+  `autonomy-browser` network (only the dashboard and leases join it).
+- `tools/dashboard/browser_reconciler.py` — started at worker activation:
+  takes a new epoch (fencing the previous worker's writes), adopts running
+  leases, then every 5 s health-checks and releases on the ending events.
+- `tools/dashboard/dao/browser_leases.py` — the `browser_leases` table in
+  `dashboard.db`; per-lease secret and VNC password AES-GCM-sealed under a key
+  derived from `dashboard-session.secret`.
+- Limits: the machine Setting `autonomy.browser.defaults`
+  (`tools/graph/schemas/browser_defaults.py`).
+
 ## Lease image
 
 `image/build.sh` builds `autonomy-browser:local` (about 1.3 GB) from a flat

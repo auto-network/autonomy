@@ -1,0 +1,244 @@
+"""Browser lease reconciler (auto-czoc0; design graph://c330323d-986).
+
+Runs in the activated dashboard worker (one per machine). On activation it
+takes a new epoch, fencing off the previous worker's writes, attaches the
+dashboard to the lease network and adopts every running lease container. Then
+every :data:`TICK_S` seconds it:
+
+- health-checks leases through their agents: the first healthy answer makes a
+  starting lease ready, and two failures one tick apart release a lease;
+- releases leases whose owning session ended, whose idle limit passed, whose
+  workspace no longer enables ``browser``, or whose time limit passed (the
+  in-container watchdog normally ends those first);
+- every second tick, compares Docker with the records: a container with no
+  active record is stopped, and a record whose container is gone is closed.
+
+Lease containers are separate from the dashboard, so worker reloads, crashes
+and container restarts leave them running; only these rules end them.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from typing import Optional
+
+from tools.dashboard import browser_containers as containers
+from tools.dashboard.dao import browser_leases as store
+
+logger = logging.getLogger(__name__)
+
+TICK_S = 5.0
+START_TIMEOUT_S = 90.0
+EXPIRY_GRACE_S = 15.0
+
+_epoch: Optional[int] = None
+_tick = 0
+
+
+def epoch() -> Optional[int]:
+    """This worker's epoch, or None before activation (writes are refused)."""
+    return _epoch
+
+
+def defaults() -> dict:
+    from tools.graph import ops as graph_ops
+    from tools.graph.schemas import browser_defaults
+
+    try:
+        row = graph_ops.read_set_key(browser_defaults.SET_ID, "default", org="machine", peers=[])
+    except Exception:
+        row = None
+    return browser_defaults.resolved((row or {}).get("payload"))
+
+
+# ── lifecycle actions ──────────────────────────────────────────────────
+
+
+def release(lease: store.Lease, reason: str, *, epoch_: int) -> bool:
+    """Move a lease to releasing, stop its container, and close the record."""
+    if lease.state != "releasing":
+        if lease.state in ("ready", "busy", "locked", "starting", "unhealthy"):
+            if not store.transition(lease.lease_hash, epoch=epoch_, to="releasing",
+                                    audit_op="release", result=reason):
+                return False
+        elif lease.state == "requested":
+            store.transition(lease.lease_hash, epoch=epoch_, to="failed",
+                             audit_op="release", result=reason, diagnostic=reason)
+            return store.transition(lease.lease_hash, epoch=epoch_, to="gone")
+    containers.stop(lease.container_name)
+    return store.transition(lease.lease_hash, epoch=epoch_, to="gone", audit_op="gone", result=reason)
+
+
+def release_async(lease: store.Lease, reason: str) -> None:
+    epoch_ = _epoch
+    if epoch_ is None:
+        return
+    threading.Thread(target=_release_logged, args=(lease, reason, epoch_), daemon=True,
+                     name=f"browser-release-{lease.container_name}").start()
+
+
+def _release_logged(lease: store.Lease, reason: str, epoch_: int) -> None:
+    try:
+        release(lease, reason, epoch_=epoch_)
+    except Exception:
+        logger.exception("browser lease release failed; the reconciler will retry")
+
+
+def wait_ready(lease_hash: str, epoch_: int, timeout_s: float = START_TIMEOUT_S) -> None:
+    """Poll a starting lease's agent until healthy (start-time path)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        lease = store.get(lease_hash)
+        if lease is None or lease.state != "starting" or not lease.address:
+            return
+        if _healthy(lease):
+            store.transition(lease_hash, epoch=epoch_, to="ready", expect=("starting",),
+                             audit_op="ready", last_health_at=time.time(), health_failures=0)
+            return
+        time.sleep(0.5)
+
+
+def _healthy(lease: store.Lease) -> bool:
+    try:
+        status, body = containers.agent_request(lease.address, lease.secret, "GET", "/health",
+                                                timeout=3)
+    except Exception:
+        return False
+    return status == 200 and body.get("healthy") is True
+
+
+# ── activation and the loop ────────────────────────────────────────────
+
+
+def activate() -> int:
+    """Take a new epoch, join the lease network and adopt running leases."""
+    global _epoch
+    _epoch = store.take_epoch()
+    containers.ensure_network()
+    rows = {lease.lease_hash: lease for lease in store.list_leases()}
+    adopted = orphans = 0
+    for container in containers.list_containers():
+        lease = rows.get(container.lease_hash)
+        if lease is not None and container.state == "running":
+            adopted += store.adopt(lease.lease_hash, epoch=_epoch)
+        elif lease is None:
+            containers.stop(container.name)
+            orphans += 1
+    logger.info("browser broker: epoch %d, adopted %d lease(s), stopped %d orphan container(s)",
+                _epoch, adopted, orphans)
+    return _epoch
+
+
+def reconcile_once(now: Optional[float] = None) -> None:
+    global _tick
+    epoch_ = _epoch
+    if epoch_ is None:
+        return
+    if store.current_epoch() != epoch_:
+        return  # a newer worker owns the leases
+    now = now or time.time()
+    _tick += 1
+    if _tick % 2 == 1:
+        _docker_pass(epoch_, now)
+    leases = store.list_leases()
+    if not leases:
+        return
+    limits = defaults()
+    capability_cache: dict[tuple[str, str], bool] = {}
+    for lease in leases:
+        reason = _end_reason(lease, now, limits, capability_cache)
+        if reason:
+            release(lease, reason, epoch_=epoch_)
+            continue
+        if lease.state in ("starting", "ready", "busy", "locked", "unhealthy") and lease.address:
+            _health_pass(lease, epoch_, now)
+
+
+def _docker_pass(epoch_: int, now: float) -> None:
+    listed = {c.lease_hash: c for c in containers.list_containers()}
+    rows = {lease.lease_hash: lease for lease in store.list_leases()}
+    for lease_hash, container in listed.items():
+        if lease_hash not in rows:
+            logger.warning("browser broker: stopping %s, which has no lease record", container.name)
+            containers.stop(container.name)
+    for lease in rows.values():
+        container = listed.get(lease.lease_hash)
+        if container is not None and container.state in ("running", "created"):
+            continue
+        if lease.state == "requested" and now - lease.created_at < START_TIMEOUT_S:
+            continue  # its container is being created right now
+        release(lease, "container-gone", epoch_=epoch_)
+
+
+def _end_reason(lease: store.Lease, now: float, limits: dict, capability_cache: dict) -> Optional[str]:
+    if lease.state == "releasing":
+        return "releasing"
+    if now >= lease.expires_at + EXPIRY_GRACE_S:
+        return "time-limit"
+    if now - lease.last_activity >= limits["idle_s"]:
+        return "idle"
+    if lease.state == "starting" and now - lease.created_at >= START_TIMEOUT_S:
+        return "start-timeout"
+    from tools.dashboard.dao import dashboard_db
+
+    if not dashboard_db.is_session_live(lease.session):
+        return "session-ended"
+    key = (lease.org, lease.workspace)
+    if key not in capability_cache:
+        from tools.dashboard.capability_gate import capability_enabled
+
+        try:
+            capability_cache[key] = capability_enabled(lease.org, lease.workspace, "browser")
+        except Exception:
+            capability_cache[key] = True  # unreadable is not revoked
+    if not capability_cache[key]:
+        return "capability-revoked"
+    return None
+
+
+def _health_pass(lease: store.Lease, epoch_: int, now: float) -> None:
+    if _healthy(lease):
+        if lease.state == "starting":
+            store.transition(lease.lease_hash, epoch=epoch_, to="ready", expect=("starting",),
+                             audit_op="ready", last_health_at=now, health_failures=0)
+        elif lease.health_failures:
+            store.update(lease.lease_hash, epoch=epoch_, health_failures=0, last_health_at=now)
+        return
+    if lease.state == "starting":
+        return  # still booting; the start timeout ends it
+    failures = lease.health_failures + 1
+    store.update(lease.lease_hash, epoch=epoch_, health_failures=failures, last_health_at=now)
+    if failures >= 2:
+        if lease.state == "ready":
+            store.transition(lease.lease_hash, epoch=epoch_, to="unhealthy", expect=("ready",),
+                             audit_op="health", result="unhealthy")
+        fresh = store.get(lease.lease_hash)
+        if fresh is not None:
+            release(fresh, "unhealthy", epoch_=epoch_)
+
+
+async def run_forever() -> None:
+    """The dashboard's background task (started at worker activation)."""
+    import asyncio
+
+    try:
+        await asyncio.to_thread(activate)
+    except Exception:
+        logger.exception("browser broker: activation failed; retrying in the loop")
+    backoff = TICK_S
+    while True:
+        try:
+            if _epoch is None:
+                await asyncio.to_thread(activate)
+            await asyncio.to_thread(reconcile_once)
+            backoff = TICK_S
+        except asyncio.CancelledError:
+            raise
+        except containers.DockerUnavailable:
+            backoff = min(backoff * 2, 60.0)
+            logger.warning("browser broker: docker unavailable; next attempt in %.0fs", backoff)
+        except Exception:
+            logger.exception("browser broker: reconcile failed; retrying next tick")
+        await asyncio.sleep(backoff)
