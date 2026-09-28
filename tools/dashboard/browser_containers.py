@@ -92,6 +92,10 @@ def create_args(*, name: str, lease_labels: dict[str, str], caps: Caps,
             "--cpus", str(caps.cpus), "--pids-limit", str(caps.pids), "--shm-size", SHM_SIZE,
             "--security-opt", f"seccomp={SECCOMP_PROFILE}",
             "--security-opt", "no-new-privileges",
+            # No raw sockets even after an escape: the egress exemption is by
+            # source address, which raw sockets could forge (measured: Chrome
+            # does not need NET_RAW; --cap-drop ALL breaks its zygote).
+            "--cap-drop", "NET_RAW",
             "-e", "BROWSER_LEASE_SECRET", "-e", "BROWSER_VNC_PASSWORD",
             "-e", "BROWSER_LEASE_EXPIRES_AT"]
     if timezone:
@@ -195,25 +199,34 @@ def _bridge_name() -> str:
     return name
 
 
-EGRESS_TAG = "autonomy-browser-egress"
+#: Our own chains. The node's INPUT and DOCKER-USER chains are shared with
+#: tailscaled and Docker, which rewrite them; we only ever add one jump rule
+#: to each and never delete from them by position.
+FWD_CHAIN = "AUTONOMY-BROWSER-FWD"
+IN_CHAIN = "AUTONOMY-BROWSER-IN"
 
 
-def egress_rules(bridge: str, dashboard_ip: str) -> list[list[str]]:
-    """The host rules, each as ``[chain, *spec]``.
+def egress_rules(bridge: str, dashboard_ip: str) -> dict[str, list[list[str]]]:
+    """The rules of our two chains, in order (jumps into them match ``-i <bridge>``).
 
-    FORWARD (DOCKER-USER): new connections leaving the lease bridge for a
-    blocked range are dropped; ``! -o <bridge>`` leaves traffic within the
-    bridge (dashboard <-> lease) alone. INPUT: new connections from the lease
-    bridge to the node itself (its published ports, its LAN address, the
-    gateway) are dropped. The dashboard's own address on the bridge is exempt
-    from both: on Docker < 28 its default route, and so its egress to the LAN
-    and the NAS, leaves through this bridge."""
-    common = ["-i", bridge, "!", "-s", f"{dashboard_ip}/32"]
-    tag = ["-m", "comment", "--comment", EGRESS_TAG]
-    rules = [["DOCKER-USER", *common, "!", "-o", bridge, "-d", cidr,
-              "-m", "conntrack", "--ctstate", "NEW", *tag, "-j", "DROP"] for cidr in EGRESS_BLOCKED]
-    rules.append(["INPUT", *common, "-m", "conntrack", "--ctstate", "NEW", *tag, "-j", "DROP"])
-    return rules
+    FWD: new connections leaving the lease bridge for a blocked range are
+    dropped; ``! -o <bridge>`` leaves traffic within the bridge (dashboard <->
+    lease) alone. IN: new connections from the lease bridge to the node itself
+    (its published ports, its LAN address, the gateway) are dropped. The
+    dashboard's own address on the bridge is exempt from both: on Docker < 28
+    its default route, and so its egress to the LAN and the NAS, leaves
+    through this bridge."""
+    exempt = ["!", "-s", f"{dashboard_ip}/32"]
+    new = ["-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"]
+    return {
+        FWD_CHAIN: [["!", "-o", bridge, *exempt, "-d", cidr, *new] for cidr in EGRESS_BLOCKED],
+        IN_CHAIN: [[*exempt, *new]],
+    }
+
+
+def jump_rules(bridge: str) -> dict[str, list[str]]:
+    """The one rule each shared chain gets."""
+    return {"DOCKER-USER": ["-i", bridge, "-j", FWD_CHAIN], "INPUT": ["-i", bridge, "-j", IN_CHAIN]}
 
 
 def _dashboard_ip_on_lease_network(own: str) -> str:
@@ -225,11 +238,12 @@ def _dashboard_ip_on_lease_network(own: str) -> str:
 def restrict_egress() -> None:
     """Install and verify the lease egress policy on the node (auto-i5okc).
 
-    A short-lived helper on the host network with NET_ADMIN writes the rules
-    into Docker's DOCKER-USER chain and the host INPUT chain. Tagged rules that
-    are no longer wanted (an old dashboard address, a recreated network) are
-    removed. Raises IsolationUnavailable when the policy cannot be verified;
-    leases are then refused."""
+    A short-lived helper on the host network with NET_ADMIN keeps our two
+    chains exactly equal to :func:`egress_rules` and makes sure the shared
+    INPUT and DOCKER-USER chains jump to them for the lease bridge. Raises
+    IsolationUnavailable when the policy cannot be verified; leases are then
+    refused."""
+    import shlex
     from agents.mount_plan import _own_container_id
 
     backend = _docker("info", "--format", "{{.FirewallBackend.Driver}}", check=False).stdout.strip()
@@ -243,31 +257,46 @@ def restrict_egress() -> None:
         raise IsolationUnavailable(f"the dashboard has no address on {NETWORK}")
     helper = ["run", "--rm", "--network", "host", "--cap-drop", "ALL", "--cap-add", "NET_ADMIN",
               "--user", "0", "--entrypoint", "iptables", IMAGE, "-w"]
-    wanted = egress_rules(_bridge_name(), dashboard_ip)
-    for chain in ("DOCKER-USER", "INPUT"):
-        want = {frozenset(r[1:]) for r in wanted if r[0] == chain}
-        appended = [line for line in _docker(*helper, "-S", chain, check=False).stdout.splitlines()
+
+    def ipt(*args):
+        return _docker(*helper, *args, check=False)
+
+    bridge = _bridge_name()
+    for chain, wanted in egress_rules(bridge, dashboard_ip).items():
+        if ipt("-S", chain).returncode != 0 and ipt("-N", chain).returncode != 0:
+            raise IsolationUnavailable(f"cannot create chain {chain}")
+        current = [line[len(f"-A {chain} "):] for line in ipt("-S", chain).stdout.splitlines()
+                   if line.startswith(f"-A {chain} ")]
+        if [_normalize(c) for c in current] != [frozenset(w) for w in wanted]:
+            # Our own chain: put the wanted rules first, then trim the old ones
+            # from the end, so there is never a moment without the policy.
+            for position, rule in enumerate(wanted, start=1):
+                if ipt("-I", chain, str(position), *rule).returncode != 0:
+                    raise IsolationUnavailable(f"cannot write {chain}")
+            for position in range(len(wanted) + len(current), len(wanted), -1):
+                ipt("-D", chain, str(position))
+        verified = [line[len(f"-A {chain} "):] for line in ipt("-S", chain).stdout.splitlines()
                     if line.startswith(f"-A {chain} ")]
-        stale = [number for number, line in enumerate(appended, start=1)
-                 if EGRESS_TAG in line and _normalize(line[len(f"-A {chain} "):]) not in want]
-        # Delete by position, highest first, so a rule iptables prints oddly
-        # (e.g. an interface it cannot resolve) is still removed.
-        for number in sorted(stale, reverse=True):
-            _docker(*helper, "-D", chain, str(number), check=False)
-    for rule in wanted:
-        chain, spec = rule[0], rule[1:]
-        if _docker(*helper, "-C", chain, *spec, check=False).returncode == 0:
-            continue
-        proc = _docker(*helper, "-I", chain, "1", *spec, check=False)
-        if proc.returncode != 0 or _docker(*helper, "-C", chain, *spec, check=False).returncode != 0:
-            raise IsolationUnavailable(f"cannot install the lease egress rule {rule}: "
-                                       f"{proc.stderr.strip()[:300]}")
+        if [_normalize(v) for v in verified] != [frozenset(w) for w in wanted]:
+            raise IsolationUnavailable(f"{chain} does not hold the lease egress policy")
+    for shared, jump in jump_rules(bridge).items():
+        target = jump[-1]
+        # A jump for an old bridge (a recreated network) is removed by its exact
+        # specification, never by position.
+        for line in ipt("-S", shared).stdout.splitlines():
+            if line.startswith(f"-A {shared} ") and line.endswith(f"-j {target}"):
+                spec = line[len(f"-A {shared} "):]
+                if _normalize(spec) != frozenset(jump):
+                    ipt("-D", shared, *shlex.split(spec))
+        if ipt("-C", shared, *jump).returncode != 0:
+            ipt("-I", shared, "1", *jump)
+            if ipt("-C", shared, *jump).returncode != 0:
+                raise IsolationUnavailable(f"cannot add the {target} jump to {shared}")
 
 
 def _normalize(spec: str) -> frozenset:
     # iptables -S prints matches in its own order and quoting; compare as a set
-    # of tokens, which is enough to tell our tagged rules apart. A line that
-    # does not parse is never "wanted".
+    # of tokens. A line that does not parse never equals a wanted rule.
     import shlex
     try:
         return frozenset(shlex.split(spec))
