@@ -1065,6 +1065,14 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
             "the signed payload does not match this request — refusing to "
             "publish; reopen the approval and sign it again"
         )
+    # The rendered payload names the organization as bound then. A binding
+    # that changed since (re-registration, recovery) would publish under an
+    # organization the operator did not see (auto-0vfjc).
+    if signed_payload.get("org") != binding.get("org_uuid"):
+        return _fail(
+            "the organization changed after this request was prepared; close "
+            "it and publish again"
+        )
 
     meta, meta_error = _tunnel_link_meta(req, decision)
     if meta_error:

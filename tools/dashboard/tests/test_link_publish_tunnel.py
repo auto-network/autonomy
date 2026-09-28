@@ -91,7 +91,8 @@ def founder_persona(founded_org):
 
 
 def _persona_cert(signer, session_key, persona_pub, *, kind="operator",
-                  scope=SESSION_SCOPE, not_before=None, not_after=None):
+                  scope=SESSION_SCOPE, not_before=None, not_after=None,
+                  org_uuid=ORG_UUID):
     """Mint a session certificate the way sign-on does: signed by the ACTING
     PERSONA (not the org root), naming that persona as the subject.
 
@@ -101,7 +102,7 @@ def _persona_cert(signer, session_key, persona_pub, *, kind="operator",
     """
     now = int(time.time())
     return issue_cert(
-        signer, session_key.public_hex, scope=scope, org=ORG_UUID,
+        signer, session_key.public_hex, scope=scope, org=org_uuid,
         subject=Subject(kind, persona_pub),
         not_before=now - 3600 if not_before is None else not_before,
         not_after=now + 30 * 86400 if not_after is None else not_after,
@@ -482,6 +483,41 @@ def test_an_envelope_signed_before_the_ttl_edit_is_refused(
     assert d["result"]["execution"]["ok"] is False
     assert "signed payload does not match" in d["result"]["execution"]["error"]
     assert recorder.calls == []
+
+
+def test_a_binding_changed_since_the_render_is_refused(
+    env, root, session_key, session_cert, founder_persona, monkeypatch,
+):
+    """auto-0vfjc: the rendered payload names the organization as bound at
+    render. If the org re-registered before approval and the operator signed
+    on again under the new binding, the session proves authority there — so
+    only the payload shows the operator approved a different organization."""
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    rid = _create_publish(env)
+    env.get(f"/api/approvals/{rid}")  # rendered: staged under ORG_UUID
+    new_uuid = "22222222-2222-4222-8222-222222222222"
+    settings_ops.upsert_by_key(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
+        {
+            "org_uuid": new_uuid,
+            "root_pub": root.public_hex,
+            "registry_url": REGISTRY_URL,
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": "2030-01-01T00:00:00Z",
+        },
+        org=ORG,
+    )
+    cert = _persona_cert(founder_persona, session_key, founder_persona.public_hex,
+                         org_uuid=new_uuid)
+    envelope = _SignStaged(session_key, cert, "/control/create-link").sign(env, rid)
+
+    execution = _decide_and_wait(env, rid, envelope)["execution"]
+
+    assert execution["ok"] is False
+    assert "organization changed after this request was prepared" in execution["error"]
+    assert recorder.calls == []
+    assert _cached_grants() == {}
 
 
 def test_an_unrendered_request_is_refused(
