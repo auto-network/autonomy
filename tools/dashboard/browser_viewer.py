@@ -84,7 +84,9 @@ class ClientFilter:
         if kind == 6:  # ClientCutText
             if len(buf) < 8:
                 return None
-            size = struct.unpack(">I", buf[4:8])[0]
+            # Signed: a negative length marks the extended-clipboard format,
+            # whose payload is abs(length) bytes (noVNC sends one on connect).
+            size = abs(struct.unpack(">i", buf[4:8])[0])
             if size > MAX_CUT_TEXT:
                 raise ProtocolError("clipboard text too large")
             return 8 + size

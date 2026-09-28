@@ -285,3 +285,15 @@ def test_the_pages_are_served_and_load_novnc_from_our_own_origin():
         assert r.status_code == 200 and "text/html" in r.headers["content-type"]
         assert "/static/vendor/novnc-1.5.0/core/rfb.js" in r.text
         assert "cdn." not in r.text and "https://" not in r.text  # nothing from third-party origins
+
+
+
+def test_novncs_extended_clipboard_message_does_not_close_the_viewer():
+    # Captured from the operator's session (HAR, 2026-09-28): after the server's
+    # extended-clipboard caps, noVNC answers with ClientCutText length -8.
+    reply = bytes.fromhex("06000000fffffff81f000001" "00000000")
+    update = bytes([3, 1]) + struct.pack(">HHHH", 0, 0, 1920, 1080)
+    filt = viewer.ClientFilter()
+    out, saw_input = filt.feed(reply + update, allow_input=False)
+    assert out == update and filt.buffer == b""
+    assert viewer.ClientFilter().feed(reply, allow_input=True)[0] == reply
