@@ -303,6 +303,49 @@ def test_org_join_meta_admits_only_label(client, clock, root):
     assert "only label" in reply["error"]
 
 
+def test_org_follow_meta_names_the_org_slug(client, clock, root, app):
+    """An org:follow envelope names the followed org's slug, so a follower
+    names its mirror without --as (auto-iyxik, graph://5f2f5a49-00d §10.4)."""
+    with _open_tunnel(client, clock, root) as ws:
+        reply = _ctrl(ws, "c" * 32, "create-link", {
+            "target_uuid": ORG, "target_type": "org:follow",
+            "meta": {"label": "Follow us", "org": "autonomy"},
+        })
+    assert reply["ok"] is True, reply
+    grant = app.state.store.get_link(reply["token"])
+    assert grant.target_type == "org:follow"
+    assert grant.meta == {"label": "Follow us", "org": "autonomy"}
+
+
+@pytest.mark.parametrize("meta, needle", [
+    ({"org": "autonomy", "org_uuid": ORG}, "only label and org"),
+    ({"ttl": 3600}, "only label and org"),
+    ({"org": "-leading"}, "meta.org must be an org slug"),
+    ({"org": "a/b"}, "meta.org must be an org slug"),
+    ({"org": 7}, "meta.org must be an org slug"),
+    ({"org": "personal"}, "reserved name"),
+    ({"org": "machine"}, "reserved name"),
+    ({"org": "None"}, "reserved name"),
+    ({"org": "undefined"}, "reserved name"),
+])
+def test_org_follow_meta_refuses_anything_else(client, clock, root, meta, needle):
+    with _open_tunnel(client, clock, root) as ws:
+        reply = _ctrl(ws, "d" * 32, "create-link", {
+            "target_uuid": ORG, "target_type": "org:follow", "meta": meta,
+        })
+    assert reply["ok"] is False
+    assert needle in reply["error"]
+
+
+def test_reserved_follow_slugs_match_the_graphs_reserved_names():
+    """The relay ships without tools.graph, so its reserved set is a copy."""
+    from tools.data_paths import LOCAL_STORE_KEYS
+    from tools.graph.db import _STRINGIFIED_ABSENCE
+    from tools.network.registry import relay
+
+    assert relay._RESERVED_ORG_SLUGS == frozenset(LOCAL_STORE_KEYS) | _STRINGIFIED_ABSENCE
+
+
 def test_invite_ref_refused_on_non_org_join(client, clock, root):
     with _open_tunnel(client, clock, root) as ws:
         reply = _ctrl(ws, "8" * 32, "create-link", {

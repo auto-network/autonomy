@@ -1552,6 +1552,17 @@ _UUID_RE = _re.compile(
 #: rides this path too (auto-qol1v) but carries invite_ref / expires_at as
 #: top-level args and restricts meta to {label} — see _ctrl_create_link.
 _CTRL_LINK_META_FIELDS = frozenset({"ttl", "label", "require_auth"})
+#: An org:follow link's envelope names the followed org's slug, so a follower
+#: names its mirror the way the join path does (graph://5f2f5a49-00d §10.1,
+#: §10.4; auto-iyxik). Its uuid is the grant's target_uuid already.
+_CTRL_FOLLOW_META_FIELDS = frozenset({"label", "org"})
+_ORG_SLUG_RE = _re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}")
+#: Names no organization can carry, refused (case-insensitively) so a
+#: published envelope never names one: the operator's local stores and the
+#: stringified-absence names (the orgs/None.db incident). The registry ships
+#: without tools.graph, so this is a copy; test_tunnel_control pins it to
+#: tools.data_paths.LOCAL_STORE_KEYS and tools.graph.db._STRINGIFIED_ABSENCE.
+_RESERVED_ORG_SLUGS = frozenset({"personal", "machine", "none", "null", "nil", "undefined"})
 _CENTRAL_LINK_FIELDS = frozenset(
     {"operation_id", "receipt", "signature", "origin_proof"}
 )
@@ -1770,6 +1781,21 @@ def _ctrl_create_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
         # An org:join grant's lifetime is the invitation's; meta admits only label.
         if not set(meta).issubset({"label"}):
             raise _CtrlError("org:join meta admits only label")
+    elif target_type == "org:follow":
+        # A follow link is the org's standing public surface: no ttl, no
+        # viewer authn; it names the org slug for the follower's mirror.
+        if not set(meta).issubset(_CTRL_FOLLOW_META_FIELDS):
+            raise _CtrlError("org:follow meta admits only label and org")
+        org_slug = meta.get("org")
+        if org_slug is not None and (
+            not isinstance(org_slug, str) or _ORG_SLUG_RE.fullmatch(org_slug) is None
+        ):
+            raise _CtrlError(
+                "org:follow meta.org must be an org slug "
+                "(1-64 of A-Z a-z 0-9 _ -, not starting with -)"
+            )
+        if org_slug is not None and org_slug.lower() in _RESERVED_ORG_SLUGS:
+            raise _CtrlError(f"org:follow meta.org {org_slug!r} is a reserved name")
     elif not set(meta).issubset(_CTRL_LINK_META_FIELDS):
         raise _CtrlError("meta carries unsupported fields")
     if meta.get("require_auth"):
