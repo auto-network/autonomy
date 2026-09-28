@@ -313,3 +313,38 @@ def test_preference_put_is_the_operators_and_validates(monkeypatch):
 
     monkeypatch.setattr(prefs, "write_preference", refuse)
     assert asyncio.run(server.api_software_preference(_Req("PUT", {"interval_minutes": 5}))).status_code == 400
+
+
+# ── The preference actually takes effect (S7 witness, 2026-09-28) ───────────
+# read_set_key returns a dict row; read_preference read an attribute off it
+# and silently returned the defaults, so a saved interval never applied.
+
+def test_read_preference_uses_the_stored_row(monkeypatch):
+    import tools.graph.settings_ops as settings_ops
+
+    def fake_read_set_key(set_id, key, *, org, peers=None):
+        assert (set_id, key, org) == (prefs.SOFTWARE_UPDATE_PREFERENCE_SET_ID, "__default__", "personal")
+        return {"key": key, "payload": {"auto_check": True, "auto_install": True, "interval_minutes": 30}}
+
+    monkeypatch.setattr(settings_ops, "read_set_key", fake_read_set_key)
+    assert prefs.read_preference() == {"auto_check": True, "auto_install": True, "interval_minutes": 30}
+
+
+def test_a_saved_preference_reads_back(tmp_path, monkeypatch):
+    """Round trip through the real personal Settings store."""
+    from tools.graph.db import GraphDB
+
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    GraphDB.close_all_pooled()
+    try:
+        GraphDB.create_org_db("personal").close()
+        saved = prefs.write_preference({"interval_minutes": 30})
+        assert saved["interval_minutes"] == 30
+        assert prefs.read_preference() == {"auto_check": True, "auto_install": False, "interval_minutes": 30}
+        prefs.write_preference({"auto_install": True})
+        assert prefs.read_preference()["auto_install"] is True
+        assert prefs.read_preference()["interval_minutes"] == 30
+    finally:
+        GraphDB.close_all_pooled()

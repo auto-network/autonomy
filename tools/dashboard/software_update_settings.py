@@ -92,7 +92,12 @@ def read_preference() -> dict[str, Any]:
     except Exception:
         logger.debug("software_update: preference read failed; using defaults", exc_info=True)
         return resolve(None)
-    return resolve(getattr(row, "payload", None) if row is not None else None)
+    # read_set_key returns the row as a dict (payload parsed, schema defaults
+    # applied) — not an object. Reading an attribute off it silently yielded
+    # the defaults, so a saved preference never took effect (S7 witness,
+    # 2026-09-28: PUT interval 30, poller kept 360).
+    payload = row.get("payload") if isinstance(row, dict) else getattr(row, "payload", None)
+    return resolve(payload)
 
 
 def write_preference(changes: dict[str, Any]) -> dict[str, Any]:
