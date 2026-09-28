@@ -137,6 +137,9 @@ STORE_MANIFEST: tuple = (
           "session traces"),
     Store("dropbox", "dropbox", "AUTONOMY_DROPBOX_DIR", "dir",
           "machine-global operator dropbox objects and receipt metadata"),
+    Store("browser_profiles", "browser-profiles", "BROWSER_PROFILES_DIR", "dir",
+          "persistent browser profiles by organization and workspace "
+          "(`<org>/<workspace>/<name>`) — site sign-in state; not backed up"),
 )
 
 STORES_BY_KEY = {store.key: store for store in STORE_MANIFEST}

@@ -153,6 +153,11 @@ MANIFEST="$("$PYTHON" "$STORES_HELPER" stores)" || {
 echo "$(date -Iseconds) ${TIER} backup starting: data root ${DATA_ROOT} -> ${DEST}"
 
 while IFS=$'\t' read -r key kind action required rel resolved; do
+    if [[ "$action" == "exclude" ]]; then
+        echo "  ${key}: excluded from backup by policy"
+        row "$key" exclude excluded 0 ""
+        continue
+    fi
     if [[ ! -e "$resolved" ]]; then
         if [[ "$required" == "required" ]]; then
             fail "${key}: MISSING required store (${resolved})"

@@ -113,3 +113,34 @@ def test_failed_run_reports_with_reasons(synthetic):
     assert len(failed_dirs) == 1
     assert (failed_dirs[0] / "run-report.json").exists()
     assert not (failed_dirs[0] / ".backup-complete").exists()
+
+
+def test_browser_profiles_are_excluded_from_every_tier(synthetic):
+    # Browser profiles hold plaintext site sign-in cookies (auto-0skxh):
+    # present or absent, they are never copied and never fail the run.
+    import shutil
+    root, backups, fakebin = synthetic
+    profile = root / "browser-profiles" / "autonomy" / "ws" / "eversource"
+    profile.mkdir(parents=True)
+    (profile / "Cookies").write_text("session cookie")
+    proc = _run(root, backups, fakebin)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    report = json.loads((root / "backup-reports" / "hourly-latest.json").read_text())
+    row = [r for r in report["stores"] if r["name"] == "browser_profiles"][0]
+    assert (row["action"], row["status"], row["bytes"]) == ("exclude", "excluded", 0)
+    capture = [d for d in (backups / "hourly").iterdir() if d.is_dir()][0]
+    assert not list(capture.rglob("Cookies"))
+    from tools.data_paths import STORE_MANIFEST
+    env = {**os.environ, "AUTONOMY_DATA_ROOT": str(root)}
+    for store in STORE_MANIFEST:
+        if store.env:
+            env.pop(store.env, None)
+    offsite = subprocess.run(
+        ["python3", str(REPO / "tools" / "graph" / "backup_stores.py"), "offsite-data"],
+        capture_output=True, text=True, check=True, env=env,
+    ).stdout
+    assert "browser-profiles" not in offsite
+
+    shutil.rmtree(root / "browser-profiles")
+    proc = _run(root, backups, fakebin)
+    assert proc.returncode == 0, proc.stdout + proc.stderr

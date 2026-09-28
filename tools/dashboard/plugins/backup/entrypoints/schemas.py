@@ -49,9 +49,9 @@ _STORE_ELEMENT = {
                             "(orgs/autonomy.db, tls.key, beads/auto.sql)"},
     "action": {"type": "string",
                "description": "How it was captured: sqlite | copy | "
-                              "verify | dump"},
+                              "verify | dump | exclude"},
     "status": {"type": "string", "required": True,
-               "description": "ok | missing | error | absent-optional"},
+               "description": "ok | missing | error | absent-optional | excluded"},
     "bytes": {"type": "integer",
               "description": "Captured size; 0 for verify-only stores"},
     "reason": {"type": "string",

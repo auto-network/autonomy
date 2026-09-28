@@ -21,6 +21,8 @@ Modes (one per argv[1], TAB-separated rows on stdout):
     - ``verify``      — existence-checked here; CONTENT is captured by the
       restic ``kind=data`` offsite snapshot (dedup makes the large artifact
       dirs affordable there; 17 full copies/day on the NAS would not be)
+    - ``exclude``     — never copied to either tier and never required to
+      exist; reported ``excluded`` (browser profiles: sign-in state)
 
 ``offsite-data``
     Absolute paths for the restic ``kind=data`` snapshot: every ``verify``
@@ -102,6 +104,9 @@ _DIR_ACTIONS = {
     "agent_runs": "verify",      # large; restic dedup handles it offsite
     "session_traces": "verify",  # large; restic dedup handles it offsite
     "dropbox": "verify",         # media; restic dedup handles it offsite
+    # Plaintext site sign-in cookies (credential-equivalent), torn while a
+    # lease runs; a lost profile costs one re-sign-in. Never copied to any tier.
+    "browser_profiles": "exclude",
 }
 
 _OPTIONAL = {"web_push_vapid", "web_push_proof_vapid"} | set(
