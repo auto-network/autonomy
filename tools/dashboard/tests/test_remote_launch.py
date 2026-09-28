@@ -150,9 +150,10 @@ def test_a_remote_create_sends_launch_and_answers_like_a_local_one(remote):
     server, sent, _ = remote
     status, data = _post(server, {"machine": "sjc-2", "project": "p", "model": "m"})
     assert status == 202
-    assert data == {"tmux_name": "auto-9", "label": "", "type": "container",
-                    "pending": True, "machine": "sjc-2", "machine_pub": PEER}
     ((machine, op, body),) = sent
+    assert data == {"tmux_name": "auto-9", "label": "", "type": "container",
+                    "pending": True, "machine": "sjc-2", "machine_pub": PEER,
+                    "operation_id": body["operation_id"]}
     assert (machine, op) == ("sjc-2", "launch")
     assert body["project"] == "p" and body["model"] == "m"
     assert len(body["operation_id"]) == 32
@@ -197,3 +198,40 @@ def test_a_remote_create_requires_global_authority(remote, monkeypatch):
                         lambda request: JSONResponse({"error": "no"}, status_code=403))
     assert _post(server, {"machine": "sjc-2", "project": "p"})[0] == 403
     assert sent == []
+
+
+def test_a_caller_operation_id_is_used_and_a_bad_one_refused(remote):
+    server, sent, _ = remote
+    op_id = "ab" * 16
+    status, data = _post(server, {"machine": "sjc-2", "project": "p",
+                                  "operation_id": op_id})
+    assert status == 202 and data["operation_id"] == op_id
+    assert sent[-1][2]["operation_id"] == op_id
+    assert _post(server, {"machine": "sjc-2", "project": "p",
+                          "operation_id": "nope"})[0] == 400
+
+
+def test_a_lost_reply_is_retried_with_the_same_id_and_starts_one_session(
+        db, remote, monkeypatch):
+    """The far machine launches, the reply is lost (timeout), the retry with
+    the SAME operation id returns that session, repeated, and there is one."""
+    server, _sent, _ = remote
+    calls = []
+    far = scc.launch_op(_creator(calls))
+    ids = []
+
+    async def lossy(machine, op, body=None, *, timeout=15.0):
+        ids.append(body["operation_id"])
+        reply = await far(body, PEER)
+        if len(ids) == 1:
+            return {"v": 1, "ok": False, "refusal": "session-control-timeout"}
+        return reply
+
+    monkeypatch.setattr(scc, "request", lossy)
+    status, data = _post(server, {"machine": "sjc-2", "project": "p"})
+    assert status == 202, data
+    assert ids[0] == ids[1]
+    assert data["tmux_name"] == "auto-remote-1" and data["repeated"] is True
+    assert len(calls) == 1
+    assert [r["tmux_name"] for r in dashboard_db.get_live_sessions()
+            if r.get("launch_op_id") == ids[0]] == ["auto-remote-1"]

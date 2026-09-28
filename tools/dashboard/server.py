@@ -10097,15 +10097,30 @@ async def _create_remote_session(request, body: dict):
         return JSONResponse(
             {"error": "a remote launch needs a workspace project "
                       "(type 'container')"}, status_code=400)
+    # The idempotency key must survive a retry: a caller that timed out
+    # resends ITS operation_id, and the far machine answers with the session
+    # it already started. Minted here only when the caller supplied none.
+    operation_id = body.get("operation_id")
+    if operation_id is not None and not (
+        isinstance(operation_id, str)
+        and re.fullmatch(r"[0-9a-f]{32}", operation_id)
+    ):
+        return JSONResponse(
+            {"error": "operation_id must be 32 lowercase hex"}, status_code=400)
     launch = {
         "project": body["project"],
         "primer": body.get("primer"),
         "model": body.get("model"),
         "harness": body.get("harness"),
-        "operation_id": _secrets.token_hex(16),
+        "operation_id": operation_id or _secrets.token_hex(16),
     }
     reply = await session_control_client.request(
         str(body["machine"]), "launch", launch, timeout=20.0)
+    if reply.get("refusal") == "session-control-timeout":
+        # The far machine may have launched and only the reply was lost:
+        # ask once more with the SAME id, which returns that session.
+        reply = await session_control_client.request(
+            str(body["machine"]), "launch", launch, timeout=20.0)
     if not reply.get("ok"):
         return JSONResponse(
             {"error": reply.get("detail") or reply.get("refusal"),
@@ -10121,6 +10136,8 @@ async def _create_remote_session(request, body: dict):
         "pending": True,
         "machine": result.get("machine") or body["machine"],
         "machine_pub": result.get("machine_pub"),
+        "operation_id": launch["operation_id"],
+        **({"repeated": True} if result.get("repeated") else {}),
     }, status_code=202)
 
 

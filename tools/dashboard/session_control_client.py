@@ -183,6 +183,11 @@ def launch_op(create: Callable[[dict], Awaitable[object]]) -> OpHandler:
     of this fleet, and it -- never a body field -- is what gets recorded as
     ``home_machine`` / ``launched_by``. ``operation_id`` makes a retry return
     the session it already started.
+
+    Known window: a dashboard restart between ``create`` returning and
+    ``set_launch_provenance`` leaves the session without its
+    ``launch_op_id``, so a retry of that operation starts a second session.
+    The window is one local SQLite write wide.
     """
     lock = asyncio.Lock()
 

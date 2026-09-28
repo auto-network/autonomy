@@ -2198,11 +2198,22 @@ def cmd_session(args):
             value = getattr(args, name, None)
             if value:
                 body[name] = value
+        if body.get("machine"):
+            # One id for this launch, reused on the retry below, so a lost
+            # reply never starts a second session on the far machine.
+            import secrets as _secrets
+            body["operation_id"] = _secrets.token_hex(16)
         try:
             reply = client.create_session(body)
         except Exception as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(2)
+            if not body.get("machine"):
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(2)
+            try:
+                reply = client.create_session(body)
+            except Exception as retry_exc:
+                print(f"Error: {retry_exc}", file=sys.stderr)
+                sys.exit(2)
         if getattr(args, "json", False):
             print(json.dumps(reply, indent=2, sort_keys=True))
         elif isinstance(reply, dict) and reply.get("tmux_name"):
