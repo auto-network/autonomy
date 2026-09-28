@@ -487,6 +487,13 @@ class HttpClient:
         quoted = urllib.parse.quote(name, safe="@")
         return self._post(f"/api/terminal/{quoted}/kill", {})
 
+    def worktree_remote_fetch(self, session: str, repo: str | None = None):
+        """Bring ``<name>@<machine>``'s session branch home into Worktrees."""
+        body = {"session": session}
+        if repo:
+            body["repo"] = repo
+        return self._post("/api/worktrees/remote-fetch", body)
+
     def remote_status(self, machine: str):
         """``status`` of another fleet machine over session-control/1."""
         quoted = urllib.parse.quote(machine, safe="")
