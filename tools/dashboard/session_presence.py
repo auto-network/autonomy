@@ -175,6 +175,23 @@ def _peer_last_success_s() -> dict[str, int]:
     return {pub: int(ns // 1_000_000_000) for pub, ns in raw.items() if ns}
 
 
+def _active_roster() -> dict[str, str] | None:
+    """machine_pub -> machine_id of every ACTIVE roster machine, or None when
+    this dashboard has no fleet identity to resolve the roster against."""
+    try:
+        from tools.network import fleet_roster, fleet_tunnel_server
+
+        root_pub = fleet_tunnel_server._personal_root_pub()
+        if root_pub is None:
+            return None
+        active = fleet_roster.resolve(
+            fleet_roster.load_entries(org=None), anchor_root_pub=root_pub)
+    except Exception:
+        logger.debug("session_presence: roster unavailable", exc_info=True)
+        return None
+    return {pub: entry.machine_id for pub, entry in active.items()}
+
+
 def _machine_names() -> dict[str, str]:
     try:
         from tools.network import fleet_machine_profile
@@ -189,6 +206,7 @@ def read_presence(
     local_pub: str | None = None,
     peer_last_success: dict[str, int] | None = None,
     names: dict[str, str] | None = None,
+    roster: dict[str, str] | None = None,
     now: float | None = None,
 ) -> list[dict]:
     """Every machine's presence rows, each with ``machine`` and ``reachable``.
@@ -197,12 +215,21 @@ def read_presence(
     machine's rows while it was pulled from within REACHABLE_WINDOW_S;
     otherwise ``unreachable_since`` carries the last successful pull (or None
     when it was never pulled).
+
+    The set is unsigned, so a row is kept only when its key names an ACTIVE
+    roster machine and its payload's ``machine_id`` is that machine's: a row
+    one machine wrote under another's key, or for a machine no longer in the
+    roster, is dropped. ``name@machine`` is an address later session control
+    routes by, so the roster, never the row, decides which machine it names.
     """
     if local_pub is None:
         machine = local_machine()
         local_pub = machine.machine_pub if machine else None
     last = _peer_last_success_s() if peer_last_success is None else peer_last_success
     names = _machine_names() if names is None else names
+    roster = _active_roster() if roster is None else roster
+    if roster is None:
+        return []
     current = time.time() if now is None else now
     out = []
     for member in _members():
@@ -212,6 +239,11 @@ def read_presence(
         machine_pub, tmux_name = parts
         payload = dict(member.payload)
         machine_id = payload.get("machine_id", "")
+        if roster.get(machine_pub) != machine_id:
+            logger.debug(
+                "session_presence: dropping %s: key and machine_id do not "
+                "name one active roster machine", member.key)
+            continue
         seen = last.get(machine_pub)
         own = machine_pub == local_pub
         reachable = own or (seen is not None and current - seen <= REACHABLE_WINDOW_S)
@@ -267,6 +299,20 @@ class PresenceWriter:
     def start(self) -> None:
         if self._task is None:
             self._task = asyncio.get_running_loop().create_task(self._run())
+            self._task.add_done_callback(self._on_done)
+
+    @staticmethod
+    def _on_done(task: asyncio.Task) -> None:
+        # A dead writer leaves this machine's rows stale while its peers
+        # still see it as reachable; say so loudly.
+        if task.cancelled():
+            return
+        exc = task.exception()
+        logger.warning(
+            "session_presence: writer stopped%s; this machine's presence "
+            "rows are no longer maintained",
+            f" ({exc!r})" if exc else "",
+        )
 
     async def stop(self) -> None:
         if self._task is not None:

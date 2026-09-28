@@ -40,8 +40,12 @@ def _session(name, **extra):
             "type": "container", "harness": "claude", **extra}
 
 
+ROSTER = {HOME.machine_pub: HOME.machine_id, SJC.machine_pub: SJC.machine_id}
+
+
 def _rows(**kwargs):
     kwargs.setdefault("names", {HOME.machine_id: "home", SJC.machine_id: "sjc-2"})
+    kwargs.setdefault("roster", ROSTER)
     kwargs.setdefault("now", NOW)
     return {r["tmux_name"]: r for r in sp.read_presence(**kwargs)}
 
@@ -121,13 +125,31 @@ def test_remote_status_rows_use_the_name_at_machine_address(store):
     rows = sp.remote_status_rows(
         local_pub=HOME.machine_pub,
         peer_last_success={SJC.machine_pub: NOW - 5},
-        names={SJC.machine_id: "sjc-2"},
+        names={SJC.machine_id: "sjc-2"}, roster=ROSTER,
         now=NOW,
     )
     assert [r["tmux_name"] for r in rows] == ["auto-9@sjc-2"]
     assert rows[0]["attention"] == "remote"
     unreachable = sp.remote_status_rows(
         local_pub=HOME.machine_pub, peer_last_success={},
-        names={SJC.machine_id: "sjc-2"}, now=NOW,
+        names={SJC.machine_id: "sjc-2"}, roster=ROSTER, now=NOW,
     )
     assert unreachable[0]["attention"] == "unreach"
+
+
+def test_a_row_under_one_pub_carrying_another_machine_id_is_dropped(store):
+    forged = sp.LocalMachine(machine_pub=SJC.machine_pub, machine_id=HOME.machine_id)
+    sp.reconcile(forged, [_session("auto-9")])
+    assert "auto-9" not in _rows(local_pub=HOME.machine_pub)
+
+
+def test_a_row_for_a_machine_not_in_the_roster_is_dropped(store):
+    stranger = sp.LocalMachine(machine_pub="c1" * 32, machine_id="c2" * 32)
+    sp.reconcile(stranger, [_session("auto-7")])
+    assert "auto-7" not in _rows(local_pub=HOME.machine_pub)
+
+
+def test_no_roster_identity_lists_nothing(store):
+    sp.reconcile(SJC, [_session("auto-9")])
+    assert sp.read_presence(local_pub=HOME.machine_pub, roster=None,
+                            peer_last_success={}, names={}, now=NOW) == []
