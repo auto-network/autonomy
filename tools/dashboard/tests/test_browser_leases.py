@@ -334,6 +334,7 @@ def test_activation_adopts_and_stops_orphans(db, monkeypatch):
     listed = [containers.LeaseContainer("brw-e-x", h, "running", {}),
               containers.LeaseContainer("brw-e-orphan", "o" * 64, "running", {})]
     stopped = []
+    monkeypatch.setattr(containers, "ensure_network", lambda: None)
     monkeypatch.setattr(containers, "list_containers", lambda: listed)
     monkeypatch.setattr(containers, "stop", lambda name, *, lease_hash: stopped.append((name, lease_hash)))
     new = reconciler.activate()
@@ -368,6 +369,7 @@ def test_no_lease_starts_without_the_dashboard_refusal(broker, monkeypatch):
 def test_activation_pauses_the_broker_with_one_log_line_and_no_retries(db, monkeypatch, caplog):
     import logging
 
+    monkeypatch.setattr(containers, "ensure_network", lambda: None)
     monkeypatch.setattr(containers, "list_containers", lambda: [])
     monkeypatch.setattr(reconciler, "_epoch", None)
     with caplog.at_level(logging.WARNING, logger=reconciler.__name__):
@@ -378,20 +380,20 @@ def test_activation_pauses_the_broker_with_one_log_line_and_no_retries(db, monke
     assert [r.getMessage() for r in caplog.records].count(reconciler.PAUSE_MESSAGE) == 1
 
 
-@pytest.mark.parametrize("rc,out,ready", [(0, "true\n", True), (0, "false\n", False), (1, "", False)])
-def test_the_dashboard_only_checks_the_browser_network(monkeypatch, rc, out, ready):
+def test_ensure_network_creates_the_network_and_never_attaches_the_dashboard(monkeypatch):
     import subprocess
 
     calls = []
 
     def fake(*args, check=True, **kw):
         calls.append(args)
-        return subprocess.CompletedProcess(args, rc, out, "" if rc == 0 else "error: no such object")
+        return subprocess.CompletedProcess(args, 1 if args[:2] == ("network", "inspect") else 0, "", "")
 
     monkeypatch.setattr(containers, "_docker", fake)
-    assert containers.browser_network_ready() is ready
-    assert all(c[:2] == ("network", "inspect") for c in calls)  # never create, never connect
-    assert not hasattr(containers, "ensure_network")
+    containers.ensure_network()
+    assert calls[0][:2] == ("network", "inspect") and calls[1][:2] == ("network", "create")
+    assert not any(c[:2] == ("network", "connect") for c in calls)
+    assert not any("iptables" in c for c in calls)
     assert not hasattr(containers, "isolate_dashboard") and not hasattr(containers, "restrict_egress")
 
 
@@ -654,16 +656,14 @@ def test_a_failed_activation_is_retried_whole_and_then_adopts(db, monkeypatch):
     monkeypatch.setattr(reconciler, "_epoch", None)
     monkeypatch.setattr(containers, "list_containers",
                         lambda: [containers.LeaseContainer("brw-e-x", h, "running", {})])
-    real_list = containers.list_containers
     calls = {"n": 0}
 
-    def flaky_list():
+    def flaky_network():
         calls["n"] += 1
         if calls["n"] == 1:
             raise containers.DockerUnavailable("failed to connect to the docker API")
-        return real_list()
 
-    monkeypatch.setattr(containers, "list_containers", flaky_list)
+    monkeypatch.setattr(containers, "ensure_network", flaky_network)
     with pytest.raises(containers.DockerUnavailable):
         reconciler.activate()
     assert reconciler.epoch() is None  # not published: the loop will retry activation

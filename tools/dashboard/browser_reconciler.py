@@ -199,6 +199,7 @@ def activate() -> int:
     leases were never adopted."""
     global _epoch
     epoch_ = store.take_epoch()
+    containers.ensure_network()
     _ensure_isolation()
     rows = {lease.lease_hash: lease for lease in store.list_leases()}
     adopted = orphans = 0

@@ -202,14 +202,6 @@ def test_a_locked_agent_refuses_even_a_queued_command():
         agent.submit("title", {"timeout_ms": 1000}, 1)
 
 
-def test_chrome_goes_out_only_through_the_egress_proxy():
-    options = lease_agent.launch_options(40000, "", "http://autonomy-browser-egress:3128")
-    assert "--proxy-server=http://autonomy-browser-egress:3128" in options["args"]
-    assert "--proxy-bypass-list=<-loopback>" in options["args"]  # loopback and link-local via the proxy too
-    assert lease_agent.proxy_args("") == []
-    assert lease_agent.proxy_args("http://evil.example:3128 --no-sandbox") == []
-
-
 # ── sign-in page rules (auto-8q7oe.9) ──────────────────────────────────
 
 

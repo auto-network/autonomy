@@ -126,11 +126,6 @@ network colliding with the LAN, include that in your §3 briefing. §4 then runs
 `docker compose up` from this same directory, where the `.env` you just wrote
 supplies `AUTONOMY_SUBNET`.
 
-The browser broker's two networks default to `172.31.254.0/24` and
-`172.31.255.0/24`. If the report shows either overlapping a host network (an
-AWS default VPC is `172.31.0.0/16`), record a checked pair instead:
-`python3 -m tools.network.network_preflight --env-browser >> .env`.
-
 **Raise the inotify ceiling.** It is per-UID and shared by the node and all
 session containers; at the stock 128 the node silently stops tailing every
 session at once.

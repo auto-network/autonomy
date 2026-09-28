@@ -320,27 +320,15 @@ def window_args(screen: str) -> list[str]:
     return ["--window-position=0,0", f"--window-size={match[1]},{match[2]}"]
 
 
-def proxy_args(proxy: str) -> list[str]:
-    """Chrome's only route out: the egress proxy (auto-8c2df). Chrome sends it
-    host names and resolves none itself."""
-    if not re.fullmatch(r"http://[A-Za-z0-9.-]+:[0-9]{1,5}", proxy):
-        return []
-    # "<-loopback>" removes Chrome's implicit bypass of localhost and
-    # link-local, so a page reaching 127.0.0.1 (where Chrome's DevTools port
-    # and the lease agent listen) or 169.254.x goes to the proxy and is refused.
-    return [f"--proxy-server={proxy}", "--proxy-bypass-list=<-loopback>"]
-
-
-def launch_options(cdp_port: int, screen: str, proxy: str = "") -> dict:
-    """Chrome's launch options. The sandbox stays on, certificate errors are
-    never ignored, and the only route out is the egress proxy: the browser
-    network is internal (auto-8c2df), so nothing else is reachable."""
+def launch_options(cdp_port: int, screen: str) -> dict:
+    """Chrome's launch options. Certificate errors are never ignored: lease pages
+    can reach the dashboard on the lease network, and only its TLS certificate,
+    which no lease hostname matches, keeps them out (see TOOL.md)."""
     return dict(
         channel="chrome", headless=False, no_viewport=True, chromium_sandbox=True,
         accept_downloads=True, ignore_https_errors=False,
         ignore_default_args=list(CHROME_IGNORED_DEFAULTS),
-        args=[*CHROME_ARGS, *window_args(screen), *proxy_args(proxy),
-              f"--remote-debugging-port={cdp_port}"],
+        args=[*CHROME_ARGS, *window_args(screen), f"--remote-debugging-port={cdp_port}"],
     )
 
 
@@ -380,8 +368,7 @@ class LeaseAgent(BrowserController):
         port = _free_loopback_port()
         self._playwright = sync_playwright().start()
         self._context = self._playwright.chromium.launch_persistent_context(
-            str(self.profile_dir), **launch_options(port, os.environ.get("BROWSER_SCREEN", ""),
-                                                    os.environ.get("BROWSER_PROXY", "")))
+            str(self.profile_dir), **launch_options(port, os.environ.get("BROWSER_SCREEN", "")))
         pages = self._context.pages
         self.page = pages[0] if pages else self._context.new_page()
         self.page.on("download", lambda download: self._downloads.append(download))
