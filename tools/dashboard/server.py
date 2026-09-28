@@ -166,6 +166,11 @@ from tools.dashboard import fleet_enrollment_routes
 from tools.dashboard import unlock_routes
 from tools.dashboard import vault_routes
 from tools.dashboard import api_auth, route_policy
+from tools.graph import sqlite_open_diag
+
+# auto-bkv3p: count every SQLite open by its opener, before anything opens
+# one, so /api/diag/sqlite-opens can name the site that leaks connections.
+sqlite_open_diag.install()
 from tools.dashboard import network_routes
 from tools.dashboard import org_membership_routes
 from tools.dashboard import web_push, web_push_proof, web_push_routes, web_push_worker
@@ -14652,6 +14657,17 @@ async def api_diag_settings(request):
     return JSONResponse(settings_ops.settings_api_stats_snapshot())
 
 
+async def api_diag_sqlite_opens(request):
+    """SQLite connections this process opened, by database file and opener
+    (a deduplicated stack of repository frames), with how many are still
+    open. ``?database=autonomy.db`` filters by file name (auto-bkv3p)."""
+    auth_error = api_auth.require_authenticated_api_caller(request)
+    if auth_error is not None:
+        return auth_error
+    rows = sqlite_open_diag.snapshot(request.query_params.get("database") or None)
+    return JSONResponse({"pid": os.getpid(), "openers": rows})
+
+
 async def api_diag_settings_sets(request):
     """Storage + activity summary for Settings sets in the selected org."""
     auth_error = api_auth.require_authenticated_api_caller(request)
@@ -21355,6 +21371,7 @@ routes = [
     Route("/api/diag/store-dump", api_diag_store_dump),
     Route("/api/diag/eventbus/snapshot", api_diag_eventbus_snapshot, methods=["POST"]),
     Route("/api/diag/settings", api_diag_settings),
+    Route("/api/diag/sqlite-opens", api_diag_sqlite_opens),
     Route("/api/diag/settings/sets", api_diag_settings_sets),
     Route("/api/diag/settings/sets/{set_id}", api_diag_settings_set_detail),
     Route("/api/diag/settings_mediator", api_diag_settings_mediator),
