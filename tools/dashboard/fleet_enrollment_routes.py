@@ -224,6 +224,9 @@ _reachability_cache = None
 #: never "older". This counter is the ordered thing, and it is the dashboard's
 #: because the dashboard is what decides a new runtime is desired.
 _runtime_generation = 0
+#: Scope and expiry of each process delegation the last activation installed
+#: (public facts only; no key material). Reported by GET /api/fleet/runtime.
+_active_delegations: list[dict] = []
 
 
 def _serving_slot_locator():
@@ -832,6 +835,8 @@ def _activate_runtime(
         raise fleet_runtime.FleetRuntimeError(
             "fleet runtime credential names a different local machine"
         )
+    global _active_delegations
+    _active_delegations = credential.delegations()
     # Carry the Dashboard's OWN copy of this credential across a restart
     # (auto-5er0n). It is held only in process memory otherwise, so every
     # Dashboard restart left the machine unable to pull Fleet sync until a human
@@ -1252,6 +1257,10 @@ def runtime_preparation() -> JSONResponse:
         # can register it at unlock — idempotently — whenever org_uuid is still
         # null, and every machine derives the same value.
         "personal_org_uuid": fleet_runtime.personal_org_uuid(root_pub),
+        # Scope and expiry of the process delegations currently armed; empty
+        # until an activation. session:control appears beside fleet:sync once
+        # the browser mints it (graph://7eb29bc8-31a §9.3).
+        "delegations": list(_active_delegations),
         # The persona personal Services are reserved under, and therefore the
         # subject the personal serving delegate must name so the registry lets
         # this tunnel register their hosts (auto-8sdrr): the personal root

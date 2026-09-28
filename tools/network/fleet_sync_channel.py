@@ -159,8 +159,19 @@ def _transcript_hash(
     ).digest()
 
 
+#: Typed refusal for a peer that presents no valid ``session:control``
+#: delegation to an authenticator verifying that scope (graph://7eb29bc8-31a).
+SESSION_CAP_MISSING = "session-cap-missing"
+
+
 class FleetAuthenticator:
-    """Machine-key possession and live-roster authorization for one endpoint."""
+    """Machine-key possession and live-roster authorization for one endpoint.
+
+    ``scope`` is the single scope every process delegation this endpoint sends
+    or accepts must carry: ``fleet:sync`` for sync, ``session:control`` for
+    remote session control. The two never cross: a hello carrying one scope's
+    delegation is refused by an authenticator verifying the other.
+    """
 
     def __init__(
         self,
@@ -171,6 +182,7 @@ class FleetAuthenticator:
         roster_machine_pub: str | None = None,
         delegation_cert: DelegationCert | None = None,
         require_delegation: bool = False,
+        scope: str = "fleet:sync",
     ):
         # ``machine_key`` is the live signer. In production it is a
         # process-ephemeral child; ``roster_machine_pub`` is the durable,
@@ -183,6 +195,7 @@ class FleetAuthenticator:
         )
         self.delegation_cert = delegation_cert
         self.require_delegation = bool(require_delegation)
+        self.scope = scope
         self.root_pub = _hex64(root_pub, "fleet root_pub")
         self._roster_entries = roster_entries
         #: (monotonic, active machine_pubs) — see authorize().
@@ -225,6 +238,11 @@ class FleetAuthenticator:
     def _authorize_local_signer(self, delegate) -> None:
         if delegate is None:
             self.authorize(self.machine_pub)
+            if self.scope != "fleet:sync":
+                raise HandshakeError(
+                    f"{SESSION_CAP_MISSING}: this runtime holds no "
+                    f"{self.scope} delegation"
+                )
             if self.require_delegation:
                 raise HandshakeError("fleet runtime delegation is required")
             if self.machine_key.public_hex != self.machine_pub:
@@ -240,11 +258,20 @@ class FleetAuthenticator:
         """Resolve one hello signer from current root-signed roster state."""
         self.authorize(machine_pub)
         if delegate_data is None:
+            if self.scope != "fleet:sync":
+                raise HandshakeError(
+                    f"{SESSION_CAP_MISSING}: no {self.scope} delegation"
+                )
             if self.require_delegation:
                 raise HandshakeError("fleet runtime delegation is required")
             return machine_pub
         try:
             cert = DelegationCert.from_dict(delegate_data)
+            if self.scope != "fleet:sync" and cert.scope != (self.scope,):
+                raise HandshakeError(
+                    f"{SESSION_CAP_MISSING}: delegation scope "
+                    f"{list(cert.scope)} is not [{self.scope!r}]"
+                )
             active = resolve(
                 self._roster_entries(), anchor_root_pub=self.root_pub
             )
@@ -255,13 +282,13 @@ class FleetAuthenticator:
                 machine_pub,
                 org=expected_org,
                 now=int(time.time()),
-                required_scope="fleet:sync",
+                required_scope=self.scope,
             )
             if cert.parent_cert is not None:
                 raise HandshakeError(
                     "fleet runtime delegation must be machine-direct"
                 )
-            if cert.scope != ("fleet:sync",):
+            if cert.scope != (self.scope,):
                 raise HandshakeError(
                     "fleet runtime delegation has excess scope"
                 )

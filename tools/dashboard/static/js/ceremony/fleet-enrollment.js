@@ -28,6 +28,7 @@ export const FLEET_MEMBER_ASSIGNMENT = 'personal_root_holder';
 export const FLEET_COMPLETION_DOMAIN = 'autonomy.fleet.enrollment-completion.v1\n';
 export const IDKIT_CERT_DOMAIN = 'autonomy.idkit.cert.v1\n';
 export const FLEET_SYNC_SCOPE = 'fleet:sync';
+export const SESSION_CONTROL_SCOPE = 'session:control';
 // 30 days, matched to the serve-cert. The credential is persisted server-side
 // and re-minted at unlock when it is older than ~10 days (see the fleet runtime
 // renew path), so the long TTL is the correct cadence rather than a 12h memory-
@@ -151,26 +152,34 @@ async function mintRuntimeCredential({
   try {
     const processPub = await ed25519PublicHex(processSeed);
     const now = Math.floor(Date.now() / 1000);
-    const certPayload = {
-      v: 1,
-      child_pub: processPub,
-      scope: [FLEET_SYNC_SCOPE],
-      org: `personal:${personalRootPub}`,
-      subject: { kind: 'machine', id: machineId },
-      not_before: Math.max(0, now - 30),
-      not_after: now + FLEET_RUNTIME_TTL_SECONDS,
-    };
-    return {
-      machine_id: machineId,
-      machine_pub: machinePub,
-      process_private_seed: bytesToHex(processSeed),
-      delegation_cert: {
+    // One single-scope delegation per purpose, from the machine key to the
+    // same process key: fleet:sync for sync, and a SEPARATE session:control
+    // for driving sessions on other fleet machines (graph://7eb29bc8-31a
+    // §6.3), so neither check ever widens.
+    const processCert = async (scope) => {
+      const certPayload = {
+        v: 1,
+        child_pub: processPub,
+        scope: [scope],
+        org: `personal:${personalRootPub}`,
+        subject: { kind: 'machine', id: machineId },
+        not_before: Math.max(0, now - 30),
+        not_after: now + FLEET_RUNTIME_TTL_SECONDS,
+      };
+      return {
         ...certPayload,
         sig: await signHex(
           machineSigningKey,
           domainBytes(IDKIT_CERT_DOMAIN, canonicalJson(certPayload)),
         ),
-      },
+      };
+    };
+    return {
+      machine_id: machineId,
+      machine_pub: machinePub,
+      process_private_seed: bytesToHex(processSeed),
+      delegation_cert: await processCert(FLEET_SYNC_SCOPE),
+      session_control_cert: await processCert(SESSION_CONTROL_SCOPE),
     };
   } finally {
     processSeed.fill(0);
