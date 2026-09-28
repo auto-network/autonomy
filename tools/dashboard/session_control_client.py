@@ -95,17 +95,25 @@ def resolve_machine(name: str, *, roster: dict[str, str] | None = None,
 
 
 async def request(machine: str, op: str, body: dict | None = None, *,
-                  timeout: float = 15.0) -> dict:
-    """Send *op* to the fleet machine named *machine*; the reply record."""
+                  timeout: float = 15.0, stream: bool = False) -> dict:
+    """Send *op* to the fleet machine named *machine*; the reply record.
+
+    ``stream`` asks for a reply that carries a file (``output``,
+    ``fetch-branch``): the personal connector writes it under
+    data/session-transfer and ``result.file`` names it; the caller owns
+    deleting it."""
     machine_pub = await asyncio.to_thread(resolve_machine, machine)
     if machine_pub is None:
         return refusal(UNKNOWN_MACHINE,
                        f"{machine!r} is not an active machine of this fleet")
     args = {"machine_pub": machine_pub, "op": op, "body": body or {},
             "timeout": timeout}
+    if stream:
+        args["stream"] = True
     try:
         reply = await asyncio.to_thread(
-            _control, "session-control-request", args, timeout=timeout + 10.0)
+            _control, "session-control-request", args,
+            timeout=timeout + (120.0 if stream else 10.0))
     except Exception as exc:
         return refusal(CONNECTOR_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
     if not (isinstance(reply, dict) and reply.get("ok") is True

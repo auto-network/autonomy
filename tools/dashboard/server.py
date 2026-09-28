@@ -7636,9 +7636,52 @@ async def api_session_output(request):
     # Cross-org guard BEFORE the run-dir glob/stat/read (auto-49esb): a cross-org
     # session's files are refused as the same 404 a session with no run dir
     # returns, so existence never leaks.
+    machine = request.query_params.get("m")
+    if machine:
+        # A file from a session on another fleet machine
+        # (graph://7eb29bc8-31a §9.2 ``output``), streamed over
+        # session-control/1 into data/session-transfer, served once, removed.
+        refused = api_auth.require_global_api_authority(request)
+        if refused is not None:
+            return refused
+        from starlette.background import BackgroundTask
+        from tools.dashboard import session_control_client
+
+        reply = await session_control_client.request(
+            machine, "output", {"tmux_name": tmux_name, "path": rel_path},
+            timeout=60.0, stream=True)
+        result = reply.get("result") or {}
+        if not reply.get("ok") or not result.get("file"):
+            status = 404 if reply.get("refusal") in (
+                "no-such-session", "file-not-found") else 502
+            return JSONResponse({"error": reply.get("detail") or reply.get("refusal"),
+                                 "refusal": reply.get("refusal")}, status_code=status)
+        received = Path(result["file"])
+        mime, _ = mimetypes.guess_type(rel_path)
+        return FileResponse(
+            received, media_type=mime or "application/octet-stream",
+            headers={"Cache-Control": "no-store"},
+            background=BackgroundTask(lambda: received.unlink(missing_ok=True)),
+        )
+
     if _session_hidden_cross_org(request, dashboard_db.get_session(tmux_name)):
         return JSONResponse({"error": "session run dir not found"}, status_code=404)
 
+    candidate = _resolve_session_output(tmux_name, rel_path)
+    if candidate is None:
+        return JSONResponse({"error": "file not found"}, status_code=404)
+    mime, _ = mimetypes.guess_type(candidate.name)
+    return FileResponse(
+        candidate,
+        media_type=mime or "application/octet-stream",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+def _resolve_session_output(tmux_name: str, rel_path: str) -> "Path | None":
+    """The file *rel_path* in *tmux_name*'s run dirs, newest run first,
+    contained after resolution; None when there is none. The caller has
+    validated both names."""
     # Candidate base dirs, newest-first. Every session resolves under its
     # data/agent-runs/<name>-<ts>/ run dir(s). Pre-cutover native host
     # sessions had no run dir; their uploads stay readable under
@@ -7655,9 +7698,6 @@ async def api_session_output(request):
     if host_dir.is_dir():
         base_dirs.append(host_dir)
 
-    if not base_dirs:
-        return JSONResponse({"error": "session run dir not found"}, status_code=404)
-
     for base_dir in base_dirs:
         candidate = (base_dir / rel_path).resolve()
         try:
@@ -7665,13 +7705,33 @@ async def api_session_output(request):
         except ValueError:
             continue
         if candidate.is_file():
-            mime, _ = mimetypes.guess_type(candidate.name)
-            return FileResponse(
-                candidate,
-                media_type=mime or "application/octet-stream",
-                headers={"Cache-Control": "public, max-age=31536000, immutable"},
-            )
-    return JSONResponse({"error": "file not found"}, status_code=404)
+            return candidate
+    return None
+
+
+async def _inbound_session_output(body: dict, peer: str) -> dict:
+    """session-control ``output``: stream one file from a session's
+    /workspace/output HERE to another machine of this fleet. The connector
+    streams it; this only authorizes and resolves."""
+    from tools.dashboard import session_control_client as scc
+    from tools.network.session_control import MAX_STREAM_BYTES
+
+    name, rel_path = body.get("tmux_name"), body.get("path")
+    if not isinstance(name, str) or not _TMUX_NAME_RE.match(name):
+        return scc.refusal("bad-request", "tmux_name")
+    if (not isinstance(rel_path, str) or not rel_path or rel_path.startswith("/")
+            or ".." in Path(rel_path).parts):
+        return scc.refusal("bad-request", "path")
+    candidate = await asyncio.to_thread(_resolve_session_output, name, rel_path)
+    if candidate is None:
+        return scc.refusal("file-not-found", f"{name}:{rel_path}")
+    size = candidate.stat().st_size
+    if size > MAX_STREAM_BYTES:
+        return scc.refusal(scc.OP_TOO_LARGE, f"{size} bytes")
+    logger.info("session-control output %s:%s (%d bytes) to machine=%s",
+                name, rel_path, size, peer[:16])
+    return scc.ok({"name": candidate.name, "size": size,
+                   "stream_file": str(candidate)})
 
 
 async def api_session_label(request):
@@ -23375,7 +23435,8 @@ async def _activate_worker(reason: str) -> None:
             global _session_control_pump
             _session_control_pump = session_control_client.install(
                 _resolved_dispatch_limits, _create_session_from_body,
-                ops={"send": _inbound_session_send, "stop": _inbound_session_stop})
+                ops={"send": _inbound_session_send, "stop": _inbound_session_stop,
+                     "output": _inbound_session_output})
         except Exception:
             logger.exception("session-control inbound pump failed to start")
 

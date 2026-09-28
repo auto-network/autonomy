@@ -7,6 +7,7 @@ typed refusal -- including a relay that predates the capability."""
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import time
 
 import pytest
@@ -247,3 +248,85 @@ def test_an_empty_poll_returns_no_request():
 def test_malformed_requests_are_refused(raw):
     with pytest.raises(session_control.SessionControlError):
         session_control.parse_request(raw)
+
+
+# ── streamed replies (auto-yi2pe) ───────────────────────────────────────────
+
+
+def test_a_file_streams_over_the_relay_and_lands_intact(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_control, "_data_root", lambda: tmp_path)
+    source_dir = tmp_path / "agent-runs" / "auto-1-20260928"
+    source_dir.mkdir(parents=True)
+    payload = bytes(range(256)) * 5000                       # ~1.2 MiB, 7 chunks
+    (source_dir / "proof.bin").write_bytes(payload)
+    root = KeyPair.generate()
+    port = _free_port()
+    with _live_registry(port):
+        asyncio.run(_stream_scenario(root, port, source_dir / "proof.bin", payload,
+                                     tmp_path))
+
+
+async def _stream_scenario(root, port, source, payload, data_root):
+    import hashlib
+
+    _register(port, root)
+    machine_a, machine_b = KeyPair.generate(), KeyPair.generate()
+    roster = (
+        fleet_roster.enroll(root, machine_id="a1" * 32, machine_pub=machine_a.public_hex, seq=0),
+        fleet_roster.enroll(root, machine_id="b1" * 32, machine_pub=machine_b.public_hex, seq=0),
+    )
+    caps = (CAP_FLEET_DIRECTED_STREAM, CAP_SESSION_CONTROL)
+    runtime_a = Runtime(root, machine_a, "a1" * 32, roster)
+    runtime_b = Runtime(root, machine_b, "b1" * 32, roster)
+    broker_b = session_control.InboundBroker()
+    a, task_a = await _connector(port, root, machine_a, runtime_a,
+                                 session_control.InboundBroker(), caps=caps)
+    b, task_b = await _connector(port, root, machine_b, runtime_b, broker_b, caps=caps)
+
+    async def answer(result):
+        item = await broker_b.next(10)
+        broker_b.reply(item["id"], {"v": 1, "ok": True, "result": result})
+
+    try:
+        answering = asyncio.create_task(answer(
+            {"name": "proof.bin", "stream_file": str(source)}))
+        reply = await session_control.request(
+            a, runtime_a, machine_pub=machine_b.public_hex, op="output",
+            body={}, timeout=10, stream=True)
+        await answering
+        assert reply["ok"] is True, reply
+        result = reply["result"]
+        assert result["stream"] == {"size": len(payload)}
+        assert result["sha256"] == hashlib.sha256(payload).hexdigest()
+        landed = Path(result["file"])
+        assert landed.read_bytes() == payload
+        assert landed.parent == data_root / "session-transfer"
+        assert source.exists()                                # not asked to delete
+
+        # A path outside the allowed roots is refused, never streamed.
+        outside = data_root / "elsewhere.txt"
+        outside.write_text("secret")
+        answering = asyncio.create_task(answer({"stream_file": str(outside)}))
+        reply = await session_control.request(
+            a, runtime_a, machine_pub=machine_b.public_hex, op="output",
+            body={}, timeout=10, stream=True)
+        await answering
+        assert reply["ok"] is False and reply["refusal"] == session_control.BAD_REQUEST
+
+        # A staged transfer asked to be deleted is removed after streaming.
+        staged = data_root / "session-transfer" / "staged.bundle"
+        staged.write_bytes(b"bundle")
+        answering = asyncio.create_task(answer(
+            {"stream_file": str(staged), "stream_delete": True}))
+        reply = await session_control.request(
+            a, runtime_a, machine_pub=machine_b.public_hex, op="fetch-branch",
+            body={}, timeout=10, stream=True)
+        await answering
+        assert Path(reply["result"]["file"]).read_bytes() == b"bundle"
+        deadline = time.time() + 5
+        while staged.exists() and time.time() < deadline:
+            await asyncio.sleep(0.05)
+        assert not staged.exists()
+    finally:
+        await _stop(a, task_a)
+        await _stop(b, task_b)

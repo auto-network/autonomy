@@ -32,6 +32,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import secrets
 import time
 from typing import Any, Awaitable, Callable, Optional
@@ -58,6 +59,15 @@ MAX_RECORD_BYTES = 256 * 1024
 INBOUND_REPLY_TIMEOUT_S = 30.0
 #: Bound on requests parked for the dashboard; beyond it a request is refused.
 INBOUND_QUEUE_LIMIT = 64
+
+#: A reply may stream one local file after its JSON header
+#: (graph://7eb29bc8-31a §9.2 ``output`` / ``fetch-branch``): records cap at
+#: MAX_RECORD_BYTES, so the dashboard names a file and this process streams
+#: it in chunks. Bounded per transfer.
+STREAM_CHUNK_BYTES = 192 * 1024
+MAX_STREAM_BYTES = 64 * 1024 * 1024
+#: Seconds an incoming transfer file may sit before a later transfer sweeps it.
+TRANSFER_RETENTION_S = 3600
 
 # Typed refusals (graph://7eb29bc8-31a §9.2). ``destination-slot-absent`` and
 # the other relay admission reasons arrive verbatim from the relay.
@@ -109,6 +119,70 @@ def parse_request(raw: bytes) -> dict:
     ):
         raise SessionControlError(BAD_REQUEST, "not a session-control request")
     return {"op": request["op"], "body": request.get("body") or {}}
+
+
+def _data_root():
+    from pathlib import Path
+
+    from tools.data_paths import DATA_ROOT
+
+    return Path(DATA_ROOT)
+
+
+def transfer_dir():
+    """Where streamed transfers land and where the dashboard stages the
+    files it asks this process to stream."""
+    path = _data_root() / "session-transfer"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def stream_path_allowed(path) -> bool:
+    """A file the dashboard may ask this process to stream: a regular file
+    under data/agent-runs or data/host-uploads (session output) or
+    data/session-transfer (staged transfers)."""
+    from pathlib import Path
+
+    try:
+        resolved = Path(path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    if not resolved.is_file():
+        return False
+    root = _data_root().resolve()
+    for allowed in (root / "agent-runs", root / "host-uploads",
+                    root / "session-transfer"):
+        try:
+            resolved.relative_to(allowed)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _sweep_transfers(now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    with contextlib.suppress(OSError):
+        for entry in transfer_dir().iterdir():
+            with contextlib.suppress(OSError):
+                if entry.is_file() and now - entry.stat().st_mtime > TRANSFER_RETENTION_S:
+                    entry.unlink()
+
+
+async def _stream_reply(header: dict, path, delete: bool):
+    """The streamed reply: the JSON header, then the file in chunks."""
+    try:
+        yield encode(header)
+        with open(path, "rb") as fh:
+            while True:
+                chunk = await asyncio.to_thread(fh.read, STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                yield chunk
+    finally:
+        if delete:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
 
 
 def session_authenticator(runtime) -> FleetAuthenticator:
@@ -231,6 +305,24 @@ async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticato
             return encode(refusal(exc.refusal, exc.detail))
         reply = await broker.submit(
             request["op"], request["body"], peer_machine_pub=client_pub)
+        result = reply.get("result") if reply.get("ok") else None
+        if isinstance(result, dict) and "stream_file" in result:
+            result = dict(result)
+            path = result.pop("stream_file")
+            delete = bool(result.pop("stream_delete", False))
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = -1
+            if not stream_path_allowed(path) or not 0 <= size <= MAX_STREAM_BYTES:
+                if delete:
+                    with contextlib.suppress(OSError):
+                        os.unlink(path)
+                return encode(refusal(
+                    OP_TOO_LARGE if size > MAX_STREAM_BYTES else BAD_REQUEST,
+                    "the file cannot be streamed"))
+            header = {**reply, "result": {**result, "stream": {"size": size}}}
+            return _stream_reply(header, path, delete)
         try:
             return encode(reply)
         except SessionControlError as exc:
@@ -257,9 +349,45 @@ async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticato
 # ── outbound: this machine asks another ───────────────────────────────────────
 
 
+async def _receive_stream(channel, timeout: float) -> dict:
+    """Read a (possibly streamed) reply: the header, then any file chunks
+    into a transfer file whose path is returned as ``result.file``."""
+    import hashlib
+
+    stream = channel.recv_message_stream()
+    first, final = await asyncio.wait_for(stream.__anext__(), timeout)
+    header = json.loads(first)
+    announced = ((header.get("result") or {}).get("stream") or {}).get("size")
+    if final or not header.get("ok") or announced is None:
+        return header
+    _sweep_transfers()
+    target = transfer_dir() / f"in-{secrets.token_hex(16)}"
+    digest, size = hashlib.sha256(), 0
+    try:
+        with open(target, "wb") as fh:
+            while True:
+                chunk, final = await asyncio.wait_for(stream.__anext__(), timeout)
+                size += len(chunk)
+                if size > MAX_STREAM_BYTES or size > int(announced):
+                    raise SessionControlError(OP_TOO_LARGE, "stream exceeds its size")
+                digest.update(chunk)
+                await asyncio.to_thread(fh.write, chunk)
+                if final:
+                    break
+        if size != int(announced):
+            raise SessionControlError(BAD_REQUEST, "stream ended short")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            target.unlink()
+        raise
+    header["result"] = {**header["result"], "file": str(target),
+                        "sha256": digest.hexdigest()}
+    return header
+
+
 async def request(connector, runtime, *, machine_pub: str, op: str,
                   body: dict, timeout: float = 15.0,
-                  resolve_slot=None) -> dict:
+                  resolve_slot=None, stream: bool = False) -> dict:
     """Send one request to the fleet machine *machine_pub* and return its
     reply record. Every failure is a typed refusal record, never a raise, so
     an old relay ("unknown control op") or an unarmed peer reads the same way
@@ -301,11 +429,14 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
                 expected_machine_pub=machine_pub, session=endpoint.session,
             ), timeout)
             await channel.send_message(record)
-            raw = await asyncio.wait_for(channel.recv_message(), timeout)
+            if stream:
+                reply = await _receive_stream(channel, timeout)
+            else:
+                reply = json.loads(
+                    await asyncio.wait_for(channel.recv_message(), timeout))
         finally:
             with contextlib.suppress(Exception):
                 await endpoint.close()
-        reply = json.loads(raw)
         if not isinstance(reply, dict) or reply.get("v") != SESSION_CONTROL_VERSION:
             raise SessionControlError(BAD_REQUEST, "malformed reply")
         return reply
@@ -337,6 +468,7 @@ async def handle_ctl(connector, runtime, op: str, args: Any,
             connector, runtime, machine_pub=machine_pub, op=request_op,
             body=args.get("body") if isinstance(args.get("body"), dict) else {},
             timeout=float(args.get("timeout") or 15.0),
+            stream=bool(args.get("stream")),
         )
         return {"ok": True, "reply": reply}
     if op == "session-control-next":
