@@ -10,9 +10,11 @@ answers 404, like one that does not exist.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import secrets
+import struct
 import threading
 import time
 
@@ -26,6 +28,8 @@ from tools.dashboard import browser_containers as containers
 from tools.dashboard import browser_reconciler as reconciler
 from tools.dashboard.capability_gate import CapabilityRefused, require_capability
 from tools.dashboard.dao import browser_leases as store
+
+logger = logging.getLogger(__name__)
 
 ADAPTERS = ("chrome-headed",)
 _LEASE_RE = re.compile(r"^brl_[0-9a-f]{32}$")
@@ -451,10 +455,217 @@ async def delete_lease(request: Request) -> JSONResponse:
                         request.path_params["lease"])
 
 
+# ── operator side (auto-8q7oe.7) ───────────────────────────────────────
+
+from starlette.routing import WebSocketRoute  # noqa: E402
+from starlette.websockets import WebSocket, WebSocketDisconnect  # noqa: E402
+
+from tools.dashboard import browser_viewer as viewer  # noqa: E402
+
+_VIEWER_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def _operator_refusal(request: Request):
+    """Global operator authority and the dashboard's own origin, or a reply."""
+    from tools.dashboard.api_auth import require_global_api_authority
+
+    refused = require_global_api_authority(request)
+    if refused is not None:
+        return refused
+    if request.method != "GET" and not viewer.same_origin(
+            request.headers.get("origin"), request.headers.get("host")):
+        return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
+    return None
+
+
+def operator_leases() -> list[dict]:
+    from tools.dashboard.dao import dashboard_db
+
+    out = []
+    for lease in store.list_leases():
+        row = dashboard_db.get_session(lease.session) or {}
+        running = lease.state in ("starting", "ready", "busy", "locked", "unhealthy")
+        usage = containers.stats(lease.container_name) if running else {"cpu": None, "mem_mb": None}
+        out.append({
+            "lease_ref": lease.lease_hash[:16], "session": lease.session,
+            "session_label": row.get("label") or lease.session,
+            "profile_kind": lease.profile_kind, "profile_name": lease.profile_name,
+            "state": lease.state, "lock_holder": lease.lock_holder,
+            "created_at": lease.created_at, "expires_at": lease.expires_at, **usage,
+        })
+    return out
+
+
+async def get_operator_leases(request: Request) -> JSONResponse:
+    refused = _operator_refusal(request)
+    if refused is not None:
+        return refused
+    leases = await asyncio.to_thread(operator_leases)
+    limits = await asyncio.to_thread(reconciler.defaults)
+    return JSONResponse({"leases": leases, "limits": {"max_leases": limits["max_leases"],
+                                                      "memory_mb": limits["memory_mb"]}})
+
+
+async def post_control(request: Request) -> JSONResponse:
+    refused = _operator_refusal(request)
+    if refused is not None:
+        return refused
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "body is not JSON"}, status_code=400)
+    action, viewer_id = (body or {}).get("action"), (body or {}).get("viewer")
+    if action not in ("take", "return") or not isinstance(viewer_id, str) \
+            or not _VIEWER_RE.fullmatch(viewer_id):
+        return JSONResponse({"error": 'body must be {"action": "take"|"return", "viewer"}'},
+                            status_code=400)
+    lease = await asyncio.to_thread(viewer.find_lease, request.path_params["lease"])
+    if lease is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    fn = viewer.take_control if action == "take" else viewer.return_control
+    try:
+        return JSONResponse(await asyncio.to_thread(fn, lease, viewer_id))
+    except viewer.ControlRefused as exc:
+        return JSONResponse({"error": exc.error}, status_code=exc.status)
+
+
+class _WsReader:
+    """Byte-exact reads over WebSocket binary messages (handshake only)."""
+
+    def __init__(self, websocket: WebSocket):
+        self.ws, self.buffer = websocket, b""
+
+    async def read(self, n: int) -> bytes:
+        while len(self.buffer) < n:
+            self.buffer += await self.ws.receive_bytes()
+        data, self.buffer = self.buffer[:n], self.buffer[n:]
+        return data
+
+
+async def ws_view(websocket: WebSocket) -> None:
+    """Relay VNC between the operator's noVNC and the lease's x11vnc."""
+    from tools.dashboard import unlock_routes
+
+    headers = websocket.headers
+    if not viewer.same_origin(headers.get("origin"), headers.get("host")):
+        await websocket.close(code=4403)
+        return
+    if await asyncio.to_thread(viewer.organization_bearer, headers.get("authorization")):
+        await websocket.close(code=4403)
+        return
+    cookie = unlock_routes._cookie_from_scope(websocket.scope)
+    viewer_id = websocket.query_params.get("viewer", "")
+    lease = await asyncio.to_thread(viewer.find_lease, websocket.path_params["lease"])
+    if lease is None or not _VIEWER_RE.fullmatch(viewer_id) or not lease.address:
+        await websocket.close(code=4404)
+        return
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(lease.address, viewer.VNC_PORT), timeout=5)
+        await asyncio.wait_for(_server_handshake(reader, writer, lease), timeout=10)
+    except Exception:
+        logger.warning("browser viewer: cannot reach VNC for %s", lease.container_name, exc_info=True)
+        await websocket.close(code=4502)
+        return
+    offered = websocket.scope.get("subprotocols") or []
+    await websocket.accept(subprotocol="binary" if "binary" in offered else None)
+    state = viewer._control(lease.lease_hash)
+    state.viewers.add(viewer_id)
+    loop = asyncio.get_running_loop()
+    try:
+        client = _WsReader(websocket)
+        await websocket.send_bytes(viewer.RFB_VERSION)
+        await client.read(12)
+        await websocket.send_bytes(bytes([1, 1]))          # one security type: None
+        if (await client.read(1)) != b"\x01":
+            return
+        await websocket.send_bytes(struct.pack(">I", 0))    # security result: OK
+        await client.read(1)                                 # ClientInit
+        writer.write(b"\x01")                               # always shared: many viewers watch
+        await writer.drain()
+        await _relay(websocket, client, reader, writer, lease, viewer_id, cookie)
+    except (WebSocketDisconnect, ConnectionError, asyncio.IncompleteReadError, viewer.ProtocolError):
+        pass
+    finally:
+        writer.close()
+        viewer.viewer_left(lease.lease_hash, viewer_id, loop)
+
+
+async def _server_handshake(reader, writer, lease: store.Lease) -> None:
+    await reader.readexactly(12)
+    writer.write(viewer.RFB_VERSION)
+    types = await reader.readexactly((await reader.readexactly(1))[0])
+    if 2 not in types:
+        raise viewer.ProtocolError("the lease's VNC server does not offer VNC authentication")
+    writer.write(b"\x02")
+    challenge = await reader.readexactly(16)
+    password = await asyncio.to_thread(lambda: lease.vnc_password)
+    writer.write(viewer.vnc_auth_response(password, challenge))
+    await writer.drain()
+    if struct.unpack(">I", await reader.readexactly(4))[0] != 0:
+        raise viewer.ProtocolError("the lease's VNC server refused the password")
+
+
+async def _relay(websocket, client, reader, writer, lease, viewer_id, cookie) -> None:
+    from tools.dashboard import unlock_routes
+
+    filt = viewer.ClientFilter()
+    last_activity = [0.0]
+
+    async def lease_to_operator():
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                return
+            await websocket.send_bytes(data)
+
+    async def operator_to_lease():
+        if client.buffer:  # bytes that arrived with the handshake
+            pending, client.buffer = client.buffer, b""
+            await _forward(pending)
+        while True:
+            await _forward(await websocket.receive_bytes())
+
+    async def _forward(data: bytes):
+        allowed = viewer.holds_control(lease.lease_hash, viewer_id)
+        out, saw_input = filt.feed(data, allowed)
+        if out:
+            writer.write(out)
+            await writer.drain()
+        if saw_input and allowed and time.monotonic() - last_activity[0] >= viewer.ACTIVITY_WRITE_S:
+            last_activity[0] = time.monotonic()
+            epoch = reconciler.epoch()
+            if epoch is not None:
+                await asyncio.to_thread(store.update, lease.lease_hash, epoch=epoch,
+                                        last_activity=time.time())
+
+    async def session_still_valid():
+        while True:
+            await asyncio.sleep(viewer.SESSION_RECHECK_S)
+            if unlock_routes.gate_enforced() and \
+                    await asyncio.to_thread(unlock_routes.verify_session_token, cookie) is None:
+                await websocket.close(code=4401)
+                return
+            fresh = await asyncio.to_thread(store.get, lease.lease_hash)
+            if fresh is None or fresh.state in store.FINAL_STATES + ("releasing",):
+                await websocket.close(code=4410)
+                return
+
+    tasks = [asyncio.create_task(t()) for t in (lease_to_operator, operator_to_lease, session_still_valid)]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+
+
 ROUTES = [
     Route("/api/browser/leases", post_lease, methods=["POST"]),
     Route("/api/browser/leases/{lease}", get_lease, methods=["GET"]),
     Route("/api/browser/leases/{lease}", delete_lease, methods=["DELETE"]),
     Route("/api/browser/leases/{lease}/commands", post_command, methods=["POST"]),
     Route("/api/browser/leases/{lease}/secure-login", post_secure_login, methods=["POST"]),
+    Route("/api/browser/operator/leases", get_operator_leases, methods=["GET"]),
+    Route("/api/browser/leases/{lease}/control", post_control, methods=["POST"]),
+    WebSocketRoute("/ws/browser/{lease}/view", ws_view),
 ]
