@@ -721,7 +721,7 @@ class TestWorkspaceHarnessPassthrough:
         monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
         monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
         monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
-        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
+        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj, **_kw: "primer")
 
         def fake_prepare(_proj, _tmux_name, **kwargs):
             prep_kwargs.update(kwargs)
@@ -820,7 +820,7 @@ class TestWorkspaceCapabilityPassthrough:
         monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
         monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
         monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
-        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
+        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj, **_kw: "primer")
         monkeypatch.setattr(server, "prepare_session_mounts", lambda *a, **kw: {})
 
         def fake_launch_session(**kwargs):

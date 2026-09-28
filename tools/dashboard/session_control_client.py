@@ -188,10 +188,9 @@ def launch_op(create: Callable[[dict], Awaitable[object]]) -> OpHandler:
     ``home_machine`` / ``launched_by``. ``operation_id`` makes a retry return
     the session it already started.
 
-    Known window: a dashboard restart between ``create`` returning and
-    ``set_launch_provenance`` leaves the session without its
-    ``launch_op_id``, so a retry of that operation starts a second session.
-    The window is one local SQLite write wide.
+    The provenance is handed to *create*, which records it right after
+    registering the session and before enqueueing its launch, so the
+    session's primer and env see it and a retry finds its operation id.
     """
     lock = asyncio.Lock()
 
@@ -223,7 +222,10 @@ def launch_op(create: Callable[[dict], Awaitable[object]]) -> OpHandler:
             for name in ("primer", "model", "harness"):
                 if isinstance(body.get(name), str) and body[name]:
                     request[name] = body[name]
-            response = await create(request)
+            response = await create(request, provenance={
+                "launched_by": f"machine:{peer}", "home_machine": peer,
+                "launch_op_id": operation_id,
+            })
             status = getattr(response, "status_code", 500)
             try:
                 import json as _json
@@ -235,10 +237,6 @@ def launch_op(create: Callable[[dict], Awaitable[object]]) -> OpHandler:
                 reason = (WORKSPACE_UNAVAILABLE if "Unknown project" in error
                           else LAUNCH_REFUSED)
                 return refusal(reason, error)
-            await asyncio.to_thread(
-                dashboard_db.set_launch_provenance, data["tmux_name"],
-                launched_by=f"machine:{peer}", home_machine=peer,
-                launch_op_id=operation_id)
         return ok({"tmux_name": data["tmux_name"], **here})
 
     return launch

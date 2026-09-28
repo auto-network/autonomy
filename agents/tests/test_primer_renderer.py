@@ -1478,3 +1478,32 @@ def test_workspace_primer_does_not_render_the_host_block():
     out = render_workspace_primer(_cfg())
     assert "## Host Terminal" not in out
     assert "/host-home" not in out
+
+
+# ── Where this session runs (graph://7eb29bc8-31a §9.7, auto-n3rxb) ──────────
+
+
+_WHERE_REMOTE = {"machine": "sjc-2", "machine_pub": "b1" * 32,
+                 "home_machine": "home", "home_machine_pub": "a1" * 32,
+                 "launched_by": "machine:" + "a1" * 32, "remote": True}
+
+
+def test_where_section_is_absent_without_machine_context():
+    assert "## Where this session runs" not in render_workspace_primer(_cfg())
+
+
+def test_where_section_names_the_machine_and_the_launching_home():
+    out = render_workspace_primer(_cfg(), where=_WHERE_REMOTE)
+    assert "## Where this session runs" in out
+    assert "runs on **sjc-2**" in out
+    assert "launched from **home**" in out
+    assert "graph crosstalk send <name>@<machine>" in out
+    assert "AUTONOMY_HOME_MACHINE" in out
+
+
+def test_where_section_for_a_local_launch():
+    out = render_workspace_primer(_cfg(), where={
+        **_WHERE_REMOTE, "home_machine": "sjc-2", "remote": False,
+        "launched_by": "local"})
+    assert "launched on this machine" in out
+    assert "launched from **" not in out

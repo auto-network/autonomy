@@ -35,11 +35,13 @@ def db(tmp_path, monkeypatch):
 
 
 def _creator(calls, *, status=202, error=None):
-    async def create(body):
+    async def create(body, provenance=None):
         calls.append(body)
         name = f"auto-remote-{len(calls)}"
         if status == 202:
             dashboard_db.upsert_session(name, "container", body["project"])
+            if provenance:
+                dashboard_db.set_launch_provenance(name, **provenance)
             return Response(202, {"tmux_name": name, "pending": True})
         return Response(status, {"error": error})
 

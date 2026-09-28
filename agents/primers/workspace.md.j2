@@ -21,6 +21,19 @@ The operator holds the organization `{{ onboarding.org }}`; whether they founded
 {% endif %}
 {% endif %}
 
+{% if where %}
+## Where this session runs
+
+- This session runs on **{{ where.machine }}** (machine `{{ where.machine_pub[:16] }}`).
+{% if where.remote %}
+- It was launched from **{{ where.home_machine }}** (`{{ where.launched_by }}`). The operator watches and messages it from there; your commits and `/workspace/output` stay on {{ where.machine }} until fetched home.
+{% else %}
+- It was launched on this machine.
+{% endif %}
+- Sessions on the operator's other machines appear in `graph sessions --status` as `<name>@<machine>`. Reach one with `graph crosstalk send <name>@<machine> "..."`.
+- The same facts are in `AUTONOMY_MACHINE`, `AUTONOMY_MACHINE_PUB`, `AUTONOMY_HOME_MACHINE` and `AUTONOMY_LAUNCHED_BY`.
+
+{% endif %}
 {% if host_terminal %}
 {% include "host-terminal.md.j2" %}
 {% else %}

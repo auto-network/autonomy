@@ -539,7 +539,8 @@ def render_host_terminal_primer() -> str:
     return render_workspace_primer(host_terminal_workspace(), host_terminal=True)
 
 
-def render_workspace_primer(config: WorkspaceV1, *, host_terminal: bool = False) -> str:
+def render_workspace_primer(config: WorkspaceV1, *, host_terminal: bool = False,
+                            where: dict | None = None) -> str:
     """Render the workspace runtime primer for a given project config.
 
     Args:
@@ -549,6 +550,10 @@ def render_workspace_primer(config: WorkspaceV1, *, host_terminal: bool = False)
         host_terminal: Render the host terminal's block
             (``primers/host-terminal.md.j2``) in place of the repo and
             editing sections. Only ``render_host_terminal_primer`` sets it.
+        where: The launching session's machine context
+            (``{machine, machine_pub, home_machine, launched_by, remote}``,
+            graph://7eb29bc8-31a §9.7), rendered as "Where this session
+            runs". None omits the section.
 
     Returns:
         The rendered markdown primer as a string.
@@ -605,6 +610,7 @@ def render_workspace_primer(config: WorkspaceV1, *, host_terminal: bool = False)
     return template.render(
         config=config,
         host_terminal=host_terminal,
+        where=where,
         has_startup=has_startup,
         writable_repos=writable_repos,
         readonly_repos=readonly_repos,

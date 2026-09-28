@@ -9222,6 +9222,45 @@ def _apply_env_from_host(names, extra_env: dict, *, context: str) -> None:
             )
 
 
+def _session_machine_context(tmux_name: str) -> dict | None:
+    """Where *tmux_name* runs and who launched it from where
+    (graph://7eb29bc8-31a §9.7), or None on a machine with no fleet identity.
+    ``remote`` is True for a session another fleet machine launched here."""
+    try:
+        from tools.dashboard import session_presence
+
+        machine = session_presence.local_machine()
+        if machine is None:
+            return None
+        names = session_presence._machine_names()
+        roster = session_presence._active_roster() or {}
+        row = dashboard_db.get_session(tmux_name) or {}
+    except Exception:
+        logger.debug("session machine context unavailable", exc_info=True)
+        return None
+    home = row.get("home_machine") or machine.machine_pub
+    return {
+        "machine": names.get(machine.machine_id) or machine.machine_pub[:12],
+        "machine_pub": machine.machine_pub,
+        "home_machine": names.get(roster.get(home, "")) or home[:12],
+        "home_machine_pub": home,
+        "launched_by": row.get("launched_by") or "local",
+        "remote": home != machine.machine_pub,
+    }
+
+
+def _machine_env(where: dict | None) -> dict[str, str]:
+    """The AUTONOMY_MACHINE* variables for a session's container."""
+    if not where:
+        return {}
+    return {
+        "AUTONOMY_MACHINE": where["machine"],
+        "AUTONOMY_MACHINE_PUB": where["machine_pub"],
+        "AUTONOMY_HOME_MACHINE": where["home_machine"],
+        "AUTONOMY_LAUNCHED_BY": where["launched_by"],
+    }
+
+
 def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateWriter) -> None:
     """Worker-thread implementation of workspace prepare/launch/tmux/register."""
     tmux_name = job.tmux_name
@@ -9329,13 +9368,15 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             proj.env_from_host, extra_env,
             context=f"workspace {getattr(proj, 'id', None) or proj.graph_project}",
         )
+        where = _session_machine_context(tmux_name)
+        extra_env.update(_machine_env(where))
         extra_env = extra_env or None
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         run_dir = DATA_ROOT / "agent-runs" / f"{tmux_name}-{ts}"
         run_dir.mkdir(parents=True, exist_ok=True)
         primer_path = run_dir / ".claude_md"
-        primer_path.write_text(render_workspace_primer(proj))
+        primer_path.write_text(render_workspace_primer(proj, where=where))
         startup_script = workspace_settings.materialize_startup_script(
             proj, run_dir)
         working_dir = proj.working_dir or "/workspace/repo"
@@ -9635,9 +9676,11 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 proj.env_from_host, extra_env,
                 context=f"workspace {getattr(proj, 'id', None) or proj.graph_project}",
             )
+            where = _session_machine_context(tmux_name)
+            extra_env.update(_machine_env(where))
             run_dir.mkdir(parents=True, exist_ok=True)
             primer_path = run_dir / ".claude_md"
-            primer_path.write_text(render_workspace_primer(proj))
+            primer_path.write_text(render_workspace_primer(proj, where=where))
             startup_script = workspace_settings.materialize_startup_script(
                 proj, run_dir)
             cmd_str = launch_session(
@@ -10316,10 +10359,15 @@ async def _create_remote_session(request, body: dict):
     }, status_code=202)
 
 
-async def _create_session_from_body(body: dict, request=None):
+async def _create_session_from_body(body: dict, request=None, provenance=None):
     """api_session_create for an already-parsed body, on THIS machine. Also
     the executor of an inbound session-control ``launch`` (``request`` None:
-    a remote launch is always a workspace session, which never reads it)."""
+    a remote launch is always a workspace session, which never reads it).
+
+    ``provenance`` ({launched_by, home_machine, launch_op_id}) is recorded on
+    the session row as soon as it is registered, before the lifecycle job is
+    enqueued, so the launched session's primer and env already see it and a
+    retried launch finds its operation id."""
     # auto-bpomi: throwaway phase-trace diagnostics — measure session-boot
     # slices for Bead B. Single grep target: 'phase-trace:'.
     _phase_t0 = time.monotonic()
@@ -10408,6 +10456,9 @@ async def _create_session_from_body(body: dict, request=None):
             project=proj.id,
             harness=body.get("harness") or proj.harness or "claude",
         )
+        if provenance:
+            await asyncio.to_thread(
+                dashboard_db.set_launch_provenance, tmux_name, **provenance)
         job = LifecycleJob(
             "start",
             tmux_name,
