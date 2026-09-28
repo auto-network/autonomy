@@ -245,10 +245,23 @@ def address(name: str) -> str:
     return proc.stdout.strip()
 
 
-def stop(name: str, grace_s: int = 5) -> None:
-    """Stop (and, through --rm, remove) a lease container. Idempotent."""
+def stop(name: str, grace_s: int = 5, removal_timeout_s: float = 20.0) -> None:
+    """Stop and remove a lease container, returning only once its name is free.
+
+    ``docker stop`` returns when the container exits, but ``--rm`` removes it
+    asynchronously, so without the wait a lease could be recorded gone while
+    its persistent profile's name is still held (measured on the node: the
+    next request for the profile got 409). Idempotent."""
+    import time
+
     _docker("stop", "-t", str(grace_s), name, check=False, timeout=grace_s + 20)
     _docker("rm", "-f", name, check=False)
+    deadline = time.monotonic() + removal_timeout_s
+    while _docker("inspect", "--format", "{{.Id}}", name, check=False).returncode == 0:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"{name} was not removed within {removal_timeout_s:.0f} s")
+        time.sleep(0.2)
+        _docker("rm", "-f", name, check=False)
 
 
 @dataclass(frozen=True)

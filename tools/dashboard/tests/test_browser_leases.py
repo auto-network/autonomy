@@ -404,3 +404,22 @@ def test_isolation_needs_a_containerized_dashboard(monkeypatch):
     monkeypatch.setattr("agents.mount_plan._own_container_id", lambda: None)
     with pytest.raises(containers.IsolationUnavailable):
         containers.isolate_dashboard()
+
+
+def test_stop_returns_only_once_the_name_is_free(monkeypatch):
+    import subprocess
+
+    inspections = {"left": 3}
+    calls = []
+
+    def fake(*args, check=True, **kw):
+        calls.append(args[0])
+        if args[0] == "inspect":
+            inspections["left"] -= 1
+            return subprocess.CompletedProcess(args, 0 if inspections["left"] >= 0 else 1, "", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(containers, "_docker", fake)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    containers.stop("brw-p-0123456789abcdef")
+    assert calls.count("inspect") == 4 and calls[:2] == ["stop", "rm"]
