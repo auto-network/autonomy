@@ -29,7 +29,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2]) + "/"
 _STACK_DEPTH = 6
 _THIS_FILE = "tools/graph/sqlite_open_diag.py"
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 _original_connect = None
 #: (database file name, opener signature) -> connections opened
 _opened: dict[tuple[str, str], int] = {}
