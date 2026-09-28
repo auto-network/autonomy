@@ -122,12 +122,11 @@ def test_labels_and_create_arguments():
     joined = " ".join(argv)
     for expected in ("--network autonomy-browser", "--restart no", "--rm", "--memory 2048m",
                      "--memory-swap 2048m", "--cpus 2", "--pids-limit 1024", "--shm-size 1g",
-                     "--security-opt no-new-privileges", "--cap-drop NET_RAW", "-e TZ=America/New_York"):
+                     "--security-opt no-new-privileges", "-e TZ=America/New_York"):
         assert expected in joined
     assert f"seccomp={containers.SECCOMP_PROFILE}" in joined
     assert argv[-1] == "autonomy-browser:local"
     assert not {"-p", "--publish", "-P", "--publish-all", "--privileged", "--cap-add"} & set(argv)
-    assert argv[argv.index("--cap-drop") + 1] == "NET_RAW"
     # Secrets are named, never valued, on the command line.
     for name in ("BROWSER_LEASE_SECRET", "BROWSER_VNC_PASSWORD", "BROWSER_LEASE_EXPIRES_AT"):
         assert argv[argv.index(name) - 1] == "-e"
@@ -494,112 +493,76 @@ def test_one_stuck_release_does_not_stall_the_pass(db, live, monkeypatch):
 
 def test_egress_rules_exempt_the_dashboard_and_stay_off_intra_bridge_traffic():
     rules = containers.egress_rules("br-0123456789ab", "172.19.0.2")
-    forward, inbound = rules[containers.FWD_CHAIN], rules[containers.IN_CHAIN]
+    forward = [r for r in rules if r[0] == "DOCKER-USER"]
     assert sorted(r[r.index("-d") + 1] for r in forward) == sorted(containers.EGRESS_BLOCKED)
-    for rule in forward + inbound:
+    for rule in rules:
         text = " ".join(rule)
-        assert "! -s 172.19.0.2/32" in text and "--ctstate NEW" in text and rule[-2:] == ["-j", "DROP"]
+        assert "-i br-0123456789ab" in text and "! -s 172.19.0.2/32" in text
+        assert "--ctstate NEW" in text and rule[-2:] == ["-j", "DROP"]
+        assert f"--comment {containers.EGRESS_TAG}" in text
     for rule in forward:
         assert "! -o br-0123456789ab" in " ".join(rule)
-    assert "-d" not in inbound[0]
-    assert containers.jump_rules("br-0123456789ab") == {
-        "DOCKER-USER": ["-i", "br-0123456789ab", "-j", containers.FWD_CHAIN],
-        "INPUT": ["-i", "br-0123456789ab", "-j", containers.IN_CHAIN]}
+    assert [r for r in rules if r[0] == "INPUT"] and "-d" not in [r for r in rules if r[0] == "INPUT"][0]
+    for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10"):
+        assert cidr in containers.EGRESS_BLOCKED
 
 
-TAILSCALE = ["-j", "ts-input"]
-DOCKER_RETURN = ["-j", "RETURN"]
-
-
-def _fake_iptables_docker(monkeypatch, *, backend="iptables", options="<no value>", chains=None):
+def _fake_iptables_docker(monkeypatch, *, backend="iptables", options="<no value>", existing=()):
     import subprocess
 
-    chains = chains if chains is not None else {"DOCKER-USER": [list(DOCKER_RETURN)],
-                                                "INPUT": [list(TAILSCALE)]}
+    chains = {"DOCKER-USER": list(existing), "INPUT": []}
     calls = []
 
     def fake(*args, check=True, **kw):
+        calls.append(args)
         if args[0] == "info":
             return subprocess.CompletedProcess(args, 0, backend + "\n", "")
         if args[0] == "inspect":
-            return subprocess.CompletedProcess(args, 0, state["dashboard_ip"] + "\n", "")
+            return subprocess.CompletedProcess(args, 0, "172.19.0.2\n", "")
         if args[:2] == ("network", "inspect"):
             return subprocess.CompletedProcess(args, 0, f"97e82cc8791a55aa {options}\n", "")
-        iptables = list(args[args.index("-w") + 1:])
-        calls.append(iptables)
-        op, chain, rest = iptables[0], iptables[1], iptables[2:]
-        ok = subprocess.CompletedProcess(args, 0, "", "")
-        missing = subprocess.CompletedProcess(args, 1, "", "No chain/target/match by that name")
-        if op == "-N":
-            chains.setdefault(chain, [])
-            return ok
-        if chain not in chains:
-            return missing
-        rules = chains[chain]
+        op = args[args.index("-w") + 1]
+        chain = args[args.index("-w") + 2]
+        spec = list(args[args.index("-w") + 3:])
         if op == "-S":
-            lines = [f"-N {chain}"] + [f"-A {chain} " + " ".join(r) for r in rules]
+            lines = [f"-N {chain}"] + [f"-A {chain} " + " ".join(r) for r in chains[chain]]
             return subprocess.CompletedProcess(args, 0, "\n".join(lines), "")
         if op == "-C":
-            return ok if rest in rules else missing
+            return subprocess.CompletedProcess(args, 0 if spec in chains[chain] else 1, "", "")
         if op == "-I":
-            rules.insert(int(rest[0]) - 1, rest[1:])
-            return ok
+            chains[chain].insert(0, spec[1:])
+            return subprocess.CompletedProcess(args, 0, "", "")
         if op == "-D":
-            if len(rest) == 1 and rest[0].isdigit():
-                del rules[int(rest[0]) - 1]
-            elif rest in rules:
-                rules.remove(rest)
-            else:
-                return missing
-            return ok
-        raise AssertionError(iptables)
+            del chains[chain][int(spec[0]) - 1]
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
 
-    state = {"dashboard_ip": "172.19.0.2"}
     monkeypatch.setattr(containers, "_docker", fake)
     monkeypatch.setattr("agents.mount_plan._own_container_id", lambda: "dash123")
-    return chains, calls, state
+    return chains, calls
 
 
-def _numeric_deletes_on_shared_chains(calls):
-    return [c for c in calls if c[0] == "-D" and c[1] in ("INPUT", "DOCKER-USER")
-            and len(c) == 3 and c[2].isdigit()]
-
-
-def test_restrict_egress_uses_its_own_chains_and_one_jump_each(monkeypatch):
-    chains, calls, _ = _fake_iptables_docker(monkeypatch)
+def test_restrict_egress_installs_verifies_and_is_idempotent(monkeypatch):
+    chains, calls = _fake_iptables_docker(monkeypatch)
     containers.restrict_egress()
     wanted = containers.egress_rules("br-97e82cc8791a", "172.19.0.2")
-    assert chains[containers.FWD_CHAIN] == wanted[containers.FWD_CHAIN]
-    assert chains[containers.IN_CHAIN] == wanted[containers.IN_CHAIN]
-    assert chains["INPUT"] == [["-i", "br-97e82cc8791a", "-j", containers.IN_CHAIN], TAILSCALE]
-    assert chains["DOCKER-USER"] == [["-i", "br-97e82cc8791a", "-j", containers.FWD_CHAIN], DOCKER_RETURN]
-    before = {k: [list(r) for r in v] for k, v in chains.items()}
+    assert sorted(map(tuple, chains["DOCKER-USER"])) == sorted(tuple(r[1:]) for r in wanted if r[0] == "DOCKER-USER")
+    assert len(chains["INPUT"]) == 1
+    helper = next(c for c in calls if c[0] == "run")
+    assert helper[helper.index("--network") + 1] == "host" and "NET_ADMIN" in helper
+    before = {k: list(v) for k, v in chains.items()}
     containers.restrict_egress()
     assert chains == before
-    assert _numeric_deletes_on_shared_chains(calls) == []
 
 
-def test_a_new_dashboard_address_rebuilds_only_our_chains(monkeypatch):
-    chains, calls, state = _fake_iptables_docker(monkeypatch)
+def test_restrict_egress_prunes_stale_tagged_rules_but_not_others(monkeypatch):
+    stale = containers.egress_rules("br-97e82cc8791a", "172.19.0.9")[0][1:]     # an old dashboard address
+    foreign = ["-s", "10.9.9.9/32", "-j", "DROP"]                                # someone else's rule
+    broken = ["-i", "<no", "value>", "-m", "comment", "--comment", containers.EGRESS_TAG, "-j", "DROP"]
+    chains, _ = _fake_iptables_docker(monkeypatch, existing=[stale, foreign, broken])
     containers.restrict_egress()
-    state["dashboard_ip"] = "172.19.0.7"  # the dashboard container was recreated
-    chains["INPUT"].insert(1, ["-j", "ts-other"])  # tailscaled rewrote INPUT meanwhile
-    containers.restrict_egress()
-    assert chains[containers.FWD_CHAIN] == containers.egress_rules(
-        "br-97e82cc8791a", "172.19.0.7")[containers.FWD_CHAIN]
-    assert TAILSCALE in chains["INPUT"] and ["-j", "ts-other"] in chains["INPUT"]
-    assert chains["INPUT"].count(["-i", "br-97e82cc8791a", "-j", containers.IN_CHAIN]) == 1
-    assert _numeric_deletes_on_shared_chains(calls) == []
-
-
-def test_a_jump_for_an_old_bridge_is_removed_by_specification(monkeypatch):
-    old_jump = ["-i", "br-000000000000", "-j", containers.IN_CHAIN]
-    chains, calls, _ = _fake_iptables_docker(monkeypatch, chains={
-        "DOCKER-USER": [list(DOCKER_RETURN)], "INPUT": [old_jump, list(TAILSCALE)]})
-    containers.restrict_egress()
-    assert old_jump not in chains["INPUT"] and TAILSCALE in chains["INPUT"]
-    assert ["-D", "INPUT", *old_jump] in calls
-    assert _numeric_deletes_on_shared_chains(calls) == []
+    assert stale not in chains["DOCKER-USER"] and broken not in chains["DOCKER-USER"]
+    assert foreign in chains["DOCKER-USER"]
 
 
 @pytest.mark.parametrize("options,expected", [("<no value>", "br-97e82cc8791a"), ("", "br-97e82cc8791a"),

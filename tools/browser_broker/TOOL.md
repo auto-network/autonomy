@@ -65,11 +65,8 @@ graph://c330323d-986; epic `auto-8q7oe`.
   Traffic within the bridge (dashboard <-> lease) is untouched, and the
   dashboard's own address on the bridge is exempt: Docker older than 28
   ignores `--gw-priority`, so its default route, and its LAN/NAS traffic, runs
-  through this bridge. The rules live in our own chains,
-  `AUTONOMY-BROWSER-FWD` and `AUTONOMY-BROWSER-IN`, each reached by exactly
-  one `-i <lease bridge>` jump from `DOCKER-USER` and `INPUT`; those shared
-  chains (Docker's, tailscaled's) are never rewritten or deleted from by
-  position. Each activation rebuilds our chains and verifies them
+  through this bridge. Rules carry the comment `autonomy-browser-egress`;
+  each activation installs, verifies and prunes them
   (`browser_containers.restrict_egress`), and leases are refused until they
   hold. Why host rules rather than rules in each lease's namespace: they are
   in place before any lease starts, so no page (e.g. a restored tab) can load
