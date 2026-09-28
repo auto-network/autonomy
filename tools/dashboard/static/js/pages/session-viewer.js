@@ -2294,6 +2294,12 @@
         }
       },
 
+      // A <name>@<machine> address runs on another fleet machine; known from
+      // the address itself, before the remote row arrives.
+      get isRemote() {
+        return !!this.remoteMachine || String(this._tmuxSession || this.sessionKey || '').indexOf('@') !== -1;
+      },
+
       get machineDown() {
         return !!(this.remoteMachine && this.remoteMachine.state !== 'reachable');
       },
@@ -2545,7 +2551,9 @@
 
       saveLabel(event) {
         var store = Alpine.store('sessions')[this.sessionKey];
-        if (!store || !this.sessionKey || !store.isLive) return;
+        // Label, Escape, Ctrl-B and the terminal are this dashboard's own
+        // tmux endpoints; a session on another fleet machine has none here.
+        if (!store || !this.sessionKey || !store.isLive || this.isRemote) return;
         var newLabel = (event.target.textContent || '').trim();
         if (newLabel === this.sessionKey) newLabel = '';
         if (newLabel === (store.label || '')) return;
@@ -2725,7 +2733,7 @@
       // ── Terminal toggle ──────────────────────────────────────────
 
       toggleTerminal() {
-        if (!this._tmuxSession) return;  // guard: nothing to attach to
+        if (!this._tmuxSession || this.isRemote) return;  // guard: nothing to attach to here
         this.showTerminal = !this.showTerminal;
         if (this.showTerminal) {
           var self = this;
@@ -2783,7 +2791,7 @@
 
       async interrupt() {
         var tmux = this._tmuxSession;
-        if (!tmux) return;
+        if (!tmux || this.isRemote) return;
         try {
           await fetch('/api/session/' + encodeURIComponent(tmux) + '/interrupt', {
             method: 'POST',
@@ -2799,7 +2807,7 @@
 
       async background() {
         var tmux = this._tmuxSession;
-        if (!tmux) return;
+        if (!tmux || this.isRemote) return;
         try {
           await fetch('/api/session/' + encodeURIComponent(tmux) + '/background', {
             method: 'POST',

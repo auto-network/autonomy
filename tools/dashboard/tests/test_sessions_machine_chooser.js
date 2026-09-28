@@ -46,6 +46,16 @@ describe('machine chooser', () => {
     assert.equal(p.launchWorkspace, null);
   });
 
+  it('never launches on a machine that is reachable but not enabled', () => {
+    const p = makeSessionsPage({ CustomEvent });
+    const armed = Object.assign({}, SJC, { state: 'not_enabled', reason: 'session-cap-missing' });
+    p.launchTargets = [HOME, armed];
+    p.pickWorkspace({ id: 'autonomy-docs', name: 'Docs' });
+    assert.equal(p.launchOn(armed), false);
+    assert.equal(p.launchOn(Object.assign({}, armed, { reachable: true })), false);
+    assert.equal(p.launchPanel, 'machines');
+  });
+
   it('states each machine\'s figures, and why one cannot be used', () => {
     const p = makeSessionsPage({ CustomEvent });
     assert.equal(p.launchTargetStats(SJC),
@@ -76,6 +86,30 @@ describe('remote Active cards', () => {
   });
 });
 
+describe('remote card actions', () => {
+  function sheet(card) {
+    const calls = [];
+    const p = makeSessionsPage({ CustomEvent, fetch: (url, opts) => { calls.push([url, opts && opts.method]); return Promise.resolve({ ok: true }); } });
+    let shown = null;
+    p.__window.actionSheet = { show(o) { shown = o; } };
+    p.showSessionActions(card);
+    return { labels: Array.from(shown.actions, (a) => a.label), shown, calls };
+  }
+
+  it('offer only Close for a live remote session, and Close stops it by its address', async () => {
+    const card = { session_id: 'auto-9@sjc-2', is_live: true, machine: 'sjc-2', nag_enabled: false };
+    const r = sheet(card);
+    assert.deepEqual(r.labels, ['Close Session']);
+    await r.shown.actions[0].handler();
+    assert.deepEqual(r.calls, [['/api/terminal/auto-9%40sjc-2/kill', 'POST']]);
+  });
+
+  it('keep nag and restart for a local session', () => {
+    const r = sheet({ session_id: 'auto-1', is_live: true, nag_enabled: false });
+    assert.deepEqual(r.labels, ['Enable Nag (15m)', 'Restart Session', 'Close Session']);
+  });
+});
+
 describe('templates', () => {
   it('the + menu has the chooser panel and the card reuses the session dot', () => {
     const html = fs.readFileSync(SESSIONS_HTML, 'utf8');
@@ -85,5 +119,17 @@ describe('templates', () => {
     assert.match(card, /isLive: !!s\.is_live && s\.machine_reachable !== false/);
     assert.doesNotMatch(card, /sc-machine-dot/);
     assert.doesNotMatch(card, /is-unreachable/);
+    // Local-only card controls (worktree link, resume, retry) never render
+    // for a session on another machine.
+    assert.match(card, /x-show="!s\.machine && typeof hasWorkspaceChanges/);
+    assert.equal((card.match(/x-if="!s\.machine && !s\.is_live && s\.resumable/g) || []).length, 2);
+    assert.match(card, /x-if="!s\.machine && window\.Autonomy && window\.Autonomy\.lifecycle && window\.Autonomy\.lifecycle\.inlineAction/);
+  });
+
+  it('the viewer hides Escape, Ctrl-B and the terminal for a remote session', () => {
+    const view = fs.readFileSync(SESSIONS_HTML.replace('sessions.html', 'session-view.html'), 'utf8');
+    assert.equal((view.match(/x-if="!isRemote && _tmuxSession && isLive/g) || []).length, 3);
+    const js = fs.readFileSync(SESSIONS_HTML.replace('templates/pages/sessions.html', 'static/js/pages/session-viewer.js'), 'utf8');
+    assert.equal((js.match(/\|\| this\.isRemote\) return;/g) || []).length, 4);
   });
 });

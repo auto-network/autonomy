@@ -53,7 +53,10 @@ function makeSessionsPage(overrides) {
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(SESSIONS_JS, 'utf8'), sandbox, { filename: SESSIONS_JS });
   (listeners['alpine:init'] || []).forEach((callback) => callback());
-  return components.sessionsPage();
+  const page = components.sessionsPage();
+  // The sandbox window, for tests that stub page globals (actionSheet, ...).
+  Object.defineProperty(page, '__window', { value: window });
+  return page;
 }
 
 module.exports = { REPO_ROOT, SESSIONS_JS, SESSIONS_HTML, makeSessionsPage };

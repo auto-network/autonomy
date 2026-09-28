@@ -1553,7 +1553,7 @@
       },
 
       launchOn(t) {
-        if (!t.reachable || !this.launchWorkspace) return false;
+        if (!t.reachable || t.state === 'not_enabled' || !this.launchWorkspace) return false;
         var detail = {project: this.launchWorkspace.id};
         if (!t.local) { detail.machine = t.machine_pub; detail.machineLabel = t.label; }
         window.dispatchEvent(new CustomEvent('create-terminal', {detail: detail}));
@@ -1909,7 +1909,22 @@
         var actions = [];
         var self = this;
 
-        if (s.is_live) {
+        if (s.machine) {
+          // A session on another fleet machine: only Close routes there
+          // (api_terminal_kill stops <name>@<machine> over session-control);
+          // nag and restart are this dashboard's own endpoints.
+          if (s.is_live) {
+            actions.push({
+              label: 'Close Session',
+              style: 'destructive',
+              handler: async function() {
+                await fetch('/api/terminal/' + encodeURIComponent(tmux) + '/kill', { method: 'POST' });
+              },
+            });
+          } else {
+            actions.push({ label: 'Open', handler: function() { self.navigate(s); } });
+          }
+        } else if (s.is_live) {
           // ── Live session: nag toggle, nag presets, destructive close ──
           var nagLabel = s.nag_enabled ? 'Disable Nag' : 'Enable Nag (15m)';
           actions.push({

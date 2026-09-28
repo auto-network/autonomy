@@ -113,7 +113,7 @@
            header anchor; shows when this session has commits-ahead
            or dirty files in any of its worktrees. Optional helpers —
            gracefully no-ops on surfaces that don't define them. -->
-      <a x-show="typeof hasWorkspaceChanges === 'function' && hasWorkspaceChanges(s)"
+      <a x-show="!s.machine && typeof hasWorkspaceChanges === 'function' && hasWorkspaceChanges(s)"
          :href="typeof workspaceStatusHref === 'function' ? workspaceStatusHref(s) : '/worktrees'"
          :title="typeof workspaceStatusTooltip === 'function' ? workspaceStatusTooltip(s) : 'Workspace has tracked changes'"
          @click.stop
@@ -126,7 +126,7 @@
       <!-- Resume pill (design d2250266): dead-resumable rows get the
            compact top-right action, out of the metadata row. Hidden once
            the resume succeeded (the Live chip takes over). -->
-      <template x-if="!s.is_live && s.resumable && typeof resumeSession === 'function' && !(resumed && resumed[s.id])">
+      <template x-if="!s.machine && !s.is_live && s.resumable && typeof resumeSession === 'function' && !(resumed && resumed[s.id])">
         <button class="sc-resume-pill"
                 @click.prevent.stop="resumeSession(s, $event)"
                 x-text="(typeof resuming !== 'undefined' && resuming[s.id]) ? 'Resuming…' : 'Resume'"
@@ -243,7 +243,7 @@
            header anchor; shows when this session has commits-ahead
            or dirty files in any of its worktrees. Optional helpers —
            gracefully no-ops on surfaces that don't define them. -->
-      <a x-show="typeof hasWorkspaceChanges === 'function' && hasWorkspaceChanges(s)"
+      <a x-show="!s.machine && typeof hasWorkspaceChanges === 'function' && hasWorkspaceChanges(s)"
          :href="typeof workspaceStatusHref === 'function' ? workspaceStatusHref(s) : '/worktrees'"
          :title="typeof workspaceStatusTooltip === 'function' ? workspaceStatusTooltip(s) : 'Workspace has tracked changes'"
          @click.stop
@@ -259,7 +259,7 @@
       <!-- Resume pill (design d2250266): dead-resumable rows get the
            compact top-right action, out of the metadata row. Hidden once
            the resume succeeded (the Live chip takes over). -->
-      <template x-if="!s.is_live && s.resumable && typeof resumeSession === 'function' && !(resumed && resumed[s.id])">
+      <template x-if="!s.machine && !s.is_live && s.resumable && typeof resumeSession === 'function' && !(resumed && resumed[s.id])">
         <button class="sc-resume-pill"
                 @click.prevent.stop="resumeSession(s, $event)"
                 x-text="(typeof resuming !== 'undefined' && resuming[s.id]) ? 'Resuming…' : 'Resume'"
@@ -425,7 +425,7 @@
            worker's retry endpoint — the worker cleans the failed
            attempt's leftovers and re-runs the launch, and the card
            follows along via the registry broadcasts. -->
-      <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.inlineAction(s) && window.Autonomy.lifecycle.inlineAction(s).kind !== 'resume'">
+      <template x-if="!s.machine && window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.inlineAction(s) && window.Autonomy.lifecycle.inlineAction(s).kind !== 'resume'">
         <button class="sc-action-inline"
                 :class="window.Autonomy.lifecycle.inlineAction(s).kind"
                 @click.prevent.stop="(window.Autonomy.lifecycle.inlineAction(s).kind === 'resume' && typeof resumeSession === 'function') ? resumeSession(s, $event) : (window.Autonomy.lifecycle.inlineAction(s).kind === 'retry' ? fetch('/api/session/' + encodeURIComponent(s.tmux_name || s.session_id || s.id) + '/retry', {method: 'POST'}) : null)"
