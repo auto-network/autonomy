@@ -27,13 +27,15 @@ version: 1
 # this block; it is not a publication-state entry.
 follow:
   org_uuid: "2d4b90cb-1e89-452b-82cb-68ca44fd8e52"
-  # Published 2026-09-25T01:37:42Z from Home (approval 4af1105a9ba3, grant
-  # token ea6cbab560a815fd8c8d3a599ebb174b). The rendezvous is the link URL
-  # without its fragment; link_pub is the fragment (the channel public key).
-  # Revoking the link (`graph link revoke ea6cbab560a815fd8c8d3a599ebb174b
-  # --org autonomy`) invalidates both values: publish again and update here.
-  rendezvous: "https://relay.auto.network/l/ea6cbab560a815fd8c8d3a599ebb174b"
-  link_pub: "oAnv-C0Vy6xWRGmpLjF1mus8ak_JuyWGjoi-zWCJdWI"
+  # Re-published 2026-09-28 from Home (Central approval
+  # central-bPQq248LMr0_V718B1dkb3Y5UsS1i6LL, grant token
+  # ebff549926195b19ecdad90bc9594dd3); its envelope carries meta.org
+  # "autonomy" (auto-iyxik). The rendezvous is the link URL without its
+  # fragment; link_pub is the fragment (the channel public key). Revoking the
+  # link (`graph link revoke ebff549926195b19ecdad90bc9594dd3 --org autonomy`)
+  # invalidates both values: publish again and update here.
+  rendezvous: "https://relay.auto.network/l/ebff549926195b19ecdad90bc9594dd3"
+  link_pub: "dMxxaIWRYcrTe49JpjnZJaueKgY_BsNwN8ezap8jvAU"
   registry_url: "https://relay.auto.network"
 
 canonical:
