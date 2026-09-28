@@ -13,6 +13,9 @@ Endpoints:
 - ``POST /command`` — ``{"op", "args"}`` for the operations in :data:`OPS`.
   None of them runs caller-supplied script.
 - ``POST /abort`` — stops the running command and returns once it has stopped.
+- ``POST /lock`` — ``{"locked": bool}``; while locked every command is refused
+  (409), so none can start after the operator takes control; locking also
+  stops the running command.
 - ``POST /expiry`` — ``{"expires_at": <unix seconds>}``, passed to the watchdog.
 
 Threads. Playwright's sync API belongs to the thread that started it, so the
@@ -92,6 +95,10 @@ class BadRequest(ValueError):
 
 class Aborted(RuntimeError):
     """The running command was stopped by ``POST /abort``."""
+
+
+class Locked(RuntimeError):
+    """The lease is locked (operator control or a privileged operation)."""
 
 
 # ── request validation (pure; unit-tested) ─────────────────────────────
@@ -291,6 +298,9 @@ class LeaseAgent(BrowserController):
         self._context = None
         self._jobs: "queue.Queue[tuple[str, dict, queue.Queue]]" = queue.Queue(maxsize=1)
         self._abort = threading.Event()
+        #: Set while the operator (or a privileged operation) holds the lease:
+        #: every command is refused, so none can start after take-control.
+        self._locked = threading.Event()
         self._idle = threading.Event()
         self._idle.set()
         self._shutdown = threading.Event()
@@ -354,7 +364,19 @@ class LeaseAgent(BrowserController):
 
     # command thread
 
+    def set_locked(self, locked: bool) -> dict:
+        """Lock refuses every new command; locking also stops the running one."""
+        if locked:
+            self._locked.set()
+            stopped = self.abort()
+        else:
+            self._locked.clear()
+            stopped = {"stopped": True, "running": not self._idle.is_set()}
+        return {"locked": self._locked.is_set(), **stopped}
+
     def submit(self, op: str, args: dict, timeout_s: float) -> dict:
+        if self._locked.is_set():
+            raise Locked()
         reply: queue.Queue = queue.Queue(maxsize=1)
         try:
             self._jobs.put_nowait((op, args, reply))
@@ -372,6 +394,8 @@ class LeaseAgent(BrowserController):
             self._abort.clear()
             self._idle.clear()
             try:
+                if self._locked.is_set():  # locked while this command waited in the queue
+                    raise Aborted()
                 reply.put({"ok": True, "result": self.run(op, args)})
             except Aborted:
                 reply.put({"ok": False, "error": "aborted"})
@@ -574,9 +598,15 @@ class LeaseHandler(BaseHTTPRequestHandler):
                 op, args = validate_command(body)
                 try:
                     result = self.agent.submit(op, args, args["timeout_ms"] / 1000 + 30)
+                except Locked:
+                    return self._json(409, {"error": "locked"})
                 except CommandError:
                     return self._json(409, {"error": "busy"})
                 return self._json(200, result)
+            if self.path == "/lock":
+                if not isinstance(body, dict) or not isinstance(body.get("locked"), bool):
+                    raise BadRequest('body must be {"locked": true|false}')
+                return self._json(200, self.agent.set_locked(body["locked"]))
             if self.path == "/abort":
                 return self._json(200, self.agent.abort())
             if self.path == "/expiry":

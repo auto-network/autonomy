@@ -476,3 +476,125 @@ def test_one_stuck_release_does_not_stall_the_pass(db, live, monkeypatch):
     reconciler.reconcile_once()
     states = sorted(store.get(h).state for h in (stuck, fine))
     assert states == ["gone", "releasing"]  # the second lease was still released
+
+
+# ── caller command route (auto-8q7oe.6) ────────────────────────────────
+
+
+@pytest.fixture
+def ready_lease(broker, monkeypatch):
+    status, body = _call(routes.create_lease, "owner", {"adapter": "chrome-headed",
+                                                        "profile": {"kind": "ephemeral"}})
+    h = store.lease_hash(body["lease"])
+    store.transition(h, epoch=reconciler.epoch(), to="ready")
+    forwarded = []
+
+    def agent_request(address, secret, method, path, body=None, timeout=5):
+        forwarded.append((path, body))
+        if path == "/command":
+            hook = agent_request.during
+            if hook:
+                hook()
+            return 200, {"ok": True, "result": "Example Domain"}
+        return 200, {}
+
+    agent_request.during = None
+    monkeypatch.setattr(containers, "agent_request", agent_request)
+    return body["lease"], h, forwarded, agent_request
+
+
+def test_command_forwards_and_frees_the_lease(ready_lease):
+    lease_id, h, forwarded, _ = ready_lease
+    assert _call(routes.run_command, "owner", lease_id, {"op": "title"}) == (
+        200, {"ok": True, "result": "Example Domain"})
+    assert forwarded == [("/command", {"op": "title", "args": {}})]
+    assert store.get(h).state == "ready"
+    audit = __import__("json").loads(store.get(h).audit)
+    assert audit[-1]["op"] == "command:title" and audit[-1]["result"] == "ok"
+    assert "Example Domain" not in store.get(h).audit  # never page content
+
+
+def test_other_sessions_and_invented_leases_never_reach_the_agent(ready_lease):
+    lease_id, _, forwarded, _ = ready_lease
+    assert _call(routes.run_command, "other", lease_id, {"op": "title"})[0] == 404
+    assert _call(routes.run_command, "owner", "brl_" + "0" * 32, {"op": "title"})[0] == 404
+    assert forwarded == []
+
+
+@pytest.mark.parametrize("op", ["eval", "evaluate", "cookies", "tabs", "add_init_script", "cdp"])
+def test_operations_outside_the_list_are_400(ready_lease, op):
+    lease_id, _, forwarded, _ = ready_lease
+    assert _call(routes.run_command, "owner", lease_id, {"op": op, "args": {}})[0] == 400
+    assert forwarded == []
+
+
+def test_locked_and_busy_leases_answer_409(ready_lease):
+    lease_id, h, forwarded, _ = ready_lease
+    store.transition(h, epoch=reconciler.epoch(), to="locked", lock_holder="human")
+    for _ in range(50):
+        assert _call(routes.run_command, "owner", lease_id, {"op": "title"}) == (
+            409, {"error": "locked", "holder": "human"})
+    store.transition(h, epoch=reconciler.epoch(), to="ready", lock_holder=None)
+    store.transition(h, epoch=reconciler.epoch(), to="busy")
+    assert _call(routes.run_command, "owner", lease_id, {"op": "title"}) == (409, {"error": "busy"})
+    assert forwarded == []
+
+
+def test_take_control_during_a_command_discards_its_result(ready_lease):
+    lease_id, h, _, agent_request = ready_lease
+
+    def operator_takes_control():
+        store.transition(h, epoch=reconciler.epoch(), to="locked", expect=("busy",), lock_holder="human")
+
+    agent_request.during = operator_takes_control
+    assert _call(routes.run_command, "owner", lease_id, {"op": "title"}) == (
+        409, {"error": "locked", "holder": "human"})
+    assert store.get(h).state == "locked"  # the command did not hand the lease back
+
+
+def test_a_lease_left_busy_by_a_dead_request_is_freed(ready_lease, live, monkeypatch):
+    lease_id, h, forwarded, _ = ready_lease
+    epoch = reconciler.epoch()
+    store.transition(h, epoch=epoch, to="busy", last_activity=time.time() - reconciler.BUSY_LIMIT_S - 1)
+    monkeypatch.setattr(reconciler, "_tick", 1)       # no docker pass
+    monkeypatch.setattr(reconciler, "_healthy", lambda lease: True)
+    reconciler.reconcile_once()
+    assert store.get(h).state == "ready" and ("/abort", {}) in forwarded
+    assert "command:interrupted" in store.get(h).audit
+    assert _call(routes.run_command, "owner", lease_id, {"op": "title"})[0] == 200
+
+
+def test_a_recently_busy_lease_is_left_alone(ready_lease, live, monkeypatch):
+    lease_id, h, forwarded, _ = ready_lease
+    store.transition(h, epoch=reconciler.epoch(), to="busy")
+    monkeypatch.setattr(reconciler, "_tick", 1)
+    monkeypatch.setattr(reconciler, "_healthy", lambda lease: True)
+    reconciler.reconcile_once()
+    assert store.get(h).state == "busy" and forwarded == []
+
+
+@pytest.mark.parametrize("status", [400, 401, 403])
+def test_an_agent_refusal_is_a_broker_fault(ready_lease, monkeypatch, status):
+    lease_id, h, _, _ = ready_lease
+    monkeypatch.setattr(containers, "agent_request",
+                        lambda *a, **k: (status, {"error": "unauthorized"}))
+    assert _call(routes.run_command, "owner", lease_id, {"op": "title"}) == (
+        502, {"error": "lease agent refused"})
+    assert store.get(h).state == "ready"
+
+
+
+def test_a_live_maximum_length_command_is_not_reclaimed(ready_lease, live, monkeypatch):
+    lease_id, h, forwarded, _ = ready_lease
+    store.transition(h, epoch=reconciler.epoch(), to="busy", last_activity=time.time() - 95)
+    monkeypatch.setattr(reconciler, "_tick", 1)
+    monkeypatch.setattr(reconciler, "_healthy", lambda lease: True)
+    reconciler.reconcile_once()  # a pass at t = 95 s: the route may still be waiting
+    assert store.get(h).state == "busy" and forwarded == []
+
+
+def test_an_interrupted_command_does_not_claim_a_take_control(ready_lease, monkeypatch):
+    lease_id, h, _, _ = ready_lease
+    monkeypatch.setattr(containers, "agent_request", lambda *a, **k: (200, {"ok": False, "error": "aborted"}))
+    assert _call(routes.run_command, "owner", lease_id, {"op": "title"}) == (409, {"error": "interrupted"})
+    assert store.get(h).state == "ready"

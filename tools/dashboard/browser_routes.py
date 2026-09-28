@@ -199,6 +199,87 @@ def release_lease(authorization, lease_id: str) -> tuple[int, dict]:
     return 200, {"state": "releasing"}
 
 
+def run_command(authorization, lease_id: str, body) -> tuple[int, dict]:
+    """Forward one structured command from the lease's owner to its agent.
+
+    404 for another session's lease (nothing reaches the agent), 400 for an
+    operation outside the list, 409 while the lease is locked or busy. The
+    busy state is taken by compare-and-set; if take-control lands while the
+    command runs, its result is discarded and the caller gets 409. The audit
+    trail records the operation and a result category, never page content."""
+    from tools.browser_broker.lease_agent import BadRequest, validate_command
+
+    lease = _owned(authorization, lease_id)
+    try:
+        op, checked = validate_command(body)
+    except BadRequest as exc:
+        raise _Reply(400, {"error": str(exc)}) from exc
+    epoch = _epoch()
+    refusal = _command_refusal(lease)
+    if refusal:
+        raise _Reply(409, refusal)
+    if not store.transition(lease.lease_hash, epoch=epoch, to="busy", expect=("ready",),
+                            last_activity=time.time()):
+        fresh = store.get(lease.lease_hash)
+        raise _Reply(409, _command_refusal(fresh) or {"error": "busy"})
+    status, reply, category = 502, {"error": "lease agent unreachable"}, "error"
+    try:
+        # The raw args that passed validate_command are forwarded (its parsed
+        # form is internal); the agent re-validates with the same function.
+        status, reply = containers.agent_request(
+            lease.address, lease.secret, "POST", "/command",
+            {"op": op, "args": (body or {}).get("args", {})},
+            timeout=checked["timeout_ms"] / 1000 + 35)
+        if status == 200 and reply.get("ok"):
+            category = "ok"
+        elif reply.get("error") in ("aborted", "locked"):
+            category = "aborted"
+    except Exception:
+        logger.warning("browser command %s to %s failed", op, lease.container_name, exc_info=True)
+    finally:
+        # busy -> ready unless take-control moved the lease on meanwhile.
+        store.transition(lease.lease_hash, epoch=epoch, to="ready", expect=("busy",),
+                         audit_op=f"command:{op}", result=category, last_activity=time.time())
+    after = store.get(lease.lease_hash)
+    if after is not None and after.state == "locked":
+        raise _Reply(409, {"error": "locked", "holder": after.lock_holder or "privileged"})
+    if category == "aborted":
+        # Stopped, but nobody holds the lease: the broker freed it (a dead
+        # request's lease was reclaimed); do not claim a take-control.
+        raise _Reply(409, {"error": "interrupted"})
+    if status == 409:
+        raise _Reply(409, {"error": reply.get("error", "busy")})
+    if 400 <= status < 500:
+        # A secret or validation disagreement between broker and agent is a
+        # broker fault, not the caller's outcome.
+        raise _Reply(502, {"error": "lease agent refused"})
+    if status >= 500:
+        raise _Reply(502, {"error": "lease agent unreachable"})
+    return 200, {"ok": bool(reply.get("ok")), **({"result": reply["result"]} if "result" in reply
+                                                 else {"error": reply.get("error")})}
+
+
+def _command_refusal(lease) -> dict | None:
+    if lease is None or lease.state in store.FINAL_STATES or lease.state == "releasing":
+        return {"error": "gone"}
+    if lease.state == "locked":
+        return {"error": "locked", "holder": lease.lock_holder or "privileged"}
+    if lease.state == "busy":
+        return {"error": "busy"}
+    if lease.state != "ready":
+        return {"error": "not-ready", "state": lease.state}
+    return None
+
+
+async def post_command(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "body is not JSON"}, status_code=400)
+    return await _serve(run_command, request.headers.get("Authorization"),
+                        request.path_params["lease"], body)
+
+
 async def _serve(fn, *args) -> JSONResponse:
     try:
         status, payload = await asyncio.to_thread(fn, *args)
@@ -229,4 +310,5 @@ ROUTES = [
     Route("/api/browser/leases", post_lease, methods=["POST"]),
     Route("/api/browser/leases/{lease}", get_lease, methods=["GET"]),
     Route("/api/browser/leases/{lease}", delete_lease, methods=["DELETE"]),
+    Route("/api/browser/leases/{lease}/commands", post_command, methods=["POST"]),
 ]

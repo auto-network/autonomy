@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 TICK_S = 5.0
 START_TIMEOUT_S = 90.0
 EXPIRY_GRACE_S = 15.0
+#: The longest a command can legitimately hold a lease busy: the lease
+#: agent's largest command timeout plus the route's margin, plus 15 s so a
+#: live maximum-length command is never reclaimed while its route still
+#: waits (last_activity is stamped just before that wait starts). A busy row
+#: older than this belongs to a request that died (a worker reload or crash
+#: while the command ran, or a stuck agent).
+BUSY_LIMIT_S = 60.0 + 35.0 + 15.0
 
 _epoch: Optional[int] = None
 _tick = 0
@@ -93,6 +100,19 @@ def release_async(lease: store.Lease, reason: str) -> None:
         return
     threading.Thread(target=_release_logged, args=(lease, reason, epoch_), daemon=True,
                      name=f"browser-release-{lease.container_name}").start()
+
+
+def _free_interrupted(lease: store.Lease, epoch_: int) -> None:
+    """A lease left busy by a request that died: stop whatever the agent is
+    still doing, then make the lease usable again."""
+    if lease.address:
+        try:
+            containers.agent_request(lease.address, lease.secret, "POST", "/abort", {}, timeout=3)
+        except Exception:
+            logger.warning("browser broker: abort of interrupted command failed for %s",
+                           lease.container_name)
+    store.transition(lease.lease_hash, epoch=epoch_, to="ready", expect=("busy",),
+                     audit_op="command:interrupted", result="freed", last_activity=time.time())
 
 
 def _release_isolated(lease: store.Lease, reason: str, epoch_: int) -> None:
@@ -178,6 +198,9 @@ def reconcile_once(now: Optional[float] = None) -> None:
         reason = _end_reason(lease, now, limits, capability_cache)
         if reason:
             _release_isolated(lease, reason, epoch_)
+            continue
+        if lease.state == "busy" and now - lease.last_activity >= BUSY_LIMIT_S:
+            _free_interrupted(lease, epoch_)
             continue
         if lease.state in ("starting", "ready", "busy", "locked", "unhealthy") and lease.address:
             _health_pass(lease, epoch_, now)

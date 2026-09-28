@@ -168,3 +168,35 @@ def test_seccomp_profile_adds_only_the_namespace_rule():
     assert (sorted(added[0]["names"]), added[0]["action"]) == (
         ["clone", "setns", "unshare"], "SCMP_ACT_ALLOW")
     assert "args" not in added[0] and "includes" not in added[0]
+
+
+def test_lock_endpoint_and_locked_commands(server):
+    base, agent, _ = server
+    agent.locked = False
+
+    def set_locked(locked):
+        agent.locked = locked
+        return {"locked": locked, "stopped": True, "running": False}
+
+    def submit(op, args, timeout_s):
+        if agent.locked:
+            raise lease_agent.Locked()
+        agent.submitted.append(op)
+        return {"ok": True, "result": op}
+
+    agent.set_locked, agent.submit = set_locked, submit
+    assert _call(base, "POST", "/lock", {"locked": True})[1]["locked"] is True
+    assert _call(base, "POST", "/command", {"op": "title"}) == (409, {"error": "locked"})
+    assert _call(base, "POST", "/lock", {"locked": "yes"})[0] == 400
+    assert _call(base, "POST", "/lock", {"locked": False})[1]["locked"] is False
+    assert _call(base, "POST", "/command", {"op": "title"})[0] == 200
+    assert agent.submitted == ["title"]
+    assert _call(base, "POST", "/lock", {"locked": True}, secret="wrong")[0] == 401
+
+
+def test_a_locked_agent_refuses_even_a_queued_command():
+    agent = lease_agent.LeaseAgent.__new__(lease_agent.LeaseAgent)
+    agent._locked = __import__("threading").Event()
+    agent._locked.set()
+    with pytest.raises(lease_agent.Locked):
+        agent.submit("title", {"timeout_ms": 1000}, 1)
