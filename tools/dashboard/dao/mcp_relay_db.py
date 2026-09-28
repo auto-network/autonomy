@@ -62,6 +62,20 @@ CREATE TABLE IF NOT EXISTS mcp_crosstalk_grants (
 
 CREATE INDEX IF NOT EXISTS idx_mcp_crosstalk_session
     ON mcp_crosstalk_grants(openai_session);
+
+-- What this machine did with one Central approval (auto-fkhq0.14): written in
+-- the same transaction as the guarded grant transition, so a decision is
+-- applied at most once and always ends in a recorded state. A ``delivering``
+-- row names its owning process; one whose owner is gone was interrupted.
+CREATE TABLE IF NOT EXISTS mcp_approval_outcomes (
+    approval_id      TEXT PRIMARY KEY,
+    kind             TEXT NOT NULL,
+    state            TEXT NOT NULL,
+    detail           TEXT NOT NULL DEFAULT '',
+    owner_pid        INTEGER,
+    owner_start      TEXT,
+    at               REAL NOT NULL
+);
 """
 
 
@@ -320,23 +334,6 @@ def set_session_approval_id(
         conn.close()
 
 
-def set_crosstalk_approval_id(
-    openai_session: str, target_session: str, approval_id: str,
-    *, db_path: Path | str | None = None
-) -> bool:
-    conn = _get_conn(db_path)
-    try:
-        cur = conn.execute(
-            "UPDATE mcp_crosstalk_grants SET approval_id=?, updated_at=?"
-            " WHERE openai_session=? AND target_session=?",
-            (approval_id, time.time(), openai_session, target_session),
-        )
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
-
-
 def resolve_session(openai_session: str, *, db_path: Path | str | None = None) -> dict:
     """The relay's per-request check: returns the effective authorization for a
     session — {status, autonomy_org, level, expires_at}. `status` is 'approved'
@@ -408,30 +405,6 @@ def upsert_pending_crosstalk(
     return get_crosstalk_grant(openai_session, target_session, db_path=db_path)
 
 
-def approve_crosstalk(
-    openai_session: str,
-    target_session: str,
-    *,
-    expires_at: float | None,
-    approved_by: str = "",
-    db_path: Path | str | None = None,
-) -> dict | None:
-    now = time.time()
-    conn = _get_conn(db_path)
-    try:
-        cur = conn.execute(
-            "UPDATE mcp_crosstalk_grants SET status=?, expires_at=?, approved_by=?,"
-            " updated_at=? WHERE openai_session=? AND target_session=?",
-            (APPROVED, expires_at, approved_by, now, openai_session, target_session),
-        )
-        conn.commit()
-        if cur.rowcount == 0:
-            return None
-    finally:
-        conn.close()
-    return get_crosstalk_grant(openai_session, target_session, db_path=db_path)
-
-
 def set_crosstalk_status(
     openai_session: str, target_session: str, status: str,
     *, db_path: Path | str | None = None
@@ -455,6 +428,127 @@ def crosstalk_allowed(
     openai_session: str, target_session: str, *, db_path: Path | str | None = None
 ) -> bool:
     return _live(get_crosstalk_grant(openai_session, target_session, db_path=db_path))
+
+
+def crosstalk_grant_for_approval(
+    approval_id: str, *, db_path: Path | str | None = None
+) -> dict | None:
+    """The grant row still waiting on this approval, or None."""
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM mcp_crosstalk_grants WHERE approval_id=?", (approval_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def settle_crosstalk(
+    approval_id: str,
+    *,
+    status: str,
+    outcome: str,
+    expires_at: float | None = None,
+    owner_pid: int | None = None,
+    owner_start: str | None = None,
+    detail: str = "",
+    db_path: Path | str | None = None,
+) -> dict | None:
+    """Apply one decision to the pending grant waiting on ``approval_id``,
+    once: the grant moves to ``status`` and releases the approval id, and the
+    outcome row is written, in one transaction. Returns the grant as it was
+    (with its openai_session), or None when nothing was waiting on it."""
+    now = time.time()
+    conn = _get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM mcp_crosstalk_grants WHERE approval_id=? AND status=?",
+            (approval_id, PENDING),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        conn.execute(
+            "UPDATE mcp_crosstalk_grants SET status=?, expires_at=?, approved_by=?,"
+            " approval_id=NULL, updated_at=? WHERE grant_id=?",
+            (status, expires_at, "operator" if status == APPROVED else None, now,
+             row["grant_id"]),
+        )
+        conn.execute(
+            "INSERT INTO mcp_approval_outcomes"
+            " (approval_id, kind, state, detail, owner_pid, owner_start, at)"
+            " VALUES (?, 'mcp_crosstalk', ?, ?, ?, ?, ?)",
+            (approval_id, outcome, detail, owner_pid, owner_start, now),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return dict(row)
+
+
+def record_outcome(
+    approval_id: str, state: str, detail: str = "", *, db_path: Path | str | None = None
+) -> None:
+    """Record a terminal outcome for a decision that settled nothing (e.g. its
+    grant was re-pointed at a newer approval). Never overwrites an outcome."""
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO mcp_approval_outcomes (approval_id, kind, state, detail, at)"
+            " VALUES (?, 'mcp_crosstalk', ?, ?, ?)",
+            (approval_id, state, detail, time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_outcome(approval_id: str, *, db_path: Path | str | None = None) -> dict | None:
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM mcp_approval_outcomes WHERE approval_id=?", (approval_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def finish_outcome(
+    approval_id: str, state: str, detail: str = "", *, expect: str | None = None,
+    db_path: Path | str | None = None,
+) -> bool:
+    """Move an outcome to its terminal ``state`` (only from ``expect``, when
+    given). Returns whether it moved."""
+    conn = _get_conn(db_path)
+    try:
+        sql = ("UPDATE mcp_approval_outcomes SET state=?, detail=?, owner_pid=NULL,"
+               " owner_start=NULL, at=? WHERE approval_id=?")
+        args = [state, detail[:500], time.time(), approval_id]
+        if expect is not None:
+            sql += " AND state=?"
+            args.append(expect)
+        cur = conn.execute(sql, args)
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def outcomes_in_state(state: str, *, db_path: Path | str | None = None) -> list[dict]:
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM mcp_approval_outcomes WHERE state=?", (state,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
 
 
 def list_sessions(*, db_path: Path | str | None = None) -> list[dict]:

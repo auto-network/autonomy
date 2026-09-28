@@ -1,5 +1,8 @@
-"""Approval kinds for the ChatGPT MCP relay — one more pair of kinds on the
-generalized approval rendezvous (see approvals_routes.py), not a parallel system.
+"""Approval kinds for the ChatGPT MCP relay.
+
+``mcp_crosstalk`` is a Central approval (mcp_crosstalk_central.py); ``mcp_peer_link``
+still rides the legacy rendezvous (approvals_routes.py) until its review
+dialog has the org/level choice rows (auto-fkhq0.14 part 2).
 
 - ``mcp_peer_link``: binds one ``openai/session`` (per-chat, tunnel-stamped) to
   exactly one Autonomy org at a level (read | readwrite) for a TTL. Fires when a
@@ -31,8 +34,6 @@ KIND_CROSSTALK = "mcp_crosstalk"
 
 _LINK_REQUIRED = {"openai_session", "openai_subject", "openai_org", "intent"}
 _LINK_OPTIONAL = ("handle", "requested_org", "requested_level")
-_CROSSTALK_REQUIRED = {"openai_session", "target_session", "message"}
-_CROSSTALK_OPTIONAL = ("target_org", "handle", "intent")
 
 
 def _ttl_expires_at(decision: dict) -> float | None:
@@ -80,35 +81,6 @@ def enrich_link(row: dict) -> dict:
     except Exception:
         default_org = ""
     return {"orgs": orgs, "default_org": default_org}
-
-
-def prepare_create_crosstalk(session: str, request: dict) -> tuple[dict, dict]:
-    missing = _CROSSTALK_REQUIRED - set(request)
-    if missing:
-        raise ValueError(f"mcp_crosstalk request missing: {sorted(missing)}")
-    if not str(request.get("message") or "").strip():
-        raise ValueError("mcp_crosstalk requires the message being sent")
-    frozen = {k: str(request.get(k, "")) for k in _CROSSTALK_REQUIRED}
-    for k in _CROSSTALK_OPTIONAL:
-        if request.get(k):
-            frozen[k] = str(request[k])
-    return frozen, {}
-
-
-def enrich_crosstalk(row: dict) -> dict:
-    """Attach the target session's human title so the operator recognises WHO the
-    message goes to (recognising the target is the whole decision). Rendered at
-    GET time from the live dashboard session row; empty if the target is unknown."""
-    target = (row.get("request") or {}).get("target_session") or ""
-    label = ""
-    try:
-        from tools.dashboard.dao import dashboard_db
-        sess = dashboard_db.get_session(target)
-        if sess:
-            label = sess.get("label") or ""
-    except Exception:
-        label = ""
-    return {"target_label": label}
 
 
 def _require_operator(request: Request, _row: dict, _decision: dict) -> str | None:
@@ -179,38 +151,7 @@ async def execute_link(row: dict, decision: dict) -> dict:
             "expires_at": bound.get("expires_at")}
 
 
-async def execute_crosstalk(row: dict, decision: dict) -> dict:
-    """On approval: write the (chat, target) grant AND deliver the held message.
-
-    The message the operator saw is stored on the approval request; delivering it
-    here — rather than handing it back to the relay — is what lets the dashboard
-    stamp the source from the chat's minted handle (never the relay's launching
-    identity). The handle is read from the authoritative session record, not from
-    the request, so a stale/forged request handle cannot change attribution.
-    """
-    req = row.get("request") or {}
-    openai_session = req.get("openai_session")
-    target_session = req.get("target_session")
-    message = req.get("message") or ""
-    if not openai_session or not target_session:
-        return {"ok": False, "error": "approval row missing openai_session/target_session"}
-    granted = mcp_relay_db.approve_crosstalk(
-        openai_session, target_session, expires_at=_ttl_expires_at(decision),
-        approved_by=str(decision.get("approved_by") or "operator"))
-    if granted is None:
-        return {"ok": False, "error": "no pending crosstalk grant to approve"}
-    sess = mcp_relay_db.get_session(openai_session)
-    handle = (sess or {}).get("handle") or openai_session
-    delivery = {}
-    if message.strip():
-        from tools.dashboard import crosstalk_delivery
-        delivery = await crosstalk_delivery.deliver_from_chat(
-            handle, target_session, message)
-    return {"ok": True, "target_session": target_session, "from": handle,
-            "expires_at": granted.get("expires_at"), **delivery}
-
-
-PREPARE_CREATE = {KIND_LINK: prepare_create_link, KIND_CROSSTALK: prepare_create_crosstalk}
-EXECUTORS = {KIND_LINK: execute_link, KIND_CROSSTALK: execute_crosstalk}
-AUTHORIZE_DECISION = {KIND_LINK: _require_operator, KIND_CROSSTALK: _require_operator}
-ENRICH = {KIND_LINK: enrich_link, KIND_CROSSTALK: enrich_crosstalk}
+PREPARE_CREATE = {KIND_LINK: prepare_create_link}
+EXECUTORS = {KIND_LINK: execute_link}
+AUTHORIZE_DECISION = {KIND_LINK: _require_operator}
+ENRICH = {KIND_LINK: enrich_link}

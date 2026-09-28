@@ -2105,32 +2105,6 @@
             };
           },
         },
-        mcp_crosstalk: {
-          open(self, r) {
-            const req = r.request || {};
-            const handle = req.handle || r.session || 'unknown';
-            self.approvalBusy = false;
-            self.approvalRequest = {
-              id: r.id, kind: r.kind, session: handle,
-              title: 'CrossTalk Approval Request', actionLabel: 'Approve & send',
-              target: null,
-              // custom crosstalk layout (no bodyMarkdown, no org/level)
-              xtalk: {
-                handle: handle,
-                intent: req.intent || '',
-                targetSession: req.target_session || 'unknown',
-                targetLabel: r.target_label || '',
-                message: req.message || '(message unavailable)',
-              },
-              ttl: '86400', // default 1 day
-              awaitExecution: true,
-              error: '',
-            };
-          },
-          decision(self, req) {
-            return { ttl_seconds: req.ttl === '' ? null : Number(req.ttl) };
-          },
-        },
         jira_write: {
           open(self, r) {
             const req = r.request || {};

@@ -591,7 +591,8 @@ class TestAttentionOperatorAPI:
         assert len(applications) == 12
         assert sum(len(app.classes) for app in applications) == 19
         assert [app.application_scope for app in applications if app.enabled] == [
-            "mailbox", "links", "sessions", "vault", "fleet", "dropbox", "backup", "machine"
+            "mailbox", "links", "sessions", "vault", "relay", "fleet", "dropbox", "backup",
+            "machine"
         ]
         assert [
             cls.kind
@@ -599,7 +600,7 @@ class TestAttentionOperatorAPI:
             for cls in app.classes
             if cls.publication_enabled
         ] == ["email_send", "link_publish", "link_revoke", "dashboard_access", "vault_open",
-              "fleet_machine_admission", "external_service_access",
+              "mcp_crosstalk", "fleet_machine_admission", "external_service_access",
               "backup.failed",
               "backup.stale", "backup.drill_failed", "backup.offsite_unreachable",
               "machine.tls_certificate_expiring", "machine.vault_handoff_failed"]

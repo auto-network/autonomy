@@ -12,8 +12,10 @@ Two endpoints, both POST:
 - ``/api/mcp/crosstalk/resolve`` — the relay calls this before a ``crosstalk_send``
   to a specific session; opens a per-``(session, target)`` ``mcp_crosstalk`` popup.
 
-All authorization state lives in ``mcp_relay_db``; approvals ride the generalized
-``/api/approvals`` rendezvous. See design note graph://eeb23208-257.
+All authorization state lives in ``mcp_relay_db``. ``mcp_crosstalk`` is a Central
+approval (mcp_crosstalk_central.py; the relay is its registered-service
+requester); ``mcp_peer_link`` still rides the legacy ``/api/approvals``
+rendezvous. See design note graph://eeb23208-257.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import asyncio
 import hashlib
 import hmac
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -31,7 +34,9 @@ from starlette.routing import Route
 
 from tools.data_paths import resolve_data_root
 from tools.dashboard import crosstalk_delivery
+from tools.dashboard import mcp_crosstalk_central as central
 from tools.dashboard import mcp_peer_approvals as kinds
+from tools.dashboard.approval_service import ApprovalServiceError
 from tools.dashboard import web_push
 from tools.dashboard.dao import approval_requests as ar
 from tools.dashboard.dao import auth_db
@@ -268,7 +273,7 @@ async def resolve_crosstalk(request: Request) -> JSONResponse:
     if db.resolve_session(osession)["status"] != db.APPROVED:
         return JSONResponse({"status": "peer_not_linked"})
 
-    grant = _reconcile_crosstalk(osession, target)
+    grant = await _reconcile_crosstalk(osession, target)
 
     if db.crosstalk_allowed(osession, target):
         return JSONResponse({"status": db.APPROVED})
@@ -276,28 +281,73 @@ async def resolve_crosstalk(request: Request) -> JSONResponse:
         return JSONResponse({"status": db.DENIED})
 
     # Open ONE approval carrying the actual message (that's what the operator
-    # authorizes). The relay holds the send pending this decision.
-    db.upsert_pending_crosstalk(osession, target, target_org=target_org)
-    current = db.get_crosstalk_grant(osession, target)
-    rid = current.get("approval_id")
-    if not _has_open_approval(rid):
-        rid = await _open_approval(kinds.KIND_CROSSTALK, _handle(osession), {
-            "openai_session": osession, "target_session": target,
-            "target_org": target_org, "handle": _handle(osession),
-            "message": message, "intent": intent})
-        db.set_crosstalk_approval_id(osession, target, rid)
-    return JSONResponse({"status": db.PENDING, "approval_id": rid})
+    # authorizes). The relay holds the send pending this decision; a repeat
+    # while it is open reuses it and changes nothing.
+    handle = db.ensure_handle(osession) or _handle(osession)
+    opened = await _open_crosstalk(osession, handle, target, target_org, intent, message)
+    if isinstance(opened, JSONResponse):
+        return opened
+    return JSONResponse({"status": db.PENDING, "approval_id": opened})
 
 
-def _reconcile_crosstalk(osession: str, target: str) -> dict | None:
-    """A declined crosstalk approval becomes 'denied' so it stops re-popping."""
+async def _reconcile_crosstalk(osession: str, target: str) -> dict | None:
+    """Apply a decided crosstalk approval to its grant (once, on this machine):
+    a Grant approves it and delivers the held message; a decline denies it."""
     grant = db.get_crosstalk_grant(osession, target)
     if grant and grant.get("status") == db.PENDING and grant.get("approval_id"):
-        appr = ar.get(grant["approval_id"])
-        if appr and appr.get("result") is not None and not appr["result"].get("approved"):
-            db.set_crosstalk_status(osession, target, db.DENIED)
-            grant = db.get_crosstalk_grant(osession, target)
+        await asyncio.to_thread(_crosstalk_desk().apply, grant["approval_id"])
+        grant = db.get_crosstalk_grant(osession, target)
     return grant
+
+
+def _crosstalk_desk():
+    from tools.dashboard import attention_routes
+    desk = attention_routes.approval_runtime().crosstalk_desk
+    if desk is None:
+        raise RuntimeError("the crosstalk desk is not composed")
+    return desk
+
+
+#: Opening is serialized per (chat, target): two concurrent sends must not
+#: each find nothing open and each open an approval.
+_OPEN_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+def _open_lock(osession: str, target: str) -> threading.Lock:
+    digest = hashlib.sha256(f"{osession}\0{target}".encode()).digest()
+    return _OPEN_LOCKS[digest[0] % len(_OPEN_LOCKS)]
+
+
+async def _open_crosstalk(
+    osession: str, handle: str, target: str, target_org: str, intent: str, message: str,
+) -> str | JSONResponse:
+    """The approval this (chat, target) is waiting on: the open one, if any
+    (a repeat send changes nothing), else a new one carrying this message. A
+    message the operator could not review whole is refused here, with the
+    reason, and nothing is opened."""
+    body = {"handle": handle, "target_session": target, "target_org": target_org,
+            "intent": intent, "message": message}
+    try:
+        central.crosstalk_review(body, machine="", label="")
+    except central.CrosstalkRefused as exc:
+        return JSONResponse({"status": "refused", "error": str(exc)}, status_code=400)
+    desk = _crosstalk_desk()
+
+    def open_once() -> str:
+        with _open_lock(osession, target):
+            grant = db.get_crosstalk_grant(osession, target)
+            current = grant.get("approval_id") if grant else None
+            if desk.is_open(current):
+                return current
+            rid = desk.open(body)
+            db.upsert_pending_crosstalk(osession, target, target_org=target_org,
+                                        approval_id=rid)
+            return rid
+
+    try:
+        return await asyncio.to_thread(open_once)
+    except ApprovalServiceError:
+        return JSONResponse({"error": "the approval could not be opened"}, status_code=503)
 
 
 async def crosstalk_status(request: Request) -> JSONResponse:
@@ -316,7 +366,7 @@ async def crosstalk_status(request: Request) -> JSONResponse:
     if not osession or not target:
         return JSONResponse({"error": "openai_session and target_session required"},
                             status_code=400)
-    grant = _reconcile_crosstalk(osession, target)
+    grant = await _reconcile_crosstalk(osession, target)
     if db.crosstalk_allowed(osession, target):
         return JSONResponse({"status": db.APPROVED})
     if grant and grant.get("status") == db.DENIED:
@@ -333,7 +383,7 @@ async def relay_crosstalk(request: Request) -> JSONResponse:
     - live (chat, target) grant  -> deliver now, return `delivered`
     - declined earlier           -> return `denied`
     - otherwise                  -> store the message on ONE approval and return
-      `pending`; the operator's approval delivers it (execute_crosstalk). The
+      `pending`; the operator's approval delivers it (mcp_crosstalk_central). The
       relay does not resend — the held message is delivered on approval.
     """
     err = _relay_auth(request)
@@ -359,7 +409,7 @@ async def relay_crosstalk(request: Request) -> JSONResponse:
         return JSONResponse({"status": "peer_not_linked"})
     handle = db.ensure_handle(osession) or _handle(osession)
 
-    _reconcile_crosstalk(osession, to)
+    await _reconcile_crosstalk(osession, to)
     if db.crosstalk_allowed(osession, to):
         result = await crosstalk_delivery.deliver_from_chat(handle, to, message)
         return JSONResponse({"status": "delivered", "from": handle, **result})
@@ -367,19 +417,13 @@ async def relay_crosstalk(request: Request) -> JSONResponse:
     if grant and grant.get("status") == db.DENIED:
         return JSONResponse({"status": db.DENIED, "from": handle})
 
-    # Reuse an already-open approval (a re-relay of the same undecided send must
-    # not raise a second popup). Only when none is open do we (re)set the pending
-    # grant and open one — note upsert clears approval_id, so it must precede the
-    # set below, never run on the reuse path.
-    rid = grant.get("approval_id") if grant else None
-    if not _has_open_approval(rid):
-        db.upsert_pending_crosstalk(osession, to, target_org=target_org)
-        rid = await _open_approval(kinds.KIND_CROSSTALK, handle, {
-            "openai_session": osession, "target_session": to,
-            "target_org": target_org, "handle": handle,
-            "message": message, "intent": intent})
-        db.set_crosstalk_approval_id(osession, to, rid)
-    return JSONResponse({"status": db.PENDING, "approval_id": rid, "from": handle})
+    # Reuse an already-open approval: a re-relay of the same undecided send
+    # (or a different one) while it is open changes nothing; the operator
+    # decides the message they are looking at.
+    opened = await _open_crosstalk(osession, handle, to, target_org, intent, message)
+    if isinstance(opened, JSONResponse):
+        return opened
+    return JSONResponse({"status": db.PENDING, "approval_id": opened, "from": handle})
 
 
 async def collect_crosstalk(request: Request) -> JSONResponse:

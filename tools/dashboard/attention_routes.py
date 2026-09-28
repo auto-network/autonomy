@@ -332,6 +332,7 @@ class AttentionRouteRuntime:
     vault_open_delivery: Any | None = None
     link_operation_desk: Any | None = None
     enrollment_desk: Any | None = None
+    crosstalk_desk: Any | None = None
 
     def __post_init__(self) -> None:
         if self.operator_result_projectors is None:
@@ -457,6 +458,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
     from tools.dashboard import vault_open_central
     from tools.dashboard import link_approval_central
     from tools.dashboard import external_service_approvals as external
+    from tools.dashboard import mcp_crosstalk_central as crosstalk
     dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
     approval_registry = build_production_registry(runtimes={
         dashboard_access_central.KIND: dashboard_approval_runtime,
@@ -464,6 +466,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
         mailbox_central.KIND: mailbox_central.build_approval_runtime(),
         vault_open_central.KIND: vault_open_central.build_approval_runtime(),
         external.KIND: external.build_approval_runtime(),
+        crosstalk.KIND: crosstalk.build_approval_runtime(),
         **{kind: link_approval_central.build_approval_runtime(kind) for kind in link_approval_central.KINDS},
     })
     approval_waiters = ApprovalWaitHub()
@@ -483,6 +486,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
         registry=approval_registry,
         after_commit=approval_after_commit,
         session_label_resolver=session_requester_label,
+        registered_service_label_resolver=crosstalk.service_label,
     )
     dashboard_attention_runtime = dashboard_access_central.build_attention_runtime(
         approvals,
@@ -499,6 +503,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
             vault_open_central.build_attention_runtime(approvals),
         **{(external.KIND, scope): external.build_attention_runtime(approvals)
            for scope in external.APPLICATIONS},
+        (crosstalk.KIND, crosstalk.APPLICATION_SCOPE): crosstalk.build_attention_runtime(approvals),
         **{(kind, link_approval_central.APPLICATION_SCOPE):
            link_approval_central.build_attention_runtime(approvals, kind) for kind in link_approval_central.KINDS},
     }
@@ -570,6 +575,13 @@ def build_production_runtime() -> AttentionRouteRuntime:
             external.KIND, "dropbox", external.DROPBOX_PRODUCER.producer_id,
         ),
     )
+    crosstalk_desk = crosstalk.CrosstalkDesk(approvals=approvals)
+    crosstalk_coordinator = crosstalk.CrosstalkCoordinator(
+        desk=crosstalk_desk,
+        approvals=approvals,
+        index=index,
+        producer=attention_registry.producer(crosstalk.KIND, crosstalk.APPLICATION_SCOPE),
+    )
     link_desk = link_approval_central.LinkApprovalDesk(approvals=approvals, index=index)
     link_coordinators = [
         link_approval_central.LinkApprovalCoordinator(
@@ -582,7 +594,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
     # other kinds' approval ids.
     reconcilers = mailbox_central.ReconcilerGroup(
         coordinator, email_coordinator, vault_coordinator, enrollment_coordinator,
-        *link_coordinators,
+        crosstalk_coordinator, *link_coordinators,
     )
     coordinator_holder["coordinator"] = reconcilers
     approval_http = ApprovalHttpBridge(
@@ -628,11 +640,13 @@ def build_production_runtime() -> AttentionRouteRuntime:
                                     mailbox_central.KIND: email_consumer.project,
                                     vault_open_central.KIND: vault_delivery.operator_result,
                                     external.KIND: enrollment_desk.operator_result,
+                                    crosstalk.KIND: crosstalk_desk.operator_result,
                                     **{kind: link_desk.operator_result
                                        for kind in link_approval_central.KINDS}},
         vault_open_delivery=vault_delivery,
         link_operation_desk=link_desk,
         enrollment_desk=enrollment_desk,
+        crosstalk_desk=crosstalk_desk,
     )
 
 

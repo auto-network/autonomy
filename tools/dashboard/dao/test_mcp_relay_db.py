@@ -124,18 +124,42 @@ def test_revoke_kills_binding(dbp):
 
 
 def test_crosstalk_grant_lifecycle(dbp):
-    # pending until approved
+    # pending until the decision waiting on it is settled
     db.upsert_pending_crosstalk("v1/sessG", "auto-0809-130519", target_org="personal",
                                 approval_id="x-1", db_path=dbp)
     assert db.crosstalk_allowed("v1/sessG", "auto-0809-130519", db_path=dbp) is False
-    db.approve_crosstalk("v1/sessG", "auto-0809-130519", expires_at=time.time() + 3600,
-                         db_path=dbp)
+    db.settle_crosstalk("x-1", status=db.APPROVED, outcome="delivering",
+                        expires_at=time.time() + 3600, db_path=dbp)
     assert db.crosstalk_allowed("v1/sessG", "auto-0809-130519", db_path=dbp) is True
     # a different target is a separate, ungranted pair
     assert db.crosstalk_allowed("v1/sessG", "auto-9999-000000", db_path=dbp) is False
 
 
 def test_crosstalk_grant_expiry(dbp):
-    db.upsert_pending_crosstalk("v1/sessH", "auto-x", db_path=dbp)
-    db.approve_crosstalk("v1/sessH", "auto-x", expires_at=time.time() - 1, db_path=dbp)
+    db.upsert_pending_crosstalk("v1/sessH", "auto-x", approval_id="x-2", db_path=dbp)
+    db.settle_crosstalk("x-2", status=db.APPROVED, outcome="delivering",
+                        expires_at=time.time() - 1, db_path=dbp)
     assert db.crosstalk_allowed("v1/sessH", "auto-x", db_path=dbp) is False
+
+
+def test_a_decision_settles_its_grant_once_with_its_outcome(dbp):
+    db.upsert_pending_crosstalk("v1/sessI", "auto-x", approval_id="x-3", db_path=dbp)
+    first = db.settle_crosstalk("x-3", status=db.APPROVED, outcome="delivering",
+                                owner_pid=7, owner_start="s", db_path=dbp)
+    assert first["openai_session"] == "v1/sessI" and first["approval_id"] == "x-3"
+    assert db.settle_crosstalk("x-3", status=db.APPROVED, outcome="delivering",
+                               db_path=dbp) is None
+    assert db.get_crosstalk_grant("v1/sessI", "auto-x", db_path=dbp)["approval_id"] is None
+    assert db.get_outcome("x-3", db_path=dbp)["state"] == "delivering"
+    assert [r["approval_id"] for r in db.outcomes_in_state("delivering", db_path=dbp)] == ["x-3"]
+    assert db.finish_outcome("x-3", "delivered", expect="delivering", db_path=dbp)
+    assert not db.finish_outcome("x-3", "delivery_failed", expect="delivering", db_path=dbp)
+    assert db.get_outcome("x-3", db_path=dbp)["state"] == "delivered"
+
+
+def test_a_decision_for_a_replaced_approval_settles_nothing(dbp):
+    db.upsert_pending_crosstalk("v1/sessJ", "auto-x", approval_id="old", db_path=dbp)
+    db.upsert_pending_crosstalk("v1/sessJ", "auto-x", approval_id="new", db_path=dbp)
+    assert db.settle_crosstalk("old", status=db.DENIED, outcome="declined", db_path=dbp) is None
+    assert db.get_outcome("old", db_path=dbp) is None
+    assert db.get_crosstalk_grant("v1/sessJ", "auto-x", db_path=dbp)["status"] == db.PENDING
