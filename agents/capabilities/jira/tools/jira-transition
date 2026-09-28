@@ -55,12 +55,12 @@ trap 'rm -f "$req_file"' EXIT
 # ticket + --field values, and only then emit the approval request.
 jira_curl -sk "$DASH/api/jira/transitions/$KEY?org=$ORG" \
   | python3 -c 'import sys, json
-session, key, org, name = sys.argv[1:5]
+key, org, name = sys.argv[1:4]
 d = json.load(sys.stdin)
 if "error" in d: sys.exit("jira: " + str(d["error"]))
 rows = d.get("transitions") or []
 fields = {}
-for kv in sys.argv[5:]:
+for kv in sys.argv[4:]:
     k, sep, v = kv.partition("=")
     if not k or not sep: sys.exit("jira-transition: bad --field (expected Name=value): " + kv)
     fields[k] = v
@@ -85,9 +85,10 @@ if missing:
              + "\n".join(lines)
              + "\nPass each as --field " + chr(39) + "Name=value" + chr(39)
              + " or set them on the ticket first. Nothing was staged for approval.")
-req = {"kind": "jira_write", "session": session, "request":
-       {"op": "transition", "key": key, "org": org, "transition": match["name"]}}
+req = {"kind": "jira_write", "request":
+       {"op": "transition", "key": key, **({"org_slug": org} if org else {}), "transition": match["name"],
+        **({"to_status": match["to_status"]} if match.get("to_status") else {})}}
 if fields: req["request"]["fields"] = fields
-print(json.dumps(req))' "$SESSION" "$KEY" "$ORG" "$NAME" ${FIELDS[@]+"${FIELDS[@]}"} > "$req_file" || exit 1
+print(json.dumps(req))' "$KEY" "$ORG" "$NAME" ${FIELDS[@]+"${FIELDS[@]}"} > "$req_file" || exit 1
 
 jira_approval_wait "$req_file"

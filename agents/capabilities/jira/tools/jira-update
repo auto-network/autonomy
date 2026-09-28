@@ -65,13 +65,13 @@ trap 'rm -f "$body_file" "$req_file"' EXIT
 jira_read_body "$@" > "$body_file"
 [ -s "$body_file" ] || jira_fail "jira-update: empty body"
 
-python3 - "$SESSION" "$KEY" "$body_file" "$ORG" "$FIELD" > "$req_file" <<'PY'
+python3 - "$KEY" "$body_file" "$ORG" "$FIELD" > "$req_file" <<'PY'
 import json, re, sys
-session, key, path, org, field = sys.argv[1:6]
+key, path, org, field = sys.argv[1:5]
 # A literal customfield id skips editmeta name discovery host-side.
 field_key = "field_id" if re.fullmatch(r"customfield_\d+", field) else "field_name"
-print(json.dumps({"kind": "jira_write", "session": session, "request": {
-    "op": "set_field", "key": key, "org": org, field_key: field,
+print(json.dumps({"kind": "jira_write", "request": {
+    "op": "set_field", "key": key, **({"org_slug": org} if org else {}), field_key: field,
     "body_markdown": open(path).read()}}))
 PY
 jira_approval_wait "$req_file"

@@ -771,15 +771,47 @@ def _rich_body(cfg: JiraConfig, key: str, body_markdown: str) -> dict[str, Any]:
     return adf.markdown_to_adf(body_markdown, media_resolver=resolver)
 
 
-def add_comment(cfg: JiraConfig, key: str, body_markdown: str) -> dict[str, Any]:
-    with _client(cfg) as c:
-        resp = c.post(f"/rest/api/3/issue/{key}/comment",
-                      json={"body": _rich_body(cfg, key, body_markdown)})
-        _check(resp, f"comment on {key}")
-        body = resp.json()
+def _properties(tag: dict[str, str] | None) -> list[dict[str, Any]]:
+    return [{"key": k, "value": {"id": v}} for k, v in (tag or {}).items()]
+
+
+def _comment_result(body: dict[str, Any]) -> dict[str, Any]:
     return {"id": body.get("id"),
             "author": (body.get("author") or {}).get("displayName"),
             "created": body.get("created")}
+
+
+def add_comment(cfg: JiraConfig, key: str, body_markdown: str,
+                tag: dict[str, str] | None = None) -> dict[str, Any]:
+    """Post a comment. ``tag`` ({property key: id}) is stored as comment
+    properties, so the comment can be found again (:func:`find_comment`)."""
+    payload: dict[str, Any] = {"body": _rich_body(cfg, key, body_markdown)}
+    if tag:
+        payload["properties"] = _properties(tag)
+    with _client(cfg) as c:
+        resp = c.post(f"/rest/api/3/issue/{key}/comment", json=payload)
+        _check(resp, f"comment on {key}")
+        body = resp.json()
+    return _comment_result(body)
+
+
+def find_comment(cfg: JiraConfig, key: str, prop: str, value: str) -> dict[str, Any] | None:
+    """The comment on *key* tagged ``prop`` = *value* by :func:`add_comment`."""
+    start = 0
+    with _client(cfg) as c:
+        while True:
+            resp = c.get(f"/rest/api/3/issue/{key}/comment",
+                         params={"expand": "properties", "startAt": start, "maxResults": 100})
+            _check(resp, f"list comments on {key}")
+            page = resp.json()
+            comments = page.get("comments") or []
+            for comment in comments:
+                for item in comment.get("properties") or []:
+                    if item.get("key") == prop and (item.get("value") or {}).get("id") == value:
+                        return _comment_result(comment)
+            start += len(comments)
+            if not comments or start >= int(page.get("total") or 0):
+                return None
 
 
 def set_field(cfg: JiraConfig, key: str, field_id: str,
@@ -827,17 +859,51 @@ def set_editable_field(cfg: JiraConfig, key: str, field_reference: str,
     return {"field_id": field["id"]}
 
 
-def create_issue(cfg: JiraConfig, fields: dict[str, Any]) -> dict[str, Any]:
-    """Create an issue. A plain-string ``description`` is converted to ADF."""
+def create_issue(cfg: JiraConfig, fields: dict[str, Any],
+                 tag: dict[str, str] | None = None) -> dict[str, Any]:
+    """Create an issue. A plain-string ``description`` is converted to ADF.
+    ``tag`` ({property key: id}) is stored as issue properties, so the issue
+    can be found again (:func:`find_created_issue`)."""
     fields = dict(fields)
     if isinstance(fields.get("description"), str):
         fields["description"] = adf.markdown_to_adf(fields["description"])
+    payload: dict[str, Any] = {"fields": fields}
+    if tag:
+        payload["properties"] = _properties(tag)
     with _client(cfg) as c:
-        resp = c.post("/rest/api/3/issue", json={"fields": fields})
+        resp = c.post("/rest/api/3/issue", json=payload)
         _check(resp, "create issue")
         body = resp.json()
     return {"key": body.get("key"), "id": body.get("id"),
             "url": f"{cfg.base_url}/browse/{body.get('key')}"}
+
+
+def find_created_issue(cfg: JiraConfig, project: str, summary: str, prop: str,
+                       value: str) -> dict[str, Any] | None:
+    """The issue :func:`create_issue` created with ``prop`` = *value*: recent
+    issues this account reported in *project* with this summary, confirmed by
+    the property (issue properties set over REST are not JQL-indexed)."""
+    quoted = summary.replace("\\", "\\\\").replace('"', '\\"')
+    jql = (f'project = "{project}" AND reporter = currentUser() AND created >= -7d '
+           f'AND summary ~ "\\"{quoted}\\"" ORDER BY created DESC')
+    rows = search_issues(cfg, jql, 50).get("items") or []
+    with _client(cfg) as c:
+        for row in rows:
+            key = row.get("key")
+            resp = c.get(f"/rest/api/3/issue/{key}/properties/{prop}")
+            if resp.status_code == 404:
+                continue
+            _check(resp, f"read {prop} on {key}")
+            if (resp.json().get("value") or {}).get("id") == value:
+                return {"key": key, "url": f"{cfg.base_url}/browse/{key}"}
+    return None
+
+
+def issue_status(cfg: JiraConfig, key: str) -> str:
+    with _client(cfg) as c:
+        resp = c.get(f"/rest/api/3/issue/{key}", params={"fields": "status"})
+        _check(resp, f"read {key}")
+        return ((resp.json().get("fields") or {}).get("status") or {}).get("name") or ""
 
 
 def get_attachment(cfg: JiraConfig, attachment_id: str) -> tuple[bytes, str, str]:

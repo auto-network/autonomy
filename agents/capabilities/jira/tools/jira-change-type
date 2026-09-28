@@ -41,7 +41,7 @@ trap 'rm -f "$req_file"' EXIT
 # then emit the approval request — nothing is staged for a doomed change.
 jira_curl -sk "$DASH/api/jira/issue-types/$KEY?org=$ORG" \
   | python3 -c 'import sys, json
-session, key, org, target = sys.argv[1:5]
+key, org, target = sys.argv[1:4]
 d = json.load(sys.stdin)
 if "error" in d: sys.exit("jira: " + str(d["error"]))
 cur = d.get("current") or {}
@@ -59,9 +59,9 @@ if match.get("subtask") or cur.get("subtask"):
     sys.exit("jira-change-type: " + str(cur.get("name")) + " -> " + str(match.get("name"))
              + " crosses the sub-task boundary; the Jira REST API cannot do that Move —"
              + " ask the operator to do it in the Jira UI. Nothing was staged for approval.")
-print(json.dumps({"kind": "jira_write", "session": session, "request":
-                  {"op": "change_type", "key": key, "org": org,
+print(json.dumps({"kind": "jira_write", "request":
+                  {"op": "change_type", "key": key, **({"org_slug": org} if org else {}),
                    "issue_type": match.get("name")}}))' \
-  "$SESSION" "$KEY" "$ORG" "$TYPE" > "$req_file" || exit 1
+  "$KEY" "$ORG" "$TYPE" > "$req_file" || exit 1
 
 jira_approval_wait "$req_file"

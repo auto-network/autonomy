@@ -13,8 +13,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from agents.capabilities.jira.backend import adf, api, queries
-from tools.dashboard import approvals_routes, jira_routes
-from tools.dashboard.dao import approval_requests as ar
+from tools.dashboard import jira_routes
 
 CAPABILITY_DIR = Path(__file__).resolve().parents[3] / "agents" / "capabilities" / "jira"
 
@@ -257,7 +256,6 @@ def jira_env(tmp_path, monkeypatch):
     monkeypatch.setenv("JIRA_BASE_URL", "https://jira.test")
     monkeypatch.setenv("JIRA_EMAIL", "op@example.com")
     monkeypatch.setenv("JIRA_TOKEN_FILE", str(token_file))
-    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
     return token_file
 
 
@@ -986,11 +984,11 @@ def test_queries_with_no_overrides():
         queries.resolve_query({}, "mine", {})
 
 
-# ── routes + the jira_write executor on the approval rendezvous ──
+# ── the read routes ──
 
 
 def _app():
-    return Starlette(routes=[*approvals_routes.ROUTES, *jira_routes.ROUTES])
+    return Starlette(routes=jira_routes.ROUTES)
 
 
 def test_read_route(jira_env, monkeypatch):
@@ -1240,261 +1238,12 @@ def test_transitions_read_route(jira_env, monkeypatch):
     assert out["transitions"][0]["required_fields"][0]["has_value"] is False
 
 
-def test_jira_write_transition_flow(jira_env, monkeypatch):
-    """op=transition through the approval rendezvous: executor re-resolves
-    the transition by name and posts it with coerced fields."""
-    posted = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET":
-            return httpx.Response(200, json=_TRANSITIONS_JSON)
-        posted["path"] = request.url.path
-        posted["body"] = json.loads(request.content)
-        return httpx.Response(204)
-
-    _mock(monkeypatch, handler)
-
-    async def scenario():
-        transport = httpx.ASGITransport(app=_app())
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://t") as c:
-            r = await c.post("/api/approvals", json={
-                "kind": "jira_write", "session": "auto-1",
-                "request": {"op": "transition", "key": "PROJ-8348",
-                            "transition": "Pending RC"}})
-            rid = r.json()["id"]
-            await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
-            result = (await c.get(f"/api/approvals/{rid}?wait=10")).json()["result"]
-            assert result["execution"] == {
-                "ok": True, "transition": "Ready for RC",
-                "to_status": "Pending RC", "fields_set": []}
-            assert posted["path"] == "/rest/api/3/issue/PROJ-8348/transitions"
-            assert posted["body"] == {"transition": {"id": "41"}}
-
-    asyncio.run(scenario())
-
-
 def test_issue_types_read_route(jira_env, monkeypatch):
     _mock(monkeypatch, _issue_type_handler())
     client = TestClient(_app())
     out = client.get("/api/jira/issue-types/ENT-1").json()
     assert out["current"]["name"] == "Task"
     assert [t["name"] for t in out["issue_types"]] == ["Bug", "Task", "Sub-task"]
-
-
-def test_jira_write_change_type_flow(jira_env, monkeypatch):
-    """op=change_type through the approval rendezvous: executor re-resolves
-    the target type and PUTs the numeric id."""
-    seen = {}
-    _mock(monkeypatch, _issue_type_handler(seen))
-
-    async def scenario():
-        transport = httpx.ASGITransport(app=_app())
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://t") as c:
-            r = await c.post("/api/approvals", json={
-                "kind": "jira_write", "session": "auto-1",
-                "request": {"op": "change_type", "key": "ENT-1",
-                            "issue_type": "Bug"}})
-            rid = r.json()["id"]
-            await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
-            result = (await c.get(f"/api/approvals/{rid}?wait=10")).json()["result"]
-            assert result["execution"] == {
-                "ok": True, "key": "ENT-1", "from": "Task", "to": "Bug"}
-            assert seen["body"] == {"fields": {"issuetype": {"id": "10001"}}}
-
-    asyncio.run(scenario())
-
-
-def test_jira_write_full_flow_comment(jira_env, monkeypatch):
-    """Agent stages the write -> operator approves (bare verdict) -> executor
-    posts the comment host-side -> the agent's held GET gets the outcome."""
-    posted = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        posted["path"] = request.url.path
-        posted["body"] = json.loads(request.content)
-        return httpx.Response(201, json={
-            "id": "64029", "author": {"displayName": "Op"}, "created": "now"})
-
-    _mock(monkeypatch, handler)
-
-    async def scenario():
-        transport = httpx.ASGITransport(app=_app())
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://t") as c:
-            r = await c.post("/api/approvals", json={
-                "kind": "jira_write", "session": "auto-0708-115817",
-                "request": {"op": "comment", "key": "PROJ-8385",
-                            "body_markdown": "root cause analysis…"}})
-            rid = r.json()["id"]
-            held = asyncio.create_task(c.get(f"/api/approvals/{rid}?wait=30"))
-            await asyncio.sleep(0.05)
-            assert (await c.post(f"/api/approvals/{rid}/decision",
-                                 json={"approved": True})).json() == {"ok": True}
-            result = (await held).json()["result"]
-            assert result["approved"] is True
-            assert result["execution"] == {"ok": True, "id": "64029",
-                                           "author": "Op", "created": "now"}
-            assert posted["path"] == "/rest/api/3/issue/PROJ-8385/comment"
-            assert posted["body"]["body"]["type"] == "doc"
-
-    asyncio.run(scenario())
-
-
-def test_jira_write_declined_never_touches_jira(jira_env, monkeypatch):
-    calls = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.url.path)
-        return httpx.Response(500)
-
-    _mock(monkeypatch, handler)
-    client = TestClient(_app())
-    rid = client.post("/api/approvals", json={
-        "kind": "jira_write", "session": "auto-1",
-        "request": {"op": "comment", "key": "ENT-1", "body_markdown": "x"},
-    }).json()["id"]
-    assert client.post(f"/api/approvals/{rid}/decision",
-                       json={"approved": False}).json() == {"ok": True}
-    assert client.get(f"/api/approvals/{rid}").json()["result"] == {"approved": False}
-    assert calls == []   # no Jira traffic without an approval
-
-
-def test_jira_write_set_field_discovers_id_and_sends_adf(jira_env, monkeypatch):
-    """The Confirm Plan path: field id discovered via editmeta at execution
-    time, value written as ADF."""
-    seen = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((request.method, request.url.path))
-        if request.url.path.endswith("/editmeta"):
-            return httpx.Response(200, json={"fields": {
-                "customfield_10153": {"name": "Confirm Plan"}}})
-        body = json.loads(request.content)
-        assert body["fields"]["customfield_10153"]["type"] == "doc"
-        return httpx.Response(204)
-
-    _mock(monkeypatch, handler)
-
-    async def scenario():
-        transport = httpx.ASGITransport(app=_app())
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://t") as c:
-            r = await c.post("/api/approvals", json={
-                "kind": "jira_write", "session": "auto-1",
-                "request": {"op": "set_field", "key": "PROJ-8385",
-                            "field_name": "Confirm Plan",
-                            "body_markdown": "1. run `widgetctl version`\n2. expect 5.19"}})
-            rid = r.json()["id"]
-            await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
-            result = (await c.get(f"/api/approvals/{rid}?wait=10")).json()["result"]
-            assert result["execution"] == {"ok": True, "field_id": "customfield_10153"}
-            assert ("GET", "/rest/api/3/issue/PROJ-8385/editmeta") in seen
-            assert ("PUT", "/rest/api/3/issue/PROJ-8385") in seen
-
-    asyncio.run(scenario())
-
-
-def test_jira_write_set_field_coerces_structured_value(jira_env, monkeypatch):
-    """The approval executor applies schema coercion outside transitions."""
-    posted = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/editmeta"):
-            return httpx.Response(200, json={"fields": {
-                "fixVersions": {
-                    "name": "Fix versions",
-                    "schema": {"type": "array", "items": "version"},
-                },
-            }})
-        posted["body"] = json.loads(request.content)
-        return httpx.Response(204)
-
-    _mock(monkeypatch, handler)
-
-    async def scenario():
-        transport = httpx.ASGITransport(app=_app())
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://t") as c:
-            r = await c.post("/api/approvals", json={
-                "kind": "jira_write",
-                "session": "auto-1",
-                "request": {
-                    "op": "set_field",
-                    "key": "PROJ-8853",
-                    "field_name": "Fix versions",
-                    "body_markdown": "Widgets 6.2.0\n",
-                },
-            })
-            rid = r.json()["id"]
-            await c.post(
-                f"/api/approvals/{rid}/decision",
-                json={"approved": True},
-            )
-            result = (
-                await c.get(f"/api/approvals/{rid}?wait=10")
-            ).json()["result"]
-            assert result["execution"] == {
-                "ok": True,
-                "field_id": "fixVersions",
-            }
-
-    asyncio.run(scenario())
-    assert posted["body"] == {
-        "fields": {"fixVersions": [{"name": "Widgets 6.2.0"}]},
-    }
-
-
-def test_jira_write_story_points_uses_approval_executor(jira_env, monkeypatch):
-    """The dedicated estimation write remains behind the shared approval gate."""
-    called = {}
-
-    def fake_set_story_points(cfg, key, value, board_id=None):
-        called.update(key=key, value=value, board_id=board_id)
-        return {
-            "board_id": int(board_id),
-            "field_id": "customfield_10106",
-            "value": "5.0",
-        }
-
-    monkeypatch.setattr(api, "set_story_points", fake_set_story_points)
-
-    async def scenario():
-        transport = httpx.ASGITransport(app=_app())
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://t") as c:
-            response = await c.post("/api/approvals", json={
-                "kind": "jira_write",
-                "session": "auto-1",
-                "request": {
-                    "op": "set_story_points",
-                    "key": "PROJ-8917",
-                    "value": "5",
-                    "board_id": 42,
-                },
-            })
-            request_id = response.json()["id"]
-            await c.post(
-                f"/api/approvals/{request_id}/decision",
-                json={"approved": True},
-            )
-            result = (
-                await c.get(f"/api/approvals/{request_id}?wait=10")
-            ).json()["result"]
-            assert result["execution"] == {
-                "ok": True,
-                "board_id": 42,
-                "field_id": "customfield_10106",
-                "value": "5.0",
-            }
-
-    asyncio.run(scenario())
-    assert called == {
-        "key": "PROJ-8917",
-        "value": "5",
-        "board_id": 42,
-    }
 
 
 def test_attachment_download_route(jira_env, monkeypatch):
@@ -1512,57 +1261,201 @@ def test_attachment_download_route(jira_env, monkeypatch):
     assert 'filename="repro.log"' in resp.headers["content-disposition"]
 
 
-def test_jira_write_attach_flow(jira_env, monkeypatch):
+# ── jira_write as a Central approval: the Jira calls a Grant makes ──
+
+
+def _central(tmp_path):
+    """The real ApprovalService + JiraWriteDesk, with staging in tmp_path and
+    an in-memory journal; returns (create, grant_and_run)."""
+    from tools.dashboard import api_auth as auth
+    from tools.dashboard import jira_central as jc
+    from tools.dashboard.approval_kind_registry import build_production_registry
+    from tools.dashboard.approval_service import (
+        ApprovalService, HumanApprovalActor, InMemoryApprovalStore)
+    from tools.network.idkit.keys import KeyPair
+
+    root = KeyPair.generate()
+    staging = jc.Staging(root=lambda: tmp_path / "jira-staging")
+    registry = build_production_registry(runtimes={jc.KIND: jc.build_approval_runtime(
+        destination_resolver=lambda: "h" * 43, machine_label=lambda: "Home",
+        staging=staging)})
+    approvals = ApprovalService(registry=registry, store=InMemoryApprovalStore(),
+                                personal_root_resolver=lambda: root.public_hex,
+                                session_label_resolver=lambda s: f"{s} · Jira")
+    journal: dict = {}
+    desk = jc.JiraWriteDesk(approvals=approvals, destination_resolver=lambda: "h" * 43,
+                            staging=staging, journal=journal.get,
+                            record=journal.__setitem__)
+    agent = auth.ApiPrincipal(auth.ApiPrincipalKind.ORG_SESSION, subject="auto-1", org="acme")
+
+    def create(request):
+        return approvals.create_from_principal(jc.KIND, agent, request).approval_id
+
+    def decide(approval_id, outcome="granted"):
+        approvals.decide(approval_id, HumanApprovalActor._verified(root.public_hex),
+                         outcome=outcome, decision={})
+        status = approvals.status(approval_id)
+        desk.materialize(status)
+        return desk.requester_result(approvals.status(approval_id))
+
+    return create, decide
+
+
+def test_jira_write_transition_flow(jira_env, monkeypatch, tmp_path):
+    """op=transition: the execution re-resolves the transition by name and
+    posts it."""
+    posted = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=_TRANSITIONS_JSON)
+        posted["path"] = request.url.path
+        posted["body"] = json.loads(request.content)
+        return httpx.Response(204)
+
+    _mock(monkeypatch, handler)
+    create, decide = _central(tmp_path)
+    result = decide(create({"op": "transition", "key": "PROJ-8348",
+                            "transition": "Pending RC"}))
+    assert result["execution"] == {"ok": True, "transition": "Ready for RC",
+                                   "to_status": "Pending RC", "fields_set": []}
+    assert posted["path"] == "/rest/api/3/issue/PROJ-8348/transitions"
+    assert posted["body"] == {"transition": {"id": "41"}}
+
+
+def test_jira_write_change_type_flow(jira_env, monkeypatch, tmp_path):
+    seen = {}
+    _mock(monkeypatch, _issue_type_handler(seen))
+    create, decide = _central(tmp_path)
+    result = decide(create({"op": "change_type", "key": "ENT-1", "issue_type": "Bug"}))
+    assert result["execution"] == {"ok": True, "key": "ENT-1", "from": "Task", "to": "Bug"}
+    assert seen["body"] == {"fields": {"issuetype": {"id": "10001"}}}
+
+
+def test_jira_write_comment_flow_is_tagged_with_its_approval(jira_env, monkeypatch, tmp_path):
+    posted = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted["path"] = request.url.path
+        posted["body"] = json.loads(request.content)
+        return httpx.Response(201, json={
+            "id": "64029", "author": {"displayName": "Op"}, "created": "now"})
+
+    _mock(monkeypatch, handler)
+    create, decide = _central(tmp_path)
+    rid = create({"op": "comment", "key": "PROJ-8385",
+                  "body_markdown": "root cause analysis…"})
+    result = decide(rid)
+    assert result == {"approved": True, "execution": {"ok": True, "id": "64029",
+                                                      "author": "Op", "created": "now"}}
+    assert posted["path"] == "/rest/api/3/issue/PROJ-8385/comment"
+    assert posted["body"]["body"]["type"] == "doc"
+    assert posted["body"]["properties"] == [{"key": "autonomy.approval", "value": {"id": rid}}]
+
+
+def test_jira_write_declined_never_touches_jira(jira_env, monkeypatch, tmp_path):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(500)
+
+    _mock(monkeypatch, handler)
+    create, decide = _central(tmp_path)
+    assert decide(create({"op": "comment", "key": "ENT-1", "body_markdown": "x"}),
+                  outcome="declined") is None
+    assert calls == []   # no Jira traffic without an approval
+
+
+def test_jira_write_set_field_discovers_id_and_sends_adf(jira_env, monkeypatch, tmp_path):
+    """The Confirm Plan path: field id discovered via editmeta at execution
+    time, value written as ADF."""
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path.endswith("/editmeta"):
+            return httpx.Response(200, json={"fields": {
+                "customfield_10153": {"name": "Confirm Plan"}}})
+        body = json.loads(request.content)
+        assert body["fields"]["customfield_10153"]["type"] == "doc"
+        return httpx.Response(204)
+
+    _mock(monkeypatch, handler)
+    create, decide = _central(tmp_path)
+    result = decide(create({"op": "set_field", "key": "PROJ-8385",
+                            "field_name": "Confirm Plan",
+                            "body_markdown": "1. run `widgetctl version`\n2. expect 5.19"}))
+    assert result["execution"] == {"ok": True, "field_id": "customfield_10153"}
+    assert ("GET", "/rest/api/3/issue/PROJ-8385/editmeta") in seen
+    assert ("PUT", "/rest/api/3/issue/PROJ-8385") in seen
+
+
+def test_jira_write_set_field_coerces_structured_value(jira_env, monkeypatch, tmp_path):
+    posted = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/editmeta"):
+            return httpx.Response(200, json={"fields": {
+                "fixVersions": {"name": "Fix versions",
+                                "schema": {"type": "array", "items": "version"}}}})
+        posted["body"] = json.loads(request.content)
+        return httpx.Response(204)
+
+    _mock(monkeypatch, handler)
+    create, decide = _central(tmp_path)
+    result = decide(create({"op": "set_field", "key": "PROJ-8853",
+                            "field_name": "Fix versions",
+                            "body_markdown": "Widgets 6.2.0\n"}))
+    assert result["execution"] == {"ok": True, "field_id": "fixVersions"}
+    assert posted["body"] == {"fields": {"fixVersions": [{"name": "Widgets 6.2.0"}]}}
+
+
+def test_jira_write_story_points_flow(jira_env, monkeypatch, tmp_path):
+    called = {}
+
+    def fake_set_story_points(cfg, key, value, board_id=None):
+        called.update(key=key, value=value, board_id=board_id)
+        return {"board_id": int(board_id), "field_id": "customfield_10106", "value": "5.0"}
+
+    monkeypatch.setattr(api, "set_story_points", fake_set_story_points)
+    create, decide = _central(tmp_path)
+    result = decide(create({"op": "set_story_points", "key": "PROJ-8917",
+                            "value": "5", "board_id": 42, "field_id": "customfield_10106",
+                            "previous_value": None}))
+    assert result["execution"] == {"ok": True, "board_id": 42,
+                                   "field_id": "customfield_10106", "value": "5.0"}
+    assert called == {"key": "PROJ-8917", "value": "5", "board_id": 42}
+
+
+def test_jira_write_attach_flow(jira_env, monkeypatch, tmp_path):
     import base64 as b64
     uploaded = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         uploaded["path"] = request.url.path
         uploaded["content"] = request.content
-        return httpx.Response(200, json=[{"id": "9", "filename": "repro.log",
-                                          "size": 9}])
+        return httpx.Response(200, json=[{"id": "9", "filename": "repro.log", "size": 9}])
 
     _mock(monkeypatch, handler)
-
-    async def scenario():
-        transport = httpx.ASGITransport(app=_app())
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://t") as c:
-            r = await c.post("/api/approvals", json={
-                "kind": "jira_write", "session": "auto-1",
-                "request": {"op": "attach", "key": "ENT-1",
-                            "filename": "repro.log", "size": 9,
-                            "mime_type": "text/plain",
-                            "content_b64": b64.b64encode(b"log line\n").decode()}})
-            rid = r.json()["id"]
-            await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
-            result = (await c.get(f"/api/approvals/{rid}?wait=10")).json()["result"]
-            assert result["execution"] == {"ok": True, "id": "9",
-                                           "filename": "repro.log", "size": 9}
-            assert uploaded["path"] == "/rest/api/3/issue/ENT-1/attachments"
-            assert b"log line" in uploaded["content"]
-
-    asyncio.run(scenario())
+    create, decide = _central(tmp_path)
+    result = decide(create({"op": "attach", "key": "ENT-1", "filename": "repro.log",
+                            "size": 9, "mime_type": "text/plain",
+                            "content_b64": b64.b64encode(b"log line\n").decode()}))
+    assert result["execution"] == {"ok": True, "id": "9", "filename": "repro.log", "size": 9}
+    assert uploaded["path"] == "/rest/api/3/issue/ENT-1/attachments"
+    assert b"log line" in uploaded["content"]
 
 
-def test_jira_write_failure_lands_in_result(jira_env, monkeypatch):
+def test_jira_write_failure_lands_in_result(jira_env, monkeypatch, tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json={"errorMessages": ["bad field"]})
 
     _mock(monkeypatch, handler)
+    create, decide = _central(tmp_path)
+    result = decide(create({"op": "create", "fields": {
+        "project": {"key": "ENT"}, "summary": "s", "issuetype": {"name": "Task"}}}))
+    assert result["approved"] is True
+    assert result["execution"]["ok"] is False
+    assert "bad field" in result["execution"]["error"]
 
-    async def scenario():
-        transport = httpx.ASGITransport(app=_app())
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://t") as c:
-            r = await c.post("/api/approvals", json={
-                "kind": "jira_write", "session": "auto-1",
-                "request": {"op": "create", "fields": {"summary": "s"}}})
-            rid = r.json()["id"]
-            await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
-            result = (await c.get(f"/api/approvals/{rid}?wait=10")).json()["result"]
-            assert result["approved"] is True
-            assert result["execution"]["ok"] is False
-            assert "bad field" in result["execution"]["error"]
-
-    asyncio.run(scenario())

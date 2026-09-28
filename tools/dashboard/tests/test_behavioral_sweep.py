@@ -5682,71 +5682,6 @@ MCP_LINK_APPROVAL_CHECKS = """(async () => {
 })()"""
 
 
-JIRA_CREATE_APPROVAL_CHECKS = """(async () => {
-    var r = {};
-    var q = function(id) { return document.querySelector('[data-testid="' + id + '"]'); };
-    var data = window._worktreeReviewOverlay;
-    if (!data) { r.error = 'no review-overlay component'; return JSON.stringify(r); }
-
-    var description = '## Summary\\n\\nFirst line.\\n\\nSecond line.';
-    var fields = {
-        project: {key: 'ENTERPRISE'},
-        issuetype: {name: 'Bug'},
-        summary: 'Readable approval preview',
-        description: description,
-    };
-    data._approvalKinds.jira_write.open(data, {
-        id: 'apr-jira-create-1',
-        kind: 'jira_write',
-        session: 'auto-agent-1',
-        result: null,
-        request: {op: 'create', org: 'autonomy', fields: fields},
-    });
-    await Alpine.nextTick();
-
-    var body = q('approval-body');
-    var fieldPreview = q('approval-fields');
-    r.body_text = body ? body.textContent : null;
-    r.body_has_real_newlines = !!body && body.textContent.indexOf('\\n\\n') !== -1;
-    r.description_removed_from_fields =
-        !Object.prototype.hasOwnProperty.call(data.approvalRequest.fields, 'description');
-    r.remaining_fields_text = fieldPreview ? fieldPreview.textContent : '';
-    r.input_was_not_mutated = fields.description === description;
-    r.target = data.approvalRequest.target;
-
-    data.approvalRequest = null;
-    await Alpine.nextTick();
-
-    data._approvalKinds.jira_write.open(data, {
-        id: 'apr-jira-points-1',
-        kind: 'jira_write',
-        session: 'auto-agent-1',
-        result: null,
-        request: {
-            op: 'set_story_points',
-            org: 'anchore',
-            key: 'PROJ-8917',
-            value: '5',
-            previous_value: null,
-            board_id: 78,
-            field_id: 'customfield_10028',
-        },
-    });
-    await Alpine.nextTick();
-    var pointsBody = q('approval-body');
-    var approveButton = q('approval-approve-button');
-    r.points_title = data.approvalRequest.title;
-    r.points_action = data.approvalRequest.actionLabel;
-    r.points_body = pointsBody ? pointsBody.textContent : '';
-    r.points_button = approveButton ? approveButton.textContent.replace(/\\s+/g, ' ').trim() : '';
-    r.points_target = data.approvalRequest.target;
-
-    data.approvalRequest = null;
-    await Alpine.nextTick();
-    return JSON.stringify(r);
-})()"""
-
-
 DASHBOARD_ACCESS_APPROVAL_CHECKS = """(async () => {
     var r = {};
     var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
@@ -5833,8 +5768,10 @@ DASHBOARD_ACCESS_APPROVAL_CHECKS = """(async () => {
                 approvalGets++;
                 await sleep(40);
                 return json({
-                    id: 'apr-generic-dedup', kind: 'jira_write', session: 'auto-agent-jira',
-                    request: {op: 'comment', key: 'AUTO-123', body_markdown: 'Ship it.'},
+                    id: 'apr-generic-dedup', kind: 'mcp_peer_link', session: 'ChatGPT-20260928-160000',
+                    request: {openai_session: 'v1/x', openai_subject: 's', openai_org: 'o',
+                              intent: 'read the graph', requested_org: 'autonomy', requested_level: 'read'},
+                    orgs: ['autonomy'], default_org: 'autonomy',
                     result: null,
                 });
             }
@@ -5964,7 +5901,7 @@ class TestDashboardAccessApproval:
         c = self._checks
         assert c["duplicate_fetch_count"] == 1
         assert c["duplicate_sheet_open"] is True
-        assert c["duplicate_kind"] == "jira_write"
+        assert c["duplicate_kind"] == "mcp_peer_link"
 
 
 class TestMcpLinkApprovalDefaults:
@@ -5999,43 +5936,6 @@ class TestMcpLinkApprovalDefaults:
 # The contract -- fixed expiry shown, no duration choice, the frozen org:join
 # payload signed exactly with no ttl -- is approval_adapters.test.mjs's org:join
 # test, which also caught the hidden expiry (auto-xdy5v).
-
-
-class TestJiraCreateApprovalPreview:
-    """Creation descriptions render as readable text, outside the fields JSON."""
-
-    @pytest.fixture(scope="class", autouse=True)
-    @classmethod
-    def checks(cls, browser, request):
-        request.cls._checks = _navigate_and_eval_async(
-            "/worktrees", JIRA_CREATE_APPROVAL_CHECKS, wait_ms=1200)
-
-    def test_description_uses_readable_body_with_real_newlines(self):
-        c = self._checks
-        assert c.get("body_text") == "## Summary\n\nFirst line.\n\nSecond line.", c
-        assert c["body_has_real_newlines"] is True
-
-    def test_remaining_fields_stay_visible_without_duplicate_description(self):
-        c = self._checks
-        assert c["description_removed_from_fields"] is True
-        assert '"summary": "Readable approval preview"' in c["remaining_fields_text"]
-        assert '"description"' not in c["remaining_fields_text"]
-        assert c["target"] == "PROJ"
-
-    def test_preview_derivation_does_not_mutate_staged_request(self):
-        assert self._checks["input_was_not_mutated"] is True
-
-    def test_story_points_value_is_prominent_in_prompt_and_action(self):
-        c = self._checks
-        assert c["points_title"] == "Set 5 story points"
-        assert c["points_action"] == "Set 5 story points"
-        assert "Set 5 story points" in c["points_button"]
-        assert c["points_target"] == "PROJ-8917"
-
-    def test_story_points_body_shows_current_and_proposed_values(self):
-        assert self._checks["points_body"] == (
-            "Story Points\n\nCurrent: Unestimated\nNew: 5 story points"
-        )
 
 
 class TestWorktreesRebaseStatusBehavior:

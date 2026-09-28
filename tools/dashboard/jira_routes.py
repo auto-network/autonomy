@@ -2,37 +2,36 @@
 
 Reads are direct: an agent's ``jira-read``/``jira-createmeta`` shim calls these
 routes and the Jira call runs here, host-side — the container never holds the
-token. Writes never execute from an agent call at all: the agent stages a
-``kind=jira_write`` approval request, the operator approves or declines in the
-overlay, and the ``jira_write`` executor registered below performs the call as
-a post-approval backend task, delivering the outcome through the approval
-result. Ops carried in the request JSON:
+token. Writes never execute from an agent call at all: the agent opens a
+``kind=jira_write`` Central approval, the operator decides it in the Central
+inbox, and jira_central.py performs the write once on this machine, delivering
+the outcome through the approval result. Ops carried in the request JSON:
 
 - ``{"op": "comment", "key", "body_markdown"}``
 - ``{"op": "set_field", "key", "field_name" | "field_id", "body_markdown"}``
   (the id and schema are discovered via editmeta at execution time; rich text
   becomes ADF and structured values are coerced to Jira's object/array shape)
 - ``{"op": "create", "fields": {...}}``
-- ``{"op": "attach", "key", "filename", "content_b64", "mime_type"?}``
+- ``{"op": "attach", "key", "filename", "content_b64", "mime_type", "size"?}``
 - ``{"op": "transition", "key", "transition", "fields"?}`` (fields keyed by
   display name or id, values as CLI strings — coerced per schema host-side)
 - ``{"op": "change_type", "key", "issue_type"}`` (Jira's "Move": target name
   resolved to the project-scoped id host-side; sub-task conversions rejected)
-- ``{"op": "set_story_points", "key", "value", "board_id"?}`` (uses Jira
+- ``{"op": "set_story_points", "key", "value", "board_id", "field_id",
+  "previous_value"?}`` (uses Jira
   Software's estimation endpoint so the field need not be on the edit screen)
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from agents.capabilities.jira.backend import api, queries
-from tools.dashboard import api_auth, approvals_routes
+from tools.dashboard import api_auth
 
 
 def _cfg(org: str | None) -> api.JiraConfig:
@@ -290,59 +289,6 @@ async def run_named_query(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=502)
     return JSONResponse({"workspace": workspace_id, "query": name,
                          "jql": jql, **out})
-
-
-async def _execute_jira_write(row: dict, _decision: dict) -> dict:
-    """Post-approval executor for ``kind=jira_write`` (see approvals_routes:
-    runs as a backend task after the operator's verdict; its return value is
-    stored as ``result.execution`` and wakes the agent's held GET)."""
-    req = row["request"]
-    op = req.get("op")
-    # The org is the TRUSTED org of the approval's session — derived server-side
-    # from the session record (approvals_routes._org_for_approval → session_org_
-    # slug), never the client-supplied ``req["org"]``. Same standardization as
-    # the read routes' _org: a jira write executes against the org the caller
-    # actually belongs to, not one the request body names.
-    cfg = _cfg(approvals_routes._org_for_approval(row.get("id")))
-
-    def run() -> dict:
-        if op == "comment":
-            out = api.add_comment(cfg, req["key"], req.get("body_markdown", ""))
-        elif op == "set_field":
-            field_reference = (
-                req.get("field_id") or req.get("field_name", "")
-            )
-            out = api.set_editable_field(
-                cfg,
-                req["key"],
-                field_reference,
-                req.get("body_markdown", ""),
-            )
-        elif op == "create":
-            out = api.create_issue(cfg, req.get("fields", {}))
-        elif op == "transition":
-            out = api.transition_issue(cfg, req["key"],
-                                       req.get("transition", ""),
-                                       req.get("fields") or None)
-        elif op == "change_type":
-            out = api.change_issue_type(cfg, req["key"],
-                                        req.get("issue_type", ""))
-        elif op == "set_story_points":
-            out = api.set_story_points(
-                cfg, req["key"], req.get("value", ""), req.get("board_id"))
-        elif op == "attach":
-            out = api.add_attachment(
-                cfg, req["key"], req.get("filename", "attachment"),
-                base64.b64decode(req.get("content_b64", "")),
-                req.get("mime_type") or "application/octet-stream")
-        else:
-            return {"ok": False, "error": f"unknown jira_write op: {op}"}
-        return {"ok": True, **out}
-
-    return await asyncio.to_thread(run)
-
-
-approvals_routes.EXECUTORS["jira_write"] = _execute_jira_write
 
 
 ROUTES = [

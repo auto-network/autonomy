@@ -404,8 +404,8 @@
       signPrompt: false,      // is the passphrase entry step showing
       signRemember: false,    // "remember for this session" checkbox
       signHasRemembered: false, // a valid remembered passphrase exists (skip prompt)
-      // generic approval overlay (non-commit kinds, e.g. jira_write):
-      // { id, kind, session, title, actionLabel, op, target, bodyMarkdown, fields }
+      // generic approval overlay (the remaining legacy kinds):
+      // { id, kind, session, title, actionLabel, op, target, bodyMarkdown }
       approvalRequest: null,
       approvalBusy: false,
       selectedDirtyRow: null,
@@ -2086,138 +2086,6 @@
                      ttl_seconds: req.ttl === '' ? null : Number(req.ttl) };
           },
         },
-        jira_write: {
-          open(self, r) {
-            const req = r.request || {};
-            const createFields = req.op === 'create'
-              ? { ...(req.fields || {}) }
-              : null;
-            let createDescription = '';
-            if (createFields && typeof createFields.description === 'string') {
-              createDescription = createFields.description;
-              delete createFields.description;
-            }
-            const storyPointsValue = req.value === null || req.value === undefined ||
-              String(req.value).trim() === '' ? '?' : String(req.value).trim();
-            const storyPointsUnit = Number(storyPointsValue) === 1
-              ? 'story point' : 'story points';
-            const storyPointsLabel = storyPointsValue + ' ' + storyPointsUnit;
-            const ops = {
-              comment: { title: 'Jira comment', action: 'Post comment' },
-              set_field: {
-                title: 'Jira field update',
-                action: 'Set ' + (req.field_name || req.field_id || 'field'),
-              },
-              create: { title: 'New Jira ticket', action: 'Create ticket' },
-              attach: { title: 'Jira attachment', action: 'Attach file' },
-              transition: {
-                title: 'Jira transition',
-                action: 'Transition to ' + (req.transition || '?'),
-              },
-              change_type: {
-                title: 'Jira issue-type change',
-                action: 'Change type to ' + (req.issue_type || '?'),
-              },
-              set_story_points: {
-                title: 'Set ' + storyPointsLabel,
-                action: 'Set ' + storyPointsLabel,
-              },
-            };
-            const op = ops[req.op] || { title: 'Jira write', action: 'Approve' };
-            const attachNote = req.op === 'attach'
-              ? req.filename + ' (' + ((req.size || 0) / 1024).toFixed(1) + ' KB, ' +
-                (req.mime_type || 'unknown type') + ')'
-              : '';
-            const transitionFieldLines = Object.entries(req.fields || {})
-              .map(([k, v]) => '  ' + k + ': ' + v).join('\n');
-            const transitionNote = req.op === 'transition'
-              ? 'Transition ' + (req.key || '?') + ' → ' + (req.transition || '?') +
-                (transitionFieldLines
-                  ? '\n\nFields set with the transition:\n' + transitionFieldLines : '')
-              : '';
-            const changeTypeNote = req.op === 'change_type'
-              ? 'Change ' + (req.key || '?') + ' to issue type ' + (req.issue_type || '?')
-              : '';
-            const storyPointsNote = req.op === 'set_story_points'
-              ? 'Story Points\n\nCurrent: ' +
-                (req.previous_value === null || req.previous_value === undefined
-                  ? 'Unestimated' : req.previous_value) +
-                '\nNew: ' + storyPointsLabel
-              : '';
-            self.approvalRequest = {
-              id: r.id, kind: r.kind, session: r.session,
-              title: op.title, actionLabel: op.action, op: req.op,
-              target: req.key ||
-                ((req.fields || {}).project ? (req.fields.project.key || '') : ''),
-              bodyMarkdown:
-                req.body_markdown || createDescription || attachNote ||
-                transitionNote || changeTypeNote || storyPointsNote,
-              fields: createFields,
-            };
-            if (req.op === 'transition' && req.key) {
-              // Enrich with TRUSTED context so the operator sees what they
-              // are approving: summary + current status from the broker's
-              // read routes (host-side Jira reads — the requesting agent
-              // cannot spoof them), and the transition's real destination
-              // status (the workflow name and the status can differ).
-              const org = encodeURIComponent(req.org || '');
-              Promise.all([
-                fetch('/api/jira/issue/' + encodeURIComponent(req.key) + '?org=' + org)
-                  .then((resp) => resp.json()).catch(() => null),
-                fetch('/api/jira/transitions/' + encodeURIComponent(req.key) + '?org=' + org)
-                  .then((resp) => resp.json()).catch(() => null),
-              ]).then(([ticket, tr]) => {
-                const ar = self.approvalRequest;
-                if (!ar || ar.id !== r.id) return;   // overlay changed meanwhile
-                const want = (req.transition || '').toLowerCase();
-                const match = ((tr && tr.transitions) || []).find((t) =>
-                  (t.name || '').toLowerCase() === want ||
-                  (t.to_status || '').toLowerCase() === want);
-                const lines = [];
-                if (ticket && !ticket.error && ticket.summary) {
-                  lines.push(req.key + ' — ' + ticket.summary);
-                }
-                const from = (ticket && !ticket.error && ticket.status) || '?';
-                const to = (match && match.to_status) || req.transition || '?';
-                const via = match && match.name && match.name !== to
-                  ? ' (via ‘' + match.name + '’)' : '';
-                lines.push('Status: ' + from + ' → ' + to + via);
-                if (transitionFieldLines) {
-                  lines.push('', 'Fields set with the transition:', transitionFieldLines);
-                }
-                ar.bodyMarkdown = lines.join('\n');
-              });
-            }
-            if (req.op === 'change_type' && req.key) {
-              // Same trusted-context pattern as transitions: summary and the
-              // ticket's REAL current type come from broker read routes,
-              // not the requesting agent's payload.
-              const org = encodeURIComponent(req.org || '');
-              Promise.all([
-                fetch('/api/jira/issue/' + encodeURIComponent(req.key) + '?org=' + org)
-                  .then((resp) => resp.json()).catch(() => null),
-                fetch('/api/jira/issue-types/' + encodeURIComponent(req.key) + '?org=' + org)
-                  .then((resp) => resp.json()).catch(() => null),
-              ]).then(([ticket, types]) => {
-                const ar = self.approvalRequest;
-                if (!ar || ar.id !== r.id) return;   // overlay changed meanwhile
-                const lines = [];
-                if (ticket && !ticket.error && ticket.summary) {
-                  lines.push(req.key + ' — ' + ticket.summary);
-                }
-                const from = (types && !types.error && types.current &&
-                              types.current.name) || '?';
-                lines.push('Issue type: ' + from + ' → ' + (req.issue_type || '?'));
-                ar.bodyMarkdown = lines.join('\n');
-              });
-            }
-          },
-        },
-        // Share-link approval (spec §6.4): enrichment resolved the target
-        // title from trusted local stores and staged the EXACT registry
-        // request to sign; approve click-signs it with the operator session
-        // key and rides the envelope on the decision. The server-side
-        // executor forwards it to the registry and returns the URL.
         dashboard_access: {
           open(self, r) {
             const grant = r.staged;

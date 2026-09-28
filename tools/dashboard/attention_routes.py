@@ -333,6 +333,7 @@ class AttentionRouteRuntime:
     link_operation_desk: Any | None = None
     enrollment_desk: Any | None = None
     crosstalk_desk: Any | None = None
+    jira_write_desk: Any | None = None
 
     def __post_init__(self) -> None:
         if self.operator_result_projectors is None:
@@ -460,6 +461,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
     from tools.dashboard import external_service_approvals as external
     from tools.dashboard import mcp_crosstalk_central as crosstalk
     from tools.dashboard import visitor_approvals as visitor
+    from tools.dashboard import jira_central
     dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
     approval_registry = build_production_registry(runtimes={
         dashboard_access_central.KIND: dashboard_approval_runtime,
@@ -469,6 +471,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
         external.KIND: external.build_approval_runtime(),
         crosstalk.KIND: crosstalk.build_approval_runtime(),
         visitor.KIND: visitor.build_approval_runtime(),
+        jira_central.KIND: jira_central.build_approval_runtime(),
         **{kind: link_approval_central.build_approval_runtime(kind) for kind in link_approval_central.KINDS},
     })
     approval_waiters = ApprovalWaitHub()
@@ -507,6 +510,8 @@ def build_production_runtime() -> AttentionRouteRuntime:
            for scope in external.APPLICATIONS},
         (crosstalk.KIND, crosstalk.APPLICATION_SCOPE): crosstalk.build_attention_runtime(approvals),
         (visitor.KIND, visitor.APPLICATION_SCOPE): visitor.build_attention_runtime(approvals),
+        (jira_central.KIND, jira_central.APPLICATION_SCOPE):
+            jira_central.build_attention_runtime(approvals),
         **{(kind, link_approval_central.APPLICATION_SCOPE):
            link_approval_central.build_attention_runtime(approvals, kind) for kind in link_approval_central.KINDS},
     }
@@ -591,6 +596,13 @@ def build_production_runtime() -> AttentionRouteRuntime:
         index=index,
         producer=attention_registry.producer(visitor.KIND, visitor.APPLICATION_SCOPE),
     )
+    jira_desk = jira_central.JiraWriteDesk(approvals=approvals, index=index)
+    jira_coordinator = jira_central.JiraWriteCoordinator(
+        desk=jira_desk,
+        approvals=approvals,
+        index=index,
+        producer=attention_registry.producer(jira_central.KIND, jira_central.APPLICATION_SCOPE),
+    )
     link_desk = link_approval_central.LinkApprovalDesk(approvals=approvals, index=index)
     link_coordinators = [
         link_approval_central.LinkApprovalCoordinator(
@@ -603,7 +615,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
     # other kinds' approval ids.
     reconcilers = mailbox_central.ReconcilerGroup(
         coordinator, email_coordinator, vault_coordinator, enrollment_coordinator,
-        crosstalk_coordinator, visitor_coordinator, *link_coordinators,
+        crosstalk_coordinator, visitor_coordinator, jira_coordinator, *link_coordinators,
     )
     coordinator_holder["coordinator"] = reconcilers
     approval_http = ApprovalHttpBridge(
@@ -621,6 +633,11 @@ def build_production_runtime() -> AttentionRouteRuntime:
                     mailbox_central.build_http_adapter(
                         email_consumer,
                         reconcile=email_coordinator.reconcile_exact,
+                    ),
+                jira_central.KIND:
+                    jira_central.build_http_adapter(
+                        jira_desk,
+                        reconcile=jira_coordinator.reconcile_exact,
                     ),
                 visitor.KIND:
                     visitor.build_http_adapter(
@@ -656,12 +673,14 @@ def build_production_runtime() -> AttentionRouteRuntime:
                                     external.KIND: enrollment_desk.operator_result,
                                     crosstalk.KIND: crosstalk_desk.operator_result,
                                     visitor.KIND: visitor_desk.operator_result,
+                                    jira_central.KIND: jira_desk.operator_result,
                                     **{kind: link_desk.operator_result
                                        for kind in link_approval_central.KINDS}},
         vault_open_delivery=vault_delivery,
         link_operation_desk=link_desk,
         enrollment_desk=enrollment_desk,
         crosstalk_desk=crosstalk_desk,
+        jira_write_desk=jira_desk,
     )
 
 
@@ -1199,6 +1218,32 @@ def _vault_open_refusal(exc: Exception) -> JSONResponse:
     return _no_store({"error": code}, status_code=_VAULT_OPEN_STATUS[code])
 
 
+async def api_attention_jira_write_content(request: Request):
+    """The whole staged content of one jira_write item, for its review
+    (operator only, on the accepting machine, sha256-verified). Text is JSON
+    lines; an attachment is inline only as a magic-checked raster image,
+    otherwise a download. See jira_central.JiraWriteDesk.content."""
+    denied = _operator_guard(request)
+    if denied is not None:
+        return denied
+    desk = _runtime.jira_write_desk
+    if desk is None:
+        return _no_store({"error": "not_found"}, status_code=404)
+    try:
+        form, body, headers = await asyncio.to_thread(
+            desk.content, request.path_params["attention_id"],
+        )
+    except Exception as exc:
+        code = getattr(exc, "code", "unavailable")
+        status_code = {"not_found": 404, "elsewhere": 409, "content_missing": 410,
+                       "content_mismatch": 409}.get(code, 503)
+        return _no_store({"error": code if status_code != 503 else "unavailable"},
+                         status_code=status_code)
+    if form == "json":
+        return JSONResponse(body, headers=headers)
+    return Response(body, headers=headers)
+
+
 async def api_attention_vault_open_bootstrap(request: Request):
     """The factor ceremony and open bundle for one vault_open item (operator
     only, on the accepting machine, while it is pending or granted and not
@@ -1401,6 +1446,11 @@ routes = [
         "/api/attention/items/{attention_id:path}/approval-decision",
         api_attention_decision,
         methods=["POST"],
+    ),
+    Route(
+        "/api/attention/items/{attention_id:path}/jira-write-content",
+        api_attention_jira_write_content,
+        methods=["GET"],
     ),
     Route(
         "/api/attention/items/{attention_id:path}/vault-open-bootstrap",

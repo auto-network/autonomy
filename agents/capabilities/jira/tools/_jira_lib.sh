@@ -8,11 +8,11 @@
 
 DASH="${AUTONOMY_DASHBOARD:-${GRAPH_API:-https://localhost:8080}}"
 SESSION="${AUTONOMY_SESSION:-}"
-# Org whose install Setting configures the broker. The broker now derives the
-# AUTHORITATIVE org from the caller's bearer server-side (jira_routes._org), so
-# this only has to be SET (not correct) to satisfy `set -u` — GRAPH_ORG was
-# removed from the container environment when the org became a property of the
-# token, leaving nothing to pass. Left overridable for a non-standard topology.
+# Org whose install Setting configures the broker. Reads derive the
+# AUTHORITATIVE org from the caller's bearer server-side (jira_routes._org).
+# A write sends it as ``org_slug`` only when set: an org session's bearer is
+# its org (a different one is refused), and a local session (a host terminal)
+# must name the org to write in.
 ORG="${AUTONOMY_ORG:-}"
 
 # Every broker/approvals call carries the session bearer: /api/jira/* and
@@ -35,12 +35,12 @@ jira_read_body() {
   fi
 }
 
-# jira_approval_wait REQUEST_JSON_FILE — stage the approval, block on the
-# held GET until the operator decides, print the execution outcome JSON.
+# jira_approval_wait REQUEST_JSON_FILE — open the Central approval, block on
+# the held GET until the operator decides and the write has run, print the
+# execution outcome JSON.
 # Exit 1 with a clear message on decline or execution failure.
 jira_approval_wait() {
   local req_file="$1" id state
-  [ -n "$SESSION" ] || jira_fail "jira: AUTONOMY_SESSION is not set"
   id="$(jira_curl -sk -X POST "$DASH/api/approvals" -H 'Content-Type: application/json' \
           --data-binary @"$req_file" \
           | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)"

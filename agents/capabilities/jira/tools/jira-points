@@ -42,12 +42,12 @@ for required in ("board_id", "field_id"):
         sys.exit("jira: estimation preflight did not return " + required)
 PY
 
-python3 - "$SESSION" "$KEY" "$VALUE" "$ORG" "$context_file" > "$req_file" <<'PY'
+python3 - "$KEY" "$VALUE" "$ORG" "$context_file" > "$req_file" <<'PY'
 import json, sys
-session, key, value, org, context_path = sys.argv[1:6]
+key, value, org, context_path = sys.argv[1:5]
 context = json.load(open(context_path))
-print(json.dumps({"kind": "jira_write", "session": session, "request": {
-    "op": "set_story_points", "key": key, "org": org,
+print(json.dumps({"kind": "jira_write", "request": {
+    "op": "set_story_points", "key": key, **({"org_slug": org} if org else {}),
     "value": value, "board_id": context["board_id"],
     "field_id": context["field_id"], "previous_value": context.get("value"),
 }}))
