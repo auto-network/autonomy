@@ -473,3 +473,50 @@ async def test_a_legacy_send_frame_caller_is_not_starved_by_directed_backlog(hub
     assert kinds.count(FRAME_DATA) == 40
     # The control reply left well before the directed backlog finished.
     assert kinds.index(FRAME_CTRL) < kinds.index(FRAME_DATA) + 3
+
+
+# -- session-control/1 (graph://7eb29bc8-31a §9.1) --------------------------------
+
+from tools.network.relaykit.fleet_stream_wire import (  # noqa: E402
+    CAP_SESSION_CONTROL,
+    SESSION_CONTROL_KIND,
+)
+
+
+@pytest.mark.asyncio
+async def test_session_control_needs_its_own_capability_on_both_legs(hub, broker):
+    a = tunnel(hub, MACHINE_A, caps=(CAP, CAP_SESSION_CONTROL))
+    tunnel(hub, MACHINE_B, caps=(CAP,))                      # sync only
+    with pytest.raises(ds.DirectedStreamError, match=PAIR_DESTINATION_CAPABILITY):
+        await broker.open(a, args(), capability=CAP_SESSION_CONTROL)
+    assert broker.snapshot()["pairs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_session_control_legs_receive_the_session_control_kind(hub, broker):
+    a = tunnel(hub, MACHINE_A, caps=(CAP, CAP_SESSION_CONTROL))
+    b = tunnel(hub, MACHINE_B, caps=(CAP, CAP_SESSION_CONTROL))
+    await broker.open(a, args(), capability=CAP_SESSION_CONTROL)
+    for t in (a, b):
+        (frame,) = t.ws.of(FRAME_OPEN)
+        meta = json.loads(frame.payload)
+        assert meta["kind"] == SESSION_CONTROL_KIND
+        parse_fleet_open(meta, kind=SESSION_CONTROL_KIND)
+        with pytest.raises(Exception):
+            parse_fleet_open(meta)                           # not a fleet-stream OPEN
+    assert [p.capability for p in broker._pairs.values()] == [CAP_SESSION_CONTROL]
+
+
+@pytest.mark.asyncio
+async def test_session_control_and_sync_caps_are_counted_separately(hub):
+    broker = ds.DirectedStreamBroker(hub, pairs_per_tunnel=1, pairs_per_process=1)
+    a = tunnel(hub, MACHINE_A, caps=(CAP, CAP_SESSION_CONTROL))
+    tunnel(hub, MACHINE_B, caps=(CAP, CAP_SESSION_CONTROL))
+    await broker.open(a, args(op="01" * 16))                  # sync at its cap
+    with pytest.raises(ds.DirectedStreamError, match=ds.PAIR_CAP_PROCESS):
+        await broker.open(a, args(op="02" * 16))
+    # a sync pair at its cap does not block a session-control pair
+    await broker.open(a, args(op="03" * 16), capability=CAP_SESSION_CONTROL)
+    assert broker.snapshot()["pairs"] == 2
+    assert sorted(p.capability for p in broker._pairs.values()) == [
+        CAP, CAP_SESSION_CONTROL]

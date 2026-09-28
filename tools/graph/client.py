@@ -477,6 +477,11 @@ class HttpClient:
             return result["rows"]
         return result if isinstance(result, list) else []
 
+    def remote_status(self, machine: str):
+        """``status`` of another fleet machine over session-control/1."""
+        quoted = urllib.parse.quote(machine, safe="")
+        return self._get(f"/api/fleet/remote/{quoted}/status")
+
     def get_session_record(self, tmux_name: str):
         """Resolve one dashboard session through the authenticated client."""
         quoted = urllib.parse.quote(tmux_name, safe="")

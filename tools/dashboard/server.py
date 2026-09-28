@@ -13637,6 +13637,22 @@ async def api_dao_session_status(request):
             logger.warning("session presence read failed", exc_info=True)
     return JSONResponse(rows)
 
+async def api_remote_machine_status(request):
+    """``status`` of another fleet machine over session-control/1
+    (graph://7eb29bc8-31a §9.2). Global authority only: driving the
+    operator's machines is the operator's authority, never an org session's.
+    Refusals are 200 with ``ok: false`` and a typed ``refusal``."""
+    refused = api_auth.require_global_api_authority(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import session_control_client
+
+    started = time.monotonic()
+    reply = await session_control_client.request(
+        request.path_params["machine"], "status", {})
+    return JSONResponse({**reply, "elapsed_ms": int((time.monotonic() - started) * 1000)})
+
+
 async def page_search(request):
     """Serve the search results page (full HTML shell for direct navigation)."""
     return HTMLResponse(_load_template("base.html"))
@@ -21610,6 +21626,7 @@ routes = [
     Route("/api/_mock/harness-nonce", api_mock_harness_nonce),
     Route("/api/dao/recent_sessions", api_dao_recent_sessions),
     Route("/api/dao/session_status", api_dao_session_status),
+    Route("/api/fleet/remote/{machine}/status", api_remote_machine_status),
     Route("/api/worktrees", api_worktrees),
     Route("/api/worktrees/orgs", api_worktrees_orgs),
     Route("/api/worktrees/refresh", api_worktrees_refresh, methods=["POST"]),
@@ -21837,6 +21854,7 @@ _mock_event_watcher_task: asyncio.Task | None = None
 _harness_usage_poller_task: asyncio.Task | None = None
 _software_update_poller_task: asyncio.Task | None = None
 _session_presence_writer = None
+_session_control_pump = None
 
 
 async def _software_update_poller() -> None:
@@ -23042,6 +23060,15 @@ async def _activate_worker(reason: str) -> None:
             _session_presence_writer.start()
         except Exception:
             logger.exception("session presence writer failed to start")
+        # session-control/1 inbound: answer other fleet machines' requests
+        # (graph://7eb29bc8-31a §9.1). One pump per machine, at activation.
+        try:
+            from tools.dashboard import session_control_client
+            global _session_control_pump
+            _session_control_pump = session_control_client.install(
+                _resolved_dispatch_limits)
+        except Exception:
+            logger.exception("session-control inbound pump failed to start")
 
     if _should_run_harness_usage_poller():
         # Fetches origin and may fast-forward the checkout: one worker only,

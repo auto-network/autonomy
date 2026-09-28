@@ -62,7 +62,10 @@ from tools.network.relaykit.stream_wire import (
     CAP_TLS_STREAM,
     RESET_ROUTE_RELEASED,
 )
-from tools.network.relaykit.fleet_stream_wire import CAP_FLEET_DIRECTED_STREAM
+from tools.network.relaykit.fleet_stream_wire import (
+    CAP_FLEET_DIRECTED_STREAM,
+    CAP_SESSION_CONTROL,
+)
 from tools.network.relaykit.hello import (
     HELLO_FIELDS_V2,
     HELLO_FIELDS_V3,
@@ -1062,6 +1065,7 @@ CAP_DNS01 = "dns-01/1"
 #: intersection with what the connector offered.
 REGISTRY_CAPS = frozenset({
     CAP_HOST_LEASE, CAP_TLS_STREAM, CAP_DNS01, CAP_FLEET_DIRECTED_STREAM,
+    CAP_SESSION_CONTROL,
 })
 
 #: serve:dns-01 op signature domain (auto-bhs3c).
@@ -2160,6 +2164,21 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
             from .directed_stream import DirectedStreamError
             try:
                 result = await directed_streams.open(tunnel, args)
+            except DirectedStreamError as exc:
+                raise _CtrlError(str(exc)) from exc
+        elif op == "session-open":
+            # session-control/1 (graph://7eb29bc8-31a §9.1): the same broker
+            # and credit contract as fleet-open, under its own capability,
+            # FRAME_OPEN kind and caps. The relay forwards ciphertext; the
+            # session:control handshake inside the pair decides who.
+            if directed_streams is None:
+                raise _CtrlError("directed streams are not enabled on this relay")
+            if CAP_SESSION_CONTROL not in tunnel.caps:
+                raise _CtrlError("session-control/1 was not negotiated")
+            from .directed_stream import DirectedStreamError
+            try:
+                result = await directed_streams.open(
+                    tunnel, args, capability=CAP_SESSION_CONTROL)
             except DirectedStreamError as exc:
                 raise _CtrlError(str(exc)) from exc
         else:

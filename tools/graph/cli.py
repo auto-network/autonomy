@@ -2164,6 +2164,28 @@ def cmd_set_topics(args):
     print(f"  \u2713 Topics set ({len(args.topics)} lines)")
 
 
+def cmd_remote(args):
+    """Query another of the operator's fleet machines over session-control/1."""
+    client = get_client()
+    if not isinstance(client, HttpClient):
+        print("Error: graph remote needs the dashboard API", file=sys.stderr)
+        sys.exit(1)
+    if args.remote_cmd == "status":
+        reply = client.remote_status(args.machine)
+        if getattr(args, "json", False):
+            print(json.dumps(reply, indent=2, sort_keys=True))
+        elif isinstance(reply, dict) and reply.get("ok"):
+            r = reply.get("result") or {}
+            print(f"  {r.get('label') or '?'}  machine_pub={str(r.get('machine_pub'))[:16]}  "
+                  f"active={r.get('active')}  ({reply.get('elapsed_ms')} ms)")
+        else:
+            refusal = reply.get("refusal") if isinstance(reply, dict) else None
+            detail = reply.get("detail") if isinstance(reply, dict) else reply
+            print(f"Refused: {refusal or 'error'}{': ' + str(detail) if detail else ''}",
+                  file=sys.stderr)
+            sys.exit(2)
+
+
 def cmd_set_role(args):
     """Set the session role."""
     role = " ".join(args.role)
@@ -6049,6 +6071,13 @@ def main():
     pg = g_sub.add_parser("rename", help="Rename a group (members are told)"); pg.add_argument("slug"); pg.add_argument("name", nargs="+"); pg.set_defaults(func=cmd_group_rename)
     pg = g_sub.add_parser("dissolve", help="Dissolve a group; members become ungrouped"); pg.add_argument("slug"); pg.set_defaults(func=cmd_group_dissolve)
     pg = g_sub.add_parser("invite", help="Invite a session to a group over CrossTalk"); pg.add_argument("slug"); pg.add_argument("target"); pg.set_defaults(func=cmd_group_invite)
+
+    p = sub.add_parser("remote", help="Drive another of the operator's fleet machines (session-control/1)")
+    remote_sub = p.add_subparsers(dest="remote_cmd", required=True)
+    rp = remote_sub.add_parser("status", help="Machine identity and live session count")
+    rp.add_argument("machine", help="Machine name, machine_pub, or a unique machine_pub prefix")
+    rp.add_argument("--json", action="store_true", help="Print the raw reply")
+    p.set_defaults(func=cmd_remote)
 
     p = sub.add_parser("set-role", help="Set the session role")
     p.add_argument("role", nargs="+", help="Role name (joined if multiple words)")

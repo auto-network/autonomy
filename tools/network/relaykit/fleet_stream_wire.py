@@ -54,6 +54,24 @@ CAP_FLEET_DIRECTED_STREAM = "fleet-directed-stream/1"
 FLEET_STREAM_VERSION = 1
 FLEET_STREAM_KIND = "fleet-stream"
 
+#: session-control/1 (graph://7eb29bc8-31a §9.1): the same directed pair,
+#: brokered by the same relay code under the same credit contract, for remote
+#: session control between the operator's own machines. A separate
+#: capability, FRAME_OPEN kind and set of admission caps, so control never
+#: competes with sync for a pair.
+CAP_SESSION_CONTROL = "session-control/1"
+SESSION_CONTROL_KIND = "session-control"
+#: The source's control op for each directed capability.
+OPEN_OP_FOR_CAPABILITY = {
+    CAP_FLEET_DIRECTED_STREAM: "fleet-open",
+    CAP_SESSION_CONTROL: "session-open",
+}
+#: The FRAME_OPEN kind each directed capability's legs receive.
+KIND_FOR_CAPABILITY = {
+    CAP_FLEET_DIRECTED_STREAM: FLEET_STREAM_KIND,
+    CAP_SESSION_CONTROL: SESSION_CONTROL_KIND,
+}
+
 #: The limits below are the contract's (graph://76721e75-73c, "Limits"),
 #: decided from the two-leg soak. Only the receive window is operator
 #: tuning: it is the per-pair throughput lever on a real RTT (about
@@ -83,6 +101,15 @@ FLEET_STREAM_MAX_MESSAGE = 256 * 1024
 #: relay custody is pairs × 2 directions × offered window.
 FLEET_PAIRS_PER_TUNNEL = 64
 FLEET_PAIRS_PER_PROCESS = 256
+#: session-control/1 caps, counted only over session-control pairs: 8
+#: control + 16 observe pairs per tunnel (graph://7eb29bc8-31a §9.1).
+SESSION_PAIRS_PER_TUNNEL = 24
+SESSION_PAIRS_PER_PROCESS = 128
+#: Per-capability (per tunnel, per process) admission caps.
+PAIR_CAPS_FOR_CAPABILITY = {
+    CAP_FLEET_DIRECTED_STREAM: (FLEET_PAIRS_PER_TUNNEL, FLEET_PAIRS_PER_PROCESS),
+    CAP_SESSION_CONTROL: (SESSION_PAIRS_PER_TUNNEL, SESSION_PAIRS_PER_PROCESS),
+}
 #: Seconds the relay waits for both open-oks before resetting the offer.
 FLEET_OPEN_DEADLINE_S = 10.0
 
@@ -174,14 +201,17 @@ def build_fleet_open(
     *, pair_id: str, leg_nonce: str, role: str, operation_id: str,
     peer_persona_pub: str, peer_machine: str,
     claimed_machine_pub: str | None,
+    kind: str = FLEET_STREAM_KIND,
 ) -> bytes:
     """FRAME_OPEN payload toward one leg. Carries routing facts only: no
     credit (that arrives in READY, once the peer has offered its window)
     and no grant of any authority."""
     if role not in (ROLE_SOURCE, ROLE_DESTINATION):
         raise StreamProtocolError("unknown leg role")
+    if kind not in KIND_FOR_CAPABILITY.values():
+        raise StreamProtocolError("unknown directed stream kind")
     return json.dumps({
-        "kind": FLEET_STREAM_KIND,
+        "kind": kind,
         "v": FLEET_STREAM_VERSION,
         "pair_id": pair_id,
         "leg_nonce": leg_nonce,
@@ -192,21 +222,22 @@ def build_fleet_open(
     }).encode("utf-8")
 
 
-def parse_fleet_open(meta: object) -> dict:
-    """Validate an already-decoded FRAME_OPEN payload of kind fleet-stream."""
+def parse_fleet_open(meta: object, *, kind: str = FLEET_STREAM_KIND) -> dict:
+    """Validate an already-decoded FRAME_OPEN payload of *kind*
+    (fleet-stream by default; session-control for session-control/1)."""
     if (
         not isinstance(meta, dict)
         or set(meta) != {
             "kind", "v", "pair_id", "leg_nonce", "role", "operation_id",
             "peer", "claimed_machine_pub",
         }
-        or meta["kind"] != FLEET_STREAM_KIND
+        or meta["kind"] != kind
         or meta["v"] != FLEET_STREAM_VERSION
         or meta["role"] not in (ROLE_SOURCE, ROLE_DESTINATION)
         or not isinstance(meta["peer"], dict)
         or set(meta["peer"]) != {"persona_pub", "machine"}
     ):
-        raise StreamProtocolError("malformed fleet-stream OPEN payload")
+        raise StreamProtocolError(f"malformed {kind} OPEN payload")
     claimed = meta["claimed_machine_pub"]
     return {
         "pair_id": _hex(meta["pair_id"], _HEX32, "pair_id"),

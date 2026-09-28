@@ -36,6 +36,8 @@ from typing import Awaitable, Callable, Dict, Optional
 from .frames import FRAME_DATA, FRAME_STREAM_CTRL
 from .fleet_stream_wire import (
     CAP_FLEET_DIRECTED_STREAM,
+    KIND_FOR_CAPABILITY,
+    OPEN_OP_FOR_CAPABILITY,
     FLEET_OPEN_DEADLINE_S,
     FLEET_STREAM_KIND,
     FLEET_STREAM_WINDOW_BYTES,
@@ -65,11 +67,14 @@ from .stream_wire import (
 logger = logging.getLogger("relaykit.fleet_stream")
 
 
-def fleet_session(pair_id: str, source_nonce: str, destination_nonce: str) -> str:
+def fleet_session(pair_id: str, source_nonce: str, destination_nonce: str,
+                  capability: str = CAP_FLEET_DIRECTED_STREAM) -> str:
     """The fleet handshake ``session`` both endpoints bind to: the
     capability, the never-reused pair id, and both fresh leg nonces, in a
-    fixed order so source = initiator = client on both sides."""
-    return f"{CAP_FLEET_DIRECTED_STREAM}:{pair_id}:{source_nonce}:{destination_nonce}"
+    fixed order so source = initiator = client on both sides. The capability
+    prefix is signed in both hellos and bound into the transcript, so a
+    session-control channel's keys are domain-separated from sync's."""
+    return f"{capability}:{pair_id}:{source_nonce}:{destination_nonce}"
 
 
 class FleetStreamRefused(ConnectionError):
@@ -157,7 +162,8 @@ class FleetStreamEndpoint:
                 self._fail(RESET_PROTOCOL)
                 return
             self.session = fleet_session(
-                self.pair_id, msg["source_nonce"], msg["destination_nonce"])
+                self.pair_id, msg["source_nonce"], msg["destination_nonce"],
+                self._adapter.capability)
             self.send_window = FleetWindow(msg["window"]["bytes"], msg["window"]["slots"])
             self._send_credit.set()
             self.ready.set()
@@ -273,12 +279,24 @@ class FleetStreamEndpoint:
 
 
 class FleetStreamAdapter:
-    """Per-tunnel fleet-stream dispatcher living beside the serve loop."""
+    """Per-tunnel fleet-stream dispatcher living beside the serve loop.
+
+    *capability* selects the directed capability this adapter speaks:
+    fleet-directed-stream/1 (sync, the default) or session-control/1. It
+    fixes the FRAME_OPEN kind it accepts, the control op it opens with, and
+    the handshake session prefix; one adapter per capability per tunnel.
+    """
 
     def __init__(self, send_frame, control, *,
                  on_offer: Optional[Callable[[FleetStreamEndpoint], Awaitable[bool]]] = None,
                  window_bytes: int = FLEET_STREAM_WINDOW_BYTES,
-                 window_slots: int = FLEET_STREAM_WINDOW_SLOTS):
+                 window_slots: int = FLEET_STREAM_WINDOW_SLOTS,
+                 capability: str = CAP_FLEET_DIRECTED_STREAM):
+        if capability not in KIND_FOR_CAPABILITY:
+            raise ValueError(f"unknown directed capability {capability!r}")
+        self.capability = capability
+        self.kind = KIND_FOR_CAPABILITY[capability]
+        self._open_op = OPEN_OP_FOR_CAPABILITY[capability]
         self._send_frame = send_frame
         self._control = control
         self._on_offer = on_offer
@@ -324,7 +342,7 @@ class FleetStreamAdapter:
     def dispatch_open(self, channel_id: bytes, meta: dict) -> bool:
         """A FRAME_OPEN of kind fleet-stream. Handled on its own task so an
         application's acceptance decision never stalls the serve loop."""
-        if not isinstance(meta, dict) or meta.get("kind") != FLEET_STREAM_KIND:
+        if not isinstance(meta, dict) or meta.get("kind") != self.kind:
             return False
         self._spawn(self._open(channel_id, meta))
         return True
@@ -355,7 +373,7 @@ class FleetStreamAdapter:
 
     async def _open(self, channel_id: bytes, meta: dict) -> None:
         try:
-            offer = parse_fleet_open(meta)
+            offer = parse_fleet_open(meta, kind=self.kind)
         except StreamProtocolError:
             await self._refuse(channel_id, RESET_PROTOCOL)
             return
@@ -423,8 +441,10 @@ class FleetStreamAdapter:
         if claimed_machine_pub is not None:
             args["claimed_machine_pub"] = claimed_machine_pub
         try:
-            reply = await self._control("fleet-open", args, timeout=timeout)
+            reply = await self._control(self._open_op, args, timeout=timeout)
             if not (isinstance(reply, dict) and reply.get("ok") is True):
+                # A relay that predates this capability answers "unknown
+                # control op": a typed refusal like any other, never a crash.
                 reason = reply.get("error") if isinstance(reply, dict) else "refused"
                 raise FleetStreamRefused(str(reason))
             return await asyncio.wait_for(future, timeout)

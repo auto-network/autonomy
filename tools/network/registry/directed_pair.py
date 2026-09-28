@@ -63,13 +63,16 @@ def resolve_directed_pair(
     source: "Tunnel",
     destination_persona_pub: str,
     destination_machine_pub: str,
+    capability: str = CAP_FLEET_DIRECTED_STREAM,
 ) -> Tuple[Optional["Tunnel"], str]:
     """The destination tunnel for a directed pair, or ``(None, reason)``.
 
     The organization is taken from *source*, which the caller has
     already authenticated, and never from the request body. A capability
     proves what a connection can speak; it is not a machine identity, so
-    both are checked.
+    both are checked. *capability* is the directed capability BOTH legs
+    must have negotiated: fleet-directed-stream/1 for sync,
+    session-control/1 for remote session control.
     """
     if not _identifies_a_machine(source.persona_pub, source.machine):
         return None, PAIR_SOURCE_IDENTITY_MISSING
@@ -95,9 +98,9 @@ def resolve_directed_pair(
     if destination is source:
         return None, PAIR_SELF
 
-    if CAP_FLEET_DIRECTED_STREAM not in (source.caps or ()):
+    if capability not in (source.caps or ()):
         return None, PAIR_SOURCE_CAPABILITY
-    if CAP_FLEET_DIRECTED_STREAM not in (destination.caps or ()):
+    if capability not in (destination.caps or ()):
         return None, PAIR_DESTINATION_CAPABILITY
 
     return destination, PAIR_OK
@@ -145,9 +148,13 @@ class DirectedPair:
     blanket "ignore stale events" rule would instead leak the old pair.
     """
 
-    def __init__(self, source: "Tunnel", destination: "Tunnel"):
+    def __init__(self, source: "Tunnel", destination: "Tunnel",
+                 capability: str = CAP_FLEET_DIRECTED_STREAM):
         self.source = source
         self.destination = destination
+        #: The directed capability this pair was admitted under; activation
+        #: re-runs the resolver with the same one.
+        self.capability = capability
         self.state = PAIR_OFFERED
         self.terminal_reason: Optional[str] = None
         self._accepted: set = set()
@@ -197,6 +204,7 @@ class DirectedPair:
         current, reason = resolve_directed_pair(
             hub, self.source,
             self.destination.persona_pub, self.destination.machine,
+            self.capability,
         )
         if reason != PAIR_OK:
             self._terminate(reason)

@@ -1705,17 +1705,28 @@ def _make_ice_serving_connector(
         from tools.network.fleet_relay_carrier import fleet_stream_offer_handler
         from tools.network.fleet_relay_sync import connector_runtime as _fleet_rt
 
+        caps = ("host-lease/1", "tls-stream/1", "dns-01/1",
+                "fleet-directed-stream/1")
         stream_kwargs = {
             "machine_key": machine_key,
             # fleet-directed-stream/1 (auto-fh2nv): this tunnel can be one
             # leg of a relay pair. Offers are served only while the process
             # is armed for fleet sync; an unarmed process refuses them the
             # way the direct listener refuses a pull.
-            "caps": ("host-lease/1", "tls-stream/1", "dns-01/1",
-                     "fleet-directed-stream/1"),
+            "caps": caps,
             "stream_handler": LocalCaddyStreamHandler(graph_org),
             "fleet_stream_offer": fleet_stream_offer_handler(_fleet_rt),
         }
+        if graph_org in (None, "personal"):
+            # session-control/1 (graph://7eb29bc8-31a §9.1): remote session
+            # control between the operator's own machines rides the PERSONAL
+            # tunnel only, the one connector that holds the session:control
+            # delegation.
+            from tools.network.session_control import session_control_offer_handler
+
+            stream_kwargs["caps"] = caps + ("session-control/1",)
+            stream_kwargs["session_control_offer"] = (
+                session_control_offer_handler(_fleet_rt))
     # Per-link serving (graph://807b4e11-3e9): resolve the link's channel
     # signing key from the vault so the handshake is authenticated by that key
     # instead of the org-root serve cert. A link with no channel key (legacy,
@@ -2189,6 +2200,21 @@ async def _serve_control_listener(connector, ctl_path: str,
                         )
                     except Exception as exc:
                         reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                elif isinstance(request.get("op"), str) and request.get(
+                    "op", "").startswith("session-control-"):
+                    # session-control/1 (graph://7eb29bc8-31a §9.1): the
+                    # dashboard's outbound requests and its long-poll for
+                    # inbound ones, over this same authenticated socket.
+                    from tools.network import session_control
+                    from tools.network.fleet_relay_sync import connector_runtime
+
+                    try:
+                        reply = await session_control.handle_ctl(
+                            connector, connector_runtime, request["op"],
+                            request.get("args") or {})
+                    except Exception as exc:
+                        reply = {"ok": False,
+                                 "error": f"{type(exc).__name__}: {exc}"}
                 elif request.get("op") == "fleet-relay-pull":
                     # DELEGATED pull (auto-ew9wf). The dashboard decided this
                     # peer's direct addresses are exhausted and minted the

@@ -224,6 +224,10 @@ class ConnectorFleetRuntime:
         #: the serving connector presents this unlinkable key instead of the
         #: fleet machine_key. None keeps the transitional fleet-key behavior.
         self.serving_machine_key: KeyPair | None = None
+        #: The session:control delegation (graph://7eb29bc8-31a §9.3) to the
+        #: same process key as the sync credential. Only the personal
+        #: connector's payload carries it; None refuses session control.
+        self.session_control_cert = None
         #: Set at connector startup (main) so a fresh process re-arms itself
         #: from the warm ramfs cache and a successful configure() re-warms it.
         #: None on any node without a ramfs keycache — arming still works, it
@@ -385,6 +389,7 @@ class ConnectorFleetRuntime:
             self._retired_listeners.append(previous.server)
         self.machine_key = credential.machine_key
         self.serving_machine_key = credential.serving_machine_key
+        self.session_control_cert = credential.session_control_cert
         # A fresh credential means this process is no longer refusing — start a
         # new refusal tally so the flag's "since" reflects THIS lock, not one
         # cleared hours ago.

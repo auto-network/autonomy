@@ -54,6 +54,8 @@ from tools.network.relaykit.frames import (
 )
 from tools.network.relaykit.fleet_stream_wire import (
     CAP_FLEET_DIRECTED_STREAM,
+    KIND_FOR_CAPABILITY,
+    PAIR_CAPS_FOR_CAPABILITY,
     FLEET_OPEN_DEADLINE_S,
     FLEET_PAIRS_PER_PROCESS,
     FLEET_PAIRS_PER_TUNNEL,
@@ -243,12 +245,14 @@ class _Leg:
 class _Pair:
     def __init__(self, broker: "DirectedStreamBroker", source: "Tunnel",
                  destination: "Tunnel", operation_id: str,
-                 claimed_machine_pub: Optional[str]):
+                 claimed_machine_pub: Optional[str],
+                 capability: str = CAP_FLEET_DIRECTED_STREAM):
         self.broker = broker
         self.pair_id = secrets.token_hex(16)
         self.operation_id = operation_id
         self.claimed_machine_pub = claimed_machine_pub
-        self.state = DirectedPair(source, destination)
+        self.capability = capability
+        self.state = DirectedPair(source, destination, capability)
         self.source = _Leg(self, source, ROLE_SOURCE)
         self.destination = _Leg(self, destination, ROLE_DESTINATION)
         self.accepted_event = asyncio.Event()
@@ -341,11 +345,20 @@ class DirectedStreamBroker:
 
     # -- readouts -----------------------------------------------------------
 
-    def _pairs_on(self, tunnel: "Tunnel") -> list:
+    def _pairs_on(self, tunnel: "Tunnel",
+                  capability: Optional[str] = None) -> list:
         return [
             pair for pair in self._pairs.values()
-            if pair.source.tunnel is tunnel or pair.destination.tunnel is tunnel
+            if (pair.source.tunnel is tunnel or pair.destination.tunnel is tunnel)
+            and (capability is None or pair.capability == capability)
         ]
+
+    def _caps(self, capability: str) -> tuple[int, int]:
+        """(per tunnel, per process) admission caps for *capability*.
+        fleet-directed-stream/1 keeps this broker's configured caps."""
+        if capability == CAP_FLEET_DIRECTED_STREAM:
+            return self.pairs_per_tunnel, self.pairs_per_process
+        return PAIR_CAPS_FOR_CAPABILITY[capability]
 
     def snapshot(self, org: Optional[str] = None) -> dict:
         """Operator/test readout: counts and retained custody, never payload.
@@ -375,20 +388,25 @@ class DirectedStreamBroker:
 
     # -- admission ----------------------------------------------------------
 
-    async def open(self, source: "Tunnel", args: object) -> dict:
-        """Handle one ``fleet-open`` control op from *source*.
+    async def open(self, source: "Tunnel", args: object, *,
+                   capability: str = CAP_FLEET_DIRECTED_STREAM) -> dict:
+        """Handle one ``fleet-open`` (or, for *capability*
+        session-control/1, ``session-open``) control op from *source*.
 
         Returns the control reply body on admission; raises
         :class:`DirectedStreamError` with the typed reason otherwise. The
         reply means "both legs have been sent OPEN", not readiness: the
         source's endpoint learns readiness from its own READY.
         """
+        if capability not in KIND_FOR_CAPABILITY:
+            raise DirectedStreamError(f"unknown directed capability {capability!r}")
         try:
             request = parse_fleet_open_args(args)
         except StreamProtocolError as exc:
             raise DirectedStreamError(f"{PAIR_INVALID_ARGS}: {exc}") from exc
         destination, reason = resolve_directed_pair(
             self.hub, source, request["dst_persona_pub"], request["dst_machine"],
+            capability,
         )
         if reason != PAIR_OK:
             raise DirectedStreamError(reason)
@@ -399,16 +417,20 @@ class DirectedStreamBroker:
                 and existing.operation_id == request["operation_id"]
             ):
                 raise DirectedStreamError(PAIR_OPERATION_OPEN)
-        # Admission BEFORE allocation: count what this pair would add.
-        if len(self._pairs) >= self.pairs_per_process:
+        # Admission BEFORE allocation: count what this pair would add, over
+        # pairs of the same capability only, so control and sync never
+        # starve each other.
+        per_tunnel, per_process = self._caps(capability)
+        same = [p for p in self._pairs.values() if p.capability == capability]
+        if len(same) >= per_process:
             raise DirectedStreamError(PAIR_CAP_PROCESS)
         for tunnel in (source, destination):
-            if len(self._pairs_on(tunnel)) >= self.pairs_per_tunnel:
+            if len(self._pairs_on(tunnel, capability)) >= per_tunnel:
                 raise DirectedStreamError(PAIR_CAP_TUNNEL)
 
         pair = _Pair(
             self, source, destination, request["operation_id"],
-            request["claimed_machine_pub"],
+            request["claimed_machine_pub"], capability,
         )
         self._pairs[pair.pair_id] = pair
         for leg in pair.legs:
@@ -421,6 +443,7 @@ class DirectedStreamBroker:
                     operation_id=pair.operation_id,
                     peer_persona_pub=peer.tunnel.persona_pub,
                     peer_machine=peer.tunnel.machine,
+                    kind=KIND_FOR_CAPABILITY[capability],
                     # The hint travels to the DESTINATION only: it is the
                     # source's claim about itself.
                     claimed_machine_pub=(

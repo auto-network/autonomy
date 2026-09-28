@@ -73,7 +73,7 @@ from .frames import (
 from .stream_adapter import StreamAdapter
 from .stream_wire import CAP_TLS_STREAM
 from .fleet_stream import FleetStreamAdapter
-from .fleet_stream_wire import CAP_FLEET_DIRECTED_STREAM
+from .fleet_stream_wire import CAP_FLEET_DIRECTED_STREAM, CAP_SESSION_CONTROL
 from .hello import (
     HELLO_VERSION_2,
     HELLO_VERSION_3,
@@ -508,6 +508,7 @@ class TunnelConnector:
         membership_proof_for=None,
         fleet_stream_window=None,
         fleet_stream_offer=None,
+        session_control_offer=None,
     ):
         self._url = f"{relay_url.rstrip('/')}/t/{org}"
         #: The relay ORIGIN and org this connector actually dialed. Kept
@@ -574,6 +575,13 @@ class TunnelConnector:
         #: The live tunnel's FleetStreamAdapter (open pairs through it), or
         #: None between tunnels / when the capability was not negotiated.
         self.fleet_streams: "FleetStreamAdapter | None" = None
+        #: async (FleetStreamEndpoint) -> bool for an inbound session-control/1
+        #: offer (graph://7eb29bc8-31a §9.1); None refuses every offer.
+        self._session_control_offer = session_control_offer
+        #: The live tunnel's session-control/1 adapter, or None between
+        #: tunnels / when the relay did not negotiate the capability (an old
+        #: relay): callers then refuse with a typed reason.
+        self.session_streams: "FleetStreamAdapter | None" = None
         #: capability intersection the registry accepted on the live tunnel
         self.accepted_caps: tuple = ()
         #: reservation -> hostname this connector wants leased; re-registered
@@ -1138,6 +1146,15 @@ class TunnelConnector:
                 **self._fleet_stream_window,
             )
         self.fleet_streams = fleet
+        # session-control/1: a second adapter over the same frames, same rule.
+        session = None
+        if CAP_SESSION_CONTROL in self.accepted_caps:
+            session = FleetStreamAdapter(
+                send_frame, self.control, on_offer=self._session_control_offer,
+                capability=CAP_SESSION_CONTROL,
+            )
+        self.session_streams = session
+        directed = tuple(a for a in (fleet, session) if a is not None)
         open_tasks: set = set()
 
         def drop(channel_id: bytes) -> None:
@@ -1157,9 +1174,8 @@ class TunnelConnector:
                     self._resolve_ctrl_reply(frame.payload)
                     continue
                 if frame.type == FRAME_STREAM_CTRL:
-                    if fleet is not None and fleet.dispatch_ctrl(
-                        frame.channel_id, frame.payload
-                    ):
+                    if any(a.dispatch_ctrl(frame.channel_id, frame.payload)
+                           for a in directed):
                         continue
                     if adapter is not None:
                         adapter.dispatch_ctrl(frame.channel_id, frame.payload)
@@ -1172,6 +1188,15 @@ class TunnelConnector:
                             and meta.get("kind") == "fleet-stream"
                         ):
                             if fleet is None or not fleet.dispatch_open(
+                                frame.channel_id, meta
+                            ):
+                                await send_frame(FRAME_CLOSE, frame.channel_id)
+                            continue
+                        if (
+                            isinstance(meta, dict)
+                            and meta.get("kind") == "session-control"
+                        ):
+                            if session is None or not session.dispatch_open(
                                 frame.channel_id, meta
                             ):
                                 await send_frame(FRAME_CLOSE, frame.channel_id)
@@ -1236,9 +1261,8 @@ class TunnelConnector:
                                             grant=grant)
                     )
                 elif frame.type == FRAME_DATA:
-                    if fleet is not None and fleet.dispatch_data(
-                        frame.channel_id, frame.payload
-                    ):
+                    if any(a.dispatch_data(frame.channel_id, frame.payload)
+                           for a in directed):
                         continue
                     if adapter is not None and adapter.dispatch_data(
                         frame.channel_id, frame.payload
@@ -1248,9 +1272,7 @@ class TunnelConnector:
                     if queue is not None:
                         queue.put_nowait(frame.payload)
                 elif frame.type == FRAME_CLOSE:
-                    if fleet is not None and fleet.dispatch_close(
-                        frame.channel_id
-                    ):
+                    if any(a.dispatch_close(frame.channel_id) for a in directed):
                         continue
                     if adapter is not None and adapter.dispatch_close(
                         frame.channel_id
@@ -1259,8 +1281,9 @@ class TunnelConnector:
                     drop(frame.channel_id)
         finally:
             self.fleet_streams = None
-            if fleet is not None:
-                await fleet.shutdown()
+            self.session_streams = None
+            for directed_adapter in directed:
+                await directed_adapter.shutdown()
             if adapter is not None:
                 for task in list(open_tasks):
                     task.cancel()
