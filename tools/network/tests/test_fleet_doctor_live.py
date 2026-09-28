@@ -126,3 +126,29 @@ def test_tunnel_summary_names_a_failed_viewer_channel():
     })
     assert text.startswith("connected since 2m ago; 3 viewer channel(s) failed, last 10s ago "
                            "on link abababab... (close 4502): PermissionError: link key resolution refused")
+
+
+def test_a_held_org_sync_certificate_prints_its_expiry(monkeypatch, capsys):
+    """The held-certificate branch computes days to expiry (auto-2se3x: it
+    named an unimported ``_time`` and crashed the whole doctor)."""
+    replies = {
+        "/api/vault/status": {"pid": 7, "audited_delegate_warm": True},
+        "/api/vault/organizations": {
+            "pid": 7, "audited_delegate_warm": True,
+            "organizations": [
+                {"org": "dynbench",
+                 "generation_keys": {"recorded": 1, "open_in_worker": 1},
+                 "organization_kem_key_held": True,
+                 "delegate": {"status": "ready"},
+                 "org_sync": {"key_held": True,
+                              "certificate": {"persona": "ab" * 32, "child_pub": "cd" * 32,
+                                              "not_after": time.time() + 10 * 86400 + 60}}},
+            ],
+        },
+    }
+    monkeypatch.setattr(fleet_doctor, "_api_get",
+                        lambda base, path, token, timeout=8.0: (replies[path], None))
+    fleet_doctor.check_live_worker({}, "https://localhost:8080", "tok")
+    out = capsys.readouterr().out
+    assert "dynbench: org sync channel: held: persona abababababab via serving key " \
+           "cdcdcdcdcdcd, expires in 10d; key held" in out

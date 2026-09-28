@@ -2090,7 +2090,7 @@ def check_live_worker(report: dict, api_base: str, api_token: str | None) -> Non
                 cert = org_sync["certificate"]
                 expires = cert.get("not_after")
                 days = ("" if not isinstance(expires, (int, float))
-                        else f", expires in {int((expires - _time.time()) // 86400)}d")
+                        else f", expires in {int((expires - time.time()) // 86400)}d")
                 _line(
                     f"{slug}: org sync channel",
                     f"held: persona {str(cert.get('persona') or '')[:12]} via serving key "
