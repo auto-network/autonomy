@@ -1311,15 +1311,14 @@ async def _probe_serving(binding: dict, token: str, org: str,
                          *, grant_id: str | None = None) -> dict:
     """End-to-end liveness probe of a freshly published link. Never raises —
     a probe that cannot run is reported as not-live, never an exception into
-    the publish result (the grant is already cached). Shared with Link Central
-    (link_central.py), which probes serving after a central publish.
+    the publish result (the grant is already cached).
 
     *grant_id* is the row key the grant was written under. Since 1ed46d1f the
     publish path keys the row by a publisher-minted grant id, so a probe that
     looked the row up by token found nothing and reported "link has no channel
-    key" — a true statement about a row it never located. Link Central still
-    writes its row keyed by the token and passes no grant id; ``check_grant``
-    resolves ``grant_id or token``, so both callers find their own row."""
+    key" — a true statement about a row it never located. ``check_grant``
+    resolves ``grant_id or token``, so a row written before O-C (keyed by
+    its token) is still found."""
     from tools.dashboard.link_probe import probe_link, registry_to_relay_ws
     from tools.dashboard.link_serving import check_grant
     try:

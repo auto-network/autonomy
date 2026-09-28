@@ -106,7 +106,6 @@ from . import org_capability_install  # noqa: F401 — autonomy.org.capability.i
 from . import workspace_capability_enable  # noqa: F401 — autonomy.workspace.capability.enable#1
 from . import commit_policy  # noqa: F401 — autonomy.commit.policy#1 + operation_policy#1
 from . import network_identity  # noqa: F401 — autonomy.network.{org-key,binding,link-grant}#1
-from . import link_approval  # noqa: F401 — autonomy.network.link-approval-{intent,result}#1
 from . import namespace_reservation  # noqa: F401 — autonomy.network.namespace-reservation#1
 from . import serve_zone  # noqa: F401 — autonomy.network.serve-zone#1
 from . import dashboard_auth  # noqa: F401 — autonomy.identity.dashboard-auth#1

@@ -57,10 +57,6 @@ from tools.graph.schemas.central_attention import (
     ATTENTION_PRESENTATION_SET_ID,
     CENTRAL_ATTENTION_REVISION,
 )
-from tools.graph.schemas.link_approval import (
-    LINK_APPROVAL_INTENT_SET_ID,
-    LINK_APPROVAL_RESULT_SET_ID,
-)
 
 
 logger = logging.getLogger(__name__)
@@ -71,8 +67,6 @@ PRIVATE_CENTRAL_SET_IDS = frozenset({
     ATTENTION_ITEM_SET_ID,
     ATTENTION_PRESENTATION_SET_ID,
     ATTENTION_DELIVERY_SET_ID,
-    LINK_APPROVAL_INTENT_SET_ID,
-    LINK_APPROVAL_RESULT_SET_ID,
 })
 
 _BROWSER_EVENT_SET_IDS = frozenset({
@@ -334,7 +328,6 @@ class AttentionRouteRuntime:
     hub: PrivateAttentionHub
     approval_http: ApprovalHttpBridge | None = None
     approval_reconciler: Any | None = None
-    link_receipt_forwarder: Any | None = None
     operator_result_projectors: Mapping[str, Any] | None = None
     vault_open_delivery: Any | None = None
     link_operation_desk: Any | None = None
@@ -461,14 +454,14 @@ def build_production_runtime() -> AttentionRouteRuntime:
     from tools.dashboard import fleet_enrollment_approvals as fleet
     from tools.dashboard import mailbox_central
     from tools.dashboard import vault_open_central
-    from tools.dashboard import link_approval_central as link_central
+    from tools.dashboard import link_approval_central
     dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
     approval_registry = build_production_registry(runtimes={
         dashboard_access_central.KIND: dashboard_approval_runtime,
         fleet.KIND: fleet.build_approval_runtime(),
         mailbox_central.KIND: mailbox_central.build_approval_runtime(),
         vault_open_central.KIND: vault_open_central.build_approval_runtime(),
-        **{kind: link_central.build_approval_runtime(kind) for kind in link_central.KINDS},
+        **{kind: link_approval_central.build_approval_runtime(kind) for kind in link_approval_central.KINDS},
     })
     approval_waiters = ApprovalWaitHub()
     coordinator_holder: dict[str, Any] = {}
@@ -501,8 +494,8 @@ def build_production_runtime() -> AttentionRouteRuntime:
             mailbox_central.build_attention_runtime(approvals),
         (vault_open_central.KIND, vault_open_central.APPLICATION_SCOPE):
             vault_open_central.build_attention_runtime(approvals),
-        **{(kind, link_central.APPLICATION_SCOPE):
-           link_central.build_attention_runtime(approvals, kind) for kind in link_central.KINDS},
+        **{(kind, link_approval_central.APPLICATION_SCOPE):
+           link_approval_central.build_attention_runtime(approvals, kind) for kind in link_approval_central.KINDS},
     }
     # The backup plugin's non-approval publication runtimes (auto-fnydv).
     # The registry rows are closed substrate code; the plugin supplies
@@ -563,13 +556,13 @@ def build_production_runtime() -> AttentionRouteRuntime:
             vault_open_central.KIND, vault_open_central.APPLICATION_SCOPE,
         ),
     )
-    link_desk = link_central.LinkApprovalDesk(approvals=approvals, index=index)
+    link_desk = link_approval_central.LinkApprovalDesk(approvals=approvals, index=index)
     link_coordinators = [
-        link_central.LinkApprovalCoordinator(
+        link_approval_central.LinkApprovalCoordinator(
             kind=kind, approvals=approvals, index=index,
-            producer=attention_registry.producer(kind, link_central.APPLICATION_SCOPE),
+            producer=attention_registry.producer(kind, link_approval_central.APPLICATION_SCOPE),
         )
-        for kind in link_central.KINDS
+        for kind in link_approval_central.KINDS
     ]
     # One reconciler slot, one coordinator per migrated kind; each ignores
     # other kinds' approval ids.
@@ -599,7 +592,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
                         reconcile=vault_coordinator.reconcile_exact,
                     ),
                 **{
-                    c.kind: link_central.build_http_adapter(
+                    c.kind: link_approval_central.build_http_adapter(
                         c.kind, link_desk, reconcile=c.reconcile_exact,
                     )
                     for c in link_coordinators
@@ -620,7 +613,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
                                     mailbox_central.KIND: email_consumer.project,
                                     vault_open_central.KIND: vault_delivery.operator_result,
                                     **{kind: link_desk.operator_result
-                                       for kind in link_central.KINDS}},
+                                       for kind in link_approval_central.KINDS}},
         vault_open_delivery=vault_delivery,
         link_operation_desk=link_desk,
     )
@@ -1145,44 +1138,6 @@ async def api_attention_decision(request: Request):
     return _no_store({"resolution": public})
 
 
-async def api_attention_link_receipt(request: Request):
-    """Forward one signed Link receipt request to its frozen registry.
-
-    The handler accepts no destination, organization, path, approval kind, or
-    store selector.  The inactive Link runtime supplies the item-bound
-    forwarder in tests; production returns not-found until Link activation.
-    """
-    denied = operator_mutation_guard(request)
-    if denied is not None:
-        return denied
-    try:
-        body = await _strict_json_object(request)
-    except ValueError:
-        return _no_store({"error": "invalid_request"}, status_code=422)
-    forwarder = _runtime.link_receipt_forwarder
-    if forwarder is None:
-        return _no_store({"error": "not_found"}, status_code=404)
-    try:
-        result = await asyncio.to_thread(
-            forwarder.forward,
-            request.path_params["attention_id"],
-            body,
-        )
-    except Exception as exc:
-        code = getattr(exc, "code", "unavailable")
-        if code == "not_found":
-            status = 404
-        elif code in {"invalid_request", "invalid_decision", "receipt_invalid"}:
-            status = 422
-        elif code in {"not_actionable", "source_expired", "binding_drift"}:
-            status = 409
-        else:
-            status = 503
-            code = "unavailable"
-        return _no_store({"error": code}, status_code=status)
-    return _no_store(dict(result))
-
-
 _VAULT_OPEN_STATUS = {
     "invalid_request": 422, "not_found": 404, "not_actionable": 409,
     "window_closed": 409, "elsewhere": 409, "binding_drift": 409,
@@ -1399,11 +1354,6 @@ routes = [
     Route(
         "/api/attention/items/{attention_id:path}/approval-decision",
         api_attention_decision,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/attention/items/{attention_id:path}/link-operation-receipt",
-        api_attention_link_receipt,
         methods=["POST"],
     ),
     Route(

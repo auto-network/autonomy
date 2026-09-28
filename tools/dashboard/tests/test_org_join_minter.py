@@ -155,8 +155,8 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
 
     # Publish ends with an end-to-end recipient probe over the relay (added
     # after this test was written); it has its own suite, and this test is
-    # about the minting contract, so the probe is a live recorder, as
-    # test_link_central stubs it. The publish must still go through it.
+    # about the minting contract, so the probe is a live recorder. The
+    # publish must still go through it.
     import tools.dashboard.link_approvals as _approvals_mod
     probes = []
 

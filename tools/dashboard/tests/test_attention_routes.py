@@ -40,10 +40,6 @@ from tools.graph.schemas.central_attention import (
     ATTENTION_DELIVERY_SET_ID, ATTENTION_ITEM_SET_ID,
     ATTENTION_PRESENTATION_SET_ID,
 )
-from tools.graph.schemas.link_approval import (
-    LINK_APPROVAL_INTENT_SET_ID,
-    LINK_APPROVAL_RESULT_SET_ID,
-)
 
 ROOT = "a" * 64
 APPROVAL_ID = "approval-1234567890"
@@ -434,39 +430,6 @@ class TestAttentionOperatorAPI:
             )
             assert client.get("/api/attention/items").status_code == 403
 
-    def test_link_receipt_forwarder_is_same_origin_item_keyed_and_no_store(
-        self, route_client,
-    ):
-        client, runtime, _producer = route_client
-        path = "/api/attention/items/recipient-item/link-operation-receipt"
-        origin = {"Origin": "https://dashboard.test"}
-        inactive = client.post(path, headers=origin, json={"envelope": {}})
-        assert inactive.status_code == 404
-        assert inactive.headers["Cache-Control"] == "no-store"
-
-        calls = []
-
-        class Forwarder:
-            def forward(self, attention_id, body):
-                if set(body) != {"envelope"}:
-                    from tools.dashboard.link_central import LinkCentralError
-                    raise LinkCentralError("invalid_request")
-                calls.append((attention_id, body))
-                return {"receipt": {"v": 1}, "signature": "signed"}
-
-        runtime.link_receipt_forwarder = Forwarder()
-        selector = client.post(
-            path,
-            headers=origin,
-            json={"envelope": {}, "org": "forged"},
-        )
-        assert selector.status_code == 422 and calls == []
-        accepted = client.post(path, headers=origin, json={"envelope": {}})
-        assert accepted.status_code == 200
-        assert accepted.headers["Cache-Control"] == "no-store"
-        assert accepted.json() == {"receipt": {"v": 1}, "signature": "signed"}
-        assert calls == [("recipient-item", {"envelope": {}})]
-
     def test_lifecycle_binding_mismatch_disabled_and_storage_failure(
         self, route_client,
     ):
@@ -842,7 +805,6 @@ def test_server_hook_diverts_all_private_sets(monkeypatch):
         APPROVAL_REQUEST_SET_ID, APPROVAL_RESOLUTION_SET_ID,
         ATTENTION_ITEM_SET_ID, ATTENTION_PRESENTATION_SET_ID,
         ATTENTION_DELIVERY_SET_ID,
-        LINK_APPROVAL_INTENT_SET_ID, LINK_APPROVAL_RESULT_SET_ID,
     ):
         private = {
             "set_id": set_id, "schema_revision": 99, "key": "private-key",
@@ -851,7 +813,7 @@ def test_server_hook_diverts_all_private_sets(monkeypatch):
         server._settings_emit_hook(
             operation="upsert", snapshot=private, org="wrong-org",
         )
-    assert len(delivered) == 7 and bus.all_cached_topics() == []
+    assert len(delivered) == 5 and bus.all_cached_topics() == []
     public = dict(private, set_id="dashboard.feature_flags", schema_revision=1)
     server._settings_emit_hook(operation="upsert", snapshot=public, org=None)
     assert bus.all_cached_topics() == ["setting.changed"]
