@@ -482,6 +482,11 @@ class HttpClient:
         machine over session-control/1)."""
         return self._post("/api/session/create", body)
 
+    def stop_session(self, name: str):
+        """Stop a session; ``name@machine`` stops one on another fleet machine."""
+        quoted = urllib.parse.quote(name, safe="@")
+        return self._post(f"/api/terminal/{quoted}/kill", {})
+
     def remote_status(self, machine: str):
         """``status`` of another fleet machine over session-control/1."""
         quoted = urllib.parse.quote(machine, safe="")

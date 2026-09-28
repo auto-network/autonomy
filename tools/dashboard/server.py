@@ -4048,15 +4048,104 @@ async def api_terminal_kill(request):
     Unknown-to-the-DB tmux sessions fall back to a direct kill.
     """
     name = request.path_params["id"]
+    if "@" in name:
+        # <name>@<machine>: stop a session on another fleet machine over
+        # session-control/1 (graph://7eb29bc8-31a §9.2). Operator authority.
+        refused = api_auth.require_global_api_authority(request)
+        if refused is not None:
+            return refused
+        from tools.dashboard import session_control_client
+
+        target, _, machine = name.rpartition("@")
+        reply = await session_control_client.request(
+            machine, "stop", {"tmux_name": target})
+        if not reply.get("ok"):
+            return JSONResponse(
+                {"status": "refused", "id": name, "refusal": reply.get("refusal"),
+                 "error": reply.get("detail") or reply.get("refusal")},
+                status_code=409)
+        return JSONResponse({**(reply.get("result") or {}), "id": name},
+                            status_code=202)
+    payload, status = await _stop_session(name)
+    return JSONResponse(payload, status_code=status)
+
+
+async def _inbound_session_send(body: dict, peer: str) -> dict:
+    """session-control ``send`` (graph://7eb29bc8-31a §9.2): paste text into
+    a session HERE for another machine of this fleet.
+
+    ``kind`` "input" pastes the text as typed (the operator's viewer input);
+    "crosstalk" wraps it in a CrossTalk envelope whose ``from`` is the
+    claimed sending session ADDRESSED AT THE HANDSHAKE-PROVED MACHINE, so the
+    machine is never a body claim. The peer is logged for audit.
+    """
+    from tools.dashboard import session_control_client as scc
+    from tools.dashboard import session_presence
+
+    name, text = body.get("tmux_name"), body.get("text")
+    kind = body.get("kind") or "input"
+    if not isinstance(name, str) or not name or not isinstance(text, str) or not text:
+        return scc.refusal("bad-request", "tmux_name and text are required")
+    if kind not in ("input", "crosstalk"):
+        return scc.refusal("bad-request", f"unknown send kind {kind!r}")
+    if len(text.encode("utf-8")) > scc.MAX_SEND_BYTES:
+        return scc.refusal(scc.OP_TOO_LARGE, f"text over {scc.MAX_SEND_BYTES} bytes")
+    if not await asyncio.to_thread(_tmux_session_exists, name):
+        return scc.refusal(scc.NO_SUCH_SESSION, name)
+    roster = await asyncio.to_thread(session_presence._active_roster) or {}
+    names = await asyncio.to_thread(session_presence._machine_names)
+    peer_label = names.get(roster.get(peer, "")) or peer[:12]
+    if kind == "crosstalk":
+        error = _validate_crosstalk_message(text)
+        if error:
+            return scc.refusal("bad-request", error)
+        claimed = str(body.get("from_session") or "unknown")[:128]
+        label = str(body.get("from_label") or claimed)[:200].replace('"', "'")
+        sender = f"{claimed}@{peer_label}"
+        iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        payload = (
+            f'<crosstalk from="{sender}"\n'
+            f'           label="{label}"\n'
+            f'           machine="{peer_label}"\n'
+            f'           timestamp="{iso_now}">\n'
+            f'{text}\n'
+            f'</crosstalk>'
+        )
+    else:
+        sender, payload = f"operator@{peer_label}", text
+    await tmux_send(name, payload)
+    await asyncio.to_thread(
+        auth_db.insert_message, sender, sender, name, None, None, text, time.time())
+    logger.info("session-control send kind=%s to=%s from_machine=%s",
+                kind, name, peer[:16])
+    return scc.ok({"delivered": True, "tmux_name": name})
+
+
+async def _inbound_session_stop(body: dict, peer: str) -> dict:
+    """session-control ``stop``: stop a session HERE for another machine of
+    this fleet (the handshake-proved *peer*, logged for audit)."""
+    from tools.dashboard import session_control_client as scc
+
+    name = body.get("tmux_name")
+    if not isinstance(name, str) or not name:
+        return scc.refusal("bad-request", "tmux_name is required")
+    payload, _status = await _stop_session(name)
+    if payload.get("status") == "not_found":
+        return scc.refusal(scc.NO_SUCH_SESSION, name)
+    logger.info("session-control stop %s from_machine=%s", name, peer[:16])
+    return scc.ok(payload)
+
+
+async def _stop_session(name: str) -> tuple[dict, int]:
+    """Stop *name* on THIS machine (api_terminal_kill's body; also the
+    executor of an inbound session-control ``stop``)."""
     if not _tmux_session_exists(name) and not dashboard_db.session_exists(name):
-        return JSONResponse({"status": "not_found", "id": name})
+        return {"status": "not_found", "id": name}, 200
 
     if dashboard_db.session_exists(name):
         job = LifecycleJob("stop", name, {"event_loop": asyncio.get_running_loop()})
         if _SESSION_LIFECYCLE_WORKER.try_enqueue(job):
-            return JSONResponse(
-                {"status": "stopping", "id": name}, status_code=202,
-            )
+            return {"status": "stopping", "id": name}, 202
         logger.warning(
             "api_terminal_kill: lifecycle queue full; stopping %s inline", name,
         )
@@ -4075,7 +4164,7 @@ async def api_terminal_kill(request):
             capture_output=True, timeout=30,
             cwd=str(Path(__file__).parents[2]),
         ))
-    return JSONResponse({"status": "killed", "id": name})
+    return {"status": "killed", "id": name}, 200
 
 
 async def api_terminal_rename(request):
@@ -4873,6 +4962,36 @@ async def api_crosstalk_send(request):
         return JSONResponse({"delivered": bool(delivered), "from": sender, "label": sender_label,
                              "target": target, "group": slug, "members": delivered})
 
+    # <name>@<machine>, or a name that lives only on another fleet machine:
+    # deliver over session-control/1 (graph://7eb29bc8-31a §9.2). The far
+    # machine builds the envelope and stamps the machine the handshake proved.
+    remote = await _remote_crosstalk_target(target)
+    if isinstance(remote, JSONResponse):
+        return remote
+    if remote is not None:
+        from tools.dashboard import session_control_client
+
+        name, machine = remote
+        sender_row = dashboard_db.get_session(sender)
+        sender_label = (sender_row or {}).get("label", "") or sender
+        reply = await session_control_client.request(machine, "send", {
+            "tmux_name": name, "kind": "crosstalk", "text": message,
+            "from_session": sender, "from_label": sender_label,
+        })
+        delivered = bool(reply.get("ok"))
+        await asyncio.to_thread(
+            auth_db.insert_message, sender, sender_label, target,
+            None, None, message, time.time(), 1 if delivered else 0)
+        if not delivered:
+            status = 404 if reply.get("refusal") == "no-such-session" else 502
+            return JSONResponse(
+                {"error": reply.get("detail") or reply.get("refusal"),
+                 "refusal": reply.get("refusal"), "target": target},
+                status_code=status)
+        return JSONResponse({"delivered": True, "from": sender,
+                             "label": sender_label, "target": target,
+                             "machine": machine})
+
     # Validate target. A live tmux session delivers normally (below). A target
     # that is a known chat handle (ChatGPT-<datetime>) has no live pane; queue the
     # message for that chat to collect — but only while an approved crosstalk grant
@@ -4944,6 +5063,36 @@ async def api_crosstalk_send(request):
         "harness": sender_harness,
         "model": sender_model or None,
     })
+
+
+async def _remote_crosstalk_target(target: str):
+    """(name, machine) when *target* is a session on another fleet machine,
+    None when it is not, or a JSONResponse error for an ambiguous name.
+
+    ``name@machine`` is explicit. An unqualified name that is not a local
+    tmux session resolves only when exactly one other machine's presence row
+    carries it; two machines with that name is an error naming both.
+    """
+    if not target or target.startswith("group:"):
+        return None
+    if "@" in target:
+        name, _, machine = target.rpartition("@")
+        return (name, machine) if name and machine else None
+    if await asyncio.to_thread(_tmux_session_exists, target):
+        return None
+    from tools.dashboard import session_presence
+
+    try:
+        rows = await asyncio.to_thread(session_presence.read_presence)
+    except Exception:
+        return None
+    hits = [r for r in rows if not r["local"] and r["tmux_name"] == target]
+    if len(hits) > 1:
+        return JSONResponse(
+            {"error": f"{target} runs on more than one machine; address it as "
+                      + " or ".join(f"{target}@{r['machine']}" for r in hits)},
+            status_code=409)
+    return (target, hits[0]["machine_pub"]) if hits else None
 
 
 _MAX_BROADCAST_IDLE_SECS = 21600  # 6 hours
@@ -7100,6 +7249,27 @@ async def api_session_send(request):
         )
     if not message:
         return JSONResponse({"error": "message is required"}, status_code=400)
+
+    machine = (body.get("machine") or "").strip()
+    if not machine and "@" in tmux_session:
+        tmux_session, _, machine = tmux_session.rpartition("@")
+    if machine:
+        # The viewer's input for a session on another fleet machine
+        # (graph://7eb29bc8-31a §9.2): operator authority, pasted as typed.
+        refused = api_auth.require_global_api_authority(request)
+        if refused is not None:
+            return refused
+        from tools.dashboard import session_control_client
+
+        reply = await session_control_client.request(machine, "send", {
+            "tmux_name": tmux_session, "kind": "input", "text": message})
+        if not reply.get("ok"):
+            status = 404 if reply.get("refusal") == "no-such-session" else 502
+            return JSONResponse(
+                {"error": reply.get("detail") or reply.get("refusal"),
+                 "refusal": reply.get("refusal")}, status_code=status)
+        return JSONResponse({"status": "sent", "tmux_session": tmux_session,
+                             "machine": machine})
 
     try:
         exists = _tmux_session_exists(tmux_session)
@@ -23148,7 +23318,8 @@ async def _activate_worker(reason: str) -> None:
             from tools.dashboard import session_control_client
             global _session_control_pump
             _session_control_pump = session_control_client.install(
-                _resolved_dispatch_limits, _create_session_from_body)
+                _resolved_dispatch_limits, _create_session_from_body,
+                ops={"send": _inbound_session_send, "stop": _inbound_session_stop})
         except Exception:
             logger.exception("session-control inbound pump failed to start")
 

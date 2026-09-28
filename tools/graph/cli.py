@@ -2216,9 +2216,22 @@ def cmd_session(args):
                 sys.exit(2)
         if getattr(args, "json", False):
             print(json.dumps(reply, indent=2, sort_keys=True))
-        elif isinstance(reply, dict) and reply.get("tmux_name"):
+            return
+        if isinstance(reply, dict) and reply.get("tmux_name"):
             where = f"@{reply['machine']}" if reply.get("machine") else ""
             print(f"  \u2713 {reply['tmux_name']}{where} (launching)")
+        else:
+            print(f"Error: {reply}", file=sys.stderr)
+            sys.exit(2)
+    elif args.session_cmd == "stop":
+        try:
+            reply = client.stop_session(args.name)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        status = reply.get("status") if isinstance(reply, dict) else None
+        if status in ("stopping", "killed"):
+            print(f"  \u2713 {args.name}: {status}")
         else:
             print(f"Error: {reply}", file=sys.stderr)
             sys.exit(2)
@@ -6119,6 +6132,8 @@ def main():
     sp.add_argument("--model", help="Model override")
     sp.add_argument("--harness", help="Harness override")
     sp.add_argument("--json", action="store_true", help="Print the raw reply")
+    sp = session_sub.add_parser("stop", help="Stop a session (name, or name@machine for another fleet machine)")
+    sp.add_argument("name")
     p.set_defaults(func=cmd_session)
 
     p = sub.add_parser("remote", help="Drive another of the operator's fleet machines (session-control/1)")

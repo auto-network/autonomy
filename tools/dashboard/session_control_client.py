@@ -34,6 +34,10 @@ POLL_WAIT_S = 20.0
 UNAVAILABLE_BACKOFF_S = 5.0
 
 CONNECTOR_UNAVAILABLE = "personal-connector-unavailable"
+NO_SUCH_SESSION = "no-such-session"
+OP_TOO_LARGE = "op-too-large"
+#: Largest text a remote send may paste (graph://7eb29bc8-31a §9.2).
+MAX_SEND_BYTES = 256 * 1024
 UNKNOWN_MACHINE = "unknown-machine"
 UNKNOWN_OP = "unknown-op"
 OP_FAILED = "op-failed"
@@ -302,11 +306,15 @@ class InboundPump:
 
 def install(limits_provider: Callable[[], dict],
             create: Callable[[dict], Awaitable[object]] | None = None,
+            ops: dict[str, OpHandler] | None = None,
             ) -> InboundPump:
-    """Register the built-in ops and start the pump (worker activation)."""
+    """Register the built-in ops, plus the server-owned *ops*, and start the
+    pump (worker activation)."""
     register_op("status", status_op(limits_provider))
     if create is not None:
         register_op("launch", launch_op(create))
+    for name, handler in (ops or {}).items():
+        register_op(name, handler)
     pump = InboundPump()
     pump.start()
     return pump
