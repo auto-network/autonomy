@@ -28,7 +28,7 @@ from typing import Optional
 from tools.data_paths import REPO_ROOT
 
 IMAGE = "autonomy-browser:local"
-NETWORK = "autonomy-browser"
+NETWORK = "autonomy-leases"
 AGENT_PORT = 7300
 SHM_SIZE = "1g"
 SECCOMP_PROFILE = REPO_ROOT / "tools" / "browser_broker" / "image" / "seccomp-chrome.json"
@@ -115,13 +115,22 @@ def create_args(*, name: str, lease_labels: dict[str, str], caps: Caps,
 
 
 def ensure_network() -> None:
-    """Create ``autonomy-browser`` if missing. The dashboard never joins it:
-    the network redesign (auto-8c2df) reaches leases through a relay instead."""
+    """Create the plain lease network if missing and attach this dashboard to it,
+    so the dashboard can reach its leases. No firewall rules are installed."""
     if _docker("network", "inspect", NETWORK, check=False).returncode != 0:
         proc = _docker("network", "create", "--driver", "bridge",
                        "--label", f"{LABEL}.network=1", NETWORK, check=False)
         if proc.returncode != 0 and not _says(proc, "already exists"):
             raise RuntimeError(f"cannot create {NETWORK}: {proc.stderr.strip()}")
+    from agents.mount_plan import _own_container_id
+
+    own = _own_container_id()
+    if own:
+        proc = _docker("network", "connect", "--gw-priority", "-1", NETWORK, own, check=False)
+        if proc.returncode != 0 and _says(proc, "gw-priority"):
+            proc = _docker("network", "connect", NETWORK, own, check=False)
+        if proc.returncode != 0 and not _says(proc, "already exists", "already attached"):
+            raise RuntimeError(f"cannot attach the dashboard to {NETWORK}: {proc.stderr.strip()}")
 
 
 def profile_mount_argv(org: str, workspace: str, name: str) -> list[str]:

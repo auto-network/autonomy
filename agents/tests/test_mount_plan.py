@@ -349,14 +349,14 @@ def test_workspace_bind_on_a_private_mount_is_emitted_without_rslave():
 
 # ── the node's primary network is its Compose network, never the lease network ──
 def test_primary_network_is_the_dashboard_alias_network_not_the_lease_network(monkeypatch):
-    """auto-czoc0 review: the dashboard also joins autonomy-browser, which sorts
+    """auto-czoc0 review: the dashboard also joins autonomy-leases, which sorts
     before autonomy_default in docker's inspect map. Sessions must still launch
     on the network where the node carries its ``dashboard`` alias."""
     import json
     import subprocess
 
     networks = {  # docker serializes the map with sorted keys
-        "autonomy-browser": {"Aliases": [], "DNSNames": ["dashboard-1", "abc123"], "GwPriority": -1},
+        "autonomy-leases": {"Aliases": [], "DNSNames": ["dashboard-1", "abc123"], "GwPriority": -1},
         "autonomy_default": {"Aliases": ["dashboard"],
                              "DNSNames": ["dashboard-1", "dashboard", "abc123"], "GwPriority": 0},
     }

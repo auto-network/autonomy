@@ -199,7 +199,7 @@ def _own_container_id() -> Optional[str]:
 
 #: The browser broker's lease network (tools/dashboard/browser_containers.py).
 #: The dashboard joins it to reach lease containers; sessions must never.
-_BROWSER_LEASE_NETWORK = "autonomy-browser"
+_BROWSER_LEASE_NETWORK = "autonomy-leases"
 
 
 def _own_primary_network(cid: str) -> str:

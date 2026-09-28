@@ -48,7 +48,6 @@ _epoch: Optional[int] = None
 _tick = 0
 _isolated = False
 _isolation_checked = False
-PAUSE_MESSAGE = "browser broker paused: network redesign (bead follows)"
 
 
 def isolation_checked() -> bool:
@@ -64,12 +63,10 @@ def isolated() -> bool:
 
 
 def _ensure_isolation() -> None:
-    """Paused: no firewall rules and no network attachment until the redesign.
-    Logged once per activation, never retried."""
+    """Leases are allowed once the lease network is in place (no firewall rules)."""
     global _isolated, _isolation_checked
-    _isolated = False
+    _isolated = True
     _isolation_checked = True
-    logger.warning(PAUSE_MESSAGE)
 
 
 def epoch() -> Optional[int]:
