@@ -80,10 +80,18 @@ def _founded_with_invite(*, key_bound: bool = False) -> str:
     return invite_id
 
 
-def _publish(invite_ref: str, *, token: str = GRANT_TOKEN) -> None:
+def _publish(invite_ref: str, *, token: str = GRANT_TOKEN, grant_id: str | None = None,
+             bearer: str | None = None, key: str | None = None) -> None:
+    """A published link's grant row. The executor keys it by ``grant_id``
+    (``_execute_share_link_publish_tunnel``); legacy rows by the token."""
+    payload = {"grant_id": grant_id} if grant_id else {}
+    if bearer:
+        payload["bearer"] = bearer
     settings_ops.add_setting(
-        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, token,
+        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
+        key or grant_id or token,
         {
+            **payload,
             "token": token,
             "url": f"https://relay.auto.network/l/{token}",
             "target_uuid": "11111111-1111-4111-8111-111111111111",
@@ -188,3 +196,82 @@ def test_malformed_input_is_refused_before_anything_is_read(client):
 def test_mock_mode_has_no_ledger(client, monkeypatch):
     monkeypatch.setenv("DASHBOARD_MOCK", "1")
     assert _post(client, org=ORG, invite_ref="ab" * 32, token=BEARER).status_code == 502
+
+
+GRANT_ID = "9d" * 16
+
+
+def _grant_rows():
+    return [
+        (member.key, member.payload or {})
+        for member in settings_ops.read_owned_set(
+            NETWORK_LINK_GRANT_SET_ID, org=ORG,
+            target_revision=NETWORK_LINK_GRANT_REVISION,
+        ).members
+    ]
+
+
+def test_the_bearer_lands_on_the_publishers_own_row(client):
+    """auto-xvqxz: the publisher keys a grant row by its grant_id. Retaining
+    the bearer under the registry token wrote a second row for the same
+    link, and the screen showed whichever it met last."""
+    invite_ref = _founded_with_invite()
+    _publish(invite_ref, grant_id=GRANT_ID)
+
+    response = _post(client, org=ORG, invite_ref=invite_ref, token=BEARER)
+
+    assert response.status_code == 200, response.text
+    rows = _grant_rows()
+    assert [key for key, _payload in rows] == [GRANT_ID]
+    assert rows[0][1]["bearer"] == BEARER
+
+
+def test_the_screen_shows_the_row_that_holds_the_bearer(client):
+    """Rows already duplicated by the old retention: whichever order they
+    resolve in, the Membership view renders the one carrying the bearer."""
+    from tools.dashboard import org_membership_routes
+
+    invite_ref = _founded_with_invite()
+    _publish(invite_ref, grant_id=GRANT_ID)
+    _publish(invite_ref, grant_id=GRANT_ID, bearer=BEARER, key=GRANT_TOKEN)
+
+    assert org_membership_routes._link_grants(ORG)[invite_ref]["bearer"] == BEARER
+    original = settings_ops.read_owned_set
+
+    def reversed_members(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result.members.reverse()
+        return result
+
+    import unittest.mock
+    with unittest.mock.patch.object(settings_ops, "read_owned_set", reversed_members):
+        assert org_membership_routes._link_grants(ORG)[invite_ref]["bearer"] == BEARER
+
+
+def test_an_unpublished_grant_row_is_not_a_published_link(client):
+    """The publisher writes a grant row before create-link; until the
+    registry answers it has no token or url. Retention treats it as no link
+    at all and writes nothing."""
+    invite_ref = _founded_with_invite()
+    settings_ops.add_setting(
+        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, GRANT_ID,
+        {
+            "grant_id": GRANT_ID,
+            "target_uuid": "11111111-1111-4111-8111-111111111111",
+            "target_type": "org:join",
+            "invite_ref": invite_ref,
+            "meta": {},
+            "subject": {"kind": "operator", "id": "op-1"},
+            "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+        org=ORG,
+    )
+    GraphDB.close_all_pooled()
+
+    response = _post(client, org=ORG, invite_ref=invite_ref, token=BEARER)
+
+    assert response.status_code == 404, response.text
+    assert "no published link" in response.json()["error"]
+    rows = _grant_rows()
+    assert [key for key, _payload in rows] == [GRANT_ID]
+    assert "bearer" not in rows[0][1]

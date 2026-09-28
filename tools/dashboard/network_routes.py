@@ -1883,13 +1883,25 @@ async def post_ledger_invite_bearer(request: Request) -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": f"could not read the grant cache: {exc}"},
                             status_code=400)
-    grant = None
+    # The publisher keys a grant row by its grant_id (legacy rows: by the
+    # registry token). Retaining the bearer under any other key wrote a
+    # second row for the same link, and the Membership screen then showed
+    # whichever row it met last — often the one without the bearer.
+    from tools.dashboard.link_approvals import is_published_grant
+
+    grant = grant_key = None
     for member in members:
         payload = member.payload or {}
+        # Only a published row: one the publisher wrote before create-link
+        # (or a failed publish left) has no token or url yet.
         if (payload.get("target_type") == "org:join"
-                and payload.get("invite_ref") == invite_ref):
-            grant = payload
-            break
+                and payload.get("invite_ref") == invite_ref
+                and is_published_grant(payload)):
+            key = payload.get("grant_id") or payload.get("token")
+            if grant is None or member.key == key:
+                grant, grant_key = payload, key
+            if member.key == key:
+                break
     if grant is None:
         return JSONResponse(
             {"ok": False, "error": "that invitation has no published link"},
@@ -1900,7 +1912,7 @@ async def post_ledger_invite_bearer(request: Request) -> JSONResponse:
     try:
         settings_ops.upsert_by_key(
             NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
-            grant["token"], {**grant, "bearer": token}, org=requested_org,
+            grant_key, {**grant, "bearer": token}, org=requested_org,
         )
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": f"could not retain the bearer: {exc}"},

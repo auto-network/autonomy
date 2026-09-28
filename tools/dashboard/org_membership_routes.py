@@ -102,6 +102,12 @@ def _link_grants(slug: str) -> dict:
         invite_ref = payload.get("invite_ref")
         url = payload.get("url")
         if payload.get("target_type") == "org:join" and invite_ref and url:
+            # A bearer retained before auto-xvqxz landed in a second row
+            # for the same link; the row carrying the bearer is the one to
+            # show.
+            held = grants.get(str(invite_ref))
+            if held is not None and held["bearer"] and not payload.get("bearer"):
+                continue
             label = (payload.get("meta") or {}).get("label")
             bearer = payload.get("bearer")
             channel_pub = payload.get("channel_pub")
