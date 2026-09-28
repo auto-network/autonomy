@@ -2547,23 +2547,36 @@ RECENT_SORT_SINCE_BEHAVIOR_CHECKS = """(async () => {
         if (!root) return JSON.stringify({error: 'sessionsPage not found'});
         var data = Alpine.$data(root);
 
+        // The rendered list is the reactive getter `filtered` (type chip,
+        // org, search, Since window, then the Sort); `recent` is the raw
+        // projection and is never re-sorted (auto-pw295).
+        // Preconditions the sweep's shared browser does not guarantee: a
+        // search left by an earlier class (TestSearchChromePolish typed
+        // 'polish') and an org filter both narrow `filtered`.
+        data.searchQuery = '';
+        data.selectedOrg = '';
+        await tick();
+
         // Baseline: sort=lastActivity, since=1d — most-recent row first.
         data.recentSort = 'lastActivity';
         data.recentSince = 'all';
         await tick();
-        r.initial_ids = data.recent.map(function(s) { return s.id; });
+        r.initial_ids = data.filtered.map(function(s) { return s.id; });
 
         // Sort by Most Turns — 627-turn session must float to the top.
         data.recentSort = 'turns';
         await tick();
-        r.turns_ids = data.recent.map(function(s) { return s.id; });
+        r.turns_ids = data.filtered.map(function(s) { return s.id; });
+        r.state_seen = {selectedOrg: data.selectedOrg, recentFilter: data.recentFilter,
+            search: data.searchQuery || data.search || '', recent_len: data.recent.length,
+            recent_ids: data.recent.map(function(s) { return s.id; }).slice(0, 6)};
         r.turns_first = r.turns_ids[0] || '';
 
         // Filter by Since=6h — 2h-old row still included, 2d-old excluded.
         data.recentSort = 'lastActivity';
         data.recentSince = '6h';
         await tick();
-        r.since_6h_ids = data.recent.map(function(s) { return s.id; });
+        r.since_6h_ids = data.filtered.map(function(s) { return s.id; });
 
         // Persistence — changing these writes to localStorage.
         r.sort_in_storage = localStorage.getItem('recentSort');
@@ -2693,6 +2706,16 @@ BEADS_PAGE_CHECKS = """
     r.org_selector_visible = !!(orgSelect && orgSelect.offsetParent !== null);
     r.org_selector_before_profile = !!(orgSelect && profile &&
       orgSelect.getBoundingClientRect().right <= profile.getBoundingClientRect().left);
+    // One identity component moves between two shell homes at the nav
+    // breakpoint: the sidebar on desktop, the header on mobile.
+    r.org_selector_in_header = !!(orgSelect && orgSelect.closest('#header-actions'));
+    r.profile_home = profile && profile.parentNode
+      ? (profile.parentNode.id || '') : '';
+    r.desktop = window.matchMedia('(min-width: 768px)').matches;
+    var rectOf = function(el) { if (!el) return null; var b = el.getBoundingClientRect();
+      return [Math.round(b.left), Math.round(b.right), Math.round(b.top), Math.round(b.width)]; };
+    r.org_selector_rect = rectOf(orgSelect);
+    r.profile_rect = rectOf(profile);
     var firstBeadLink = document.querySelector('a[href^="/bead/"]');
     r.bead_link_keeps_org = !!(firstBeadLink && firstBeadLink.getAttribute('href').indexOf('org=autonomy') !== -1);
     var beadsRoot = document.querySelector('[x-data="beadsPage()"]');
@@ -3278,9 +3301,14 @@ WORKTREES_PAGE_CHECKS = """(async () => {
     var textOf = function(el) {
         return el ? el.textContent.replace(/\\s+/g, ' ').trim() : '';
     };
-    var cardBySession = function(sessionName) {
+    // A session may hold several worktrees (auto-sweep-alpha has a second
+    // repository branch since 2206c55f), so a card is named by session AND a
+    // text only that worktree's card shows (its commit subject); the second
+    // argument is optional for single-worktree sessions.
+    var cardBySession = function(sessionName, repoName) {
         return Array.from(document.querySelectorAll('[data-testid="worktree-commit-card"]')).find(function(card) {
-            return card.textContent.indexOf(sessionName) !== -1;
+            var text = card.textContent;
+            return text.indexOf(sessionName) !== -1 && (!repoName || text.indexOf(repoName) !== -1);
         }) || null;
     };
     var badgeTexts = function(root, testid) {
@@ -3303,13 +3331,21 @@ WORKTREES_PAGE_CHECKS = """(async () => {
     r.commit_titles = Array.from(document.querySelectorAll('[data-testid="worktree-commit-card"] h3')).map(function(el) {
         return el.textContent.trim();
     });
+    var wtRoot = document.querySelector('[data-testid="worktrees-page"]');
+    var wtData = wtRoot && window.Alpine ? Alpine.$data(wtRoot) : null;
+    r.worktrees_state = wtData ? {selectedOrg: wtData.selectedOrg,
+        rows: (wtData.rows || []).map(function(w) { return w.session_name + '/' + w.repo_name; })} : null;
+    // The hero tiles restate the page's own rows: worktrees, commits, dirty.
+    r.expected_summary = wtData ? [String((wtData.rows || []).length),
+        String((wtData.commitItems || []).length),
+        String(wtData.uncommittedChangesCount)] : null;
     r.summary_counts = Array.from(document.querySelectorAll('[data-testid="worktrees-summary"] > div')).map(function(tile) {
         var values = tile.querySelectorAll('div');
         var last = values.length ? values[values.length - 1] : null;
         return last ? last.textContent.trim() : '';
     });
 
-    var alphaCard = cardBySession('auto-sweep-alpha');
+    var alphaCard = cardBySession('auto-sweep-alpha', 'Fix worktree review sticky headers');
     var betaCard = cardBySession('auto-sweep-beta');
     var deltaCard = cardBySession('auto-sweep-delta');
     r.alpha_has_empty_state = !!(alphaCard && alphaCard.querySelector('[data-testid="pr-empty-state-cta"]'));
@@ -3778,6 +3814,7 @@ class TestRecentSortAndSinceBehavior:
     @pytest.fixture(scope="class", autouse=True)
     @classmethod
     def checks(cls, browser, request):
+        _forget_page_org_choices("sessionsOrgFilter")
         result = _navigate_and_eval_async(
             "/sessions",
             RECENT_SORT_SINCE_BEHAVIOR_CHECKS,
@@ -3790,7 +3827,7 @@ class TestRecentSortAndSinceBehavior:
         c = self._checks
         assert c.get("turns_first") == "src-sweep-aaa111", (
             f"Most Turns should place the 627-turn session first; got "
-            f"{c.get('turns_first')!r}, full order {c.get('turns_ids')}"
+            f"{c.get('turns_first')!r}, full order {c.get('turns_ids')}; page state {c.get('state_seen')}"
         )
 
     def test_since_6h_excludes_ancient_rows(self):
@@ -3890,10 +3927,18 @@ class TestBeadsPageBehavior:
         assert c.get("has_deps_tab"), f"No 'Deps' tab, got: {c.get('tab_labels')}"
 
     def test_organization_selector_is_beside_profile(self):
-        """User sees the organization selector immediately before profile."""
+        """The organization selector sits in the header's actions. The profile
+        is one component that lives in the sidebar on desktop and in the
+        header, immediately after the selector, on mobile."""
         c = self._checks
         assert c.get("org_selector_visible"), "Organization selector is not visible"
-        assert c.get("org_selector_before_profile"), "Organization selector is not before profile"
+        assert c.get("org_selector_in_header"), "Organization selector is not in the header actions"
+        if c.get("desktop"):
+            assert c.get("profile_home") == "identity-sidebar-slot", c.get("profile_home")
+        else:
+            assert c.get("org_selector_before_profile"), (
+                "Organization selector is not before profile: "
+                f"select [l,r,t,w]={c.get('org_selector_rect')} profile={c.get('profile_rect')}")
 
     def test_bead_navigation_keeps_selected_organization(self):
         """Opening a listed bead retains the selected tracker."""
@@ -5261,6 +5306,7 @@ class TestWorktreesPageBehavior:
     @pytest.fixture(scope="class", autouse=True)
     @classmethod
     def checks(cls, browser, request):
+        _forget_page_org_choices("worktrees.org")
         result = _navigate_and_eval_async("/worktrees", WORKTREES_PAGE_CHECKS, wait_ms=1200)
         request.cls._checks = result
 
@@ -5268,17 +5314,25 @@ class TestWorktreesPageBehavior:
         """User sees populated worktree cards instead of the empty pre-init shell."""
         c = self._checks
         assert c.get("has_page"), "No worktrees page root found"
-        assert c.get("commit_card_count") == 3, (
-            f"Expected 3 commit-stack cards, got {c.get('commit_card_count')}"
+        # One card per worktree: alpha, beta, alpha's second branch, delta.
+        assert c.get("commit_card_count") == 4, (
+            f"Expected 4 commit-stack cards, got {c.get('commit_card_count')}"
         )
         assert c.get("refresh_label") == "Refresh", (
             f"Refresh button rendered oddly: {c.get('refresh_label')!r}"
         )
-        # Org-scoped hero stats: worktrees / commits / uncommitted changes
-        # (the sweep fixture is single-org, so the page auto-selects it).
-        assert c.get("summary_counts") == ["4", "6", "2"], (
-            f"Unexpected summary counts: {c.get('summary_counts')}"
+        # Org-scoped hero stats: worktrees / commits / uncommitted changes.
+        # They restate the page's rows; how many rows depends on the org a
+        # previous class left selected (the dirty-only gamma worktree is in
+        # the autonomy org), so compare with the page, then pin the fixture.
+        assert c.get("summary_counts") == c.get("expected_summary"), (
+            f"Summary {c.get('summary_counts')} disagrees with the page's rows "
+            f"{c.get('expected_summary')}; page state {c.get('worktrees_state')}"
         )
+        rows = (c.get("worktrees_state") or {}).get("rows") or []
+        for wt in ("auto-sweep-alpha/autonomy", "auto-sweep-alpha/encore-service",
+                   "auto-sweep-beta/enterprise", "auto-sweep-delta/widgets_ng"):
+            assert wt in rows, (wt, rows)
 
     def test_commit_cards_show_fixture_titles(self):
         """Unbound and single-PR rows still show their commit headlines."""
@@ -5938,148 +5992,12 @@ class TestMcpLinkApprovalDefaults:
         assert self._checks["requested_level"] == "read"
 
 
-ORG_JOIN_APPROVAL_CHECKS = """(async () => {
-    var r = {};
-    var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
-    var tick = async function() { await Alpine.nextTick(); await sleep(80); };
-    var q = function(id) { return document.querySelector('[data-testid="' + id + '"]'); };
-    var data = window._worktreeReviewOverlay;
-    if (!data) return JSON.stringify({error: 'no review-overlay component'});
-
-    var expiry = 1900000000123;
-    var payload = {
-        org: '11111111-1111-4111-8111-111111111111',
-        target_uuid: '11111111-1111-4111-8111-111111111111',
-        target_type: 'org:join',
-        invite_ref: 'ef'.repeat(32),
-        expires_at: expiry,
-        meta: {label: 'Member invitation'},
-    };
-    var approval = {
-        id: 'apr-org-join', kind: 'link_publish', session: 'auto-agent-1',
-        request: {
-            org: 'netorg',
-            target_uuid: payload.target_uuid,
-            target_type: payload.target_type,
-            invite_ref: payload.invite_ref,
-            expires_at: expiry,
-            meta: payload.meta,
-        },
-        target_title: 'Invitation to member',
-        type_label: 'Invitation',
-        absolute_expiry: expiry,
-        acting_identity: {slug: 'netorg', name: 'Network Org'},
-        actor_identity: {display_name: 'Alex Operator', root_pub: 'aa'.repeat(32)},
-        registry_request: {
-            method: 'POST', path: '/v1/links',
-            registry_url: 'https://registry.test', payload: payload,
-        },
-    };
-    var authority = false, signed = [], posted = [];
-    var origFetch = window.fetch;
-    var origSigner = window.AutonomyNetworkSigner;
-    var origSession = window.AutonomyNetworkSession;
-    var origToast = window.showToast;
-    try {
-        window.showToast = function() {};
-        window.AutonomyNetworkSession = {
-            state: function() {
-                return authority
-                    ? {signedIn: true,
-                       orgs: [{org: payload.org, orgSlug: null, live: true,
-                               subject: {kind: 'operator',
-                                         id: 'aa'.repeat(32)}}]}
-                    : {signedIn: false, orgs: []};
-            },
-            signOn: async function(password) {
-                if (password !== 'correct password') throw new Error('wrong passphrase');
-                authority = true;
-            },
-            signOut: async function() { authority = false; },
-        };
-        window.AutonomyNetworkSigner = {
-            available: function() { return authority; },
-            signRegistryRequest: async function(method, path, exactPayload) {
-                signed.push({method: method, path: path, payload: exactPayload});
-                return {
-                    v: 1, signer: 'ab', ts: 123, payload: exactPayload,
-                    sig: 'cd', cert: '{"stub":true}',
-                };
-            },
-        };
-        window.fetch = async function(url, opts) {
-            var u = String(url);
-            if (u.indexOf('/decision') !== -1) {
-                posted.push(JSON.parse((opts || {}).body || '{}'));
-                return {ok: true, json: async function() { return {ok: true}; }};
-            }
-            if (u.indexOf('?wait=20') !== -1) {
-                return {ok: true, json: async function() {
-                    return {result: {execution: {ok: true, token: 'registry-token'}}};
-                }};
-            }
-            return origFetch.call(this, url, opts);
-        };
-
-        await data._approvalKinds.link_publish.open(data, approval);
-        await tick();
-        var sheet = q('approval-sheet');
-        var duration = sheet.querySelector('[data-testid="approval-duration"]');
-        r.fixed_expiry = data.approvalRequest.fixedExpiry;
-        r.duration_hidden = !!duration &&
-            getComputedStyle(duration.parentElement).display === 'none';
-        r.expiry_visible = (sheet.textContent || '')
-            .indexOf(new Date(expiry).toLocaleString()) !== -1;
-        var password = sheet.querySelector('[data-testid="approval-password"]');
-        password.value = 'correct password';
-        password.dispatchEvent(new Event('input', {bubbles: true}));
-        await data.approveRequest();
-        await tick();
-        r.signed = signed[0];
-        r.decision = posted[0];
-    } catch (err) {
-        r.error = String(err && err.stack ? err.stack : err);
-    } finally {
-        window.fetch = origFetch;
-        window.AutonomyNetworkSigner = origSigner;
-        window.AutonomyNetworkSession = origSession;
-        if (origToast) window.showToast = origToast; else delete window.showToast;
-        data.approvalRequest = null;
-    }
-    return JSON.stringify(r);
-})()"""
-
-
-def test_org_join_approval_signs_fixed_absolute_expiry(browser):
-    checks = _navigate_and_eval_async(
-        "/worktrees", ORG_JOIN_APPROVAL_CHECKS, wait_ms=1200)
-    assert not checks.get("error"), checks.get("error")
-    assert checks["fixed_expiry"] is True, checks
-    assert checks["duration_hidden"] is True, checks
-    assert checks["expiry_visible"] is True
-    expected_payload = {
-        "org": "11111111-1111-4111-8111-111111111111",
-        "target_uuid": "11111111-1111-4111-8111-111111111111",
-        "target_type": "org:join",
-        "invite_ref": "ef" * 32,
-        "expires_at": 1900000000123,
-        "meta": {"label": "Member invitation"},
-    }
-    assert checks["signed"] == {
-        "method": "TUNNEL", "path": "/control/create-link",
-        "payload": expected_payload,
-    }
-    assert checks["decision"] == {
-        "approved": True,
-        "envelope": {
-            "v": 1,
-            "signer": "ab",
-            "ts": 123,
-            "payload": expected_payload,
-            "sig": "cd",
-            "cert": '{"stub":true}',
-        },
-    }
+# test_org_join_approval_signs_fixed_absolute_expiry and its
+# ORG_JOIN_APPROVAL_CHECKS were retired with the worktrees gate2 sheet they
+# drove (auto-pw295; link_publish opens the shared dialog since 3c01bc06).
+# The contract -- fixed expiry shown, no duration choice, the frozen org:join
+# payload signed exactly with no ttl -- is approval_adapters.test.mjs's org:join
+# test, which also caught the hidden expiry (auto-xdy5v).
 
 
 class TestJiraCreateApprovalPreview:
@@ -7664,6 +7582,21 @@ EXPERIMENT_TOOLBAR_CHECKS = """(async () => {
 
   return JSON.stringify(r);
 })()"""
+
+
+def _forget_page_org_choices(*keys: str) -> None:
+    """Clear persisted per-page organization choices before a page mounts.
+
+    Pages remember the org a user picked (sessionsOrgFilter, worktrees.org)
+    and the sweep shares one browser across classes. A class whose fixtures
+    assume the page default states that precondition here. A page kept
+    mounted across SPA navigation also keeps in-memory state (a search typed
+    by an earlier class emptied Recent Sessions, auto-pw295), which the
+    class's own script must reset.
+    """
+    js = "(() => {" + "".join(
+        f"localStorage.removeItem({json.dumps(k)});" for k in keys) + " return 'ok'; })()"
+    subprocess.run(["agent-browser", "eval", js], capture_output=True, text=True, timeout=20)
 
 
 def _navigate_and_eval_async(path: str, js_expr: str, wait_ms: int = 800) -> dict:
@@ -9794,15 +9727,17 @@ SEARCH_CHROME_POLISH_CHECKS = """(async () => {
   r.has_alpine_root = !!spScope;
 
   // ── 1. All-orgs glyph: muted, not gradient ──────────────────────────
+  // The chip is the shared x-org-picker since 4c627dd8: its All-orgs
+  // choice renders .org-picker-glyph in slate #334155 with the '∞' initial.
   var orgGlyph = document.querySelector(
-    '[data-testid="sp-org-chip"] .sp-filter-chip-glyph'
+    '[data-testid="sp-org-chip"] .org-picker-glyph'
   );
   r.org_glyph_present = !!orgGlyph;
   if (orgGlyph) {
     var ogc = window.getComputedStyle(orgGlyph);
     r.org_glyph_bg_color = ogc.backgroundColor;
     r.org_glyph_bg_image = ogc.backgroundImage;
-    r.org_glyph_has_all_class = orgGlyph.classList.contains('sp-filter-chip-all');
+    r.org_glyph_initial = (orgGlyph.textContent || '').trim();
   }
 
   // ── 2. State chip default label: 'Raw (Any)' ────────────────────────
@@ -9904,17 +9839,14 @@ class TestSearchChromePolish:
         request.cls._checks = result
 
     def test_org_chip_all_orgs_glyph_muted(self):
-        """The All-orgs glyph background is the muted #2a3441, NOT a gradient."""
+        """The All-orgs glyph is the shared picker's muted slate, NOT a gradient."""
         c = self._checks
         assert c.get("org_glyph_present"), "Org chip glyph element missing"
-        assert c.get("org_glyph_has_all_class"), (
-            "Default org chip glyph should carry the 'sp-filter-chip-all' "
-            "class (no org pinned), got class state: "
-            f"{c.get('org_glyph_has_all_class')!r}"
-        )
-        # Computed colour for #2a3441 is rgb(42, 52, 65).
-        assert c.get("org_glyph_bg_color") == "rgb(42, 52, 65)", (
-            f"All-orgs glyph background should be rgb(42, 52, 65), "
+        # No org pinned: the picker's All choice ('∞').
+        assert c.get("org_glyph_initial") == "∞", c.get("org_glyph_initial")
+        # Computed colour for the picker's All #334155 is rgb(51, 65, 85).
+        assert c.get("org_glyph_bg_color") == "rgb(51, 65, 85)", (
+            f"All-orgs glyph background should be rgb(51, 65, 85), "
             f"got {c.get('org_glyph_bg_color')!r}"
         )
         bg_img = c.get("org_glyph_bg_image") or "none"
@@ -13733,8 +13665,9 @@ class TestCoordinatorBoardParityV2:
 
     def test_publication_state_canonical_overrides_raw(self):
         """Acceptance #2 (curation layer) — a ``raw`` peer write + a
-        ``canonical`` coordinator override at the same key resolves to
-        the override.
+        ``curated`` coordinator override at the same key resolves to
+        the override. (The tile sets are banded raw..curated, so curated
+        is the curation layer; canonical is refused at write.)
 
         Substrate-level test against ``settings_ops`` directly so it
         exercises the actual publication-state precedence, not the mock
@@ -13773,11 +13706,11 @@ class TestCoordinatorBoardParityV2:
                     },
                     state="raw",
                  org=settings_ops.CALLER_ORG)
-                # Coordinator promotes a canonical override at the same key.
+                # Coordinator promotes a curated override at the same key.
                 settings_ops.override_setting(
                     raw_id,
                     {"thing": "Coordinator's editorial framing"},
-                    state="canonical",
+                    state="curated",
                  org=settings_ops.CALLER_ORG)
 
                 # Read at v2; the override should win.
@@ -13790,7 +13723,7 @@ class TestCoordinatorBoardParityV2:
                 )
                 assert resolved.payload.get("thing") \
                     == "Coordinator's editorial framing", (
-                    f"canonical override did not supersede raw peer write; "
+                    f"curated override did not supersede raw peer write; "
                     f"got {resolved.payload!r}"
                 )
             finally:
