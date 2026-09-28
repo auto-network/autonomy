@@ -333,7 +333,6 @@ def test_activation_adopts_and_stops_orphans(db, monkeypatch):
               containers.LeaseContainer("brw-e-orphan", "o" * 64, "running", {})]
     stopped = []
     monkeypatch.setattr(containers, "ensure_network", lambda: None)
-    monkeypatch.setattr(containers, "isolate_dashboard", lambda: None)
     monkeypatch.setattr(containers, "list_containers", lambda: listed)
     monkeypatch.setattr(containers, "stop", lambda name, *, lease_hash: stopped.append((name, lease_hash)))
     new = reconciler.activate()
@@ -365,45 +364,36 @@ def test_no_lease_starts_without_the_dashboard_refusal(broker, monkeypatch):
     assert launched == [] and store.list_leases() == []
 
 
-def test_isolation_rule_is_checked_inserted_and_verified(monkeypatch):
+def test_activation_pauses_the_broker_with_one_log_line_and_no_retries(db, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(containers, "ensure_network", lambda: None)
+    monkeypatch.setattr(containers, "list_containers", lambda: [])
+    monkeypatch.setattr(reconciler, "_epoch", None)
+    with caplog.at_level(logging.WARNING, logger=reconciler.__name__):
+        reconciler.activate()
+        for _ in range(12):  # a minute of reconciler ticks
+            reconciler.reconcile_once()
+    assert reconciler.isolated() is False
+    assert [r.getMessage() for r in caplog.records].count(reconciler.PAUSE_MESSAGE) == 1
+
+
+def test_ensure_network_creates_the_network_and_never_attaches_the_dashboard(monkeypatch):
     import subprocess
 
-    calls, rules = [], set()
-    ipv6 = {"on": "false"}
+    calls = []
 
-    def fake_docker(*args, check=True, **kw):
+    def fake(*args, check=True, **kw):
         calls.append(args)
-        if args[:2] == ("network", "inspect"):
-            return subprocess.CompletedProcess(args, 0, f"172.19.0.0/16 {ipv6['on']}\n", "")
-        if args[0] == "run":
-            op, rule = args[args.index("-w") + 1], args[args.index("-w") + 2:]
-            if op == "-I":
-                rules.add(rule)
-            return subprocess.CompletedProcess(args, 0 if rule in rules else 1, "", "")
-        raise AssertionError(args)
+        return subprocess.CompletedProcess(args, 1 if args[:2] == ("network", "inspect") else 0, "", "")
 
-    monkeypatch.setattr(containers, "_docker", fake_docker)
-    monkeypatch.setattr("agents.mount_plan._own_container_id", lambda: "dash123")
-    containers.isolate_dashboard()
-    run = [c for c in calls if c[0] == "run"]
-    assert [c[c.index("-w") + 1] for c in run] == ["-C", "-I", "-C"]
-    helper = run[1]
-    assert helper[helper.index("--network") + 1] == "container:dash123"
-    assert "NET_ADMIN" in helper and helper[helper.index("--cap-drop") + 1] == "ALL"
-    assert helper[helper.index("-w") + 2:] == ("INPUT", "-s", "172.19.0.0/16", "-m", "conntrack",
-                                               "--ctstate", "NEW", "-j", "DROP")
-    calls.clear()
-    containers.isolate_dashboard()  # idempotent: one check, no second insert
-    assert [c[c.index("-w") + 1] for c in calls if c[0] == "run"] == ["-C"]
-    ipv6["on"] = "true"  # an IPv6-enabled lease network fails closed
-    with pytest.raises(containers.IsolationUnavailable):
-        containers.isolate_dashboard()
+    monkeypatch.setattr(containers, "_docker", fake)
+    containers.ensure_network()
+    assert calls[0][:2] == ("network", "inspect") and calls[1][:2] == ("network", "create")
+    assert not any(c[:2] == ("network", "connect") for c in calls)
+    assert not any("iptables" in c for c in calls)
+    assert not hasattr(containers, "isolate_dashboard") and not hasattr(containers, "restrict_egress")
 
-
-def test_isolation_needs_a_containerized_dashboard(monkeypatch):
-    monkeypatch.setattr("agents.mount_plan._own_container_id", lambda: None)
-    with pytest.raises(containers.IsolationUnavailable):
-        containers.isolate_dashboard()
 
 
 def _fake_container_lifecycle(monkeypatch, *, removal_polls=3, daemon_error=False):

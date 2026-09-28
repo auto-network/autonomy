@@ -36,23 +36,21 @@ EXPIRY_GRACE_S = 15.0
 _epoch: Optional[int] = None
 _tick = 0
 _isolated = False
-ISOLATION_RETRY_TICKS = 6
+PAUSE_MESSAGE = "browser broker paused: network redesign (bead follows)"
 
 
 def isolated() -> bool:
-    """Whether the lease -> dashboard refusal is verified in place; leases are
-    not started without it."""
+    """Whether leases may start. False while the broker is paused for the
+    network redesign (auto-8c2df): lease requests answer 503 isolation."""
     return _isolated
 
 
 def _ensure_isolation() -> None:
+    """Paused: no firewall rules and no network attachment until the redesign.
+    Logged once per activation, never retried."""
     global _isolated
-    try:
-        containers.isolate_dashboard()
-        _isolated = True
-    except Exception as exc:
-        _isolated = False
-        logger.warning("browser broker: lease isolation unavailable, leases refused: %s", exc)
+    _isolated = False
+    logger.warning(PAUSE_MESSAGE)
 
 
 def epoch() -> Optional[int]:
@@ -169,8 +167,6 @@ def reconcile_once(now: Optional[float] = None) -> None:
         return  # a newer worker owns the leases
     now = now or time.time()
     _tick += 1
-    if not _isolated and _tick % ISOLATION_RETRY_TICKS == 0:
-        _ensure_isolation()
     if _tick % 2 == 1:
         _docker_pass(epoch_, now)
     leases = store.list_leases()
