@@ -39,7 +39,6 @@ from tools.vault.policy_class import ROOT_REACHABLE_FORM
 from tools.vault.recipients import PERSONAL_ROOT_RECIPIENT
 
 
-KIND = "vault_open"
 # ttl_seconds is the delivered credential's ramfs LIFETIME (not the approval
 # window — that is the kind's FIXED policy). 0 means the FULL CONTAINER
 # LIFESPAN: no timed destruction; the file dies with the container's private
@@ -48,11 +47,6 @@ MIN_TTL_SECONDS = 0
 MAX_TTL_SECONDS = 86400
 DEFAULT_TTL_SECONDS = 0
 _ALLOWED_REQUEST_FIELDS = {"set_id", "key", "ttl_seconds"}
-_HEX_SEED_LEN = 64
-#: A content-encryption key is 32 bytes → 64 lowercase-hex chars. The browser
-#: (B-1) opens the policy class and returns this one revision's CEK; the server
-#: never sees opener seeds or the class key.
-_HEX_CEK_LEN = 64
 
 
 def _setting_route(
