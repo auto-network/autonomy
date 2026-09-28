@@ -477,6 +477,11 @@ class HttpClient:
             return result["rows"]
         return result if isinstance(result, list) else []
 
+    def create_session(self, body: dict):
+        """POST /api/session/create (``machine`` launches on another fleet
+        machine over session-control/1)."""
+        return self._post("/api/session/create", body)
+
     def remote_status(self, machine: str):
         """``status`` of another fleet machine over session-control/1."""
         quoted = urllib.parse.quote(machine, safe="")

@@ -536,7 +536,38 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN tmux_socket TEXT")
         _conn.commit()
+    # Migrate: remote-launch provenance (graph://7eb29bc8-31a §9.4). NULL on
+    # every local launch. launched_by names who asked; home_machine is the
+    # machine_pub the session:control handshake proved; launch_op_id makes a
+    # retried launch return the session it already started.
+    for column in ("launched_by", "home_machine", "launch_op_id"):
+        try:
+            _conn.execute(f"SELECT {column} FROM tmux_sessions LIMIT 0")
+        except sqlite3.OperationalError:
+            _conn.execute(f"ALTER TABLE tmux_sessions ADD COLUMN {column} TEXT")
+            _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
+
+
+def set_launch_provenance(
+    tmux_name: str, *, launched_by: str, home_machine: str, launch_op_id: str,
+) -> None:
+    """Record who launched *tmux_name* from which machine, and the op id."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions SET launched_by = ?, home_machine = ?, "
+        "launch_op_id = ? WHERE tmux_name = ?",
+        (launched_by, home_machine, launch_op_id, tmux_name),
+    )
+    conn.commit()
+
+
+def session_for_launch_op(launch_op_id: str) -> dict | None:
+    """The session a remote launch op already started, or None."""
+    row = get_conn().execute(
+        "SELECT * FROM tmux_sessions WHERE launch_op_id = ?", (launch_op_id,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def get_tmux_socket(tmux_name: str) -> str | None:

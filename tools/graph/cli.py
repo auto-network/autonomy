@@ -2186,6 +2186,33 @@ def cmd_remote(args):
             sys.exit(2)
 
 
+def cmd_session(args):
+    """Start a session, here or on another of the operator's fleet machines."""
+    client = get_client()
+    if not isinstance(client, HttpClient):
+        print("Error: graph session needs the dashboard API", file=sys.stderr)
+        sys.exit(1)
+    if args.session_cmd == "create":
+        body = {"type": "container", "project": args.project}
+        for name in ("machine", "primer", "model", "harness"):
+            value = getattr(args, name, None)
+            if value:
+                body[name] = value
+        try:
+            reply = client.create_session(body)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if getattr(args, "json", False):
+            print(json.dumps(reply, indent=2, sort_keys=True))
+        elif isinstance(reply, dict) and reply.get("tmux_name"):
+            where = f"@{reply['machine']}" if reply.get("machine") else ""
+            print(f"  \u2713 {reply['tmux_name']}{where} (launching)")
+        else:
+            print(f"Error: {reply}", file=sys.stderr)
+            sys.exit(2)
+
+
 def cmd_set_role(args):
     """Set the session role."""
     role = " ".join(args.role)
@@ -6071,6 +6098,17 @@ def main():
     pg = g_sub.add_parser("rename", help="Rename a group (members are told)"); pg.add_argument("slug"); pg.add_argument("name", nargs="+"); pg.set_defaults(func=cmd_group_rename)
     pg = g_sub.add_parser("dissolve", help="Dissolve a group; members become ungrouped"); pg.add_argument("slug"); pg.set_defaults(func=cmd_group_dissolve)
     pg = g_sub.add_parser("invite", help="Invite a session to a group over CrossTalk"); pg.add_argument("slug"); pg.add_argument("target"); pg.set_defaults(func=cmd_group_invite)
+
+    p = sub.add_parser("session", help="Start a workspace session, here or on another fleet machine")
+    session_sub = p.add_subparsers(dest="session_cmd", required=True)
+    sp = session_sub.add_parser("create", help="Start a workspace session")
+    sp.add_argument("--project", required=True, help="Workspace id")
+    sp.add_argument("--machine", help="Fleet machine name or machine_pub to run it on (default: here)")
+    sp.add_argument("--primer", help="graph:// URL injected as the first message")
+    sp.add_argument("--model", help="Model override")
+    sp.add_argument("--harness", help="Harness override")
+    sp.add_argument("--json", action="store_true", help="Print the raw reply")
+    p.set_defaults(func=cmd_session)
 
     p = sub.add_parser("remote", help="Drive another of the operator's fleet machines (session-control/1)")
     remote_sub = p.add_subparsers(dest="remote_cmd", required=True)

@@ -168,6 +168,73 @@ def status_op(limits_provider: Callable[[], dict]) -> OpHandler:
     return status
 
 
+_OPERATION_ID = re.compile(r"[0-9a-f]{32}")
+LAUNCH_REFUSED = "launch-refused"
+WORKSPACE_UNAVAILABLE = "workspace-unavailable"
+
+
+def launch_op(create: Callable[[dict], Awaitable[object]]) -> OpHandler:
+    """``launch``: start a workspace session HERE for another fleet machine
+    (graph://7eb29bc8-31a §9.2, §9.4).
+
+    *create* is the dashboard's own session-create path for a parsed body
+    (server._create_session_from_body), so a remote launch is exactly a local
+    create. Authorization is the handshake: *peer* is an active roster machine
+    of this fleet, and it -- never a body field -- is what gets recorded as
+    ``home_machine`` / ``launched_by``. ``operation_id`` makes a retry return
+    the session it already started.
+    """
+    lock = asyncio.Lock()
+
+    async def launch(body: dict, peer: str) -> dict:
+        from tools.dashboard import session_presence
+        from tools.dashboard.dao import dashboard_db
+
+        operation_id = body.get("operation_id")
+        project = body.get("project")
+        if not isinstance(operation_id, str) or not _OPERATION_ID.fullmatch(operation_id):
+            return refusal("bad-request", "operation_id must be 32 hex")
+        if not isinstance(project, str) or not project:
+            return refusal("bad-request", "project is required")
+        if not _HEX64.fullmatch(peer or ""):
+            return refusal("bad-request", "no authenticated peer")
+        machine = await asyncio.to_thread(session_presence.local_machine)
+        names = await asyncio.to_thread(session_presence._machine_names)
+        here = {
+            "machine_pub": machine.machine_pub if machine else None,
+            "machine": names.get(machine.machine_id) if machine else None,
+        }
+        async with lock:
+            existing = await asyncio.to_thread(
+                dashboard_db.session_for_launch_op, operation_id)
+            if existing is not None:
+                return ok({"tmux_name": existing["tmux_name"], **here,
+                           "repeated": True})
+            request = {"type": "container", "project": project}
+            for name in ("primer", "model", "harness"):
+                if isinstance(body.get(name), str) and body[name]:
+                    request[name] = body[name]
+            response = await create(request)
+            status = getattr(response, "status_code", 500)
+            try:
+                import json as _json
+                data = _json.loads(getattr(response, "body", b"{}") or b"{}")
+            except ValueError:
+                data = {}
+            if status != 202 or not data.get("tmux_name"):
+                error = str(data.get("error") or f"create returned {status}")
+                reason = (WORKSPACE_UNAVAILABLE if "Unknown project" in error
+                          else LAUNCH_REFUSED)
+                return refusal(reason, error)
+            await asyncio.to_thread(
+                dashboard_db.set_launch_provenance, data["tmux_name"],
+                launched_by=f"machine:{peer}", home_machine=peer,
+                launch_op_id=operation_id)
+        return ok({"tmux_name": data["tmux_name"], **here})
+
+    return launch
+
+
 class InboundPump:
     """Long-poll the personal connector for inbound requests and answer them."""
 
@@ -228,9 +295,13 @@ class InboundPump:
                 await asyncio.sleep(UNAVAILABLE_BACKOFF_S)
 
 
-def install(limits_provider: Callable[[], dict]) -> InboundPump:
+def install(limits_provider: Callable[[], dict],
+            create: Callable[[dict], Awaitable[object]] | None = None,
+            ) -> InboundPump:
     """Register the built-in ops and start the pump (worker activation)."""
     register_op("status", status_op(limits_provider))
+    if create is not None:
+        register_op("launch", launch_op(create))
     pump = InboundPump()
     pump.start()
     return pump

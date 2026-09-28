@@ -10059,13 +10059,75 @@ async def api_session_create(request):
     registered; progress is delivered via startup_state/SSE.  Non-workspace
     container sessions still wait for monitor tracking on the legacy path.
     Host sessions return immediately, like workspace sessions.
+
+    ``machine`` (optional): a fleet machine name or machine_pub. When it names
+    another machine, the create becomes a ``launch`` request over
+    session-control/1 (graph://7eb29bc8-31a §9.4) and that machine runs it
+    through this same path; only workspace (``project``) sessions, and only
+    with global operator authority.
     """
     body = {}
     try:
         body = await request.json()
     except Exception:
         pass
+    machine = body.get("machine") if isinstance(body, dict) else None
+    if machine:
+        return await _create_remote_session(request, body)
+    return await _create_session_from_body(body, request)
 
+
+async def _create_remote_session(request, body: dict):
+    """The ``machine`` branch of api_session_create."""
+    import secrets as _secrets
+
+    from tools.dashboard import session_control_client, session_presence
+
+    refused = api_auth.require_global_api_authority(request)
+    if refused is not None:
+        return refused
+    machine_pub = await asyncio.to_thread(
+        session_control_client.resolve_machine, str(body["machine"]))
+    local = await asyncio.to_thread(session_presence.local_machine)
+    if machine_pub is not None and local is not None \
+            and machine_pub == local.machine_pub:
+        return await _create_session_from_body(
+            {k: v for k, v in body.items() if k != "machine"}, request)
+    if body.get("type", "container") != "container" or not body.get("project"):
+        return JSONResponse(
+            {"error": "a remote launch needs a workspace project "
+                      "(type 'container')"}, status_code=400)
+    launch = {
+        "project": body["project"],
+        "primer": body.get("primer"),
+        "model": body.get("model"),
+        "harness": body.get("harness"),
+        "operation_id": _secrets.token_hex(16),
+    }
+    reply = await session_control_client.request(
+        str(body["machine"]), "launch", launch, timeout=20.0)
+    if not reply.get("ok"):
+        return JSONResponse(
+            {"error": reply.get("detail") or reply.get("refusal"),
+             "refusal": reply.get("refusal"), "machine": body["machine"]},
+            status_code=502 if reply.get("refusal") in (
+                "session-control-timeout", "personal-connector-unavailable",
+            ) else 409)
+    result = reply.get("result") or {}
+    return JSONResponse({
+        "tmux_name": result.get("tmux_name"),
+        "label": "",
+        "type": "container",
+        "pending": True,
+        "machine": result.get("machine") or body["machine"],
+        "machine_pub": result.get("machine_pub"),
+    }, status_code=202)
+
+
+async def _create_session_from_body(body: dict, request=None):
+    """api_session_create for an already-parsed body, on THIS machine. Also
+    the executor of an inbound session-control ``launch`` (``request`` None:
+    a remote launch is always a workspace session, which never reads it)."""
     # auto-bpomi: throwaway phase-trace diagnostics — measure session-boot
     # slices for Bead B. Single grep target: 'phase-trace:'.
     _phase_t0 = time.monotonic()
@@ -10283,7 +10345,10 @@ async def api_session_create(request):
         # Its org is the requester's, else personal (auto-2v6ay.2, ruling
         # b): it is stamped on the session token, the session row and the
         # orientation, so one value flows through all three.
-        session_org = api_auth.organization_scope_from_request(request) or "personal"
+        session_org = (
+            api_auth.organization_scope_from_request(request)
+            if request is not None else None
+        ) or "personal"
         await session_monitor.register_pending(
             tmux_name,
             session_type="container",
@@ -23066,7 +23131,7 @@ async def _activate_worker(reason: str) -> None:
             from tools.dashboard import session_control_client
             global _session_control_pump
             _session_control_pump = session_control_client.install(
-                _resolved_dispatch_limits)
+                _resolved_dispatch_limits, _create_session_from_body)
         except Exception:
             logger.exception("session-control inbound pump failed to start")
 
