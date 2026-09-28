@@ -465,10 +465,13 @@ class HttpClient:
             return result["notes"]
         return result if isinstance(result, list) else []
 
-    def list_session_status(self, *, since=None):
+    def list_session_status(self, *, since=None, remote=False):
         params: dict[str, Any] = {}
         if since:
             params["since"] = since
+        if remote:
+            # Also sessions on the operator's other fleet machines.
+            params["remote"] = "1"
         result = self._get("/api/dao/session_status", params or None)
         if isinstance(result, dict) and "rows" in result:
             return result["rows"]

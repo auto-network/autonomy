@@ -9938,7 +9938,10 @@ def _recover_lifecycle_row(tmux_name: str, state: str) -> None:
             tmux_name, state,
         )
     else:
-        SessionLifecycleStateWriter().fail(
+        # Through the hooked writer, like the adopt branch above: a transition
+        # that skips the hook never reaches session:ended subscribers such as
+        # the session presence writer.
+        _SESSION_LIFECYCLE_WORKER.state_writer.fail(
             tmux_name,
             phase="startup_recovery",
             reason=f"dashboard restarted mid-launch (was {state}); process gone",
@@ -13622,6 +13625,16 @@ async def api_dao_session_status(request):
         rows = await asyncio.to_thread(dao_sessions.get_session_status_rows, since)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    if request.query_params.get("remote") == "1":
+        # Sessions on the operator's other fleet machines, addressed
+        # <name>@<machine> (graph://7eb29bc8-31a §9.5). Opt-in so consumers
+        # that count local sessions (harness usage) are unaffected.
+        from tools.dashboard import session_presence
+        try:
+            rows = list(rows) + await asyncio.to_thread(
+                session_presence.remote_status_rows)
+        except Exception:
+            logger.warning("session presence read failed", exc_info=True)
     return JSONResponse(rows)
 
 async def page_search(request):
@@ -21823,6 +21836,7 @@ _dispatch_watcher_task: asyncio.Task | None = None
 _mock_event_watcher_task: asyncio.Task | None = None
 _harness_usage_poller_task: asyncio.Task | None = None
 _software_update_poller_task: asyncio.Task | None = None
+_session_presence_writer = None
 
 
 async def _software_update_poller() -> None:
@@ -23015,6 +23029,19 @@ async def _activate_worker(reason: str) -> None:
         await dashboard_fleet_sync_service.start()
     except Exception:
         logger.exception("fleet sync scheduler failed to start")
+
+    # Session presence (graph://7eb29bc8-31a §9.5): this machine's live
+    # sessions, written to the personal set on roster change so every fleet
+    # machine can list them. Activation-only, after the lifecycle recovery
+    # above has settled stuck rows: one writer per machine.
+    if not os.environ.get("DASHBOARD_MOCK"):
+        try:
+            from tools.dashboard import session_presence
+            global _session_presence_writer
+            _session_presence_writer = session_presence.PresenceWriter(event_bus)
+            _session_presence_writer.start()
+        except Exception:
+            logger.exception("session presence writer failed to start")
 
     if _should_run_harness_usage_poller():
         # Fetches origin and may fast-forward the checkout: one worker only,

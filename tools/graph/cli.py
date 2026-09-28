@@ -2036,7 +2036,7 @@ def cmd_sessions(args):
         client = get_client()
         if isinstance(client, HttpClient):
             try:
-                rows = client.list_session_status(since=since)
+                rows = client.list_session_status(since=since, remote=True)
             except ValueError as e:
                 print(f"Error: {e}", file=sys.stderr)
                 sys.exit(1)
