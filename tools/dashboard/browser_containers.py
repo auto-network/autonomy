@@ -148,6 +148,12 @@ def _isolation_rule(subnet: str) -> list[str]:
     return ["INPUT", "-s", subnet, "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"]
 
 
+def _gateway_rule(gateway: str) -> list[str]:
+    # The network gateway is the host: docker-proxy's source for the published
+    # port and the host's own route in. Lease containers never hold it.
+    return ["INPUT", "-s", gateway, "-j", "ACCEPT"]
+
+
 def isolate_dashboard() -> None:
     """Refuse, at the network level, every connection a lease starts toward the
     dashboard (the dashboard dials leases, never the reverse).
@@ -161,22 +167,34 @@ def isolate_dashboard() -> None:
     own = _own_container_id()
     if not own:
         raise IsolationUnavailable("the dashboard is not a container; lease isolation needs one")
-    subnet, _, ipv6 = _docker("network", "inspect", "--format",
-                              "{{(index .IPAM.Config 0).Subnet}} {{.EnableIPv6}}",
+    subnet, _, rest = _docker("network", "inspect", "--format",
+                              "{{(index .IPAM.Config 0).Subnet}} {{(index .IPAM.Config 0).Gateway}} {{.EnableIPv6}}",
                               NETWORK).stdout.strip().partition(" ")
+    gateway, _, ipv6 = rest.partition(" ")
     if not subnet:
         raise IsolationUnavailable(f"{NETWORK} has no subnet")
+    if not gateway:
+        raise IsolationUnavailable(f"{NETWORK} has no gateway")
     if ipv6.strip() == "true":
         # The refusal is IPv4 iptables; never protect only half of a network.
         raise IsolationUnavailable(f"{NETWORK} has IPv6 enabled; recreate it IPv4-only")
     helper = ["run", "--rm", "--network", f"container:{own}", "--cap-drop", "ALL",
               "--cap-add", "NET_ADMIN", "--user", "0", "--entrypoint", "iptables", IMAGE, "-w"]
     rule = _isolation_rule(subnet)
-    if _docker(*helper, "-C", *rule, check=False).returncode == 0:
-        return
-    proc = _docker(*helper, "-I", *rule, check=False)
-    if proc.returncode != 0 or _docker(*helper, "-C", *rule, check=False).returncode != 0:
-        raise IsolationUnavailable(f"cannot install the lease refusal rule: {proc.stderr.strip()[:300]}")
+    if _docker(*helper, "-C", *rule, check=False).returncode != 0:
+        proc = _docker(*helper, "-I", *rule, check=False)
+        if proc.returncode != 0 or _docker(*helper, "-C", *rule, check=False).returncode != 0:
+            raise IsolationUnavailable(f"cannot install the lease refusal rule: {proc.stderr.strip()[:300]}")
+    # The host reaches the dashboard through this same network: docker-proxy
+    # forwards the published port from the network's gateway address, so the
+    # refusal must not cover it (2026-09-28: it did, and every localhost:8080
+    # connection on the host was dropped). The gateway exemption sits above
+    # the refusal; re-inserting keeps it first after any later insert.
+    allow = _gateway_rule(gateway)
+    _docker(*helper, "-D", *allow, check=False)
+    proc = _docker(*helper, "-I", allow[0], "1", *allow[1:], check=False)
+    if proc.returncode != 0 or _docker(*helper, "-C", *allow, check=False).returncode != 0:
+        raise IsolationUnavailable(f"cannot exempt the host gateway from the refusal: {proc.stderr.strip()[:300]}")
 
 
 #: Destinations a lease may never open a connection to: private, carrier-grade
