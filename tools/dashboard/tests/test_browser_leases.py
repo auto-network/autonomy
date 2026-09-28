@@ -427,7 +427,7 @@ def _fake_container_lifecycle(monkeypatch, *, removal_polls=3, daemon_error=Fals
                 state["old_polls"] -= 1
                 if state["old_polls"] < 0:
                     state["old_gone"] = True  # --rm finished; the name is free and gets reused
-                    return subprocess.CompletedProcess(args, 1, "", "Error: No such object: OLD")
+                    return subprocess.CompletedProcess(args, 1, "", "error: no such object: OLD")
                 return subprocess.CompletedProcess(args, 0, "OLD\n", "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
@@ -449,9 +449,12 @@ def test_stop_waits_for_removal_and_only_ever_touches_that_container(monkeypatch
 def test_stop_is_idempotent_and_does_not_mistake_a_daemon_error_for_removal(monkeypatch):
     import subprocess
 
-    monkeypatch.setattr(containers, "_docker", lambda *a, **k: subprocess.CompletedProcess(
-        a, 1, "", "Error: No such object: brw-e-x"))
-    containers.stop("brw-e-x", lease_hash="x" * 64)  # already gone: returns quietly
+    for wording in ("error: no such object: brw-e-x",            # Docker 29 (Home)
+                    "Error: No such object: brw-e-x",            # older daemons
+                    "Error response from daemon: No such container: brw-e-x"):
+        monkeypatch.setattr(containers, "_docker", lambda *a, w=wording, **k: subprocess.CompletedProcess(
+            a, 1, "", w))
+        containers.stop("brw-e-x", lease_hash="x" * 64)  # already gone: returns quietly
     _fake_container_lifecycle(monkeypatch, daemon_error=True)
     with pytest.raises(containers.DockerUnavailable):
         containers.stop("brw-p-0123456789abcdef", lease_hash="o" * 64)

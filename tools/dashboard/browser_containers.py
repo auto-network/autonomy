@@ -246,7 +246,11 @@ def address(name: str) -> str:
 
 
 def _missing(proc: subprocess.CompletedProcess) -> bool:
-    return "No such object" in proc.stderr or "No such container" in proc.stderr
+    # Docker's wording varies by version and case: 29.x prints
+    # "error: no such object: <name>" (measured on Home), older daemons
+    # "Error: No such object" / "No such container".
+    err = proc.stderr.lower()
+    return "no such object" in err or "no such container" in err
 
 
 def stop(name: str, *, lease_hash: str, grace_s: int = 5, removal_timeout_s: float = 20.0) -> None:
