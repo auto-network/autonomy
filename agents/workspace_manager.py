@@ -3942,6 +3942,18 @@ def cleanup_session_worktree(
     return result
 
 
+def _review_binding_org(session_name: str) -> str:
+    """Where a session's review bindings live: the same org the Worktrees
+    monitor writes them to (``worktree_monitor._store_org``: the session's
+    org, else personal), so cleanup deletes the rows that exist. It was the
+    literal "autonomy" (auto-2v6ay.2, D5)."""
+    try:
+        from tools.dashboard.worktree_monitor import _store_org
+        return _store_org(session_name)
+    except Exception:
+        return "personal"
+
+
 def _delete_review_bindings_for_session(session_name: str) -> int:
     """Hard-delete every review-binding row scoped to ``session_name``."""
     try:
@@ -3960,7 +3972,7 @@ def _delete_review_bindings_for_session(session_name: str) -> int:
         return settings_ops.remove_settings_by_key_prefix(
             REVIEW_BINDING_SET_ID,
             prefix=session_name,
-            org="autonomy",
+            org=_review_binding_org(session_name),
         )
     except Exception:
         logger.warning(
@@ -3987,7 +3999,7 @@ def _delete_review_bindings_for_session_repo(
         return settings_ops.remove_settings_by_key_prefix(
             REVIEW_BINDING_SET_ID,
             prefix=f"{session_name}:{repo_name}",
-            org="autonomy",
+            org=_review_binding_org(session_name),
         )
     except Exception:
         logger.warning(

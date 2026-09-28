@@ -1810,7 +1810,7 @@ def _find_stale_fleet_join_state() -> dict:
         except sqlite3.OperationalError:
             pass
 
-    org_slugs = ["autonomy"]  # scopeless local-store default publish target
+    org_slugs: list[str] = []
     try:
         org_slugs.extend(ref.slug for ref in org_ops.list_orgs())
     except Exception:

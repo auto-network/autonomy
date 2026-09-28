@@ -1,6 +1,6 @@
 id: example
 api_version: 1
-org: autonomy
+org: personal
 
 paths:
   - /example

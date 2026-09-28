@@ -198,9 +198,11 @@ def test_presentations_api_reads_design_and_records_shown(tmp_path, monkeypatch)
     assert shown_response.json()["deck"]["last_shown_at"].endswith("Z")
 
     assert library_response.status_code == 200
-    assert library_response.json()["org"] == "autonomy"
+    # No org selected: the library and the shown record both use personal,
+    # never a literal org (auto-2v6ay.2).
+    assert library_response.json()["org"] == "personal"
     decks = library_response.json()["decks"]
-    assert decks[0]["org"] == "autonomy"
+    assert decks[0]["org"] == "personal"
     assert [d["design_id"] for d in decks] == [TEST_EXPERIMENT_ID]
 
     persisted = json.loads(fixture_path.read_text())["settings"][PRESENTATION_DECK_SET_ID]

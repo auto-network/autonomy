@@ -1,6 +1,6 @@
 id: mission
 api_version: 1
-org: autonomy
+org: personal
 
 # Enabled by default: fresh installs show Mission Control (operator hand-out,
 # 2026-09-27). The cutover is done: the legacy mission_control plugin is

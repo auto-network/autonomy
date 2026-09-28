@@ -121,9 +121,12 @@ class PluginManifest(BaseModel):
 
     id: str
     api_version: int
-    # Default install scope. The substrate reads this plugin's
-    # ``dashboard.plugin#1`` toggle row from ``<org>.db``. Operators
-    # override per-installation by writing a payload with ``org: <slug>``.
+    # Where the plugin's DECLARED Settings install, never a literal org
+    # (auto-2v6ay.2, operator decision D5): ``personal`` keeps them in the
+    # operator's own store; ``every`` installs them into every shared org this
+    # node holds plus personal. Toggle rows always live in PLUGIN_TOGGLE_ORG
+    # (personal) and action handlers fire for every org. An operator narrows
+    # a plugin to one org by writing ``org: <slug>`` into its toggle payload.
     org: str
     # A plugin with a page declares all four of paths, assets, nav and
     # frontend. A plugin that only carries Settings rows declares none of

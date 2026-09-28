@@ -1,6 +1,6 @@
 id: mission_control
 api_version: 1
-org: autonomy
+org: personal
 
 # Superseded by the mission plugin; retained for historical freeform records.
 default_enabled: false

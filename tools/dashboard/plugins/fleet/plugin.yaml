@@ -1,6 +1,6 @@
 id: fleet
 api_version: 1
-org: autonomy
+org: personal
 
 paths:
   - /fleet

@@ -35,7 +35,7 @@ from pydantic import ValidationError
 # registration order" risk in the bead).
 from . import schema as _plugin_schema  # noqa: F401 — registers DashboardPluginV1
 from .manifest import PluginManifest, SUBSTRATE_API_VERSION
-from .schema import PLUGIN_SET_ID
+from .schema import PLUGIN_SET_ID, PLUGIN_TOGGLE_ORG
 
 
 logger = logging.getLogger(__name__)
@@ -199,7 +199,7 @@ def is_enabled(
     return bool(payload.get("enabled", True))
 
 
-def _read_plugin_settings(org: str | None = None) -> dict[str, dict]:
+def _read_plugin_settings(org: str | None = PLUGIN_TOGGLE_ORG) -> dict[str, dict]:
     """Return ``{plugin_id: payload}`` for ``dashboard.plugin#1`` rows.
 
     Mock-mode (``DASHBOARD_MOCK`` set) reads from the dashboard mock DAO
@@ -317,7 +317,11 @@ def _resolve_entrypoints(
             from tools.dashboard.settings_mediator.loop import (
                 _loading_plugin_org,
             )
-            token = _loading_plugin_org.set(resolved_org)
+            # Handlers take only an explicit install scope (the operator's
+            # override), else none: a scopeless handler fires for every
+            # org's rows. The manifest's org used to be stamped here, so
+            # handlers only ever fired for "autonomy" rows (auto-2v6ay.2).
+            token = _loading_plugin_org.set(effective_org)
             try:
                 for spec in ep.actions:
                     importlib.import_module(spec)
@@ -362,23 +366,18 @@ def load_enabled(
     """Discover, filter by Setting, resolve entrypoints. Returns the
     surviving ``LoadedPlugin`` list.
 
-    Each plugin's enable state is read from *its own* ``manifest.org``'s
-    DB — never from the caller's org or an unscoped sweep. Reads are
-    cached per-org for the duration of a single ``load_enabled`` call so
-    plugins sharing an install scope don't double-fetch.
+    Every plugin's enable state is read from ``PLUGIN_TOGGLE_ORG`` (the
+    operator's personal store), once per call.
 
     ``LoadedPlugin.effective_org`` resolves to the toggle row's
     ``payload.org`` override when present, else ``manifest.org``.
     """
     discovered = discover(plugins_dir=plugins_dir)
-    cache: dict[str, dict[str, dict]] = {}
+    settings = _read_plugin_settings(org=PLUGIN_TOGGLE_ORG)
 
     loaded: list[LoadedPlugin] = []
     for d in discovered:
         manifest_org = d.manifest.org
-        if manifest_org not in cache:
-            cache[manifest_org] = _read_plugin_settings(org=manifest_org)
-        settings = cache[manifest_org]
         if not is_enabled(
             d.manifest.id, d.plugin_dir, settings, manifest=d.manifest,
         ):
@@ -454,47 +453,136 @@ def reconcile_declared_settings(
     for plugin in plugins:
         if not plugin.manifest.settings:
             continue
-        manifest_org = plugin.manifest.org
-        if manifest_org not in cache:
-            cache[manifest_org] = _read_plugin_settings(org=manifest_org)
-        settings = cache[manifest_org]
+        if PLUGIN_TOGGLE_ORG not in cache:
+            cache[PLUGIN_TOGGLE_ORG] = _read_plugin_settings(org=PLUGIN_TOGGLE_ORG)
+        settings = cache[PLUGIN_TOGGLE_ORG]
         payload = settings.get(plugin.id)
         override = (payload or {}).get("org") if isinstance(payload, dict) else None
-        effective_org = (
-            override if isinstance(override, str) and override else manifest_org
-        )
+        # Where the declared Settings go: the operator's explicit install
+        # scope, else every shared org this node holds plus personal
+        # (auto-2v6ay.2, host ruling of 23:58Z replacing ruling e). The
+        # manifest's org named an org a fresh node does not have.
+        targets = ([override] if isinstance(override, str) and override
+                   else _declared_settings_orgs(plugin.manifest.org))
         enabled = is_enabled(
             plugin.id,
             plugin.plugin_dir,
             settings,
             manifest=plugin.manifest,
         )
-        if _is_followed_mirror(effective_org):
-            # The manifest names an organization this node only FOLLOWS: its
-            # local database is a read-only mirror of that org's public
-            # surface (graph://5f2f5a49-00d §10.4), so there is nothing to
-            # install into it and every write would be refused. Skipped as a
-            # fact, not logged as a failure.
-            results.append({
-                "plugin_id": plugin.id, "org": effective_org,
-                "status": "skipped", "action": "followed_mirror",
-            })
-            continue
-        try:
-            if enabled:
-                results.extend(plugin_settings.reconcile_plugin_settings(
-                    plugin,
-                    effective_org=effective_org,
-                    force=force,
-                ))
-            elif payload is not None:
-                results.extend(plugin_settings.uninstall_plugin_settings(
-                    plugin,
-                    effective_org=effective_org,
-                ))
-        except Exception:
-            logger.exception(
-                "[plugin_loader] failed reconciling declared settings for %s",
-                plugin.id,
-            )
+        for effective_org in targets:
+            results.extend(_reconcile_plugin_in_org(
+                plugin_settings, plugin, effective_org,
+                enabled=enabled, toggled=payload is not None, force=force))
     return results
+
+
+#: Manifest ``org:`` value for a plugin whose declared Settings belong to
+#: every org (agent actions, capability installs); ``personal`` keeps them in
+#: the operator's own store (Getting Started's personal workspaces).
+EVERY_ORG = "every"
+
+
+def _declared_settings_orgs(scope: str = EVERY_ORG) -> list[str]:
+    """Where a plugin's declared Settings install. ``personal``: personal
+    only. Anything else (``every``, or a legacy org name, which is never a
+    target itself): every shared org this node holds (not a followed mirror,
+    not the machine store), then personal (auto-2v6ay.2)."""
+    if scope == "personal":
+        return ["personal"]
+    orgs: list[str] = []
+    try:
+        from tools.graph import org_ops
+
+        for ref in org_ops.list_orgs():
+            slug = ref.slug
+            if slug in ("machine", "personal") or slug in orgs:
+                continue
+            if _is_followed_mirror(slug):
+                continue
+            orgs.append(slug)
+    except Exception:
+        logger.exception("[plugin_loader] could not list orgs for declared settings")
+    return orgs + ["personal"]
+
+
+def _reconcile_plugin_in_org(plugin_settings, plugin, effective_org, *,
+                             enabled: bool, toggled: bool, force: bool) -> list:
+    """Install (or, when explicitly toggled off, uninstall) one plugin's
+    declared Settings in one org."""
+    if _is_followed_mirror(effective_org):
+        # An organization this node only FOLLOWS: its local database is a
+        # read-only mirror of that org's public surface (graph://5f2f5a49-00d
+        # §10.4), so there is nothing to install into it and every write
+        # would be refused. Skipped as a fact, not logged as a failure.
+        return [{
+            "plugin_id": plugin.id, "org": effective_org,
+            "status": "skipped", "action": "followed_mirror",
+        }]
+    try:
+        if enabled:
+            return list(plugin_settings.reconcile_plugin_settings(
+                plugin, effective_org=effective_org, force=force,
+            ))
+        if toggled:
+            return list(plugin_settings.uninstall_plugin_settings(
+                plugin, effective_org=effective_org,
+            ))
+    except Exception:
+        logger.exception(
+            "[plugin_loader] failed reconciling declared settings for %s in %s",
+            plugin.id, effective_org,
+        )
+    return []
+
+
+def migrate_plugin_toggles_to_personal(plugins) -> dict[str, str]:
+    """Copy toggle rows that exist only in an organization's store into
+    ``PLUGIN_TOGGLE_ORG``, once (auto-2v6ay.2, ruling a).
+
+    Toggles used to live in each manifest's org, so a node that ran before
+    this change keeps its choices there (Home: five rows in autonomy).
+    Reading personal alone would silently revert them to their defaults.
+    For each plugin with no personal row, the row from its manifest's org
+    wins, else the first found in any other shared org. Nothing is deleted,
+    so it is idempotent and reversible. Returns ``{plugin_id: source_org}``
+    for the rows copied. Never raises.
+    """
+    if os.environ.get("DASHBOARD_MOCK"):
+        return {}
+    copied: dict[str, str] = {}
+    try:
+        from tools.graph import org_ops, settings_ops
+        from tools.graph.db import is_followed_org
+        from .schema import PLUGIN_SCHEMA_REVISION
+
+        personal = _read_plugin_settings(org=PLUGIN_TOGGLE_ORG)
+        manifest_org = {p.id: p.manifest.org for p in plugins}
+        by_org: dict[str, dict] = {}
+        for ref in org_ops.list_orgs():
+            slug = ref.slug
+            if slug in (PLUGIN_TOGGLE_ORG, "machine"):
+                continue
+            try:
+                if is_followed_org(slug):
+                    continue
+                members = settings_ops.read_owned_set(PLUGIN_SET_ID, org=slug).members
+            except Exception:
+                continue
+            by_org[slug] = {m.key: dict(m.payload) for m in members
+                            if isinstance(m.payload, dict)}
+        wanted = sorted({key for rows in by_org.values() for key in rows} - set(personal))
+        for plugin_id in wanted:
+            order = sorted(by_org, key=lambda slug: slug != manifest_org.get(plugin_id))
+            source = next(slug for slug in order if plugin_id in by_org[slug])
+            settings_ops.upsert_by_key(
+                PLUGIN_SET_ID, PLUGIN_SCHEMA_REVISION, plugin_id,
+                by_org[source][plugin_id], org=PLUGIN_TOGGLE_ORG, state="raw",
+            )
+            copied[plugin_id] = source
+        if copied:
+            logger.warning("[plugin_loader] copied plugin toggles into %s: %s",
+                           PLUGIN_TOGGLE_ORG, copied)
+    except Exception:
+        logger.exception("[plugin_loader] plugin toggle migration failed")
+    return copied

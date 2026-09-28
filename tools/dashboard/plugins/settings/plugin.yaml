@@ -1,6 +1,6 @@
 id: settings
 api_version: 1
-org: autonomy
+org: personal
 
 paths:
   - /settings

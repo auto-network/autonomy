@@ -1,6 +1,6 @@
 id: primers
 api_version: 1
-org: autonomy
+org: personal
 
 paths:
   - /primers

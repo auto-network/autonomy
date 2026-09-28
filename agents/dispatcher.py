@@ -2292,10 +2292,30 @@ def _monitor_post(path: str, body: dict, *, tmux_name: str) -> None:
               file=sys.stderr)
 
 
+def _run_org(output_dir, jsonl_file: Path) -> str:
+    """The org a dispatched, librarian or agentic run belongs to, as the
+    monitor should attribute it: the org the launcher stamped into the run's
+    .session_meta.json. The JSONL's parent directory name, which this used,
+    is "-workspace-repo" for every container whatever its org, and the
+    fallback was the literal "autonomy" (auto-2v6ay.2, D5). Personal when
+    neither says."""
+    if output_dir:
+        try:
+            meta = json.loads(
+                (Path(output_dir) / "sessions" / ".session_meta.json").read_text())
+        except (OSError, ValueError, TypeError):
+            meta = {}
+        if isinstance(meta, dict):
+            org = meta.get("org") or meta.get("graph_org")
+            if isinstance(org, str) and org.strip():
+                return org.strip()
+    return "personal"
+
+
 def _register_dispatch_session(agent: "RunningAgent", jsonl_file: Path) -> None:
     """Register a dispatch session with the monitor (idempotent, best-effort)."""
     tmux_name = Path(agent.output_dir).name if agent.output_dir else agent.bead_id
-    project = jsonl_file.parent.name if jsonl_file.is_file() else "autonomy"
+    project = _run_org(agent.output_dir, jsonl_file)
     body = {
         "tmux_name": tmux_name,
         "type": "dispatch",
@@ -2312,7 +2332,7 @@ def _register_librarian_session(
 ) -> None:
     """Register a librarian session with the monitor (idempotent, best-effort)."""
     tmux_name = Path(lib.output_dir).name if lib.output_dir else lib.job_id
-    project = jsonl_file.parent.name if jsonl_file.is_file() else "autonomy"
+    project = _run_org(lib.output_dir, jsonl_file)
     body = {
         "tmux_name": tmux_name,
         "type": "librarian",
@@ -2350,7 +2370,7 @@ def _register_agentic_session(
     the SSE session_id the front-end's session-store handler routes by.
     """
     tmux_name = run_id
-    project = jsonl_file.parent.name if jsonl_file.is_file() else "autonomy"
+    project = _run_org(output_dir, jsonl_file)
     # The launcher stamps the exact provider identity alongside the JSONL.
     # Carry it across the dispatcher→dashboard IPC boundary so the monitor
     # chooses the right parser from byte zero (and the Dispatch card can show

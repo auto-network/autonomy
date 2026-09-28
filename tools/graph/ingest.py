@@ -955,7 +955,10 @@ def _build_host_project_to_org() -> dict[str, str]:
         f"{home}/workspace/widgets-ng": "anchore",
         f"{home}/workspace/widgets": "anchore",
         f"{home}/workspace/widgets-dev-compose-files": "anchore",
-        f"{home}/workspace/autonomy": "autonomy",
+        # No ~/workspace/autonomy row: it named an org a fresh node lacks and
+        # overrode the ruling below (a host terminal files under personal).
+        # A deployment that wants it sets AUTONOMY_HOST_PROJECT_ORGS
+        # (auto-2v6ay.2, D5).
         f"{home}/infra": "blindhash",
         f"{home}/blindhash": "blindhash",
         f"{home}/jira": "personal",

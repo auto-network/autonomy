@@ -15,7 +15,8 @@ function primersPage() {
   return {
     // ── Data ───────────────────────────────────────────────────
     orgs: [],
-    selectedOrg: 'autonomy',
+    // The shell's org, else personal: never a literal org (auto-2v6ay.2).
+    selectedOrg: ((document.querySelector('meta[name="autonomy-shell-org"]') || {}).content || '') || 'personal',
     workspaces: [],
     primers: {},          // { workspace_id: {markdown, token_estimate, workspace} }
     query: '',
@@ -37,9 +38,9 @@ function primersPage() {
       if (saved && saved.org && this.orgs.includes(saved.org)) {
         this.selectedOrg = saved.org;
       } else if (!this.orgs.includes(this.selectedOrg)) {
-        this.selectedOrg = this.orgs.includes('autonomy')
-          ? 'autonomy'
-          : (this.orgs[0] || 'autonomy');
+        this.selectedOrg = this.orgs.includes(((document.querySelector('meta[name="autonomy-shell-org"]') || {}).content || ''))
+          ? ((document.querySelector('meta[name="autonomy-shell-org"]') || {}).content || '')
+          : (this.orgs[0] || 'personal');
       }
       this._updateTopbar();
       await this._loadWorkspaces();
@@ -144,14 +145,14 @@ function primersPage() {
       this.loadingOrgs = true;
       try {
         const res = await window.Autonomy.fetch('/api/orgs');
-        if (!res.ok) { this.orgs = ['autonomy']; return; }
+        if (!res.ok) { this.orgs = ['personal']; return; }
         const data = await res.json();
         const slugs = (data.orgs || [])
           .map(entry => (entry && entry.org && entry.org.slug) || entry.slug)
           .filter(Boolean);
-        this.orgs = slugs.length ? slugs : ['autonomy'];
+        this.orgs = slugs.length ? slugs : ['personal'];
       } catch (e) {
-        this.orgs = ['autonomy'];
+        this.orgs = ['personal'];
       } finally {
         this.loadingOrgs = false;
         this._updateTopbar();

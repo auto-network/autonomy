@@ -1,6 +1,6 @@
 id: testing
 api_version: 1
-org: autonomy
+org: every
 default_enabled: true
 
 paths:

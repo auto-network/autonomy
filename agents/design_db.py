@@ -100,33 +100,15 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-#: The org a NULL-org design is backfilled to when it was modified recently.
-#: Per operator direction: recently-active designs in this deployment are almost
-#: all this org, and they must stay reachable by an org-scoped caller. Older
-#: NULL-org designs are left NULL (unattributable → hidden from org callers, still
-#: visible to the operator), matching the token h4kzx rule.
-_OBVIOUS_ORG = "autonomy"
-
-
 def _ensure_org_column(conn: sqlite3.Connection) -> None:
-    """Add the ``org`` column (idempotent) and, once, backfill recently-modified
-    designs to the obvious org so agents can reach their own recent work.
-
-    The backfill runs only when the column is first created (the ALTER succeeds).
-    A design with any revision created in the last ~2 days is stamped in full
-    (every revision of that design shares one org). Older designs stay NULL.
-    """
+    """Add the ``org`` column (idempotent). A NULL-org design stays NULL:
+    unattributable, hidden from org callers, visible to the operator (the
+    h4kzx rule). A one-time backfill that stamped recent designs "autonomy"
+    ran on the deployment it was written for and is gone (auto-2v6ay.2)."""
     try:
         conn.execute("ALTER TABLE designs ADD COLUMN org TEXT")
     except sqlite3.OperationalError:
-        return  # column already present → already migrated and backfilled once
-    conn.execute(
-        "UPDATE designs SET org = ? WHERE org IS NULL AND design_id IN ("
-        "  SELECT design_id FROM designs"
-        "  WHERE created_at >= datetime('now', '-2 days')"
-        ")",
-        (_OBVIOUS_ORG,),
-    )
+        return  # column already present
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

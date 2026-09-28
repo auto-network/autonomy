@@ -95,7 +95,7 @@
         last_push: s.last_push || '',
         count: Number(s.count) || 0,
         live: typeof s.live === 'boolean' ? s.live : !!live,
-        href: isSession ? '/session/' + encodeURIComponent(org || 'autonomy') + '/' + encodeURIComponent(s.id) : null,
+        href: isSession ? '/session/' + encodeURIComponent(org || 'personal') + '/' + encodeURIComponent(s.id) : null,
       };
     });
     out.sort(function (a, b) {

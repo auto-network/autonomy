@@ -1,6 +1,6 @@
 id: backup
 api_version: 1
-org: autonomy
+org: personal
 
 # Ships dormant while the epic builds (auto-qyirn); the operator flips
 # the dashboard.plugin row when the state surface is worth watching.

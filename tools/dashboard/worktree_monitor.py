@@ -157,6 +157,18 @@ def _encode_json(payload) -> bytes:
     ).encode("utf-8")
 
 
+def _store_org(session_name: str) -> str:
+    """The org whose Settings hold a Worktrees row's watch, PR-binding,
+    review-state and terminal-fire rows: the session's org, else personal.
+    Every one of them was the literal "autonomy", so on a node without it
+    watch, nag and PR binding stopped working (auto-2v6ay.2, D5). Readers
+    and writers derive it from the same session, so they meet."""
+    from tools.dashboard.org_identity import UNKNOWN_SLUG
+
+    org = org_for_session(session_name)
+    return org if org and org != UNKNOWN_SLUG else "personal"
+
+
 def org_for_session(session_name: str) -> str | None:
     """The org a session acts for, or None when it cannot be determined.
 
@@ -189,7 +201,7 @@ def _read_watch_setting(session_name: str, repo_name: str):
     key = _watch_key(session_name, repo_name)
     members = settings_ops.read_set(
         WATCH_SET_ID,
-        org="autonomy",
+        org=_store_org(session_name),
     ).to_dict()
     return members.get(key)
 
@@ -351,7 +363,7 @@ def _read_bindings(row: WorktreeState) -> list:
     members = settings_ops.read_set(
         REVIEW_BINDING_SET_ID,
         prefix=prefix,
-        org="autonomy",
+        org=_store_org(row.session_name),
     )
     exact = sorted(members.members, key=lambda member: member.key)
     # Deterministic per-review ordering matters for stacked rows because
@@ -373,9 +385,9 @@ def _read_bindings(row: WorktreeState) -> list:
     members = settings_ops.read_set(
         REVIEW_BINDING_SET_ID,
         prefix=f"{row.session_name}:{row.repo_name}",
-        org="autonomy",
+        org=_store_org(row.session_name),
     )
-    cache_map = _read_review_state_cache(repo_slug)
+    cache_map = _read_review_state_cache(repo_slug, _store_org(row.session_name))
     branch_groups: dict[str, dict] = {}
     for member in members.members:
         try:
@@ -428,7 +440,7 @@ def _read_bindings_batch(
     }
 
 
-def _read_review_state_cache(repo_slug: str | None) -> dict[str, dict]:
+def _read_review_state_cache(repo_slug: str | None, org: str) -> dict[str, dict]:
     """Read the per-repo cache map ``{key: payload}`` for ``repo_slug``.
 
     ``repo_slug`` is the ``<owner>/<repo>`` form derived from the
@@ -440,7 +452,7 @@ def _read_review_state_cache(repo_slug: str | None) -> dict[str, dict]:
     members = settings_ops.read_set(
         REVIEW_STATE_SET_ID,
         prefix=repo_slug,
-        org="autonomy",
+        org=org,
     )
     return {m.key: m.payload for m in members.members}
 
@@ -537,7 +549,7 @@ def _compose_bound_snapshot(
     the operator declared a stack in order.
     """
     repo_slug = derive_repo_slug(row.managed_clone) or ""
-    cache_map = _read_review_state_cache(repo_slug)
+    cache_map = _read_review_state_cache(repo_slug, _store_org(row.session_name))
     reviews: list[dict] = []
     any_stale = False
     for binding in bindings:
@@ -639,13 +651,13 @@ def _seed_bindings_from_legacy_reviews(row: WorktreeState, reviews) -> None:
             continue
 
         binding_key = f"{row.session_name}:{row.repo_name}:{row.branch}:{review_id}"
-        if settings_ops.read_set_key(REVIEW_BINDING_SET_ID, binding_key, org="autonomy") is None:
+        if settings_ops.read_set_key(REVIEW_BINDING_SET_ID, binding_key, org=_store_org(row.session_name)) is None:
             settings_ops.add_setting(
                 REVIEW_BINDING_SET_ID,
                 REVIEW_BINDING_REVISION,
                 binding_key,
                 {"base_sha": base_sha},
-                org="autonomy",
+                org=_store_org(row.session_name),
             )
 
         if repo_slug:
@@ -654,7 +666,7 @@ def _seed_bindings_from_legacy_reviews(row: WorktreeState, reviews) -> None:
                 REVIEW_STATE_REVISION,
                 f"{repo_slug}:{review_id}",
                 _cache_payload_from_review(review),
-                org="autonomy",
+                org=_store_org(row.session_name),
             )
 
 
@@ -791,7 +803,7 @@ async def _refresh_bindings_via_rest(
     rate-limit backoff on True and recomposes from cache regardless.
     """
     repo_slug = derive_repo_slug(row.managed_clone) or ""
-    cache_map = _read_review_state_cache(repo_slug)
+    cache_map = _read_review_state_cache(repo_slug, _store_org(row.session_name))
     rate_limited = False
 
     for binding in bindings:
@@ -818,7 +830,7 @@ async def _refresh_bindings_via_rest(
             try:
                 settings_ops.upsert_by_key(
                     REVIEW_STATE_SET_ID, REVIEW_STATE_REVISION,
-                    cache_key, cached, org="autonomy",
+                    cache_key, cached, org=_store_org(row.session_name),
                 )
             except Exception:
                 logger.warning(
@@ -871,7 +883,7 @@ async def _refresh_bindings_via_rest(
             try:
                 settings_ops.upsert_by_key(
                     REVIEW_STATE_SET_ID, REVIEW_STATE_REVISION,
-                    cache_key, payload, org="autonomy",
+                    cache_key, payload, org=_store_org(row.session_name),
                 )
             except Exception:
                 logger.warning(
@@ -941,7 +953,7 @@ async def _refresh_bindings_via_rest(
         try:
             settings_ops.upsert_by_key(
                 REVIEW_STATE_SET_ID, REVIEW_STATE_REVISION,
-                cache_key, payload, org="autonomy",
+                cache_key, payload, org=_store_org(row.session_name),
             )
         except Exception:
             logger.warning(
@@ -1300,17 +1312,17 @@ class WorktreeMonitor:
         setting = settings_ops.read_set_key(
             WATCH_SET_ID,
             _watch_key(*key),
-            org="autonomy",
+            org=_store_org(key[0]),
         )
         if setting is not None:
-            settings_ops.remove_setting(setting["id"], org="autonomy")
+            settings_ops.remove_setting(setting["id"], org=_store_org(key[0]))
 
     def _clear_persisted_terminal_fires(self, key: tuple[str, str]) -> None:
         """Delete all persisted terminal-fire ledger rows for ``key``."""
         settings_ops.remove_settings_by_key_prefix(
             TERMINAL_FIRE_SET_ID,
             prefix=f"{key[0]}:{key[1]}",
-            org="autonomy",
+            org=_store_org(key[0]),
         )
 
     def _has_persisted_terminal_fire(
@@ -1323,7 +1335,7 @@ class WorktreeMonitor:
         return settings_ops.read_set_key(
             TERMINAL_FIRE_SET_ID,
             _terminal_fire_key(key[0], key[1], review_id, head_sha),
-            org="autonomy",
+            org=_store_org(key[0]),
         ) is not None
 
     def _rehydrate_nag_mode(self, key: tuple[str, str]) -> tuple[str, float] | None:
@@ -1487,7 +1499,7 @@ class WorktreeMonitor:
             WATCH_REVISION,
             _watch_key(*key),
             payload,
-            org="autonomy",
+            org=_store_org(session_name),
         )
 
         cached = self._source_control_cache.get(key)
@@ -1976,7 +1988,7 @@ class WorktreeMonitor:
                         TERMINAL_FIRE_REVISION,
                         _terminal_fire_key(session_name, _repo, review_id, head_sha),
                         {"fired_at": time.time()},
-                        org="autonomy",
+                        org=_store_org(session_name),
                     )
                 except Exception:
                     logger.warning(

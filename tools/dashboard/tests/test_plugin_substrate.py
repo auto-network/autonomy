@@ -423,7 +423,9 @@ def test_plugin_asset_rev_changes_when_page_assets_change(tmp_path, monkeypatch)
     assert before != after
 
 
-@pytest.mark.parametrize("caller_org, expected_org", [("anchore", "anchore"), (None, "autonomy")])
+# An unbound operator with no selected org gets null (the shell's own scope
+# applies), never the manifest's org (auto-2v6ay.2).
+@pytest.mark.parametrize("caller_org, expected_org", [("anchore", "anchore"), (None, None)])
 def test_api_plugins_browser_scope_respects_org_bearer(tmp_path, monkeypatch, caller_org, expected_org):
     import asyncio
     import json
@@ -552,38 +554,27 @@ def test_manifest_requires_org_field():
         PluginManifest.model_validate(bad)
 
 
-def test_loader_reads_each_plugin_org_independently(tmp_path, monkeypatch):
-    """Two plugins with different manifest orgs each read their toggle
-    row from their own org-DB — never from a sibling plugin's org.
-    """
+def test_loader_reads_every_toggle_from_the_personal_store(tmp_path, monkeypatch):
+    """Toggles live in the operator's personal store whatever each manifest
+    names (auto-2v6ay.2, ruling a): a manifest org a node lacks failed the
+    read every 30 s."""
     plugins_dir = tmp_path / "plugins"
     plugins_dir.mkdir()
     _write_plugin(plugins_dir, "alpha", _min_manifest_yaml("alpha", org="autonomy"))
     _write_plugin(plugins_dir, "bravo", _min_manifest_yaml("bravo", org="anchore"))
 
-    calls: list[tuple[str, str | None]] = []
+    calls: list[str | None] = []
 
     def fake_read_plugin_settings(org=None):
-        calls.append(("_read_plugin_settings", org))
-        if org == "autonomy":
-            return {"alpha": {"enabled": True}}
-        if org == "anchore":
-            return {"bravo": {"enabled": True}}
+        calls.append(org)
+        if org == "personal":
+            return {"alpha": {"enabled": True}, "bravo": {"enabled": False}}
         return {}
 
     monkeypatch.setattr(loader, "_read_plugin_settings", fake_read_plugin_settings)
-
     loaded = loader.load_enabled(plugins_dir=plugins_dir)
-    by_id = {p.id: p for p in loaded}
-    assert set(by_id) == {"alpha", "bravo"}
-
-    requested_orgs = {org for _, org in calls}
-    assert "autonomy" in requested_orgs
-    assert "anchore" in requested_orgs
-    # The unscoped sweep that caused the original bug must not happen.
-    assert None not in requested_orgs, (
-        f"_read_plugin_settings was called with org=None: {calls}"
-    )
+    assert {p.id for p in loaded} == {"alpha"}
+    assert set(calls) == {"personal"}
 
 
 def test_loader_handles_missing_org_db(tmp_path, monkeypatch):
@@ -612,7 +603,7 @@ def test_setting_payload_org_overrides_manifest_org(tmp_path, monkeypatch):
     _write_plugin(plugins_dir, "switched", _min_manifest_yaml("switched", org="autonomy"))
 
     def fake_settings(org=None):
-        if org == "autonomy":
+        if org == "personal":
             return {"switched": {"enabled": True, "org": "anchore"}}
         return {}
 
@@ -631,7 +622,7 @@ def test_setting_without_org_keeps_manifest_org(tmp_path, monkeypatch):
     _write_plugin(plugins_dir, "stable", _min_manifest_yaml("stable", org="autonomy"))
 
     def fake_settings(org=None):
-        if org == "autonomy":
+        if org == "personal":
             return {"stable": {"enabled": True}}
         return {}
 
@@ -912,11 +903,42 @@ def test_plugin_declared_setting_skips_a_followed_mirror(tmp_path, monkeypatch):
         loaded = loader.load_all(plugins_dir=plugins_dir)
         results = loader.reconcile_declared_settings(loaded)
 
-        assert results == [{"plugin_id": "settingplug", "org": "autonomy",
-                            "status": "skipped", "action": "followed_mirror"}]
+        # A manifest naming an org never makes it a target (auto-2v6ay.2):
+        # the setting goes to every shared org this node holds -- a followed
+        # mirror is not one -- plus personal. Nothing touches the mirror.
+        assert results and all(r.get("org") == "personal" for r in results)
         assert graph_ops.read_set(
             "dashboard.agent-actions", org="autonomy", peers=[],
         ).to_dict() == {}
     finally:
         GraphDB.close_all_pooled()
         _ORG_TYPE_CACHE.clear()
+
+
+
+def test_toggles_are_copied_into_personal_once_preferring_the_manifest_org(monkeypatch):
+    """auto-2v6ay.2: a node's existing toggles (Home: five rows in autonomy)
+    are carried into personal, not silently reverted to defaults."""
+    from types import SimpleNamespace
+    from tools.graph import org_ops, settings_ops
+    import tools.graph.db as graph_db
+
+    rows = {"autonomy": {"mission_control": {"enabled": True}, "backup": {"enabled": True}},
+            "anchore": {"backup": {"enabled": False}, "nexus": {"enabled": True}},
+            "personal": {"nexus": {"enabled": False}}}
+    written = {}
+    monkeypatch.setattr(org_ops, "list_orgs", lambda: [
+        SimpleNamespace(slug=s) for s in ("anchore", "autonomy", "personal", "machine")])
+    monkeypatch.setattr(graph_db, "is_followed_org", lambda slug, **k: False)
+    monkeypatch.setattr(settings_ops, "read_owned_set", lambda set_id, org: SimpleNamespace(
+        members=[SimpleNamespace(key=k, payload=v) for k, v in rows.get(org, {}).items()]))
+    monkeypatch.setattr(loader, "_read_plugin_settings", lambda org=None: dict(rows[org]))
+    monkeypatch.setattr(settings_ops, "upsert_by_key",
+                        lambda set_id, rev, key, payload, org, state: written.update({key: (org, payload)}))
+    plugins = [SimpleNamespace(id="backup", manifest=SimpleNamespace(org="autonomy")),
+               SimpleNamespace(id="mission_control", manifest=SimpleNamespace(org="autonomy")),
+               SimpleNamespace(id="nexus", manifest=SimpleNamespace(org="autonomy"))]
+    copied = loader.migrate_plugin_toggles_to_personal(plugins)
+    assert copied == {"backup": "autonomy", "mission_control": "autonomy"}
+    assert written["backup"] == ("personal", {"enabled": True})     # manifest org wins
+    assert "nexus" not in written                                    # personal already decided

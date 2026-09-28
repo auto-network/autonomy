@@ -3,7 +3,7 @@
     return {
       orgs: [],
       repositories: [],
-      selectedOrg: 'autonomy',
+      selectedOrg: ((document.querySelector('meta[name="autonomy-shell-org"]') || {}).content || '') || 'personal',
       selectedRepository: '',
       summary: null,
       loading: false,
@@ -28,9 +28,9 @@
             .map(row => (row && row.org && row.org.slug) || row.slug)
             .filter(Boolean);
         } catch (_error) {
-          this.orgs = ['autonomy'];
+          this.orgs = ['personal'];
         }
-        if (!this.orgs.length) this.orgs = ['autonomy'];
+        if (!this.orgs.length) this.orgs = ['personal'];
         if (!this.orgs.includes(this.selectedOrg)) this.selectedOrg = this.orgs[0];
         this.orgs.sort((left, right) => {
           if (left === this.selectedOrg) return -1;

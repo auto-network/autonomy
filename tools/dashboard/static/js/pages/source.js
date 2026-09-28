@@ -122,7 +122,7 @@
           const author = meta.author || '';
           if (author) sessions.push({ id: author, label: author, last_push: self.src?.created_at || '', count: 0 });
           const opts = {
-            org: (self.src && self.src.org && self.src.org.slug) || self.callerOrg || 'autonomy',
+            org: (self.src && self.src.org && self.src.org.slug) || self.callerOrg || 'personal',
             targetType: 'note',
             targetUuid: self.src?.id || self.id,
             title: self.displayTitle,

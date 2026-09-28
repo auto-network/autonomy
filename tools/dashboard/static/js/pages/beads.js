@@ -753,8 +753,11 @@
           this.orgs = [];
         }
         if (!this.selectedOrg) {
-          this.selectedOrg = this.orgs.some(o => o.slug === 'autonomy')
-            ? 'autonomy' : ((this.orgs[0] || {}).slug || '');
+          // The shell's org when it is one of these, else the first: never a
+          // literal org (auto-2v6ay.2).
+          const shell = ((document.querySelector('meta[name="autonomy-shell-org"]') || {}).content || '');
+          this.selectedOrg = this.orgs.some(o => o.slug === shell)
+            ? shell : ((this.orgs[0] || {}).slug || '');
         }
       },
 

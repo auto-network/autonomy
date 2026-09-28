@@ -31,14 +31,13 @@ from tools.graph import settings_ops
 COORDINATOR_SET_ID = "dashboard.coordinator"
 COORDINATOR_DECISION_SET_ID = "dashboard.coordinator-decision"
 OPERATOR_MESSAGE_SET_ID = "dashboard.operator-message-to-coordinator"
-COORDINATOR_ORG = "autonomy"
-
-
-def _bound_coordinator_session() -> str | None:
+def _bound_coordinator_session(org: str | None) -> str | None:
+    """The coordinator bound in *org*: the org of the row being handled,
+    else personal. It was the literal "autonomy" (auto-2v6ay.2, D5)."""
     binding = settings_ops.read_set_key(
         COORDINATOR_SET_ID,
         "default",
-        org=COORDINATOR_ORG,
+        org=org or "personal",
         peers=[],
     )
     if not binding:
@@ -135,7 +134,7 @@ async def refresh_request(row, svc):
     name="coordinator_board.operator_message",
 )
 async def operator_message(row, svc):
-    target = _bound_coordinator_session()
+    target = _bound_coordinator_session(getattr(row, "org", None))
     if not target:
         svc.log.warning(
             "coordinator_board.operator_message: no dashboard.coordinator "

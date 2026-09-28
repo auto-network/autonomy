@@ -2338,7 +2338,6 @@
             const defaultOrg = String(r.default_org || '').trim();
             const autonomyOrg = orgs.includes(requestedOrg) ? requestedOrg
               : orgs.includes(defaultOrg) ? defaultOrg
-              : orgs.includes('autonomy') ? 'autonomy'
               : (orgs[0] || requestedOrg || defaultOrg);
             const requestedLevel = ['read', 'readwrite'].includes(req.requested_level)
               ? req.requested_level : 'read';

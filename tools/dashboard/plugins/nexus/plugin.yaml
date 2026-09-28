@@ -1,6 +1,6 @@
 id: nexus
 api_version: 1
-org: autonomy
+org: personal
 
 # Ships dormant — operator opts in by writing
 # dashboard.plugin#1 → key=nexus, payload {"enabled": true}.

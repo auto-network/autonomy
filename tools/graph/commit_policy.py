@@ -687,6 +687,9 @@ def seed_default_workspace_policies(workspaces: Mapping[str, Any]) -> dict[str, 
     results: dict[str, str] = {}
     for workspace_id, workspace in sorted(workspaces.items()):
         org = getattr(workspace, "graph_project", None)
+        # A deliberate literal (auto-2v6ay.2, ruling d): this seeds the
+        # Autonomy product's own repository policy (direct-master), which
+        # belongs to that org alone. Every other org opts in explicitly.
         if org != "autonomy":
             continue
         try:

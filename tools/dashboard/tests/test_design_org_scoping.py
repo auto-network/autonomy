@@ -95,7 +95,7 @@ def test_a_new_revision_inherits_its_designs_org(design_db):
     assert design_db.get_design(second)["org"] == "autonomy"
 
 
-def test_backfill_stamps_recent_null_org_and_leaves_old_null(design_db):
+def test_adding_the_org_column_backfills_nothing(design_db):
     # Build a pre-migration designs table (no org column) directly, with one
     # recent and one old design, then run the migration helper.
     conn = sqlite3.connect(":memory:")
@@ -113,5 +113,7 @@ def test_backfill_stamps_recent_null_org_and_leaves_old_null(design_db):
 
     recent = conn.execute("SELECT org FROM designs WHERE id='r1'").fetchone()["org"]
     old = conn.execute("SELECT org FROM designs WHERE id='r2'").fetchone()["org"]
-    assert recent == design_db._OBVIOUS_ORG
+    # No literal backfill any more (auto-2v6ay.2): a NULL-org design stays
+    # NULL, unattributable, whatever its age.
+    assert recent is None
     assert old is None

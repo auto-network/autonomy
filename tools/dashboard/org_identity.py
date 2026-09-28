@@ -19,6 +19,8 @@ that is either a workspace id (``widgets-ng``) or an org slug
 
 from __future__ import annotations
 
+import functools
+
 import hashlib
 from functools import lru_cache
 from typing import Any
@@ -296,6 +298,20 @@ def _overlay_personal_profile(identity: dict[str, Any]) -> None:
         )
 
 
+_LEGACY_PATH_ORG = "autonomy"
+
+
+@functools.lru_cache(maxsize=1)
+def _legacy_path_org_exists() -> bool:
+    """Cached: session_org_slug runs per session in list views, and an org
+    appearing or vanishing is a reload-scale event."""
+    try:
+        from tools.graph import org_ops
+        return org_ops.get_org(_LEGACY_PATH_ORG) is not None
+    except Exception:
+        return False
+
+
 def session_org_slug(session: dict) -> str:
     """Derive an org slug from a session payload.
 
@@ -312,13 +328,14 @@ def session_org_slug(session: dict) -> str:
     via ``project_config``. Unknown values pass through as the slug
     itself so the generated fallback still gives a stable colour.
     """
-    # Dispatch + librarian run ON the Autonomy platform; they ARE Autonomy.
-    # Their payloads often carry an empty project field, so this must come
-    # before the empty-raw guard or it never fires for the target case.
-    # Operator contract (attention 20:02): only host sessions should lack an org.
+    # Dispatch and librarian runs register the org they were launched in
+    # (agents.dispatcher._run_org); one with no project belongs to personal,
+    # never a literal org (auto-2v6ay.2, D5). This must come before the
+    # empty-raw guard, which would otherwise paint "?".
     session_type = session.get("session_type") or session.get("type")
-    if session_type in ("dispatch", "librarian"):
-        return "autonomy"
+    if session_type in ("dispatch", "librarian") and not str(
+            session.get("project") or "").strip().strip("[]").strip():
+        return "personal"
     # Host terminals have no real organization; they file and render as
     # personal (operator ruling 2026-08-31, superseding the earlier
     # "only host sessions should lack an org" contract that painted "?").
@@ -330,13 +347,14 @@ def session_org_slug(session: dict) -> str:
         raw = raw.strip().strip("[]").strip()
     if not raw:
         return UNKNOWN_SLUG
-    # Known autonomy path patterns map to the autonomy org. Covers the
-    # dashboard container ("-workspace-repo") and any host session living in a
-    # "…/workspace/autonomy" checkout (slugified to "…-workspace-autonomy",
-    # regardless of the operator's home) — both produce path-derived project
-    # values that should identify as autonomy.
+    # Path-derived project values ("-workspace-repo", the dashboard
+    # container's cwd, and "…-workspace-autonomy" host checkouts) are what
+    # rows registered before auto-2v6ay.2 carry; runs now register their real
+    # org. On the deployment that wrote them they identify as autonomy -- a
+    # deliberate, allowlisted literal, taken only where that org exists. Any
+    # other node files them under personal, never under an org it lacks (D5).
     if raw in _AUTONOMY_PATH_PATTERNS or raw.endswith("-workspace-autonomy"):
-        return "autonomy"
+        return _LEGACY_PATH_ORG if _legacy_path_org_exists() else "personal"
     # Other path-derived ingest junk never identifies an org. Treat it
     # as unresolved so the renderer paints "?".
     if raw.startswith("-"):

@@ -654,7 +654,7 @@
           var self = this, sessions = (window.Alpine && window.Alpine.store('sessions')) || {};
           return this.decks.filter(function (deck) { return self.deckLive(deck); }).map(function (deck) {
             return {session_id:deck.creator_session_id, session_label:sessions[deck.creator_session_id].label || deck.creator_session_label,
-              org:deck.org || self.org || 'autonomy', artifact_id:deck.design_id || deck.key,
+              org:deck.org || self.org || 'personal', artifact_id:deck.design_id || deck.key,
               artifact_title:deck.name, artifact_href:self.deckHref(deck), artifact_kind:'Slides'};
           });
         },
@@ -665,7 +665,7 @@
         _presenceOptions: function () {
           var deck = this.deck || {};
           return {
-            org: deck.org || 'autonomy',
+            org: deck.org || 'personal',
             targetType: 'present',
             targetUuid: deck.design_id || deck.key || '',
             extraIds: [deck.latest_revision_id].filter(Boolean),
@@ -716,7 +716,7 @@
         },
 
         openSession: function (deck) {
-          if (deck && deck.creator_session_id) navigateTo('/session/autonomy/' + encodeURIComponent(deck.creator_session_id));
+          if (deck && deck.creator_session_id) navigateTo('/session/' + encodeURIComponent(deck.org || 'personal') + '/' + encodeURIComponent(deck.creator_session_id));
         },
 
         creatorLabel: function (deck) {

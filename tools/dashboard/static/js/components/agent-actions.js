@@ -64,9 +64,26 @@
     }
   }
 
+  // A bead belongs to the org its org:<slug> label names -- the org its
+  // dispatch targets -- not a literal org (auto-2v6ay.2). '' lets the
+  // shell's own scope apply.
+  async function fetchBeadOrg(beadId) {
+    try {
+      var resp = await fetch('/api/bead/' + encodeURIComponent(beadId));
+      if (!resp.ok) return '';
+      var body = await resp.json();
+      var labels = (body && (body.labels || (body.bead && body.bead.labels))) || [];
+      for (var i = 0; i < labels.length; i++) {
+        var label = String(labels[i] || '');
+        if (label.indexOf('org:') === 0 && label.length > 4) return label.slice(4);
+      }
+    } catch (e) { /* fall through */ }
+    return '';
+  }
+
   async function fetchAssetOrg(asset) {
     if (!asset || !asset.id) return '';
-    if (asset.type === 'bead') return 'autonomy';
+    if (asset.type === 'bead') return fetchBeadOrg(asset.id);
     return fetchSourceOrg(asset.id);
   }
 

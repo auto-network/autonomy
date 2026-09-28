@@ -206,6 +206,7 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 # See bead auto-a79f6 + design note graph://f77a5415-04f.
 
 from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
+from tools.dashboard.plugin_api.schema import PLUGIN_TOGGLE_ORG  # noqa: E402
 from tools.dashboard.plugin_api.session_contributions import (  # noqa: E402
     SESSION_CONTRIBUTIONS_TOPIC,
     normalize_descriptor as normalize_session_contribution,
@@ -348,39 +349,22 @@ def _plugin_badge_color(idx: int) -> str:
 def _plugin_enabled_map() -> dict[str, bool]:
     """Resolve current enable state for every loaded plugin.
 
-    Each plugin's toggle row lives in *its own* ``manifest.org``'s DB
-    — substrate v1.1 scopes per-plugin internally so unscoped browser
-    requests still see the canonical state. Reads are batched per-org
-    so two plugins sharing an install scope make one DB call.
+    Every toggle row lives in ``PLUGIN_TOGGLE_ORG`` (the operator's
+    personal store, auto-2v6ay.2): one read for all plugins. It used to be
+    each manifest's org, which a node without that org failed every 30 s.
 
     Per-request rather than cached: lets operators flip
     ``dashboard.plugin#1: {enabled: ...}`` without restart, and the
     L2.B sweep tests rely on the same path to drive plugin state via
     fixture toggles.
     """
-    cache: dict[str, dict[str, dict]] = {}
+    settings = plugin_loader._read_plugin_settings(org=PLUGIN_TOGGLE_ORG)
     out: dict[str, bool] = {}
     for p in PLUGIN_REGISTRY:
-        manifest_org = p.manifest.org
-        if manifest_org not in cache:
-            cache[manifest_org] = plugin_loader._read_plugin_settings(
-                org=manifest_org,
-            )
-        settings = cache[manifest_org]
         out[p.id] = plugin_loader.is_enabled(
             p.id, p.plugin_dir, settings, manifest=p.manifest,
         )
     return out
-
-
-def _plugin_effective_org(plugin: plugin_loader.LoadedPlugin) -> str:
-    """Resolve the runtime org for *plugin* — payload override or manifest."""
-    settings = plugin_loader._read_plugin_settings(org=plugin.manifest.org)
-    payload = settings.get(plugin.id) or {}
-    override = payload.get("org")
-    if isinstance(override, str) and override:
-        return override
-    return plugin.manifest.org
 
 
 class _VersionedStatic(StaticFiles):
@@ -5714,7 +5698,9 @@ async def api_dispatch_tail(request):
                 "session_id": run_name,
                 "tmux_name": run_name,
                 "tmux_session": run_name,
-                "project": "autonomy",
+                # The run's own org, never a literal (auto-2v6ay.2, D5).
+                "project": _resolve_agentic_identity(
+                    (run_row or {}).get("agentic_source_id"))["target_org"] or "personal",
             })
         # Multi-JSONL handling deferred per Round 7h scope: claude emits
         # exactly one .jsonl per session today; take the first.
@@ -21060,14 +21046,13 @@ async def api_plugins(request):
 
     Shape: ``{plugins: [{id, label, path, paths, badge_color, alpine_root, org,
     asset_rev, has_style, sidebar, identity_menu, identity_detail, voice}]}``
-    — one entry per currently-enabled plugin. Each plugin's toggle row
-    is read from *its own* ``manifest.org``'s DB, so unscoped browser
-    requests still see the canonical state (substrate v1.1 fix). The
-    ``org`` field is the runtime install scope: operator override
-    (``payload.org``) when set, else ``manifest.org``. The browser
-    stamps it as ``X-Graph-Org`` on plugin-originated fetches. For an
-    org-bound session, return its authenticated org instead: an install
-    scope cannot override the session's data scope.
+    — one entry per currently-enabled plugin. Toggle rows are read from
+    ``PLUGIN_TOGGLE_ORG`` (the operator's personal store). The ``org`` field
+    is what the browser stamps as ``X-Graph-Org`` on plugin-originated
+    fetches: an org-bound session's own org; otherwise the operator's
+    override (``payload.org``), else the org this request selected, else
+    null so the shell's own scope applies. It is never the manifest's
+    ``org:``, which named an org a fresh node does not have (auto-2v6ay.2).
     """
     try:
         force_settings = (
@@ -21081,27 +21066,23 @@ async def api_plugins(request):
         )
     except Exception:
         logger.exception("plugin declared-settings reconcile failed")
-    cache: dict[str, dict[str, dict]] = {}
+    settings = plugin_loader._read_plugin_settings(org=PLUGIN_TOGGLE_ORG)
+    principal = api_auth.principal_from_request(request)
+    request_org = api_auth.organization_scope_from_request(request)
     out = []
     for idx, p in enumerate(PLUGIN_REGISTRY):
-        manifest_org = p.manifest.org
-        if manifest_org not in cache:
-            cache[manifest_org] = plugin_loader._read_plugin_settings(
-                org=manifest_org,
-            )
-        settings = cache[manifest_org]
         if not plugin_loader.is_enabled(
             p.id, p.plugin_dir, settings, manifest=p.manifest,
         ):
             continue
         payload = settings.get(p.id) or {}
         override = payload.get("org")
-        effective_org = (
-            override if isinstance(override, str) and override else manifest_org
-        )
-        principal = api_auth.principal_from_request(request)
         if principal.org_bound:
             effective_org = principal.org
+        elif isinstance(override, str) and override:
+            effective_org = override
+        else:
+            effective_org = request_org or None
         if not p.manifest.has_page:
             # Settings-only plugin: nothing for the shell to show.
             continue
@@ -22231,6 +22212,11 @@ async def _on_startup():
     except Exception:
         logger.exception("commit policy default seed failed; continuing startup")
     _mark("seed_default_workspace_policies")
+    # Toggles moved to the operator's personal store (auto-2v6ay.2); carry a
+    # node's existing choices over before anything reads them.
+    await asyncio.to_thread(
+        plugin_loader.migrate_plugin_toggles_to_personal, PLUGIN_REGISTRY)
+    _mark("plugin_loader.migrate_plugin_toggles_to_personal")
     try:
         await asyncio.to_thread(
             plugin_loader.reconcile_declared_settings,

@@ -114,7 +114,7 @@ def services_capture():
 
 
 def _make_row(payload: dict, *, set_id: str = COORDINATOR_DECISION_SET_ID,
-              row_id: str = "row-1", key: str = "k-1") -> Row:
+              row_id: str = "row-1", key: str = "k-1", org: str | None = None) -> Row:
     """Construct a Row for direct handler unit tests."""
     return Row(
         id=row_id,
@@ -123,6 +123,7 @@ def _make_row(payload: dict, *, set_id: str = COORDINATOR_DECISION_SET_ID,
         payload=payload,
         created_at="2026-04-30T00:00:00Z",
         updated_at="2026-04-30T00:00:00Z",
+        org=org,
     )
 
 
@@ -239,12 +240,13 @@ async def test_operator_message_routes_to_coordinator(
     row = _make_row(
         {"text": "ack — sequencing approved", "sentAt": None},
         set_id=OPERATOR_MESSAGE_SET_ID,
+        org="autonomy",
     )
     from tools.graph import ops
     ops.add_setting(
         COORDINATOR_SET_ID, 1, "default",
         {"session_id": "auto-coord-9"},
-        org="autonomy",  # actions read the binding at COORDINATOR_ORG
+        org="autonomy",  # the binding is read in the triggering row's org
     )
 
     await actions.operator_message(row, services_capture)
@@ -462,7 +464,7 @@ async def test_dispatch_operator_message_routes_to_bound_coordinator(
     ops.add_setting(
         COORDINATOR_SET_ID, 1, "default",
         {"session_id": "auto-bound-coord"},
-        org="autonomy",  # actions read the binding at COORDINATOR_ORG
+        org="autonomy",  # the binding is read in the triggering row's org
     )
     ops.add_setting(
         OPERATOR_MESSAGE_SET_ID, 1,

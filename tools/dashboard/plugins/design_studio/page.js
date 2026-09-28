@@ -123,7 +123,7 @@
         get canGoForward() { return this.iterIndex < this.iterCount - 1; },
         get linkedSessionMode() { return !!this.linkedSessionId; },
         get linkedSessionHref() {
-          var org = (this.design && this.design.org) || 'autonomy';
+          var org = (this.design && this.design.org) || 'personal';
           return '/session/' + encodeURIComponent(org) + '/' + encodeURIComponent(this.linkedSessionId);
         },
         get linkedSessionStore() {
@@ -143,7 +143,7 @@
         get presenceSessions() {
           var revisions = (this.series && this.series.revisions) || [];
           var sessions = (window.Alpine && Alpine.store && Alpine.store('sessions')) || {};
-          var org = (this.design && this.design.org) || 'autonomy';
+          var org = (this.design && this.design.org) || 'personal';
           var byId = {};
           var order = [];
           for (var i = 0; i < revisions.length; i++) {
@@ -452,7 +452,7 @@
           var self = this;
           var revisions = (this.series && this.series.revisions) || [];
           return {
-            org: (this.design && this.design.org) || 'autonomy',
+            org: (this.design && this.design.org) || 'personal',
             targetType: 'design',
             targetUuid: this.designId,
             extraIds: revisions.map(function (r) { return r && r.id; }),
@@ -933,7 +933,7 @@ function designStudioPage() {
       var seen = {};
       var out = [];
       (this.designs || []).forEach(function (d) {
-        var org = (d && d.org) || 'autonomy';
+        var org = (d && d.org) || 'personal';
         if (!seen[org]) { seen[org] = true; out.push(org); }
       });
       return out.sort();
@@ -946,7 +946,7 @@ function designStudioPage() {
       var q = String(this.query || '').trim().toLowerCase();
       return (this.remoteShares || []).filter(function (share) {
         if (!share) return false;
-        if (self.org !== 'all' && (share.org || 'autonomy') !== self.org) return false;
+        if (self.org !== 'all' && (share.org || 'personal') !== self.org) return false;
         if (!q) return true;
         return [share.label, share.target_uuid, share.org].join(' ').toLowerCase().indexOf(q) >= 0;
       });
@@ -963,7 +963,7 @@ function designStudioPage() {
         if (self.liveOnly && !self.isLiveDesign(design)) return false;
         if (self.dynamicOnly && !design.has_fixture) return false;
         if (self.sharedOnly && !design.shared) return false;
-        if (self.org !== 'all' && (design.org || 'autonomy') !== self.org) return false;
+        if (self.org !== 'all' && (design.org || 'personal') !== self.org) return false;
         return true;
       });
     },
@@ -1183,7 +1183,7 @@ function designStudioPage() {
 
     openSession: function (design) {
       if (!design || !design.creator_session_id) return;
-      navigateTo('/session/' + encodeURIComponent(design.org || 'autonomy') + '/' + encodeURIComponent(design.creator_session_id));
+      navigateTo('/session/' + encodeURIComponent(design.org || 'personal') + '/' + encodeURIComponent(design.creator_session_id));
     },
 
     setDesignStatus: async function (design, status) {
@@ -1315,11 +1315,11 @@ function designStudioPage() {
       var self = this, source = this.presenceDesigns.length ? this.presenceDesigns : this.designs;
       return source.filter(function (design) {
         return design && self._liveSession(design.creator_session_id)
-          && (self.org === 'all' || (design.org || 'autonomy') === self.org);
+          && (self.org === 'all' || (design.org || 'personal') === self.org);
       }).map(function (design) {
         var live = self._liveSession(design.creator_session_id);
         return {session_id:design.creator_session_id, session_label:live.label || design.creator_session_label,
-          org:design.org || 'autonomy', artifact_id:design.design_id || design.latest_revision_id,
+          org:design.org || 'personal', artifact_id:design.design_id || design.latest_revision_id,
           artifact_title:design.title, artifact_href:'/design/' + encodeURIComponent(design.latest_revision_id || design.design_id), artifact_kind:'Design'};
       });
     },

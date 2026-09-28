@@ -146,7 +146,8 @@ class RebaseDirectiveV1(WorktreeDirective):
                 WORKTREE_REBASE_STATUS_REVISION,
                 _rebase_status_key(session_name, repo_name),
                 {"state": "failed", "error": str(exc)},
-                org=row.org or "autonomy",
+                # The row's org, else the session's (auto-2v6ay.2, D5).
+                org=row.org or _session_store_org(session_name),
             )
             svc.log.warning(
                 "rebase directive delivery failed for %s/%s: %s",
@@ -237,3 +238,8 @@ class WorktreeRebaseStatusV1(WorktreeStatusSchema):
 
 
 WORKTREE_REBASE_STATUS_SET_ID = WorktreeRebaseStatusV1.set_id
+
+
+def _session_store_org(session_name: str) -> str:
+    from tools.dashboard.worktree_monitor import _store_org
+    return _store_org(session_name)

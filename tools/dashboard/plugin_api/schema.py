@@ -23,6 +23,11 @@ from tools.graph.schemas.registry import (
 
 
 PLUGIN_SET_ID = "dashboard.plugin"
+#: Where every plugin's on/off row is read and written: the operator's own
+#: store. A toggle is a dashboard preference of the user, not data of any
+#: organization, and a plugin manifest naming an org made a node without that
+#: org fail the read every 30 s (auto-2v6ay.2, ruling a).
+PLUGIN_TOGGLE_ORG = "personal"
 PLUGIN_SCHEMA_REVISION = 1
 PLUGIN_OWNED_SETTING_SET_ID = "dashboard.plugin-owned-setting"
 PLUGIN_OWNED_SETTING_SCHEMA_REVISION = 1

@@ -37,6 +37,31 @@ def _seed_hermetic_org_dbs():
     yield
     GraphDB.close_all_pooled()
 
+@pytest.fixture(autouse=True)
+def _sessions_act_for_autonomy(monkeypatch):
+    """These tests model sessions of an autonomy workspace and seed their
+    rows in autonomy. The monitor stores a row's watch, bindings and review
+    cache in the session's org (worktree_monitor._store_org, auto-2v6ay.2),
+    and these test sessions have no session row to resolve, so say so here.
+    test_store_org_* below covers the resolution itself."""
+    from tools.dashboard import worktree_monitor
+    monkeypatch.setattr(worktree_monitor, "_store_org", lambda session: "autonomy")
+
+
+def test_store_org_is_the_sessions_org_else_personal(monkeypatch):
+    from tools.dashboard import worktree_monitor
+    real = worktree_monitor.__dict__["_store_org"].__wrapped__ \
+        if hasattr(worktree_monitor.__dict__["_store_org"], "__wrapped__") else None
+    del real
+    import importlib
+    fresh = importlib.reload(worktree_monitor)
+    monkeypatch.setattr(fresh, "org_for_session", lambda s: "boatlore" if s == "auto-b" else None)
+    assert fresh._store_org("auto-b") == "boatlore"
+    assert fresh._store_org("auto-none") == "personal"
+    monkeypatch.setattr(fresh, "org_for_session", lambda s: "unknown")
+    assert fresh._store_org("auto-x") == "personal"
+
+
 from agents.workspace_manager import (
     CleanupResult,
     GitFileChange,
@@ -1201,7 +1226,9 @@ class TestWorktreePage:
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
         assert "const requestedOrg = String(req.requested_org || '').trim();" in js
         assert "const defaultOrg = String(r.default_org || '').trim();" in js
-        assert "orgs.includes('autonomy') ? 'autonomy'" in js
+        # No literal org fallback (auto-2v6ay.2): requested, then default,
+        # then the first real org.
+        assert "orgs.includes('autonomy') ? 'autonomy'" not in js
         assert "req.requested_level : 'read'" in js
         assert "ttl: '86400'" in js
         assert "autonomyOrg: ''" not in js

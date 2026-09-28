@@ -281,7 +281,9 @@ def _force_requested(request: Request) -> bool:
 
 
 async def list_decks(request: Request) -> JSONResponse:
-    org = api_auth.organization_scope_from_request(request) or "autonomy"
+    # The library of the org this request selected, else personal: never a
+    # literal org (auto-2v6ay.2, D5).
+    org = api_auth.organization_scope_from_request(request) or "personal"
     rows = _read_deck_members(org)
     decks = []
     for row in rows:
@@ -311,11 +313,14 @@ async def get_deck(request: Request) -> JSONResponse:
 
 
 async def mark_shown(request: Request) -> JSONResponse:
-    org = api_auth.organization_scope_from_request(request) or "autonomy"
     raw_id = request.path_params["design_id"]
     design = _get_design_by_revision_or_design_id(raw_id)
     if not design or api_auth.caller_org_scope_hides(request, design.get("org")):
         return JSONResponse({"error": "design not found"}, status_code=404)
+    # The library list_decks reads for this request, else the design's own
+    # org, else personal (auto-2v6ay.2, D5).
+    org = (api_auth.organization_scope_from_request(request)
+           or design.get("org") or "personal")
     payload = _deck_record_payload(design, last_shown_at=_iso_now())
     duplicates = _same_name_decks(payload["name"], payload["design_id"], org)
     if duplicates and not _force_requested(request):

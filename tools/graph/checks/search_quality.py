@@ -122,7 +122,9 @@ def graph_search(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES)
-    parser.add_argument("--org", default="autonomy")
+    # Required: the case corpus names one org's content, and a literal default
+    # named an org most nodes lack (auto-2v6ay.2).
+    parser.add_argument("--org", required=True)
     parser.add_argument("--ranker", choices=("legacy", "smart"), default="legacy")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--cutoff", type=int, default=10)

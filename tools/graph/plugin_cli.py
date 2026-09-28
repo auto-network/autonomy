@@ -32,6 +32,10 @@ from pathlib import Path
 
 #: Same Setting the dashboard's enable filter reads.
 PLUGIN_SET_ID = "dashboard.plugin"
+#: Where toggles live: the operator's personal store. Mirrors
+#: tools.dashboard.plugin_api.schema.PLUGIN_TOGGLE_ORG, which the graph CLI
+#: must not import (auto-2v6ay.2).
+PLUGIN_TOGGLE_ORG = "personal"
 
 
 def _plugins_dir() -> Path:
@@ -159,7 +163,7 @@ def register_plugin_commands(sub, plugins_dir: Path | None = None,
     mounted: list[str] = []
     payload_cache: dict[str | None, dict[str, dict]] = {}
     for plugin in discover_cli_plugins(plugins_dir):
-        org = plugin["org"]
+        org = PLUGIN_TOGGLE_ORG
         if org not in payload_cache:
             payload_cache[org] = reader(org)
         if not _is_enabled(plugin, payload_cache[org]):
