@@ -4063,7 +4063,7 @@ async def api_terminal_kill(request):
             return JSONResponse(
                 {"status": "refused", "id": name, "refusal": reply.get("refusal"),
                  "error": reply.get("detail") or reply.get("refusal")},
-                status_code=409)
+                status_code=404 if reply.get("refusal") == "no-such-session" else 409)
         return JSONResponse({**(reply.get("result") or {}), "id": name},
                             status_code=202)
     payload, status = await _stop_session(name)
@@ -4099,7 +4099,12 @@ async def _inbound_session_send(body: dict, peer: str) -> dict:
         error = _validate_crosstalk_message(text)
         if error:
             return scc.refusal("bad-request", error)
-        claimed = str(body.get("from_session") or "unknown")[:128]
+        from tools.graph.schemas.personal_session_presence import is_tmux_name
+
+        claimed = body.get("from_session")
+        # The receiver owns the envelope's shape: only a tmux-name-shaped
+        # claim reaches an attribute, never a quote or a newline.
+        claimed = claimed if is_tmux_name(claimed) else "unknown"
         label = str(body.get("from_label") or claimed)[:200].replace('"', "'")
         sender = f"{claimed}@{peer_label}"
         iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

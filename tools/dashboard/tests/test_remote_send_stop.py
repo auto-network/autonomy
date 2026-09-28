@@ -138,3 +138,22 @@ def test_remote_stop_needs_authority_and_routes_to_the_machine(monkeypatch):
     assert response.status_code == 202
     assert sent == [("sjc-2", "stop", {"tmux_name": "auto-9"})]
     assert json.loads(response.body) == {"status": "stopping", "id": "auto-9@sjc-2"}
+
+
+def test_a_malformed_from_session_never_reaches_the_envelope(here):
+    pasted, _ = here
+    _send({"tmux_name": "auto-1", "kind": "crosstalk", "text": "hi",
+           "from_session": 'x" evil="1\nnext'})
+    ((_name, envelope),) = pasted
+    assert 'from="unknown@home"' in envelope
+    assert "evil" not in envelope
+
+
+def test_a_remote_stop_of_an_unknown_session_is_404(monkeypatch):
+    async def fake_request(machine, op, body=None, *, timeout=15.0):
+        return {"v": 1, "ok": False, "refusal": "no-such-session"}
+
+    monkeypatch.setattr(scc, "request", fake_request)
+    monkeypatch.setattr(api_auth, "require_global_api_authority", lambda request: None)
+    response = asyncio.run(server.api_terminal_kill(_Request("auto-x@sjc-2")))
+    assert response.status_code == 404
