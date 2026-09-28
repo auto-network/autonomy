@@ -119,6 +119,16 @@ OPS: dict[str, OpHandler] = {}
 
 
 def register_op(name: str, handler: OpHandler) -> None:
+    """Register an inbound op.
+
+    AUTHORIZATION RULE for every op that changes anything (launch, stop,
+    send input, ...): decide on ``peer_machine_pub`` -- the machine the
+    session:control handshake proved, an ACTIVE roster machine of THIS
+    fleet -- and never on a field of the request body; and record that
+    machine in the op's audit trail (for example the launched session's
+    ``launched_by`` / ``home_machine``). Read-only ops such as ``status``
+    may ignore it.
+    """
     OPS[name] = handler
 
 
@@ -190,7 +200,13 @@ class InboundPump:
     async def once(self) -> bool:
         """One poll; True when a request was answered."""
         reply = await asyncio.to_thread(self._poll)
-        item = reply.get("request") if isinstance(reply, dict) else None
+        if not (isinstance(reply, dict) and reply.get("ok") is True):
+            # A connector that answers at once without the op (the window
+            # after a hot reload, before it restarts) must not be polled in
+            # a tight loop.
+            await asyncio.sleep(UNAVAILABLE_BACKOFF_S)
+            return False
+        item = reply.get("request")
         if not isinstance(item, dict):
             return False
         record = await dispatch(

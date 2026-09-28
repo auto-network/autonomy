@@ -2208,13 +2208,20 @@ async def _serve_control_listener(connector, ctl_path: str,
                     from tools.network import session_control
                     from tools.network.fleet_relay_sync import connector_runtime
 
-                    try:
-                        reply = await session_control.handle_ctl(
-                            connector, connector_runtime, request["op"],
-                            request.get("args") or {})
-                    except Exception as exc:
-                        reply = {"ok": False,
-                                 "error": f"{type(exc).__name__}: {exc}"}
+                    if "session-control/1" not in getattr(connector, "_caps", ()):
+                        # Only the personal connector offers the capability;
+                        # on any other connector the branch does not exist.
+                        reply = {"ok": False, "error_kind": "not-offered",
+                                 "error": "session-control is served by the "
+                                          "personal connector only"}
+                    else:
+                        try:
+                            reply = await session_control.handle_ctl(
+                                connector, connector_runtime, request["op"],
+                                request.get("args") or {})
+                        except Exception as exc:
+                            reply = {"ok": False,
+                                     "error": f"{type(exc).__name__}: {exc}"}
                 elif request.get("op") == "fleet-relay-pull":
                     # DELEGATED pull (auto-ew9wf). The dashboard decided this
                     # peer's direct addresses are exhausted and minted the

@@ -114,3 +114,21 @@ def test_status_reports_identity_live_count_and_dispatch_limits(monkeypatch):
     assert reply == {"v": 1, "ok": True, "result": {
         "machine_pub": B, "machine_id": "b2" * 32, "label": "sjc-2",
         "active": 2, "dispatch_limits": {"bead_max_concurrent": 2}}}
+
+
+def test_a_connector_that_refuses_at_once_is_not_polled_in_a_tight_loop(monkeypatch):
+    monkeypatch.setattr(scc, "UNAVAILABLE_BACKOFF_S", 0.5)
+    calls = []
+
+    def poll():
+        calls.append(1)
+        return {"ok": False, "error": "unknown op"}
+
+    async def run():
+        pump = scc.InboundPump(poll=poll, reply=lambda *a: None)
+        task = asyncio.create_task(pump.run())
+        await asyncio.sleep(1.0)
+        task.cancel()
+
+    asyncio.run(run())
+    assert len(calls) <= 2
