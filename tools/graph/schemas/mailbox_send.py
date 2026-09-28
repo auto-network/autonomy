@@ -48,6 +48,6 @@ class MailboxSendV1(SettingSchema):
     state: str = field(required=True, enum=list(SEND_STATES),
                        description="claimed (before SMTP) | sent | failed | unknown")
     claimed_at: float = field(required=True, description="Epoch seconds the send was claimed.")
-    finished_at: float | None = field(required=False, description="Epoch seconds the outcome was recorded.")
-    message_id: str | None = field(required=False, description="The sent message's Message-ID.")
-    error: str | None = field(required=False, description="Why sending failed, or why the outcome is unknown.")
+    finished_at: float = field(required=False, description="Epoch seconds the outcome was recorded.")
+    message_id: str = field(required=False, description="The sent message's Message-ID.")
+    error: str = field(required=False, description="Why sending failed, or why the outcome is unknown.")

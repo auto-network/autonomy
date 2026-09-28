@@ -232,3 +232,23 @@ def test_mail_send_limits_match_the_backend():
     assert f"MAX_BODY_BYTES = {mail.MAX_BODY_BYTES}" in tool
     assert f"MAX_BODY_LINES = {mail.MAX_BODY_LINES}" in tool
     assert '"session"' not in tool
+
+
+def test_the_real_journal_round_trips_through_the_machine_store(tmp_path, monkeypatch):
+    """The send journal is written to the machine store before and after SMTP.
+    Every other test replaces it, so this one writes through the real schema:
+    a float timestamp once failed validation after the email had left, and the
+    request then answered "unavailable" for good."""
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    from tools.graph import schemas  # noqa: F401 (registers the set)
+    approval_id = "central-journal-round-trip"
+    central.EmailSendConsumer._record(approval_id, {"state": "claimed", "claimed_at": 1500.0})
+    claim = central.EmailSendConsumer.journal(approval_id)
+    central.EmailSendConsumer._record(approval_id, {
+        **claim, "state": "sent", "message_id": "<m1@auto.network>", "finished_at": 1501.5})
+    assert central.EmailSendConsumer.journal(approval_id) == {
+        "state": "sent", "claimed_at": 1500.0, "message_id": "<m1@auto.network>", "finished_at": 1501.5}
+    central.EmailSendConsumer._record(approval_id, {
+        "state": "unknown", "claimed_at": 1500.0, "finished_at": 1502.0,
+        "error": "the send was interrupted; it was not retried"})
+    assert central.EmailSendConsumer.journal(approval_id)["state"] == "unknown"
