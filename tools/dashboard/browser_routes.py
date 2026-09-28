@@ -86,6 +86,10 @@ def create_lease(authorization, body) -> tuple[int, dict]:
     scope = _scope(authorization)
     adapter, kind, name, ttl = parse_request(body)
     epoch = _epoch()
+    if not reconciler.isolation_checked():
+        # A worker that just activated has not checked isolation yet: a reload,
+        # not an isolation failure.
+        raise _Reply(503, {"error": "unavailable", "reason": "broker-starting"})
     if not reconciler.isolated():
         raise _Reply(503, {"error": "unavailable", "reason": "isolation"})
     limits = reconciler.defaults()

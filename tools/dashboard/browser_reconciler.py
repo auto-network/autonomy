@@ -43,7 +43,14 @@ BUSY_LIMIT_S = 60.0 + 35.0 + 15.0
 _epoch: Optional[int] = None
 _tick = 0
 _isolated = False
+_isolation_checked = False
 PAUSE_MESSAGE = "browser broker paused: network redesign (bead follows)"
+
+
+def isolation_checked() -> bool:
+    """Whether this worker has checked the isolation policy at least once;
+    until then a lease request answers broker-starting, never isolation."""
+    return _isolation_checked
 
 
 def isolated() -> bool:
@@ -55,8 +62,9 @@ def isolated() -> bool:
 def _ensure_isolation() -> None:
     """Paused: no firewall rules and no network attachment until the redesign.
     Logged once per activation, never retried."""
-    global _isolated
+    global _isolated, _isolation_checked
     _isolated = False
+    _isolation_checked = True
     logger.warning(PAUSE_MESSAGE)
 
 
@@ -159,9 +167,14 @@ def _healthy(lease: store.Lease) -> bool:
 
 
 def activate() -> int:
-    """Take a new epoch, join the lease network and adopt running leases."""
+    """Take a new epoch, join the lease network and adopt running leases.
+
+    The epoch is published only when every step succeeded: a Docker error
+    part-way (now raised, auto-y8o21) leaves this worker unactivated, so the
+    loop retries the whole activation instead of running with an epoch whose
+    leases were never adopted."""
     global _epoch
-    _epoch = store.take_epoch()
+    epoch_ = store.take_epoch()
     containers.ensure_network()
     _ensure_isolation()
     rows = {lease.lease_hash: lease for lease in store.list_leases()}
@@ -169,10 +182,11 @@ def activate() -> int:
     for container in containers.list_containers():
         lease = rows.get(container.lease_hash)
         if lease is not None and container.state == "running":
-            adopted += store.adopt(lease.lease_hash, epoch=_epoch)
+            adopted += store.adopt(lease.lease_hash, epoch=epoch_)
         elif lease is None:
             containers.stop(container.name, lease_hash=container.lease_hash)
             orphans += 1
+    _epoch = epoch_
     logger.info("browser broker: epoch %d, adopted %d lease(s), stopped %d orphan container(s)",
                 _epoch, adopted, orphans)
     return _epoch

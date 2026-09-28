@@ -158,6 +158,7 @@ def broker(db, monkeypatch, tmp_path):
     epoch = store.take_epoch()
     monkeypatch.setattr(reconciler, "_epoch", epoch)
     monkeypatch.setattr(reconciler, "_isolated", True)
+    monkeypatch.setattr(reconciler, "_isolation_checked", True)
     monkeypatch.setattr(reconciler, "defaults", lambda: dict(LIMITS))
     monkeypatch.setattr(routes, "_free_gib", lambda: 500.0)
     monkeypatch.setenv("BROWSER_PROFILES_DIR", str(tmp_path / "profiles"))
@@ -408,17 +409,18 @@ def _fake_container_lifecycle(monkeypatch, *, removal_polls=3, daemon_error=Fals
         calls.append(args)
         target = args[-1]
         if args[0] == "inspect":
-            if daemon_error:
-                return subprocess.CompletedProcess(args, 1, "", "Cannot connect to the Docker daemon")
             if target == "brw-p-0123456789abcdef":
                 holder = ("NEW " + "n" * 64) if state["old_gone"] else ("OLD " + "o" * 64)
                 return subprocess.CompletedProcess(args, 0, holder + "\n", "")
-            if target == "OLD":
-                state["old_polls"] -= 1
-                if state["old_polls"] < 0:
-                    state["old_gone"] = True  # --rm finished; the name is free and gets reused
-                    return subprocess.CompletedProcess(args, 1, "", "error: no such object: OLD")
-                return subprocess.CompletedProcess(args, 0, "OLD\n", "")
+        if args[0] == "ps":
+            if daemon_error:
+                return subprocess.CompletedProcess(args, 1, "", DAEMON_DOWN_29)
+            assert "id=OLD" in args, args
+            state["old_polls"] -= 1
+            if state["old_polls"] < 0:
+                state["old_gone"] = True  # --rm finished; the name is free and gets reused
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return subprocess.CompletedProcess(args, 0, "OLD\n", "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(containers, "_docker", fake)
@@ -432,7 +434,7 @@ def test_stop_waits_for_removal_and_only_ever_touches_that_container(monkeypatch
     assert state["old_gone"]
     assert calls[0][0] == "inspect" and calls[0][-1] == "brw-p-0123456789abcdef"
     for call in calls[1:]:
-        assert call[-1] == "OLD", call        # never the name, never the new container
+        assert call[-1] in ("OLD", "id=OLD"), call  # never the name, never the new container
     assert not any(call[-1] == "NEW" for call in calls)
 
 
@@ -446,7 +448,7 @@ def test_stop_is_idempotent_and_does_not_mistake_a_daemon_error_for_removal(monk
             a, 1, "", w))
         containers.stop("brw-e-x", lease_hash="x" * 64)  # already gone: returns quietly
     _fake_container_lifecycle(monkeypatch, daemon_error=True)
-    with pytest.raises(containers.DockerUnavailable):
+    with pytest.raises(containers.DockerUnavailable):  # the removal probe hit a daemon error
         containers.stop("brw-p-0123456789abcdef", lease_hash="o" * 64)
 
 
@@ -598,3 +600,71 @@ def test_an_interrupted_command_does_not_claim_a_take_control(ready_lease, monke
     monkeypatch.setattr(containers, "agent_request", lambda *a, **k: (200, {"ok": False, "error": "aborted"}))
     assert _call(routes.run_command, "owner", lease_id, {"op": "title"}) == (409, {"error": "interrupted"})
     assert store.get(h).state == "ready"
+
+
+# ── Docker's wording, captured from Docker 29 (auto-y8o21) ─────────────
+
+CONFLICT_29 = ('Error response from daemon: Conflict. The container name "/y8probe" is already in use by '
+               'container "2d4722e782ad". You have to remove (or rename) that container to be able to reuse that name.')
+NETWORK_EXISTS_29 = "Error response from daemon: network with name autonomy-browser already exists"
+NO_SUCH_29 = "error: no such object: no-such-y8"
+DAEMON_DOWN_29 = ("failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is "
+                  "correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file")
+DAEMON_DOWN_OLD = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+
+
+def _completed(stderr, rc=1):
+    import subprocess
+    return subprocess.CompletedProcess(["docker"], rc, "", stderr)
+
+
+@pytest.mark.parametrize("stderr", [DAEMON_DOWN_29, DAEMON_DOWN_OLD])
+def test_a_daemon_outage_is_docker_unavailable_in_every_wording(monkeypatch, stderr):
+    monkeypatch.setattr(containers.subprocess, "run", lambda *a, **k: _completed(stderr))
+    with pytest.raises(containers.DockerUnavailable):
+        containers._docker("ps")
+    with pytest.raises(containers.DockerUnavailable):  # even when the caller does not check
+        containers._docker("network", "inspect", "x", check=False)
+
+
+def test_a_name_conflict_is_recognised_in_docker_29_wording(monkeypatch):
+    monkeypatch.setattr(containers.subprocess, "run", lambda *a, **k: _completed(CONFLICT_29))
+    with pytest.raises(containers.NameConflict):
+        containers._docker("create", "--name", "y8probe", "img")
+
+
+def test_stderr_matching_ignores_case():
+    assert containers._missing(_completed(NO_SUCH_29))
+    assert containers._missing(_completed("Error: No such object: x"))
+    assert containers._missing(_completed("Error response from daemon: No such container: x"))
+    assert containers._says(_completed(NETWORK_EXISTS_29), "already exists")
+    assert not containers._says(_completed(NETWORK_EXISTS_29), "already attached")
+
+
+def test_lease_requests_say_broker_starting_until_isolation_was_checked(broker, monkeypatch):
+    monkeypatch.setattr(reconciler, "_isolation_checked", False)
+    assert _call(routes.create_lease, "owner", {"adapter": "chrome-headed",
+                                                "profile": {"kind": "ephemeral"}}) == (
+        503, {"error": "unavailable", "reason": "broker-starting"})
+
+
+def test_a_failed_activation_is_retried_whole_and_then_adopts(db, monkeypatch):
+    old = store.take_epoch()
+    h = _admit(old)
+    store.transition(h, epoch=old, to="starting", address="172.30.0.9")
+    monkeypatch.setattr(reconciler, "_epoch", None)
+    monkeypatch.setattr(containers, "list_containers",
+                        lambda: [containers.LeaseContainer("brw-e-x", h, "running", {})])
+    calls = {"n": 0}
+
+    def flaky_network():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise containers.DockerUnavailable("failed to connect to the docker API")
+
+    monkeypatch.setattr(containers, "ensure_network", flaky_network)
+    with pytest.raises(containers.DockerUnavailable):
+        reconciler.activate()
+    assert reconciler.epoch() is None  # not published: the loop will retry activation
+    epoch = reconciler.activate()
+    assert reconciler.epoch() == epoch and store.get(h).epoch == epoch  # adopted

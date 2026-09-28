@@ -46,6 +46,20 @@ class NameConflict(RuntimeError):
     """A container with this name exists: the persistent profile is in use."""
 
 
+#: Docker's error wording differs by version and case (Home, Docker 29.7.2:
+#: "error: no such object", "failed to connect to the docker API"; older
+#: daemons: "Error: No such object", "Cannot connect to the Docker daemon").
+#: Every classification of stderr goes through _says, which lowercases.
+_DAEMON_DOWN = ("cannot connect to the docker daemon", "failed to connect to the docker api",
+                "is the docker daemon running")
+
+
+def _says(proc: subprocess.CompletedProcess, *phrases: str, all_of: bool = False) -> bool:
+    err = (proc.stderr or "").lower()
+    found = [phrase.lower() in err for phrase in phrases]
+    return all(found) if all_of else any(found)
+
+
 def _docker(*args: str, env: Optional[dict] = None, timeout: float = DOCKER_TIMEOUT_S,
             check: bool = True) -> subprocess.CompletedProcess:
     try:
@@ -53,11 +67,11 @@ def _docker(*args: str, env: Optional[dict] = None, timeout: float = DOCKER_TIME
                               timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise DockerUnavailable(f"docker {args[0]}: {exc}") from exc
+    if proc.returncode != 0 and _says(proc, *_DAEMON_DOWN):
+        raise DockerUnavailable(proc.stderr.strip()[:500])
     if check and proc.returncode != 0:
-        if "is already in use" in proc.stderr and "Conflict" in proc.stderr:
+        if _says(proc, "is already in use", "conflict", all_of=True):
             raise NameConflict(proc.stderr.strip())
-        if "Cannot connect to the Docker daemon" in proc.stderr:
-            raise DockerUnavailable(proc.stderr.strip())
         raise RuntimeError(f"docker {args[0]} failed: {proc.stderr.strip()[:500]}")
     return proc
 
@@ -106,7 +120,7 @@ def ensure_network() -> None:
     if _docker("network", "inspect", NETWORK, check=False).returncode != 0:
         proc = _docker("network", "create", "--driver", "bridge",
                        "--label", f"{LABEL}.network=1", NETWORK, check=False)
-        if proc.returncode != 0 and "already exists" not in proc.stderr:
+        if proc.returncode != 0 and not _says(proc, "already exists"):
             raise RuntimeError(f"cannot create {NETWORK}: {proc.stderr.strip()}")
 
 
@@ -182,11 +196,7 @@ def address(name: str) -> str:
 
 
 def _missing(proc: subprocess.CompletedProcess) -> bool:
-    # Docker's wording varies by version and case: 29.x prints
-    # "error: no such object: <name>" (measured on Home), older daemons
-    # "Error: No such object" / "No such container".
-    err = proc.stderr.lower()
-    return "no such object" in err or "no such container" in err
+    return _says(proc, "no such object", "no such container")
 
 
 def stop(name: str, *, lease_hash: str, grace_s: int = 5, removal_timeout_s: float = 20.0) -> None:
@@ -218,11 +228,13 @@ def stop(name: str, *, lease_hash: str, grace_s: int = 5, removal_timeout_s: flo
     _docker("rm", "-f", container_id, check=False)
     deadline = time.monotonic() + removal_timeout_s
     while True:
-        probe = _docker("inspect", "--format", "{{.Id}}", container_id, check=False)
+        # No stderr parsing: `ps --filter id=` exits 0 and prints nothing once
+        # the container is gone, so a non-zero exit really is a daemon error.
+        probe = _docker("ps", "-a", "-q", "--no-trunc", "--filter", f"id={container_id}", check=False)
         if probe.returncode != 0:
-            if _missing(probe):
-                return
-            raise DockerUnavailable(f"docker inspect {container_id[:12]}: {probe.stderr.strip()[:200]}")
+            raise DockerUnavailable(f"docker ps: {probe.stderr.strip()[:200]}")
+        if not probe.stdout.strip():
+            return
         if time.monotonic() >= deadline:
             raise RuntimeError(f"{name} ({container_id[:12]}) was not removed within "
                                f"{removal_timeout_s:.0f} s")
