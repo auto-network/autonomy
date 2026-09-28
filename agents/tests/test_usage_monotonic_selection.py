@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import pytest
 
@@ -76,17 +75,23 @@ def test_an_unavailable_row_claims_nothing_either_way():
 
 
 def _token(key):
-    return SimpleNamespace(key=key, payload={"raw_key": f"tok-{key}"})
+    # A vault account with a setup token (bcb2d029 moved accounts into the
+    # vault; the picker reads them through _claude_accounts, auto-6oha0).
+    from tools.graph.harness_credentials import Account
+
+    return Account("claude", key, {"setup": f"tok-{key}"})
+
+
+def _accounts(monkeypatch, *keys):
+    monkeypatch.setattr(
+        session_launcher, "_claude_accounts", lambda: [_token(k) for k in keys])
 
 
 @pytest.fixture
 def picker(monkeypatch):
     """Two accounts: ``maxed`` is exhausted, ``fresh`` has headroom."""
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.setattr(
-        session_launcher, "_setup_token_rows",
-        lambda: [_token("maxed"), _token("fresh")])
-    monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: [])
+    _accounts(monkeypatch, "maxed", "fresh")
     monkeypatch.setattr(
         session_launcher, "_claude_usage_rows",
         lambda: [dict(_reading(100), account_id="maxed"),
@@ -109,9 +114,7 @@ def test_it_is_still_chosen_when_it_is_the_only_one(monkeypatch):
     failing on the provider's terms is more useful than never attempting it.
     """
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.setattr(
-        session_launcher, "_setup_token_rows", lambda: [_token("maxed")])
-    monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: [])
+    _accounts(monkeypatch, "maxed")
     monkeypatch.setattr(
         session_launcher, "_claude_usage_rows",
         lambda: [dict(_reading(100), account_id="maxed")])
@@ -123,10 +126,7 @@ def test_it_is_still_chosen_when_it_is_the_only_one(monkeypatch):
 def test_an_old_but_open_reading_still_drives_the_choice(monkeypatch):
     """The reading is hours old and its window has not reset — it decides."""
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.setattr(
-        session_launcher, "_setup_token_rows",
-        lambda: [_token("maxed"), _token("fresh")])
-    monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: [])
+    _accounts(monkeypatch, "maxed", "fresh")
     monkeypatch.setattr(
         session_launcher, "_claude_usage_rows",
         lambda: [dict(_reading(100), account_id="maxed",
