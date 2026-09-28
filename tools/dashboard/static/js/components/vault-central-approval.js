@@ -5,8 +5,10 @@
  * to every personal machine, so the content key can never ride them), then the
  * content key opened by the factor ceremony goes to this Dashboard's delivery
  * endpoint, which writes the value to the requesting session and returns a
- * value-free receipt. The key lives only in this function's memory and is
- * cleared once the delivery settles.
+ * value-free receipt. The key lives only in this function's memory and its
+ * reference is cleared once the delivery settles. It is a JS string, which
+ * cannot be overwritten in place: clearing drops the reference, it does not
+ * wipe the bytes.
  *
  * Only the machine that accepted the request can deliver. Elsewhere the review
  * says where to go instead of starting a ceremony that could not complete. A
