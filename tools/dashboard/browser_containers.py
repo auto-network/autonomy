@@ -114,11 +114,18 @@ def ensure_network() -> None:
     if own:
         # --gw-priority -1 keeps the dashboard's default route (its egress) on
         # its own network; without it the attach moves the default route to the
-        # lease bridge (measured). Docker < 28 lacks the flag: attach anyway.
+        # lease bridge (measured). A daemon older than Docker 28 (API 1.48)
+        # ignores the flag silently (measured on Docker 26), so say so here.
+        api = _docker("version", "--format", "{{.Server.APIVersion}}", check=False).stdout.strip()
+        try:
+            old_daemon = tuple(int(x) for x in api.split(".")) < (1, 48)
+        except ValueError:
+            old_daemon = False
+        if old_daemon:
+            logger.warning("docker API %s ignores --gw-priority: the dashboard's default route "
+                           "moves to %s, so its egress leaves from its address there", api, NETWORK)
         proc = _docker("network", "connect", "--gw-priority", "-1", NETWORK, own, check=False)
         if proc.returncode != 0 and "gw-priority" in proc.stderr:
-            logger.warning("docker lacks --gw-priority; the dashboard's default route "
-                           "may move to %s", NETWORK)
             proc = _docker("network", "connect", NETWORK, own, check=False)
         if proc.returncode != 0 and "already exists" not in proc.stderr \
                 and "already attached" not in proc.stderr:
@@ -149,10 +156,14 @@ def isolate_dashboard() -> None:
     own = _own_container_id()
     if not own:
         raise IsolationUnavailable("the dashboard is not a container; lease isolation needs one")
-    subnet = _docker("network", "inspect", "--format",
-                     "{{(index .IPAM.Config 0).Subnet}}", NETWORK).stdout.strip()
+    subnet, _, ipv6 = _docker("network", "inspect", "--format",
+                              "{{(index .IPAM.Config 0).Subnet}} {{.EnableIPv6}}",
+                              NETWORK).stdout.strip().partition(" ")
     if not subnet:
         raise IsolationUnavailable(f"{NETWORK} has no subnet")
+    if ipv6.strip() == "true":
+        # The refusal is IPv4 iptables; never protect only half of a network.
+        raise IsolationUnavailable(f"{NETWORK} has IPv6 enabled; recreate it IPv4-only")
     helper = ["run", "--rm", "--network", f"container:{own}", "--cap-drop", "ALL",
               "--cap-add", "NET_ADMIN", "--user", "0", "--entrypoint", "iptables", IMAGE, "-w"]
     rule = _isolation_rule(subnet)

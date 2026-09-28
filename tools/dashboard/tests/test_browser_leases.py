@@ -369,11 +369,12 @@ def test_isolation_rule_is_checked_inserted_and_verified(monkeypatch):
     import subprocess
 
     calls, rules = [], set()
+    ipv6 = {"on": "false"}
 
     def fake_docker(*args, check=True, **kw):
         calls.append(args)
         if args[:2] == ("network", "inspect"):
-            return subprocess.CompletedProcess(args, 0, "172.19.0.0/16\n", "")
+            return subprocess.CompletedProcess(args, 0, f"172.19.0.0/16 {ipv6['on']}\n", "")
         if args[0] == "run":
             op, rule = args[args.index("-w") + 1], args[args.index("-w") + 2:]
             if op == "-I":
@@ -394,6 +395,9 @@ def test_isolation_rule_is_checked_inserted_and_verified(monkeypatch):
     calls.clear()
     containers.isolate_dashboard()  # idempotent: one check, no second insert
     assert [c[c.index("-w") + 1] for c in calls if c[0] == "run"] == ["-C"]
+    ipv6["on"] = "true"  # an IPv6-enabled lease network fails closed
+    with pytest.raises(containers.IsolationUnavailable):
+        containers.isolate_dashboard()
 
 
 def test_isolation_needs_a_containerized_dashboard(monkeypatch):
