@@ -28,7 +28,7 @@ from typing import Optional
 from tools.data_paths import REPO_ROOT
 
 IMAGE = "autonomy-browser:local"
-NETWORK = "autonomy-leases"
+NETWORK = "autonomy_leases"
 AGENT_PORT = 7300
 SHM_SIZE = "1g"
 SECCOMP_PROFILE = REPO_ROOT / "tools" / "browser_broker" / "image" / "seccomp-chrome.json"
@@ -116,7 +116,12 @@ def create_args(*, name: str, lease_labels: dict[str, str], caps: Caps,
 
 def ensure_network() -> None:
     """Create the plain lease network if missing and attach this dashboard to it,
-    so the dashboard can reach its leases. No firewall rules are installed."""
+    so the dashboard can reach its leases. No firewall rules are installed.
+
+    The name sorts AFTER ``autonomy_default`` on purpose: Docker before 28
+    ignores --gw-priority and gives the default route to the attached network
+    whose name sorts first, so this keeps the dashboard's own route on its
+    Compose network."""
     if _docker("network", "inspect", NETWORK, check=False).returncode != 0:
         proc = _docker("network", "create", "--driver", "bridge",
                        "--label", f"{LABEL}.network=1", NETWORK, check=False)

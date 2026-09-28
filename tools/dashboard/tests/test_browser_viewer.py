@@ -110,9 +110,12 @@ def lease(tmp_path, monkeypatch):
         aborts.append(path)
         if agent_request.fail:
             return agent_request.fail
+        if path == "/login/cleanup":
+            return agent_request.cleanup
         return 200, ({"locked": body["locked"]} if path == "/lock" else {})
 
     agent_request.fail = None
+    agent_request.cleanup = (200, {"cleaned": True, "reloaded": False})
     monkeypatch.setattr(containers, "agent_request", agent_request)
     viewer._controls.clear()
     yield h, aborts, agent_request
@@ -129,7 +132,7 @@ def test_take_and_return_control(lease):
     with pytest.raises(viewer.ControlRefused):
         viewer.return_control(store.get(h), "viewer-bbbb")  # only the holder returns it
     assert viewer.return_control(store.get(h), "viewer-aaaa") == {"state": "ready"}
-    assert aborts == ["/lock", "/lock"]  # locked on take, unlocked on return
+    assert aborts == ["/lock", "/login/cleanup", "/lock"]  # lock; cleanup, then unlock
     assert (store.get(h).state, store.get(h).lock_holder) == ("ready", None)
 
 
@@ -256,3 +259,29 @@ def test_take_control_survives_the_aborted_command_freeing_the_lease(lease):
     finally:
         bc.agent_request = original
     assert store.get(h).state == "locked"
+
+
+@pytest.mark.parametrize("cleanup", [(404, {}), (200, {"cleaned": False}), (500, {})])
+def test_control_stays_with_the_operator_until_cleanup_is_confirmed(lease, cleanup):
+    h, calls, agent_request = lease
+    viewer.take_control(store.get(h), "viewer-aaaa")
+    agent_request.cleanup = cleanup
+    with pytest.raises(viewer.ControlRefused):
+        viewer.return_control(store.get(h), "viewer-aaaa")
+    assert (store.get(h).state, store.get(h).lock_holder) == ("locked", "human")
+    assert calls.count("/lock") == 1  # the agent was never unlocked
+
+
+def test_the_pages_are_served_and_load_novnc_from_our_own_origin():
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from tools.dashboard import browser_routes
+
+    app = Starlette(routes=[r for r in browser_routes.ROUTES if getattr(r, "path", "").startswith("/browser")])
+    client = TestClient(app)
+    for path in ("/browser", "/browser/0123456789abcdef"):
+        r = client.get(path)
+        assert r.status_code == 200 and "text/html" in r.headers["content-type"]
+        assert "/static/vendor/novnc-1.5.0/core/rfb.js" in r.text
+        assert "cdn." not in r.text and "https://" not in r.text  # nothing from third-party origins

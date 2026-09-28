@@ -121,7 +121,7 @@ def test_labels_and_create_arguments():
                                   caps=containers.Caps(2048, 2, 1024),
                                   mount_argv=["-v", "/x:/profile"], timezone="America/New_York")
     joined = " ".join(argv)
-    for expected in ("--network autonomy-leases", "--restart no", "--rm", "--memory 2048m",
+    for expected in ("--network autonomy_leases", "--restart no", "--rm", "--memory 2048m",
                      "--memory-swap 2048m", "--cpus 2", "--pids-limit 1024", "--shm-size 1g",
                      "--security-opt no-new-privileges", "-e TZ=America/New_York"):
         assert expected in joined
@@ -386,7 +386,7 @@ def test_ensure_network_creates_and_attaches_without_firewall_rules(monkeypatch)
     monkeypatch.setattr(containers, "_docker", fake)
     monkeypatch.setattr("agents.mount_plan._own_container_id", lambda: "dash123")
     containers.ensure_network()
-    assert calls[1][:2] == ("network", "create") and "autonomy-leases" in calls[1]
+    assert calls[1][:2] == ("network", "create") and "autonomy_leases" in calls[1]
     assert any(c[:2] == ("network", "connect") and c[-1] == "dash123" for c in calls)
     assert not any("iptables" in c for c in calls)
 

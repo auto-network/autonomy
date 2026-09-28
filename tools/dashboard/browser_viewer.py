@@ -160,14 +160,14 @@ def take_control(lease: store.Lease, viewer: str) -> dict:
     # operator in control while the agent still accepts commands. A locked
     # agent refuses every command and stops the running one, even one that
     # won the busy compare-and-set a moment before (auto-8q7oe.6).
-    if not _agent_lock(lease, True):
+    if not containers.agent_lock(lease, True):
         raise ControlRefused(502, "the lease agent did not confirm the lock; control not taken")
     # Either state: locking the agent stops a running command, whose route then
     # moves the row busy -> ready while we get here.
     if not store.transition(lease.lease_hash, epoch=epoch, to="locked", expect=("ready", "busy"),
                             audit_op="control", result="take", lock_holder="human",
                             last_activity=time.time()):
-        _agent_lock(lease, False)
+        containers.agent_lock(lease, False)
         raise ControlRefused(409, "lease changed; retry")
     state.holder = viewer
     _cancel_grace(state)
@@ -185,9 +185,11 @@ def return_control(lease: store.Lease, viewer: Optional[str]) -> dict:
     if not (lease.state == "locked" and lease.lock_holder == "human"):
         state.holder = None
         return {"state": lease.state}
-    # Password cleanup before the agent regains control arrives with password
-    # sign-in (auto-8q7oe.9); until then there is nothing to clean up.
-    _agent_lock(lease, False)
+    # The password cleanup runs before the agent regains control (a sign-in
+    # may have handed the lease over mid-login). Unconfirmed: control stays.
+    if not _agent_cleanup(lease):
+        raise ControlRefused(502, "password cleanup not confirmed; control stays with the operator")
+    containers.agent_lock(lease, False)
     if not store.transition(lease.lease_hash, epoch=epoch, to="ready", expect=("locked",),
                             audit_op="control", result="return", lock_holder=None,
                             last_activity=time.time()):
@@ -197,21 +199,15 @@ def return_control(lease: store.Lease, viewer: Optional[str]) -> dict:
     return {"state": "ready"}
 
 
-def _agent_lock(lease: store.Lease, locked: bool) -> bool:
-    """Set the lease agent's lock; True only when the agent confirms it.
-    A timeout, an error, or 404 from an image without /lock is a failure."""
+def _agent_cleanup(lease: store.Lease) -> bool:
     if not lease.address:
         return False
     try:
-        status, reply = containers.agent_request(lease.address, lease.secret, "POST", "/lock",
-                                                 {"locked": locked}, timeout=3)
+        status, reply = containers.agent_request(lease.address, lease.secret, "POST",
+                                                 "/login/cleanup", {}, timeout=65)
     except Exception:
-        status, reply = 0, {}
-    confirmed = status == 200 and reply.get("locked") is locked
-    if not confirmed:
-        logger.warning("browser viewer: agent %s not confirmed for %s (status %s)",
-                       "lock" if locked else "unlock", lease.container_name, status)
-    return confirmed
+        return False
+    return status == 200 and reply.get("cleaned") is True
 
 
 def _cancel_grace(state: _Control) -> None:

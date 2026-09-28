@@ -24,6 +24,7 @@ pin matches what the previously used unversioned CDN URL actually served):
 | `openpgp-6.3.1.min.js` | openpgp | 6.3.1 | https://cdn.jsdelivr.net/npm/openpgp@6.3.1/dist/openpgp.min.js |
 | `highlightjs/highlight-11.11.1.min.js` | @highlightjs/cdn-assets | 11.11.1 | https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.11.1/highlight.min.js |
 | `highlightjs/github-dark-11.11.1.min.css` | @highlightjs/cdn-assets | 11.11.1 | https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.11.1/styles/github-dark.min.css |
+| `novnc-1.5.0/` (`core/`, `vendor/pako/`, `LICENSE.txt`) | noVNC | 1.5.0 | https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz (tarball sha256 6a73e41f98388a5348b7902f54b02d177cb73b7e5eb0a7a0dcf688cc2c79b42a; ES modules served as-is; MPL-2.0 core, pako MIT) |
 
 ```
 sha256:

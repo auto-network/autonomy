@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Browsers</title>
+<script src="/static/vendor/tailwind-browser-4.3.3.min.js"></script>
+<script defer src="/static/vendor/alpine-3.15.12.min.js"></script>
+<style>
+  body { background: rgb(2 6 23); color: rgb(226 232 240); font-family: ui-sans-serif, system-ui, sans-serif; }
+  .bw-card { background: rgb(15 23 42 / 0.6); border: 1px solid rgb(51 65 85); border-radius: 14px; }
+  .bw-muted { color: rgb(148 163 184); }
+  .bw-dim { color: rgb(100 116 139); }
+  .bw-mono { font-family: ui-monospace, monospace; }
+  .bw-btn { padding: 6px 14px; border-radius: 8px; font-size: 13px; border: 1px solid rgb(99 102 241);
+            color: rgb(199 210 254); background: rgb(49 46 129 / 0.35); }
+  .bw-btn:hover { background: rgb(49 46 129 / 0.6); }
+  .bw-btn:disabled { border-color: rgb(51 65 85); color: rgb(100 116 139); background: transparent; }
+  .bw-btn-amber { border-color: rgb(217 119 6); color: rgb(253 230 138); background: rgb(120 53 15 / 0.35); }
+  .bw-btn-amber:hover { background: rgb(120 53 15 / 0.6); }
+  .bw-pill { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
+  .bw-ready { color: rgb(134 239 172); border-color: rgb(22 101 52); }
+  .bw-busy { color: rgb(147 197 253); border-color: rgb(30 64 175); }
+  .bw-locked { color: rgb(253 230 138); border-color: rgb(146 64 14); }
+  .bw-starting { color: rgb(203 213 225); border-color: rgb(71 85 105); }
+  .bw-bad { color: rgb(252 165 165); border-color: rgb(153 27 27); }
+  .bw-bar { height: 4px; border-radius: 2px; background: rgb(30 41 59); overflow: hidden; }
+  .bw-bar > div { height: 100%; background: rgb(99 102 241); }
+  .bw-screen { position: relative; background: #000; border-radius: 10px; overflow: hidden; aspect-ratio: 16 / 9; }
+  .bw-screen.bw-mine { outline: 2px solid rgb(245 158 11); outline-offset: 2px; }
+  #bw-vnc { position: absolute; inset: 0; }
+  #bw-keys { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
+</style>
+</head>
+<body>
+<div x-data="browserPage()" x-init="boot()" class="min-h-screen">
+
+  <div class="h-11 flex items-center px-3 md:px-5 border-b border-slate-800 text-sm font-semibold text-slate-200 gap-2">
+    <template x-if="view === 'viewer'">
+      <a href="/browser" class="bw-muted hover:text-slate-200" aria-label="All browsers">&larr;</a>
+    </template>
+    <span x-text="view === 'list' ? 'Browsers' : 'Browser · ' + (current() ? current().session_label : '')"></span>
+  </div>
+
+  <!-- /browser : lease list -->
+  <main x-show="view === 'list'" class="max-w-4xl mx-auto px-3 md:px-6 py-4">
+    <div class="text-xs bw-muted mb-3"><span x-text="leases.filter(l => live(l)).length"></span> of <span x-text="limits.max_leases"></span> browsers running on this node</div>
+    <template x-if="error"><div class="bw-card p-4 text-sm bw-bad mb-3" x-text="error"></div></template>
+    <template x-if="!leases.some(l => live(l))">
+      <div class="bw-card p-8 text-center text-sm bw-muted">No browser is running. Leases appear here when an agent session starts one.</div>
+    </template>
+    <div class="bw-card hidden md:block" x-show="leases.some(l => live(l))">
+      <table class="w-full text-sm">
+        <thead><tr class="text-[11px] uppercase tracking-wider bw-muted text-left">
+          <th class="px-4 py-2 font-medium">Session</th><th class="px-2 py-2 font-medium">Browser</th>
+          <th class="px-2 py-2 font-medium">State</th><th class="px-2 py-2 font-medium text-right">Age</th>
+          <th class="px-2 py-2 font-medium text-right">CPU</th><th class="px-4 py-2 font-medium w-40">Memory</th></tr></thead>
+        <tbody>
+          <template x-for="l in leases.filter(l => live(l))" :key="l.lease_ref">
+            <tr @click="location.href = '/browser/' + l.lease_ref" class="border-t border-slate-800 hover:bg-slate-800/40 cursor-pointer">
+              <td class="px-4 py-2.5"><div x-text="l.session_label"></div><div class="bw-mono text-[11px] bw-dim" x-text="l.session"></div></td>
+              <td class="px-2 py-2.5" x-text="browserLabel(l)"></td>
+              <td class="px-2 py-2.5"><span class="bw-pill" :class="pillClass(l)" x-text="stateLabel(l)"></span></td>
+              <td class="px-2 py-2.5 text-right tabular-nums" x-text="age(l)"></td>
+              <td class="px-2 py-2.5 text-right tabular-nums" x-text="l.cpu == null ? '—' : Math.round(l.cpu) + '%'"></td>
+              <td class="px-4 py-2.5">
+                <div class="flex justify-between text-[11px] bw-muted"><span x-text="l.mem_mb == null ? '—' : Math.round(l.mem_mb) + ' MiB'"></span><span x-text="'of ' + limits.memory_mb"></span></div>
+                <div class="bw-bar mt-1"><div :style="'width:' + Math.min(100, 100 * (l.mem_mb || 0) / limits.memory_mb) + '%'"></div></div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+    <div class="md:hidden space-y-2">
+      <template x-for="l in leases.filter(l => live(l))" :key="l.lease_ref">
+        <a :href="'/browser/' + l.lease_ref" class="bw-card block w-full text-left p-3">
+          <div class="flex items-center justify-between gap-2">
+            <div class="font-medium truncate" x-text="l.session_label"></div>
+            <span class="bw-pill" :class="pillClass(l)" x-text="stateLabel(l)"></span>
+          </div>
+          <div class="text-xs bw-muted mt-1" x-text="browserLabel(l) + ' · ' + age(l)"></div>
+          <div class="bw-bar mt-2"><div :style="'width:' + Math.min(100, 100 * (l.mem_mb || 0) / limits.memory_mb) + '%'"></div></div>
+        </a>
+      </template>
+    </div>
+  </main>
+
+  <!-- /browser/{lease} : viewer -->
+  <main x-show="view === 'viewer'" class="max-w-6xl mx-auto px-0 md:px-6 py-0 md:py-4">
+    <div class="flex flex-wrap items-center gap-2 px-3 md:px-0 py-2 md:pb-3 text-sm" x-show="current()">
+      <span class="bw-pill" :class="current() && pillClass(current())" x-text="current() && stateLabel(current())"></span>
+      <span class="bw-muted text-xs" x-text="controlLine()"></span>
+      <span class="ml-auto text-xs bw-dim tabular-nums" x-show="current() && live(current())" x-text="current() && ('ends in ' + remaining(current()))"></span>
+    </div>
+    <div class="bw-screen md:rounded-[10px] rounded-none" :class="control === 'mine' ? 'bw-mine' : ''"
+         x-show="current() && live(current()) && connection !== 'closed'">
+      <div id="bw-vnc"></div>
+      <input id="bw-keys" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
+             @input="relayKeys($event)" @keydown="relaySpecial($event)">
+    </div>
+    <div x-show="!current() || !live(current()) || connection === 'closed'" class="bw-card mx-3 md:mx-0 p-8 text-center text-sm">
+      <template x-if="loaded && (!current() || !live(current()))"><div><div class="text-slate-200">This browser has ended.</div>
+        <a class="bw-btn mt-4 inline-block" href="/browser">All browsers</a></div></template>
+      <template x-if="current() && live(current()) && connection === 'closed'"><div><div class="text-slate-200">The viewer disconnected.</div>
+        <div class="bw-muted mt-1" x-text="closeReason"></div>
+        <button class="bw-btn mt-4" @click="connect()">Reconnect</button></div></template>
+    </div>
+    <div class="sticky bottom-0 md:static flex flex-wrap items-center gap-2 px-3 md:px-0 py-3 bg-slate-950/95 md:bg-transparent border-t border-slate-800 md:border-0"
+         x-show="current() && live(current()) && connection === 'live'">
+      <template x-if="control !== 'mine'">
+        <button class="bw-btn bw-btn-amber" @click="take()" :disabled="pending" x-text="pending ? 'Taking control…' : 'Take control'"></button>
+      </template>
+      <template x-if="control === 'mine'">
+        <div class="flex flex-wrap gap-2">
+          <button class="bw-btn" @click="giveBack()" :disabled="pending" x-text="pending ? 'Returning…' : 'Return control to agent'"></button>
+          <button class="bw-btn md:hidden" @click="document.getElementById('bw-keys').focus()">Keyboard</button>
+        </div>
+      </template>
+      <span class="text-xs bw-dim" x-text="controlError || controlHint()"></span>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+import RFB from "/static/vendor/novnc-1.5.0/core/rfb.js";
+window.__BrowserRFB = RFB;
+</script>
+<script>
+function browserPage() {
+  const ref = (location.pathname.match(/^\/browser\/([0-9a-f]{16})$/) || [])[1] || null;
+  let viewerId = sessionStorage.getItem("bw-viewer");
+  if (!viewerId) { viewerId = "viewer-" + crypto.randomUUID().replace(/-/g, "").slice(0, 16); sessionStorage.setItem("bw-viewer", viewerId); }
+  return {
+    view: ref ? "viewer" : "list", ref, viewerId,
+    leases: [], limits: { max_leases: 4, memory_mb: 2048 }, now: Date.now() / 1000,
+    loaded: false, error: "", connection: "connecting", closeReason: "",
+    control: "none", pending: false, controlError: "", rfb: null,
+
+    live(l) { return l && !["gone", "failed", "releasing"].includes(l.state); },
+    current() { return this.leases.find(l => l.lease_ref === this.ref); },
+    browserLabel(l) { return l.profile_kind === "persistent" ? "Chrome · " + l.profile_name : "Chrome · throwaway"; },
+    age(l) { const s = Math.max(0, Math.round(this.now - l.created_at)); return s < 3600 ? Math.floor(s / 60) + " min" : Math.floor(s / 3600) + " h " + Math.floor((s % 3600) / 60) + " min"; },
+    remaining(l) { const m = Math.floor(Math.max(0, l.expires_at - this.now) / 60); return m >= 60 ? Math.floor(m / 60) + " h " + (m % 60) + " min" : m + " min"; },
+    stateLabel(l) {
+      if (!this.live(l)) return l.state === "failed" ? "Failed" : "Ended";
+      if (l.state === "locked") return l.lock_holder === "human" ? "Operator in control" : "Signing in";
+      return { starting: "Starting", ready: "Idle", busy: "Agent working", unhealthy: "Not responding" }[l.state] || l.state;
+    },
+    pillClass(l) {
+      if (!this.live(l) || l.state === "unhealthy") return "bw-bad";
+      return { ready: "bw-ready", busy: "bw-busy", locked: "bw-locked", starting: "bw-starting" }[l.state] || "bw-starting";
+    },
+    controlLine() {
+      const l = this.current(); if (!l) return "";
+      if (this.control === "mine") return "You have control. The agent's commands wait until you return it.";
+      if (l.state === "locked" && l.lock_holder === "human") return "Another viewer has control.";
+      if (l.state === "locked") return "The broker is signing in for the agent. You are watching.";
+      return "The agent is driving. You are watching.";
+    },
+    controlHint() {
+      if (this.control === "mine") return "If you close this page, control returns to the agent after 60 seconds.";
+      return "Taking control stops the agent's current command.";
+    },
+
+    async refresh() {
+      try {
+        const r = await fetch("/api/browser/operator/leases", { credentials: "same-origin" });
+        if (!r.ok) { this.error = "Could not load browsers (" + r.status + ")."; return; }
+        const body = await r.json();
+        this.leases = body.leases; this.limits = body.limits; this.error = ""; this.loaded = true;
+        const l = this.current();
+        if (this.control === "mine" && !(l && l.state === "locked" && l.lock_holder === "human")) this.setControl("none");
+      } catch (e) { this.error = "Could not load browsers."; }
+    },
+    boot() {
+      this.refresh(); setInterval(() => this.refresh(), 3000);
+      setInterval(() => { this.now = Date.now() / 1000; }, 1000);
+      if (this.view === "viewer") this.waitForRFB();
+    },
+    waitForRFB() { if (window.__BrowserRFB) this.connect(); else setTimeout(() => this.waitForRFB(), 50); },
+    connect() {
+      if (this.rfb) { try { this.rfb.disconnect(); } catch (e) {} }
+      this.connection = "connecting";
+      const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+      const url = `${scheme}//${location.host}/ws/browser/${this.ref}/view?viewer=${this.viewerId}`;
+      const rfb = new window.__BrowserRFB(document.getElementById("bw-vnc"), url, { wsProtocols: ["binary"] });
+      rfb.scaleViewport = true; rfb.resizeSession = false; rfb.viewOnly = this.control !== "mine";
+      rfb.addEventListener("connect", () => { this.connection = "live"; });
+      rfb.addEventListener("disconnect", (e) => {
+        this.connection = "closed";
+        this.closeReason = e.detail && e.detail.clean ? "The browser ended or your sign-in expired." : "The connection dropped.";
+      });
+      this.rfb = rfb;
+    },
+    setControl(state) { this.control = state; if (this.rfb) this.rfb.viewOnly = state !== "mine"; },
+    async post(action) {
+      const r = await fetch(`/api/browser/leases/${this.ref}/control`, {
+        method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, viewer: this.viewerId }) });
+      return [r.status, await r.json().catch(() => ({}))];
+    },
+    async take() {
+      this.pending = true; this.controlError = "";
+      const [status, body] = await this.post("take");
+      this.pending = false;
+      if (status === 200) { this.setControl("mine"); this.refresh(); }
+      else this.controlError = "Could not take control: " + (body.error || status);
+    },
+    async giveBack() {
+      this.pending = true; this.controlError = "";
+      const [status, body] = await this.post("return");
+      this.pending = false;
+      if (status === 200) { this.setControl("none"); this.refresh(); }
+      else this.controlError = "Could not return control: " + (body.error || status);
+    },
+    // Phone keyboard: a hidden input collects keys and relays them as key events.
+    relayKeys(event) {
+      if (!this.rfb || this.control !== "mine") { event.target.value = ""; return; }
+      for (const ch of event.target.value) this.rfb.sendKey(ch.codePointAt(0) < 256 ? ch.codePointAt(0) : 0x1000000 + ch.codePointAt(0));
+      event.target.value = "";
+    },
+    relaySpecial(event) {
+      if (!this.rfb || this.control !== "mine") return;
+      const special = { Enter: 0xff0d, Backspace: 0xff08, Tab: 0xff09, Escape: 0xff1b };
+      if (special[event.key]) { this.rfb.sendKey(special[event.key], event.key); event.preventDefault(); }
+    },
+  };
+}
+</script>
+</body>
+</html>

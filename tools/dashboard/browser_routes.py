@@ -17,6 +17,7 @@ import secrets
 import struct
 import threading
 import time
+from pathlib import Path
 
 from typing import Optional
 
@@ -659,7 +660,21 @@ async def _relay(websocket, client, reader, writer, lease, viewer_id, cookie) ->
             task.cancel()
 
 
+_PAGE = Path(__file__).resolve().parent / "static" / "browser" / "browser.html"
+
+
+async def browser_page(request: Request):
+    """The operator's lease list (/browser) and viewer (/browser/{lease}). The
+    dashboard sign-in gate covers these paths; the page carries no data and
+    reads everything from the operator-authority APIs."""
+    from starlette.responses import FileResponse
+
+    return FileResponse(_PAGE, media_type="text/html", headers={"Cache-Control": "no-store"})
+
+
 ROUTES = [
+    Route("/browser", browser_page, methods=["GET"]),
+    Route("/browser/{lease}", browser_page, methods=["GET"]),
     Route("/api/browser/leases", post_lease, methods=["POST"]),
     Route("/api/browser/leases/{lease}", get_lease, methods=["GET"]),
     Route("/api/browser/leases/{lease}", delete_lease, methods=["DELETE"]),
