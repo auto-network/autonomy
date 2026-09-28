@@ -2659,7 +2659,13 @@
               review: { title: 'Publish a share link', intro: '',
                 organization: { name: acting.name || approval.orgSlug, image: acting.favicon },
                 target, requester, controls,
-                facts: approval.recipient ? [['Prepared for', approval.recipient.displayName]] : [],
+                // The dialog renders facts, not arbitrary controls: an
+                // invitation's fixed expiry must be a fact or it is never
+                // shown (auto-xdy5v).
+                facts: [
+                  ...(approval.recipient ? [['Prepared for', approval.recipient.displayName]] : []),
+                  ...(approval.fixedExpiry && approval.fixedExpiryLabel ? [['Link expires', approval.fixedExpiryLabel]] : []),
+                ],
                 unavailable: approval.blockingError },
               retained: !registrationRequired && _matchingApprovalAuthority(approval),
               authorize: options => _signLinkDecision(self, approval, options),

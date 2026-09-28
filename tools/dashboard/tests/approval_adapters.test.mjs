@@ -192,3 +192,29 @@ test('a request that cannot be approved says why, and Authorize writes nothing',
   assert.equal(signs.length, 0);
   assert.equal(requests.filter(row => row.options?.method === 'POST').length, 0);
 });
+// An invitation link (org:join) has a fixed absolute expiry: no duration
+// choice, and the frozen registry payload is signed exactly, with no TTL
+// added (ported from the retired sweep test
+// test_org_join_approval_signs_fixed_absolute_expiry, auto-pw295).
+test('an org:join publish shows its fixed expiry and signs the frozen payload with no TTL', async () => {
+  const expiry = 1900000000123;
+  const orgUuid = '11111111-1111-4111-8111-111111111111';
+  state = { signedIn: true, orgs: [{ org: orgUuid, live: true }] };
+  const payload = { org: orgUuid, target_uuid: orgUuid, target_type: 'org:join',
+    invite_ref: 'ef'.repeat(32), expires_at: expiry, meta: { label: 'Member invitation' } };
+  await instance._approvalKinds.link_publish.open(instance, {
+    ...request(), ttl: null, absolute_expiry: expiry,
+    request: { org: 'autonomy', target_type: 'org:join', target_uuid: orgUuid },
+    registry_request: { payload } });
+  assert.equal(q('select'), null, 'no duration choice for an invitation');
+  // The fixed expiry is a review fact (auto-xdy5v: it was only a span in
+  // controls, which the dialog never renders).
+  assert.ok(shadowText().includes('Link expires'), 'expiry fact missing');
+  assert.ok(shadowText().includes(new Date(expiry).toLocaleString()), 'expiry date missing');
+  q('#primary').click();
+  await until(() => q('#result-title')?.textContent === 'Link published');
+  assert.equal(signs.length, 1);
+  assert.deepEqual(signs[0].slice(0, 3), ['TUNNEL', '/control/create-link', payload]);
+  const write = requests.find(row => row.options?.method === 'POST');
+  assert.deepEqual(JSON.parse(write.options.body), { approved: true, envelope: { signed: 'existing-envelope' } });
+});
