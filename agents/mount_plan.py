@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -275,12 +275,11 @@ class BindRefuseMissing(str):
 class PrivateBind(BindRefuseMissing):
     """A strict bind with docker's default (private) propagation.
 
-    ``rslave`` needs the source's mount to be shared or slave; docker refuses
-    it otherwise ("path X is mounted on / but it is not a shared or slave
-    mount"), which is the case for any path under a private ``/`` — WSL2
-    Ubuntu's root, for one. The operator's home, mounted read-only into the
-    host terminal, needs no propagation (fresh published install on WSL2,
-    2026-09-26)."""
+    Never propagates, even where the source's mount is shared: the operator's
+    home, mounted read-only into the host terminal, needs no live remounts
+    (fresh published install on WSL2, 2026-09-26). Other strict binds keep
+    ``rslave`` only where the daemon-frame probe finds the source's mount
+    shared or slave (:func:`mount_args`)."""
     bind_propagation = None
 
 
@@ -414,12 +413,13 @@ def emit(r: ResolvedMount, topo: NodeTopology) -> list:
         # fails the launch instead of `-v` fabricating an empty dir at it.
         #
         # bind-propagation=rslave: receive-only propagation from the host mount
-        # at r.host_source. If that host mount is itself `shared` (an operator/
-        # deploy concern, not this launcher's), a later host-side umount+mount
-        # there (e.g. an NFS version flip) reaches this bind live, no container
-        # restart needed. If the host mount is plain `private` (the common,
-        # unconfigured case — most deployments), this is a silent no-op and
-        # behavior is byte-identical to today. Never `shared` here: `slave` is
+        # at r.host_source, so a later host-side umount+mount there (e.g. an NFS
+        # version flip) reaches this bind live, no container restart needed.
+        # Docker accepts it only when that mount is shared or slave in the
+        # daemon's frame and REFUSES it on a private one ("path X is mounted on
+        # / but it is not a shared or slave mount": WSL2 Ubuntu's private /,
+        # auto-b0326), so mount_args keeps it only for sources the daemon-frame
+        # probe found propagating. Never `shared` here: `slave` is
         # one-directional (host -> container only), so nothing this container
         # mounts can propagate back out to the host or to a sibling container.
         parts = ["type=bind", f"src={r.host_source}", f"dst={dest}"]
@@ -435,11 +435,29 @@ def emit(r: ResolvedMount, topo: NodeTopology) -> list:
 _DOCKER_SOCKET = "/var/run/docker.sock"
 
 
-def mount_args(plan: MountPlan, topo: NodeTopology) -> list:
+def propagation_sources(plan: MountPlan, topo: NodeTopology) -> list:
+    """The daemon-frame source of every bind the plan would emit with a
+    propagation mode — the paths whose mount the launcher must find shared or
+    slave (``secret_ramfs.daemon_propagating``) before ``mount_args`` may keep
+    ``rslave`` on them. Empty when the plan has none, so no probe runs."""
+    out: list = []
+    for spec in plan.specs():
+        r = resolve(spec, topo)
+        if r is not None and r.bind_refuse_missing and r.bind_propagation and r.host_source:
+            out.append(r.host_source)
+    return out
+
+
+def mount_args(plan: MountPlan, topo: NodeTopology, propagating=frozenset()) -> list:
     """The one emission path both entry points call. Refuses the docker socket
     over the WHOLE plan (closing the bypass where startup_script/global_claude_md
     skipped the check) unless the plan carries the host-terminal carve-out, then
-    resolves+emits each spec in insertion order."""
+    resolves+emits each spec in insertion order.
+
+    *propagating* holds the daemon-frame sources whose mount is shared or slave
+    (see :func:`propagation_sources`); a bind whose source is not in it is
+    emitted with docker's default private propagation, which docker always
+    accepts."""
     for spec in plan.specs():
         if plan.allow_docker_socket:
             break
@@ -450,8 +468,11 @@ def mount_args(plan: MountPlan, topo: NodeTopology) -> list:
     out: list = []
     for spec in plan.specs():
         r = resolve(spec, topo)
-        if r is not None:
-            out += emit(r, topo)
+        if r is None:
+            continue
+        if r.bind_propagation and r.host_source not in propagating:
+            r = replace(r, bind_propagation=None)
+        out += emit(r, topo)
     return out
 
 

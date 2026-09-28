@@ -1832,6 +1832,29 @@ def _host_terminal_profile() -> tuple[dict, list[str]]:
 
 # ── Main Launch Function ──────────────────────────────────────────────────────
 
+def _daemon_propagating(plan, topo) -> set:
+    """The plan's rslave bind sources whose daemon-frame mount is shared or
+    slave, the only ones docker accepts ``bind-propagation=rslave`` for
+    (auto-b0326). No probe runs when the plan has no such bind; an unrunnable
+    probe yields the empty set, so every bind is emitted private, which docker
+    always accepts."""
+    from agents.mount_plan import propagation_sources
+    from agents import secret_ramfs
+
+    sources = propagation_sources(plan, topo)
+    if not sources:
+        return set()
+    found = secret_ramfs.daemon_propagating(sources)
+    if found is None:
+        # Visible, so a lost NFS live-remount pickup has a findable cause.
+        logger.warning(
+            "propagation probe unavailable; binding %d workspace source(s) "
+            "without rslave: %s", len(sources), ", ".join(sources),
+        )
+        return set()
+    return found
+
+
 def launch_session(
     session_type: str,
     name: str,
@@ -2145,7 +2168,7 @@ def launch_session(
     # criterion 6). The validated argv is spliced into cmd at the emission point.
     _topo = discover_topology()
     try:
-        _mount_argv = mount_args(plan, _topo)
+        _mount_argv = mount_args(plan, _topo, _daemon_propagating(plan, _topo))
     except SocketMountRefused:
         print(f"  ERROR: refusing host Docker socket mount for session '{name}'",
               file=sys.stderr)

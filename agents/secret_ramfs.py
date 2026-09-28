@@ -359,6 +359,103 @@ def daemon_missing(paths: list) -> "list | None":
     return [p for p in uniq if p in absent]
 
 
+def _mountinfo_unescape(field: str) -> str:
+    """A mountinfo path field with its octal escapes (``\\040`` etc.) decoded."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def propagating_from_mountinfo(mountinfo: str, resolved: dict) -> set:
+    """The keys of *resolved* (``{source: realpath}``) whose containing mount is
+    shared or slave, from a ``/proc/<pid>/mountinfo`` text.
+
+    The containing mount is the one with the longest mount point that is the
+    path or an ancestor of it; among stacked mounts on one point the last line
+    (the top) wins. Its optional fields name its propagation: ``shared:N`` or
+    ``master:N`` (a slave) propagate, none means private. Only a propagating
+    source may be bound with ``bind-propagation=rslave``: docker refuses it
+    otherwise ("path X is mounted on / but it is not a shared or slave mount").
+    """
+    mounts: list = []
+    for line in mountinfo.splitlines():
+        fields = line.split()
+        if len(fields) < 7 or "-" not in fields[6:]:
+            continue
+        optional = fields[6:fields.index("-", 6)]
+        mounts.append((
+            _mountinfo_unescape(fields[4]),
+            any(o.startswith(("shared:", "master:")) for o in optional),
+        ))
+    out: set = set()
+    for source, real in resolved.items():
+        if not real or not real.startswith("/"):
+            continue
+        best, best_len = False, -1
+        for point, propagates in mounts:
+            inside = point == "/" or real == point or real.startswith(point.rstrip("/") + "/")
+            if inside and len(point) >= best_len:
+                best, best_len = propagates, len(point)
+        if best_len >= 0 and best:
+            out.add(source)
+    return out
+
+
+def daemon_propagating(paths: list) -> "set | None":
+    """The subset of *paths* whose mount, in the frame the Docker daemon binds
+    from, is shared or slave — so ``bind-propagation=rslave`` is accepted for
+    them — or ``None`` if the check could not be run (the caller then binds
+    without propagation, which docker always accepts).
+
+    Same frame and privilege as :func:`daemon_missing`: in-process on a
+    host-native node, PID 1's mount namespace through the node's socket on a
+    containerized one. Each path is resolved there (``readlink -f``), since a
+    symlinked source is bound from its target's mount.
+    """
+    uniq = [p for p in dict.fromkeys(paths) if p]
+    if not uniq:
+        return set()
+    cid = _own_container_id()
+    if cid is None:
+        try:
+            with open("/proc/self/mountinfo", encoding="utf-8") as fh:
+                info = fh.read()
+        except OSError:
+            return None
+        return propagating_from_mountinfo(info, {p: os.path.realpath(p) for p in uniq})
+    if not Path(_DOCKER_SOCKET).exists():
+        return None
+    try:
+        image = _own_image(cid)
+    except ProvisionError:
+        return None
+    enc = " ".join(base64.b64encode(p.encode()).decode() for p in uniq)
+    script = (
+        'cat /proc/self/mountinfo; echo "--- resolved"; '
+        f'for b in {enc}; do '
+        f'p=$(printf %s "$b" | base64 -d); '
+        f'printf "%s %s\\n" "$b" "$(readlink -f "$p" 2>/dev/null)"; '
+        f'done'
+    )
+    try:
+        r = subprocess.run(
+            ["docker", "run", "--rm", "--user", "0", "--privileged", "--pid=host",
+             "--entrypoint", "nsenter", image,
+             "-t", "1", "-m", "--", "sh", "-c", script],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if r.returncode != 0 or "--- resolved" not in r.stdout:
+        return None
+    info, _, tail = r.stdout.partition("--- resolved")
+    by_b64 = {base64.b64encode(p.encode()).decode(): p for p in uniq}
+    resolved: dict = {}
+    for line in tail.splitlines():
+        b, _, real = line.partition(" ")
+        if b in by_b64:
+            resolved[by_b64[b]] = real
+    return propagating_from_mountinfo(info, resolved)
+
+
 def _is_ramfs(path: str) -> bool:
     try:
         return filesystem_magic(path) == RAMFS_MAGIC

@@ -590,7 +590,9 @@ def _emit_result_through_plan(result, topo):
     plan = mount_plan.MountPlan()
     for host, spec in result.items():
         plan.set(mount_plan.mount_spec(host, spec))
-    return mount_plan.mount_args(plan, topo)
+    # Every source counts as a propagating mount here; the private case is
+    # test_mount_plan's (auto-b0326).
+    return mount_plan.mount_args(plan, topo, set(result))
 
 
 def test_host_process_workspace_bind_emits_mount_not_v(orgs_root, tmp_path):

@@ -296,7 +296,7 @@ def main() -> int:
         # derived from source paths inside build_mount_plan.
         from agents.session_launcher import (
             build_mount_plan, _grok_launch_profile, _generate_grok_config,
-            _grok_env_with_default_key, grok_launch_script,
+            _grok_env_with_default_key, grok_launch_script, _daemon_propagating,
         )
         from agents.mount_plan import (
             mount_args, discover_topology, SocketMountRefused, MountUnresolvable,
@@ -379,7 +379,7 @@ def main() -> int:
         # (the Codex auth.json declared by build_mount_plan) — a refusal here
         # writes and mints nothing (auto-vm8qh criterion 6).
         try:
-            _mount_argv = mount_args(plan, _topo)
+            _mount_argv = mount_args(plan, _topo, _daemon_propagating(plan, _topo))
         except SocketMountRefused:
             print("ERROR: refusing host Docker socket mount", file=sys.stderr)
             return 1

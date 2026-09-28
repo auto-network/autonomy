@@ -197,7 +197,7 @@ def test_bind_refuse_missing_spec_emits_mount_bind_not_v():
     plan.set(mp.mount_spec(
         "/tmp/daemon-host-source/anchore/license.yaml",
         mp.BindRefuseMissing("/etc/x:ro")))
-    args = mp.mount_args(plan, topo)
+    args = mp.mount_args(plan, topo, {"/tmp/daemon-host-source/anchore/license.yaml"})
     assert args == [
         "--mount",
         "type=bind,src=/tmp/daemon-host-source/anchore/license.yaml,dst=/etc/x,"
@@ -224,7 +224,7 @@ def test_marker_rides_dict_update_and_is_read_by_mount_spec(tmp_path):
     plan = mp.MountPlan()
     for h, spec in merged.items():
         plan.set(mp.mount_spec(h, spec))
-    args = mp.mount_args(plan, topo)
+    args = mp.mount_args(plan, topo, {"/src/a"})
     assert "--mount" in args and (
         "type=bind,src=/src/a,dst=/dst/a,bind-propagation=rslave,readonly" in args)
     assert "-v" in args and "/src/b:/dst/b:ro" in args
@@ -263,7 +263,7 @@ def test_workspace_marker_forces_host_bind_despite_node_root_collision(monkeypat
     src = "/app/data/docker/volumes/autonomy-orgs/_data/anchore/x"
     plan = mp.MountPlan()
     plan.set(mp.mount_spec(src, mp.BindRefuseMissing("/opt/x:ro")))
-    args = mp.mount_args(plan, topo)
+    args = mp.mount_args(plan, topo, {src})
     joined = " ".join(args)
     assert args == ["--mount",
                     f"type=bind,src={src},dst=/opt/x,bind-propagation=rslave,readonly"]
@@ -317,14 +317,31 @@ def test_carve_out_is_code_only():
 
 
 def test_private_bind_emits_no_propagation_workspace_bind_keeps_rslave():
-    """rslave needs a shared/slave source mount; under a private / (WSL2
-    Ubuntu) docker refuses it. The host terminal's read-only home is a
-    PrivateBind; workspace binds keep rslave for NFS remount propagation."""
+    """A workspace bind whose source mount propagates keeps rslave (NFS
+    remounts reach it live); the host terminal's read-only home is a
+    PrivateBind and never propagates, even on a propagating mount."""
     topo = mp.NodeTopology(is_host_process=False)
     plan = mp.MountPlan()
     plan.set(mp.mount_spec("/root", mp.PrivateBind("/host-home:ro")))
     plan.set(mp.mount_spec("/srv/ws", mp.BindRefuseMissing("/workspace/ws")))
-    assert mp.mount_args(plan, topo) == [
+    assert mp.propagation_sources(plan, topo) == ["/srv/ws"]
+    assert mp.mount_args(plan, topo, {"/root", "/srv/ws"}) == [
         "--mount", "type=bind,src=/root,dst=/host-home,readonly",
         "--mount", "type=bind,src=/srv/ws,dst=/workspace/ws,bind-propagation=rslave",
     ]
+
+
+def test_workspace_bind_on_a_private_mount_is_emitted_without_rslave():
+    """auto-b0326: docker refuses rslave on a private source mount ("path X is
+    mounted on / but it is not a shared or slave mount", every source on a
+    stock WSL2 node). A source the daemon-frame probe did not find
+    propagating, or an unrunnable probe (empty set), binds private."""
+    topo = mp.NodeTopology(is_host_process=False)
+    plan = mp.MountPlan()
+    plan.set(mp.mount_spec("/home/tester/ws", mp.BindRefuseMissing("/workspace/ws:ro")))
+    plan.set(mp.mount_spec("/mnt/nas/data", mp.BindRefuseMissing("/data")))
+    assert mp.mount_args(plan, topo, {"/mnt/nas/data"}) == [
+        "--mount", "type=bind,src=/home/tester/ws,dst=/workspace/ws,readonly",
+        "--mount", "type=bind,src=/mnt/nas/data,dst=/data,bind-propagation=rslave",
+    ]
+    assert "bind-propagation" not in " ".join(mp.mount_args(plan, topo))
