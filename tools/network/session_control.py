@@ -66,6 +66,8 @@ INBOUND_QUEUE_LIMIT = 64
 #: it in chunks. Bounded per transfer.
 STREAM_CHUNK_BYTES = 192 * 1024
 MAX_STREAM_BYTES = 64 * 1024 * 1024
+#: Ceiling on one whole transfer, whatever its size.
+TRANSFER_DEADLINE_CAP_S = 600
 #: Seconds an incoming transfer file may sit before a later transfer sweeps it.
 TRANSFER_RETENTION_S = 3600
 
@@ -137,7 +139,7 @@ def transfer_dir():
     return path
 
 
-def stream_path_allowed(path) -> bool:
+def stream_path_allowed(path) -> bool:  # a check only; streaming uses open_streamable
     """A file the dashboard may ask this process to stream: a regular file
     under data/agent-runs or data/host-uploads (session output) or
     data/session-transfer (staged transfers)."""
@@ -169,17 +171,72 @@ def _sweep_transfers(now: float | None = None) -> None:
                     entry.unlink()
 
 
-async def _stream_reply(header: dict, path, delete: bool):
-    """The streamed reply: the JSON header, then the file in chunks."""
+def _within_roots(path) -> bool:
+    from pathlib import Path
+
+    root = _data_root().resolve()
+    for allowed in (root / "agent-runs", root / "host-uploads",
+                    root / "session-transfer"):
+        try:
+            Path(path).relative_to(allowed)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def open_streamable(path) -> tuple[int, int] | None:
+    """Open *path* ONCE for streaming and prove what was opened.
+
+    The session controls its own output tree, so a check on a path followed
+    by an open of that path is a race it can win by swapping in a symlink.
+    Instead: resolve, refuse a final-component symlink (O_NOFOLLOW), then
+    check the OPEN descriptor -- its real path (/proc/self/fd) must lie under
+    an allowed root, it must be a regular file no larger than
+    MAX_STREAM_BYTES. Returns ``(fd, size)``, the size read from the fd, or
+    None; the caller owns closing the fd.
+    """
+    import stat
+    from pathlib import Path
+
+    try:
+        resolved = Path(path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not _within_roots(resolved):
+        return None
+    try:
+        fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        real = Path(os.readlink(f"/proc/self/fd/{fd}"))
+        if (not stat.S_ISREG(info.st_mode) or info.st_size > MAX_STREAM_BYTES
+                or not _within_roots(real)):
+            os.close(fd)
+            return None
+    except OSError:
+        os.close(fd)
+        return None
+    return fd, info.st_size
+
+
+async def _stream_reply(header: dict, fd: int, size: int, path, delete: bool):
+    """The streamed reply: the JSON header, then exactly *size* bytes read
+    from the already-verified descriptor *fd*."""
     try:
         yield encode(header)
-        with open(path, "rb") as fh:
-            while True:
-                chunk = await asyncio.to_thread(fh.read, STREAM_CHUNK_BYTES)
-                if not chunk:
-                    break
-                yield chunk
+        remaining = size
+        while remaining > 0:
+            chunk = await asyncio.to_thread(
+                os.read, fd, min(STREAM_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
     finally:
+        os.close(fd)
         if delete:
             with contextlib.suppress(OSError):
                 os.unlink(path)
@@ -310,19 +367,15 @@ async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticato
             result = dict(result)
             path = result.pop("stream_file")
             delete = bool(result.pop("stream_delete", False))
-            try:
-                size = os.path.getsize(path)
-            except OSError:
-                size = -1
-            if not stream_path_allowed(path) or not 0 <= size <= MAX_STREAM_BYTES:
+            opened = open_streamable(path)
+            if opened is None:
                 if delete:
                     with contextlib.suppress(OSError):
                         os.unlink(path)
-                return encode(refusal(
-                    OP_TOO_LARGE if size > MAX_STREAM_BYTES else BAD_REQUEST,
-                    "the file cannot be streamed"))
+                return encode(refusal(BAD_REQUEST, "the file cannot be streamed"))
+            fd, size = opened
             header = {**reply, "result": {**result, "stream": {"size": size}}}
-            return _stream_reply(header, path, delete)
+            return _stream_reply(header, fd, size, path, delete)
         try:
             return encode(reply)
         except SessionControlError as exc:
@@ -363,10 +416,28 @@ async def _receive_stream(channel, timeout: float) -> dict:
     _sweep_transfers()
     target = transfer_dir() / f"in-{secrets.token_hex(16)}"
     digest, size = hashlib.sha256(), 0
+    # One deadline for the whole transfer, not only per chunk: a sender that
+    # drips a chunk just inside the per-chunk timeout must not hold the pair
+    # and its budget open indefinitely. timeout + 1 s per 64 KiB, capped.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + min(
+        timeout + int(announced) / (64 * 1024), TRANSFER_DEADLINE_CAP_S)
     try:
         with open(target, "wb") as fh:
             while True:
-                chunk, final = await asyncio.wait_for(stream.__anext__(), timeout)
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise SessionControlError(
+                        "session-control-timeout", "transfer exceeded its deadline")
+                try:
+                    chunk, final = await asyncio.wait_for(
+                        stream.__anext__(), min(timeout, remaining))
+                except asyncio.TimeoutError:
+                    if loop.time() >= deadline:
+                        raise SessionControlError(
+                            "session-control-timeout",
+                            "transfer exceeded its deadline") from None
+                    raise
                 size += len(chunk)
                 if size > MAX_STREAM_BYTES or size > int(announced):
                     raise SessionControlError(OP_TOO_LARGE, "stream exceeds its size")

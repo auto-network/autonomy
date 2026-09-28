@@ -7,6 +7,7 @@ typed refusal -- including a relay that predates the capability."""
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 import time
 
@@ -330,3 +331,72 @@ async def _stream_scenario(root, port, source, payload, data_root):
     finally:
         await _stop(a, task_a)
         await _stop(b, task_b)
+
+
+def test_open_streamable_refuses_a_file_swapped_for_a_symlink(tmp_path, monkeypatch):
+    """The check-then-open race: once the checked file is replaced by a
+    symlink to a file outside the roots, nothing is opened."""
+    import os
+
+    monkeypatch.setattr(session_control, "_data_root", lambda: tmp_path)
+    runs = tmp_path / "agent-runs" / "auto-1-x"
+    runs.mkdir(parents=True)
+    secret = tmp_path / "secret.db"
+    secret.write_text("vault")
+    checked = runs / "out.txt"
+    checked.write_text("ok")
+    assert session_control.stream_path_allowed(checked)
+    opened = session_control.open_streamable(checked)
+    assert opened is not None
+    os.close(opened[0])
+    checked.unlink()
+    checked.symlink_to(secret)                     # the swap
+    assert session_control.open_streamable(checked) is None
+
+
+def test_open_streamable_refuses_a_directory_swapped_for_a_symlink(tmp_path, monkeypatch):
+    """O_NOFOLLOW guards only the last component; a swapped parent directory
+    is caught by checking the open descriptor's real path."""
+    import os
+
+    monkeypatch.setattr(session_control, "_data_root", lambda: tmp_path)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "out.txt").write_text("secret")
+    runs = tmp_path / "agent-runs"
+    runs.mkdir()
+    (runs / "auto-1-x").symlink_to(outside, target_is_directory=True)
+    assert session_control.open_streamable(runs / "auto-1-x" / "out.txt") is None
+
+
+def test_open_streamable_announces_the_size_of_what_it_opened(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(session_control, "_data_root", lambda: tmp_path)
+    runs = tmp_path / "agent-runs" / "auto-1-x"
+    runs.mkdir(parents=True)
+    (runs / "out.txt").write_bytes(b"12345")
+    fd, size = session_control.open_streamable(runs / "out.txt")
+    os.close(fd)
+    assert size == 5
+    monkeypatch.setattr(session_control, "MAX_STREAM_BYTES", 4)
+    assert session_control.open_streamable(runs / "out.txt") is None
+
+
+def test_a_dripping_sender_is_cut_off_by_the_overall_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_control, "_data_root", lambda: tmp_path)
+    monkeypatch.setattr(session_control, "TRANSFER_DEADLINE_CAP_S", 0.3)
+
+    class Drip:
+        def recv_message_stream(self):
+            async def gen():
+                yield json.dumps({"v": 1, "ok": True, "result": {
+                    "stream": {"size": 1000}}}).encode(), False
+                while True:
+                    await asyncio.sleep(0.1)
+                    yield b"x", False
+            return gen()
+
+    with pytest.raises(session_control.SessionControlError, match="deadline"):
+        asyncio.run(session_control._receive_stream(Drip(), timeout=1.0))
+    assert not list((tmp_path / "session-transfer").glob("in-*"))
