@@ -110,10 +110,18 @@ class SessionsTestHarness:
         env["DASHBOARD_MOCK_EVENTS"] = str(self.events_file)
         repo_root = str(Path(__file__).resolve().parents[4])
         env["PYTHONPATH"] = repo_root
+        # The server's output goes to a FILE, never to an undrained pipe:
+        # nothing read the PIPE this used to be, so after enough logging
+        # (about twenty classes in) the 64 KB buffer filled, the server's
+        # next write blocked its event loop, and every request hung --
+        # the "reopen timeouts" of TestLibrarianRecentTitle and
+        # TestRecentSessionEndedEvent (auto-v797r). The file is also what
+        # to read when a test here fails.
+        self.server_log = open(self.tmp / "server.log", "wb")
         self.proc = subprocess.Popen(
             ["python3", "-m", "uvicorn", "tools.dashboard.server:app",
              "--fd", str(sock.fileno())],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdout=self.server_log, stderr=subprocess.STDOUT,
             env=env, cwd=repo_root, pass_fds=(sock.fileno(),),
         )
         sock.close()
@@ -148,6 +156,9 @@ class SessionsTestHarness:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+        log = getattr(self, "server_log", None)
+        if log is not None:
+            log.close()
 
     def open_sessions_page(self):
         ab_raw("close")
