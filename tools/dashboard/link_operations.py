@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import logging
+import os
 import threading
 import time
 from typing import Any
@@ -274,6 +275,16 @@ class Journal:
                                   org="machine")
 
     @staticmethod
+    def stale_prepared(older_than: float) -> list[str]:
+        """Operator operations prepared before *older_than* and never signed."""
+        rows = settings_ops.read_owned_set(LINK_OPERATION_SET_ID, org="machine",
+                                           target_revision=LINK_OPERATION_REVISION)
+        return [m.key for m in rows.members
+                if isinstance(m.payload, dict) and m.payload.get("state") == "prepared"
+                and m.payload.get("initiator") == "operator"
+                and float(m.payload.get("prepared_at") or 0) < older_than]
+
+    @staticmethod
     def delete(key: str) -> None:
         row = settings_ops.read_set_key(LINK_OPERATION_SET_ID, key, org="machine", peers=[])
         if row and row.get("id"):
@@ -281,7 +292,26 @@ class Journal:
 
 
 _lock = threading.Lock()
-_inflight: set = set()
+#: The longest one operation can hold its claim: the tunnel start and
+#: create-link retries (60 s), the serving probe and compensation, with margin.
+#: A claim older than this is settled even if its owner still lives.
+CLAIM_HARD_BOUND_SECONDS = 600
+
+
+def _owner() -> tuple[int, str | None]:
+    from tools.dashboard.connector_key_resolution import process_start
+    pid = os.getpid()
+    return pid, process_start(pid)
+
+
+def _owner_alive(entry: dict) -> bool:
+    """Whether the process that claimed this entry still runs. Its kernel
+    birth identity is compared, so a reused pid is not the owner."""
+    from tools.dashboard.connector_key_resolution import process_start
+    pid, start = entry.get("owner_pid"), entry.get("owner_start")
+    if not isinstance(pid, int) or not isinstance(start, str):
+        return False
+    return process_start(pid) == start
 
 
 def prepare_entry(key: str, *, op: str, initiator: str, planned: dict, now: float) -> dict:
@@ -294,15 +324,21 @@ def prepare_entry(key: str, *, op: str, initiator: str, planned: dict, now: floa
 def read(key: str, journal: type = Journal) -> dict | None:
     """The journal entry, with a claim left by a stopped process resolved
     from the grant row it names (published → done; unpublished → cleaned up,
-    failed; absent → failed). Deterministic; nothing is resent."""
+    failed; absent → failed). Deterministic; nothing is resent.
+
+    A claim is settled only when its owner process is gone, or it is older
+    than :data:`CLAIM_HARD_BOUND_SECONDS`. A live owner, which may be another
+    worker during a hot-reload overlap, is still running it: its grant row
+    is not dropped under it."""
     entry = journal.get(key)
     if entry is None or entry.get("state") != "claimed":
         return entry
     with _lock:
-        if key in _inflight:
-            return entry
         entry = journal.get(key) or entry
         if entry.get("state") != "claimed":
+            return entry
+        age = time.time() - float(entry.get("claimed_at") or 0)
+        if _owner_alive(entry) and age < CLAIM_HARD_BOUND_SECONDS:
             return entry
         resolved = _resolve_interrupted(entry)
         entry = {**entry, **resolved, "finished_at": time.time()}
@@ -363,10 +399,11 @@ async def execute(key: str, entry: dict, decision: dict, persona_pub: str,
         if current.get("state") == "claimed":
             raise LinkOperationError("running")
         grant_id = _grant_id_for(key) if op == PUBLISH else _revoke_grant_id(entry)
+        owner_pid, owner_start = _owner()
         claimed = {**current, "state": "claimed", "claimed_at": time.time(),
-                   "grant_id": grant_id, "persona_pub": persona_pub}
+                   "grant_id": grant_id, "persona_pub": persona_pub,
+                   "owner_pid": owner_pid, "owner_start": owner_start}
         journal.put(key, claimed)
-        _inflight.add(key)
     row = {"id": key, "request": entry["request"], "staged": entry["staged"]}
     try:
         if op == PUBLISH:
@@ -379,12 +416,9 @@ async def execute(key: str, entry: dict, decision: dict, persona_pub: str,
     finally:
         decision.pop("envelope", None)
     with _lock:
-        try:
-            state = "done" if execution.get("ok") else "failed"
-            journal.put(key, {**claimed, "state": state, "finished_at": time.time(),
-                              "execution": execution})
-        finally:
-            _inflight.discard(key)
+        state = "done" if execution.get("ok") else "failed"
+        journal.put(key, {**claimed, "state": state, "finished_at": time.time(),
+                          "execution": execution})
     return execution
 
 

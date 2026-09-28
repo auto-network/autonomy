@@ -360,3 +360,64 @@ def test_the_legacy_link_hooks_are_gone():
     for name in ("ENRICH", "EXECUTORS", "_enrich_link_publish", "_enrich_link_revoke",
                  "_staged_registry_request"):
         assert not hasattr(link_approvals, name), name
+
+
+# ── a claim is settled only when its owner is gone (review of .10a) ────────
+
+
+def _claimed_publish(**owner):
+    return {"state": "claimed", "op": "publish", "initiator": "operator", "prepared_at": NOW,
+            "request": dict(REQUEST), "staged": dict(STAGED), "grant_id": "g1",
+            "claimed_at": __import__("time").time(), **owner}
+
+
+def test_a_claim_held_by_a_live_other_worker_is_not_resolved(monkeypatch):
+    """Hot-reload overlap: the old worker is mid-publish, its grant row written
+    and the frame in flight. The new worker must not drop that row."""
+    import os
+
+    from tools.dashboard.connector_key_resolution import process_start
+
+    MemoryJournal.rows = {"live": _claimed_publish(owner_pid=os.getpid(),
+                                                   owner_start=process_start(os.getpid()))}
+    dropped = []
+    monkeypatch.setattr(ops, "_grant_row", lambda grant_id, org: {"grant_id": "g1"})
+    monkeypatch.setattr(ops.links, "_drop_cached_grant", lambda g, org: dropped.append(g))
+    assert ops.read("live", journal=MemoryJournal)["state"] == "claimed"
+    assert dropped == []
+
+
+def test_a_claim_whose_owner_died_is_resolved(monkeypatch):
+    MemoryJournal.rows = {"dead": _claimed_publish(owner_pid=2**22 + 12345, owner_start="gone")}
+    monkeypatch.setattr(ops, "_grant_row", lambda grant_id, org: None)
+    assert ops.read("dead", journal=MemoryJournal)["state"] == "failed"
+
+
+def test_a_claim_past_the_hard_bound_is_settled_even_with_a_live_owner(monkeypatch):
+    import os
+    import time as _time
+
+    from tools.dashboard.connector_key_resolution import process_start
+
+    old = _claimed_publish(owner_pid=os.getpid(), owner_start=process_start(os.getpid()))
+    old["claimed_at"] = _time.time() - ops.CLAIM_HARD_BOUND_SECONDS - 1
+    MemoryJournal.rows = {"old": old}
+    monkeypatch.setattr(ops, "_grant_row", lambda grant_id, org: None)
+    assert ops.read("old", journal=MemoryJournal)["state"] == "failed"
+
+
+def test_prepare_prunes_operator_dialogs_never_signed(monkeypatch):
+    from tools.dashboard import link_operation_routes as routes
+
+    deleted = []
+    seen = {}
+    monkeypatch.setattr(ops, "plan", lambda op, request: {"request": dict(REQUEST),
+                                                          "staged": dict(STAGED), "review": {}})
+    monkeypatch.setattr(ops, "signing_view", lambda request, staged: {})
+    monkeypatch.setattr(ops, "prepare_entry", lambda *a, **k: None)
+    monkeypatch.setattr(ops.Journal, "stale_prepared",
+                        staticmethod(lambda older_than: seen.setdefault("cut", older_than) and ["op-old"]))
+    monkeypatch.setattr(ops.Journal, "delete", staticmethod(deleted.append))
+    routes.prepare({"op": "publish", "request": dict(REQUEST)}, now=NOW)
+    assert seen["cut"] == NOW - routes.PREPARED_WINDOW_SECONDS
+    assert deleted == ["op-old"]

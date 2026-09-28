@@ -67,6 +67,9 @@ class LinkOperationV1(SettingSchema):
     staged: dict = field(required=True,
                          description="The frozen registry request {method, path, registry_url, payload, binding}.")
     persona_pub: str = field(required=False, description="The signing persona, once verified.")
+    owner_pid: int = field(required=False, description="The process that holds the claim.")
+    owner_start: str = field(required=False,
+                             description="That process's kernel birth identity (boot id + start time).")
     claimed_at: float = field(required=False, description="Epoch seconds the operation was claimed.")
     grant_id: str = field(
         required=False,

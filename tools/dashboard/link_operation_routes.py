@@ -64,9 +64,14 @@ def prepare(body: object, *, now: float | None = None) -> dict:
             or body.get("op") not in (ops.PUBLISH, ops.REVOKE):
         raise ops.LinkOperationError("invalid_request")
     planned = ops.plan(body["op"], body["request"])
+    current = time.time() if now is None else now
+    # A dialog opened and closed without signing leaves a prepared entry;
+    # prune those past the window here rather than keep them forever.
+    for stale in ops.Journal.stale_prepared(current - PREPARED_WINDOW_SECONDS):
+        ops.Journal.delete(stale)
     operation_id = "op-" + secrets.token_hex(16)
     ops.prepare_entry(operation_id, op=body["op"], initiator="operator", planned=planned,
-                      now=time.time() if now is None else now)
+                      now=current)
     return {"operation_id": operation_id, "review": planned["review"],
             "signing": ops.signing_view(planned["request"], planned["staged"])}
 
