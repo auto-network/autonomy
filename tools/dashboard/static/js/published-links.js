@@ -282,8 +282,8 @@
     if(this.open!=='access:'+s.reservation_id) return heading+'<div class="pl-access-heading"><span>'+esc(labels[mode])+'</span></div><p>'+esc(descriptions[mode])+'</p></div>';
     var self=this;
     var options=['public','personal','oidc'].map(function(value){
-      var disabled=value==='personal'||(value==='oidc'&&!self.authentication.configured);
-      var note=value==='personal'?'For this dashboard\u2019s own address only.':value==='oidc'&&!self.authentication.configured?'Set up OIDC below first.':'';
+      var disabled=value==='oidc'&&!self.authentication.configured;
+      var note=value==='personal'?'One gate passkey covers the dashboard and every Personal service.':value==='oidc'&&!self.authentication.configured?'Set up OIDC below first.':'';
       return '<label class="pl-access-option '+(disabled?'unavailable':'')+'"><input type="radio" name="access-'+esc(s.reservation_id)+'" value="'+value+'" '+(mode===value?'checked':'')+' '+(disabled?'disabled':'')+'><span><b>'+labels[value]+'</b><span>'+descriptions[value]+'</span>'+(note?'<small>'+note+'</small>':'')+'</span></label>';
     }).join('');
     return heading+'<fieldset class="pl-access-editor"><legend>Who can access this service?</legend>'+options+'<div class="pl-formactions"><button class="pl-secondary" data-action="access-cancel">Cancel</button><button class="pl-primary" data-action="access-save">Save access</button></div></fieldset></div>';

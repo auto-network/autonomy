@@ -292,3 +292,108 @@ def test_a_rotated_cookie_key_refuses_every_earlier_cookie(runtime, dashboard):
     assert client.get("/oauth2/auth").status_code == 200
     (runtime / "cookie-secret").write_text("22" * 32)
     assert client.get("/oauth2/auth").status_code == 401
+
+
+# ── one passkey for the dashboard and every Personal service (auto-z98nc, D12) ──
+
+SUFFIX = "alice-25dacd12af16373e566c.serve.auto.network"
+SERVICE = "docs." + SUFFIX
+SERVICE_ORIGIN = f"https://{SERVICE}"
+
+
+def _write_shared_record(directory, *, credentials, enrollment, origins=(ORIGIN, SERVICE_ORIGIN)):
+    (directory / "gate.json").write_text(json.dumps({
+        "rp_id": SUFFIX, "origin": ORIGIN, "origins": list(origins), "dashboard_upstream": "10.0.0.5:8081",
+        "credentials": credentials, "enrollment": enrollment,
+    }))
+
+
+def test_the_relying_party_is_the_operators_own_suffix():
+    assert gate.gate_rp_id("dashboard.alice-x.serve.auto.network") == "alice-x.serve.auto.network"
+    assert gate.gate_rp_id("docs.alice-x.serve.auto.network") == "alice-x.serve.auto.network"
+    assert gate.gate_rp_id("themes.autonomy.example.com") == "autonomy.example.com"
+    # never the relay's shared base, never shorter than the host itself
+    assert gate.gate_rp_id("alice.serve.auto.network") == "alice.serve.auto.network"
+    assert gate.gate_rp_id("dashboard.local") == "dashboard.local"
+    assert gate.gate_rp_id("localhost") == "localhost"
+    assert gate._rp_covers("alice-x.serve.auto.network", "docs.alice-x.serve.auto.network")
+    assert not gate._rp_covers("alice-x.serve.auto.network", "docs.bob-y.serve.auto.network")
+    assert not gate._rp_covers("alice-x.serve.auto.network", "evil-alice-x.serve.auto.network")
+
+
+def test_one_passkey_enrolled_at_the_suffix_signs_in_at_the_dashboard_and_at_a_service(runtime, dashboard):
+    calls, post = dashboard
+    _write_shared_record(runtime, credentials=[], enrollment={
+        "open": True, "token_sha256": gate.token_sha256(TOKEN), "expires_at": time.time() + 600})
+    key = ec.generate_private_key(ec.SECP256R1())
+    at_dashboard = _client(runtime, post)
+    options = at_dashboard.post("/oauth2/enroll/options", json={"token": TOKEN}).json()["options"]
+    assert options["rp"]["id"] == SUFFIX
+    registered = at_dashboard.post("/oauth2/enroll/verify", json={
+        "token": TOKEN, "credential": _attestation(key, options["challenge"], rp_id=SUFFIX)})
+    assert registered.status_code == 200, registered.text
+    assert calls[-1][2]["rp_id"] == SUFFIX
+    saved = calls[-1][2]
+    _write_shared_record(runtime, credentials=[{
+        "credential_id": saved["credential_id"], "public_key": saved["public_key"],
+        "sign_count": 0, "transports": saved["transports"], "rp_id": SUFFIX}], enrollment=None)
+    # At the service's own hostname: its own login, the same passkey.
+    at_service = TestClient(gate.build_app(runtime, post_dashboard=post), base_url=SERVICE_ORIGIN)
+    assert at_service.get("/oauth2/auth").status_code == 401
+    options = at_service.post("/oauth2/login/options", json={}).json()["options"]
+    assert options["rpId"] == SUFFIX
+    verified = at_service.post("/oauth2/login/verify", json={
+        "rd": SERVICE_ORIGIN + "/app", "credential": _assertion(key, options["challenge"], rp_id=SUFFIX, origin=SERVICE_ORIGIN, sign_count=3)})
+    assert verified.status_code == 200, verified.text
+    assert verified.json() == {"ok": True, "redirect": SERVICE_ORIGIN + "/app"}
+    assert at_service.get("/oauth2/auth").status_code == 200
+    # The dashboard's own gate is unchanged: the same passkey, its own cookie.
+    fresh = _client(runtime, post)
+    assert fresh.get("/oauth2/auth").status_code == 401
+    options = fresh.post("/oauth2/login/options", json={}).json()["options"]
+    assert fresh.post("/oauth2/login/verify", json={
+        "credential": _assertion(key, options["challenge"], rp_id=SUFFIX, origin=ORIGIN, sign_count=4)}).status_code == 200
+    assert fresh.get("/oauth2/auth").status_code == 200
+    # A redirect to the OTHER gated origin after a login here is not followed.
+    options = fresh.post("/oauth2/login/options", json={}).json()["options"]
+    crossed = fresh.post("/oauth2/login/verify", json={
+        "rd": ORIGIN + "/x", "credential": _assertion(key, options["challenge"], rp_id=SUFFIX, origin=ORIGIN, sign_count=5)})
+    assert crossed.json()["redirect"] == ORIGIN + "/x"
+    assert fresh.get("/oauth2/start", params={"rd": SERVICE_ORIGIN + "/a"}).text.count(SERVICE_ORIGIN + "/a") == 1
+
+
+def test_a_passkey_enrolled_for_the_dashboard_hostname_alone_opens_only_the_dashboard(runtime, dashboard):
+    """A gate passkey from before services (Home, run 10) was registered for
+    the dashboard hostname. It still opens the dashboard; a service address
+    says nothing is enrolled for it until a passkey is enrolled at the suffix."""
+    calls, post = dashboard
+    key = ec.generate_private_key(ec.SECP256R1())
+    _open_enrollment(runtime)   # legacy record: rp_id = the dashboard host
+    client = _client(runtime, post)
+    assert _enroll(client, runtime, key).status_code == 200
+    legacy = calls[-1][2]
+    _write_shared_record(runtime, credentials=[{
+        "credential_id": legacy["credential_id"], "public_key": legacy["public_key"],
+        "sign_count": 0, "transports": legacy["transports"], "rp_id": RP_ID}], enrollment=None)
+    at_dashboard = _client(runtime, post)
+    options = at_dashboard.post("/oauth2/login/options", json={}).json()["options"]
+    assert options["rpId"] == RP_ID
+    assert at_dashboard.post("/oauth2/login/verify", json={
+        "credential": _assertion(key, options["challenge"], sign_count=2)}).status_code == 200
+    at_service = TestClient(gate.build_app(runtime, post_dashboard=post), base_url=SERVICE_ORIGIN)
+    refused = at_service.post("/oauth2/login/options", json={})
+    assert refused.status_code == 409 and "no passkey is enrolled for this address" in refused.json()["error"]
+
+
+def test_a_host_the_gate_does_not_stand_in_front_of_gets_no_ceremony(runtime, dashboard):
+    calls, post = dashboard
+    _write_shared_record(runtime, credentials=[{
+        "credential_id": "Y3JlZA", "public_key": "cHVi", "sign_count": 0, "transports": [], "rp_id": SUFFIX}],
+        enrollment={"open": True, "token_sha256": gate.token_sha256(TOKEN), "expires_at": time.time() + 600})
+    elsewhere = TestClient(gate.build_app(runtime, post_dashboard=post), base_url="https://other." + SUFFIX)
+    assert elsewhere.post("/oauth2/login/options", json={}).status_code == 403
+    assert elsewhere.post("/oauth2/enroll/options", json={"token": TOKEN}).status_code == 403
+    # The gateway's forwarded host is what counts, not the socket's Host.
+    forwarded = TestClient(gate.build_app(runtime, post_dashboard=post), base_url="http://127.0.0.1:4181")
+    options = forwarded.post("/oauth2/login/options", json={}, headers={"X-Forwarded-Host": SERVICE})
+    assert options.status_code == 200 and options.json()["options"]["rpId"] == SUFFIX

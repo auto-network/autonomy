@@ -404,10 +404,48 @@ async def _build_desired_state() -> GatewayDesiredState:
         *(f"org-oidc:{org}" for org in orgs if service_auth.configuration(org)["configured"]),
         passkey_gate.HELPER_ID,
     ])
+    snapshots = []
     for org in orgs:
         snapshot = await asyncio.to_thread(_org_publication_snapshot, org)
-        if snapshot is None:
-            continue
+        if snapshot is not None:
+            snapshots.append((org, snapshot))
+    # The personal passkey gate is ONE helper for the node (auto-z98nc, D12):
+    # the dashboard's own route is its relying party's home and every
+    # Personal service, in any organization, stands behind the same passkey.
+    # Both are known before any route is planned, so a service planned before
+    # the dashboard route still gates under the shared relying party.
+    passkey_hosts: list[str] = []
+    passkey_dashboard: tuple[str, str, str] | None = None   # (org, reservation_id, hostname)
+    for org, (candidates, target_rows, facts) in snapshots:
+        for reservation in candidates:
+            if reservation.get("state") != "active":
+                continue
+            reservation_id = reservation["reservation_id"]
+            row = target_rows.get(reservation_id, {})
+            hostname = facts.get(reservation_id, (None, None))[1]
+            if row.get("access_mode", "public") != "personal" or not hostname:
+                continue
+            passkey_hosts.append(hostname)
+            if row.get("kind") == "dashboard" and passkey_dashboard is None:
+                passkey_dashboard = (org, reservation_id, hostname)
+    passkey_upstream: str | None = None
+
+    async def _passkey_helper(port: int) -> AuthHelper:
+        """The helper, materialized once with the dashboard route's upstream
+        (the callbacks' target) and every gated host."""
+        nonlocal passkey_upstream
+        if passkey_dashboard is None:
+            raise ValueError("the personal passkey gate needs the dashboard's own relay route")
+        if passkey_upstream is None:
+            dash_org, dash_id, _host = passkey_dashboard
+            dash_route = await service_gateway.resolve_gateway_route(dash_org, dash_id)
+            passkey_upstream = f"{dash_route.upstream_ip}:{dash_route.port}"
+        return await asyncio.to_thread(
+            passkey_gate.materialize_helper, passkey_dashboard[2], port, passkey_upstream,
+            tuple(sorted(set(passkey_hosts))),
+        )
+
+    for org, snapshot in snapshots:
         candidates, target_rows, facts = snapshot
         found_publication = True
         if not await _connector_ready(org):
@@ -459,21 +497,19 @@ async def _build_desired_state() -> GatewayDesiredState:
                         helper_id, f"127.0.0.1:{ports[helper_id]}", ("/oauth2/callback",),
                     ))
                 elif access == "personal":
-                    # The dashboard's own passkey gate (operator decision
-                    # 2026-09-27): one helper, bound to the dashboard route's
-                    # hostname (the passkey's relying party), the enrollment
-                    # path unlogged because it carries the token. A session
-                    # Service under the personal mode would need a gate of
-                    # its own hostname; until one exists it is unavailable,
-                    # never served under a gate for another name.
-                    if target_rows.get(reservation_id, {}).get("kind") != "dashboard":
-                        raise ValueError("the personal passkey gate serves the dashboard route only")
+                    # The node's own passkey gate (operator decisions
+                    # 2026-09-27, D12): one helper, whose relying party is the
+                    # operator's own suffix, in front of the dashboard route
+                    # and every Personal service; the enrollment path is
+                    # unlogged because it carries the token. Without the
+                    # dashboard route published there is nowhere to enrol, so
+                    # a Personal service alone is unavailable, with the reason
+                    # logged, never served ungated.
+                    if target_rows.get(reservation_id, {}).get("kind") == "dashboard":
+                        passkey_upstream = f"{route.upstream_ip}:{route.port}"
                     helper_id = passkey_gate.HELPER_ID
                     if helper_id not in helpers:
-                        helpers[helper_id] = await asyncio.to_thread(
-                            passkey_gate.materialize_helper, route.hostname, ports[helper_id],
-                            f"{route.upstream_ip}:{route.port}",
-                        )
+                        helpers[helper_id] = await _passkey_helper(ports[helper_id])
                     route = replace(route, gate=service_gateway.GatedRoute(
                         helper_id, f"127.0.0.1:{ports[helper_id]}", ("/oauth2/enroll",),
                     ))

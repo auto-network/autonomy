@@ -48,7 +48,8 @@ async function main(){
   card().querySelector('[data-action="access-edit"]').click();
   const access=card().querySelector('.pl-access-editor');
   assert.deepEqual([...access.querySelectorAll('b')].map(o=>o.textContent),['Public','Personal','Organization (OIDC)']);
-  assert.equal(access.querySelector('[value="personal"]').disabled,true);
+  assert.equal(access.querySelector('[value="personal"]').disabled,false);   // auto-z98nc: one gate passkey covers Personal services too
+  assert.match(access.textContent,/One gate passkey covers the dashboard and every Personal service/);
   assert.equal(card().querySelector('.pl-access-summary .pl-eyebrow').textContent,'Access control');
   access.querySelector('[value="oidc"]').checked=true;
   card().querySelector('[data-action="access-cancel"]').click();

@@ -316,19 +316,28 @@ def runtime_dir() -> Path:
     return RUNTIME_ROOT / HELPER_ID
 
 
-def projection(hostname: str, dashboard_upstream: str) -> dict:
+def projection(hostname: str, dashboard_upstream: str, gated_hosts: tuple[str, ...] = ()) -> dict:
     """What the helper reads: public credential data and the enrollment
-    hash, never the token, never the vault."""
+    hash, never the token, never the vault. The relying party is the
+    operator's own suffix (helper.gate_rp_id), so one enrolled passkey covers
+    the dashboard route and every Personal service in ``gated_hosts``
+    (auto-z98nc); a passkey enrolled for the dashboard hostname alone, from
+    before services, still opens that one host."""
     payload = record()
     enrollment = payload.get("enrollment") or None
+    rp_id = helper.gate_rp_id(hostname)
+    hosts = {hostname, *gated_hosts}
     return {
-        "rp_id": hostname,
+        "rp_id": rp_id,
         "origin": f"https://{hostname}",
+        "origins": sorted(f"https://{host}" for host in hosts),
         "dashboard_upstream": dashboard_upstream,
         "credentials": [
             {"credential_id": row["credential_id"], "public_key": row["public_key"],
-             "sign_count": int(row.get("sign_count") or 0), "transports": row.get("transports") or []}
-            for row in payload.get("credentials") or [] if row.get("rp_id") == hostname
+             "sign_count": int(row.get("sign_count") or 0), "transports": row.get("transports") or [],
+             "rp_id": row.get("rp_id")}
+            for row in payload.get("credentials") or []
+            if row.get("rp_id") == rp_id or row.get("rp_id") in hosts
         ],
         "enrollment": (
             {"open": True, "token_sha256": enrollment["token_sha256"], "expires_at": enrollment["expires_at"]}
@@ -337,15 +346,17 @@ def projection(hostname: str, dashboard_upstream: str) -> dict:
     }
 
 
-def materialize_helper(hostname: str, port: int, dashboard_upstream: str):
+def materialize_helper(hostname: str, port: int, dashboard_upstream: str, gated_hosts: tuple[str, ...] = ()):
     """Write the helper's runtime files and describe its container. Called by
-    the gateway planner for the dashboard's personal route; the returned
-    revision changes whenever the projection does, which re-renders the
-    route (the helper itself re-reads the files per request)."""
+    the gateway planner for the dashboard's personal route (``hostname``) and
+    every Personal service beside it (``gated_hosts``); the returned revision
+    changes whenever the projection does, which re-renders the routes (the
+    helper itself re-reads the files per request)."""
     from tools.dashboard.web_gateway_supervisor import AuthHelper
 
+    gated_hosts = tuple(sorted(set(gated_hosts)))
     files = {
-        "gate.json": json.dumps(projection(hostname, dashboard_upstream), sort_keys=True).encode(),
+        "gate.json": json.dumps(projection(hostname, dashboard_upstream, gated_hosts), sort_keys=True).encode(),
         "cookie-secret": cookie_secret().hex().encode(),
         "helper-secret": helper_secret().encode(),
     }
@@ -363,16 +374,17 @@ def materialize_helper(hostname: str, port: int, dashboard_upstream: str):
     image, app_mount = own_runtime()
     revision = digest.hexdigest()
     service = helper.render_helper_service(directory, revision, image=image, port=port, app_mount=app_mount)
-    _remember(hostname, port, dashboard_upstream)
+    _remember(hostname, port, dashboard_upstream, gated_hosts)
     return AuthHelper(HELPER_ID, str(directory), revision, service=service)
 
 
 _last_materialization: dict | None = None
 
 
-def _remember(hostname: str, port: int, dashboard_upstream: str) -> None:
+def _remember(hostname: str, port: int, dashboard_upstream: str, gated_hosts: tuple[str, ...] = ()) -> None:
     global _last_materialization
-    _last_materialization = {"hostname": hostname, "port": port, "dashboard_upstream": dashboard_upstream}
+    _last_materialization = {"hostname": hostname, "port": port, "dashboard_upstream": dashboard_upstream,
+                             "gated_hosts": tuple(gated_hosts)}
 
 
 def _rematerialize() -> None:

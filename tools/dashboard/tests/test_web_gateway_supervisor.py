@@ -1196,17 +1196,19 @@ async def test_planner_gates_the_personal_dashboard_route_with_the_passkey_helpe
     monkeypatch.setattr(sup.service_gateway, "resolve_gateway_route", resolve)
     materialized = []
 
-    def materialize(host, port, upstream):
-        materialized.append((host, port, upstream))
+    def materialize(host, port, upstream, gated_hosts=()):
+        materialized.append((host, port, upstream, gated_hosts))
         return sup.AuthHelper("dashboard-passkey", str(tmp_path), "rev-1", service={"image": "node", "volumes": [
             {"type": "bind", "source": str(tmp_path), "target": "/run/gate", "read_only": True}]})
 
     monkeypatch.setattr(passkey_gate, "materialize_helper", materialize)
+    monkeypatch.setattr(sup.service_gateway, "reservation_hostname", lambda org, reservation_id: hostname)
 
     plan = await sup.build_desired_state()
 
     assert plan.ready is True, plan
-    assert materialized == [(hostname, sup.helper_listener_ports(["dashboard-passkey"])["dashboard-passkey"], "172.16.0.9:8081")]
+    assert materialized == [(hostname, sup.helper_listener_ports(["dashboard-passkey"])["dashboard-passkey"],
+                             "172.16.0.9:8081", (hostname,))]
     assert [h.helper_id for h in plan.helpers] == ["dashboard-passkey"]
     assert plan.helpers[0].service["image"] == "node"
     assert "forward_auth 127.0.0.1:" in plan.caddyfile and "uri /oauth2/auth" in plan.caddyfile
@@ -1238,23 +1240,25 @@ def test_helper_reconciliation_uses_the_helpers_own_service_and_recovers_its_run
     assert runtime is not None
 
 
-@pytest.mark.asyncio
-async def test_planner_renders_a_personal_session_service_unavailable_not_gated_under_another_name(monkeypatch, tmp_path):
-    """The passkey gate is bound to the dashboard route's hostname (the
-    relying party); a session Service under the personal mode has no gate
-    of its own name yet and renders the unavailable page, never a gate for
-    another hostname."""
+def _personal_fleet(monkeypatch, tmp_path, *, with_dashboard: bool):
+    """Two organizations: the dashboard's own route in the personal scope
+    (when with_dashboard) and a session Service in 'acme', both Personal."""
     from tools.dashboard import passkey_gate, service_auth
 
-    monkeypatch.setattr(sup, "_discover_orgs", lambda: ["personal"])
+    monkeypatch.setattr(sup, "_discover_orgs", lambda: ["acme", "personal"])
     monkeypatch.setattr(service_auth, "configuration", lambda org: {"configured": False})
+    dash = "5030b922-d6cc-565c-8209-f675fa755226"
     rid = "6b5ef2c1-1b41-5f7a-9c7d-2f0b6a3d4e55"
+    dash_host = "dashboard.alice-x.serve.auto.network"
     host = "docs.alice-x.serve.auto.network"
-    monkeypatch.setattr(sup.service_publication, "list_reservations",
-                        lambda _org: [{"reservation_id": rid, "state": "active", "persona_label": "alice-x"}])
+    rows = {"acme": [{"reservation_id": rid, "state": "active", "persona_label": "alice-x"}],
+            "personal": [{"reservation_id": dash, "state": "active", "persona_label": "alice-x"}] if with_dashboard else []}
+    targets = {"acme": [{"reservation_id": rid, "machine_id": LOCAL_MACHINE, "access_mode": "personal"}],
+               "personal": [{"reservation_id": dash, "machine_id": LOCAL_MACHINE, "kind": "dashboard",
+                             "access_mode": "personal"}] if with_dashboard else []}
+    monkeypatch.setattr(sup.service_publication, "list_reservations", lambda org: rows[org])
     monkeypatch.setattr(sup.service_publication, "_read_local_machine_id", lambda: LOCAL_MACHINE)
-    monkeypatch.setattr(sup.service_publication, "list_service_targets",
-                        lambda _org: [{"reservation_id": rid, "machine_id": LOCAL_MACHINE, "access_mode": "personal"}])
+    monkeypatch.setattr(sup.service_publication, "list_service_targets", lambda org: targets[org])
     monkeypatch.setattr(sup.service_certificate, "active_gateway_pair", lambda _org, _persona: (
         "/run/autonomy-service-gateway-certs/personas/alice-x/tls.crt",
         "/run/autonomy-service-gateway-certs/personas/alice-x/tls.key"))
@@ -1263,22 +1267,58 @@ async def test_planner_renders_a_personal_session_service_unavailable_not_gated_
         return True
 
     monkeypatch.setattr(sup, "_connector_ready", connector_ready)
+    hosts = {rid: host, dash: dash_host}
 
     async def resolve(org, reservation_id):
+        if reservation_id == dash:
+            return ServiceGatewayRoute(reservation_id=dash, hostname=dash_host, session_id="dashboard",
+                                       container_id="a" * 64, network="autonomy_default", upstream_ip="172.16.0.9",
+                                       port=8081, expires_at="2026-08-31T21:12:00.000Z")
         return ServiceGatewayRoute(reservation_id=rid, hostname=host, session_id="auto-0831-171125",
                                    container_id="a" * 64, network="autonomy_default", upstream_ip="172.16.0.42",
                                    port=8000, expires_at="2026-08-31T21:12:00.000Z")
 
     monkeypatch.setattr(sup.service_gateway, "resolve_gateway_route", resolve)
-    monkeypatch.setattr(sup.service_gateway, "reservation_hostname", lambda org, reservation_id: host)
-    monkeypatch.setattr(passkey_gate, "materialize_helper",
-                        lambda *a: pytest.fail("no gate may be materialized for a session Service"))
+    monkeypatch.setattr(sup.service_gateway, "reservation_hostname", lambda org, reservation_id: hosts[reservation_id])
+    materialized = []
+
+    def materialize(hostname, port, upstream, gated_hosts=()):
+        materialized.append((hostname, port, upstream, gated_hosts))
+        return sup.AuthHelper("dashboard-passkey", str(tmp_path), "rev-1", service={"image": "node", "volumes": [
+            {"type": "bind", "source": str(tmp_path), "target": "/run/gate", "read_only": True}]})
+
+    monkeypatch.setattr(passkey_gate, "materialize_helper", materialize)
+    return materialized, dash_host, host
+
+
+@pytest.mark.asyncio
+async def test_planner_gates_a_personal_session_service_under_the_shared_relying_party(monkeypatch, tmp_path):
+    """D12 (auto-z98nc): one gate passkey covers the dashboard route and every
+    Personal service. The service is planned first (its org sorts first),
+    yet the helper is materialized once, for the dashboard's hostname and
+    upstream, with both hosts gated."""
+    materialized, dash_host, host = _personal_fleet(monkeypatch, tmp_path, with_dashboard=True)
 
     plan = await sup.build_desired_state()
 
-    assert plan.ready is True and plan.helpers == ()
+    assert plan.ready is True, plan
+    port = sup.helper_listener_ports(["dashboard-passkey"])["dashboard-passkey"]
+    assert materialized == [(dash_host, port, "172.16.0.9:8081", (dash_host, host))]
+    assert [h.helper_id for h in plan.helpers] == ["dashboard-passkey"]
+    assert plan.caddyfile.count("uri /oauth2/auth") == 2
+    assert f"redir * /oauth2/start?rd=https%3A%2F%2F{host}%2F 302" in plan.caddyfile
+    assert "reverse_proxy 172.16.0.42:8000" in plan.caddyfile and "not currently available" not in plan.caddyfile
+
+
+@pytest.mark.asyncio
+async def test_a_personal_session_service_without_the_dashboard_route_is_unavailable_never_ungated(monkeypatch, tmp_path):
+    materialized, _dash_host, _host = _personal_fleet(monkeypatch, tmp_path, with_dashboard=False)
+
+    plan = await sup.build_desired_state()
+
+    assert plan.ready is True and plan.helpers == () and materialized == []
     assert "not currently available" in plan.caddyfile
-    assert "forward_auth" not in plan.caddyfile
+    assert "forward_auth" not in plan.caddyfile and "reverse_proxy 172.16.0.42:8000" not in plan.caddyfile
 
 
 # ── auto-hf3ow: Settings reads off the loop, keyed, and coalesced ─────────

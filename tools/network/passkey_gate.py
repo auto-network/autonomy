@@ -2,9 +2,13 @@
 
 One small process, run from the node image in the gateway's network namespace
 (``render_helper_service``), that the gateway consults for every request to
-the dashboard's relay route (``service_gateway.render_gate``: ``forward_auth``
-on ``/oauth2/auth``, the rest of ``/oauth2/*`` proxied here). The dashboard
-process sees nothing until this helper has said yes.
+the dashboard's relay route and to every session Service set to Personal
+(``service_gateway.render_gate``: ``forward_auth`` on ``/oauth2/auth``, the
+rest of ``/oauth2/*`` proxied here). The dashboard process, or the Service,
+sees nothing until this helper has said yes. One relying party covers them
+all: the operator's own suffix (``gate_rp_id``; operator decision D12,
+auto-z98nc), so one enrolled passkey signs in at each gated hostname, each
+with its own cookie.
 
 Decided by the operator on 2026-09-27 (graph://c9d72ea4-feb, option O2d):
 our own helper on py_webauthn, the library the dashboard already uses for its
@@ -13,7 +17,8 @@ identity passkey, not a third-party identity provider. What it does:
 * ``GET /oauth2/auth`` — the forward-auth check: a valid gate cookie answers
   200, anything else 401 (the gateway then redirects to ``/oauth2/start``).
 * ``GET /oauth2/start`` — the login page: one WebAuthn assertion against a
-  credential enrolled for this hostname. ``POST /oauth2/login/options`` and
+  credential enrolled for the shared relying party (or, from before
+  services, for this exact hostname). ``POST /oauth2/login/options`` and
   ``POST /oauth2/login/verify`` are its two calls.
 * ``GET /oauth2/enroll?token=…`` — the enrollment page, reachable only with
   the one-time token the dashboard minted (sha256 + expiry in the gate
@@ -51,6 +56,38 @@ from starlette.routing import Route
 from tools.network import clock
 
 HELPER_ID = "dashboard-passkey"
+
+
+def gate_rp_id(hostname: str) -> str:
+    """The relying party a gate passkey is registered for: the operator's own
+    suffix, so one enrolled passkey verifies at the dashboard route AND at
+    every Personal service published beside it (auto-z98nc, D12).
+    ``dashboard.<label>.serve.auto.network`` -> ``<label>.serve.auto.network``;
+    ``themes.autonomy.example.com`` -> ``autonomy.example.com``. WebAuthn lets
+    the RP ID be any registrable-domain suffix of the origin's host; the
+    persona label (or the verified custom zone) is the tightest one the
+    operator owns, never a public suffix. A host too short to carry a label
+    above such a suffix is its own relying party."""
+    host = (hostname or "").strip().lower().rstrip(".")
+    labels = host.split(".")
+    if len(labels) >= 4:
+        suffix = ".".join(labels[1:])
+        # Never the relay's shared base: that is every operator's suffix,
+        # not this one's.
+        if suffix != RELAY_BASE:
+            return suffix
+    return host
+
+
+#: The relay's shared base under which every persona label lives.
+RELAY_BASE = "serve.auto.network"
+
+
+def _rp_covers(rp_id: str, host: str) -> bool:
+    """Whether a credential registered for *rp_id* may be asserted at *host*
+    (the host equals the RP ID or is a subdomain of it)."""
+    rp_id, host = (rp_id or "").lower(), (host or "").lower()
+    return bool(rp_id) and (host == rp_id or host.endswith("." + rp_id))
 COOKIE_NAME = "__Host-autonomy-gate"
 #: The two refusal windows live in tools/network/clock.py with every other
 #: gate: clock.PASSKEY_GATE_SESSION_TTL_S (the cookie) and
@@ -170,13 +207,53 @@ class GateApp:
         while len(store) > limit:
             store.pop(next(iter(store)))
 
+    @staticmethod
+    def _allowed_origins(record: dict) -> list[str]:
+        """The origins this gate stands in front of: the dashboard route and
+        every Personal service (the projection's ``origins``); a record from
+        before services carried one ``origin``."""
+        origins = record.get("origins")
+        if not isinstance(origins, list) or not origins:
+            origins = [record.get("origin")] if record.get("origin") else []
+        return [o.rstrip("/") for o in origins if isinstance(o, str) and o]
+
+    @staticmethod
+    def _request_host(request: Request) -> str:
+        """The hostname the visitor used: the gateway's forwarded host (it
+        proxies /oauth2/* and forward_auth to this helper), else the Host."""
+        forwarded = request.headers.get("x-forwarded-host") or ""
+        host = forwarded.split(",")[0].strip() or request.headers.get("host") or ""
+        return host.split(":")[0].strip().lower()
+
+    def _origin_for(self, record: dict, request: Request) -> str | None:
+        """The origin a ceremony at this request is bound to: the request's
+        own origin when it is one this gate serves, else nothing (a ceremony
+        is never accepted for a host the gate does not stand in front of)."""
+        host = self._request_host(request)
+        origin = f"https://{host}" if host else ""
+        return origin if origin in self._allowed_origins(record) else None
+
+    @staticmethod
+    def _rp_for(record: dict, host: str) -> str | None:
+        """The relying party a login at *host* asserts under: the shared
+        suffix when a passkey is enrolled for it, else the host itself when a
+        passkey was enrolled for that exact name (a dashboard-only enrolment
+        from before services), else None (nothing enrolled for this host)."""
+        shared = record.get("rp_id") or ""
+        registered = {str(row.get("rp_id") or shared) for row in record.get("credentials") or []}
+        if shared and _rp_covers(shared, host) and shared in registered:
+            return shared
+        if host in registered:
+            return host
+        return None
+
     def _redirect_target(self, record: dict, rd: str | None) -> str:
-        """Only a URL on this gate's own origin is followed after login."""
-        origin = record.get("origin") or ""
-        if isinstance(rd, str) and origin and rd.startswith(origin + "/"):
-            parts = urlsplit(rd)
-            if not parts.fragment:
-                return rd
+        """Only a URL on an origin this gate stands in front of is followed
+        after login."""
+        if isinstance(rd, str):
+            for origin in self._allowed_origins(record):
+                if rd.startswith(origin + "/") and not urlsplit(rd).fragment:
+                    return rd
         return "/"
 
     # -- forward-auth --
@@ -203,10 +280,13 @@ class GateApp:
         from webauthn.helpers.structs import UserVerificationRequirement
 
         record = self.runtime.record()
-        rp_id, origin = record.get("rp_id"), record.get("origin")
-        if not rp_id or not origin:
+        if not record.get("rp_id") or not self._allowed_origins(record):
             return JSONResponse({"ok": False, "error": "gate is not configured"}, status_code=503)
-        if not (record.get("credentials") or []):
+        origin = self._origin_for(record, request)
+        if origin is None:
+            return JSONResponse({"ok": False, "error": "this address is not behind the gate"}, status_code=403)
+        rp_id = self._rp_for(record, self._request_host(request))
+        if rp_id is None:
             return JSONResponse({"ok": False, "error": (
                 "no passkey is enrolled for this address; open enrollment from the "
                 "dashboard on the machine itself")}, status_code=409)
@@ -238,7 +318,9 @@ class GateApp:
         record = self.runtime.record()
         row = next((r for r in record.get("credentials") or []
                     if r.get("credential_id") == credential.get("rawId")), None)
-        if row is None:
+        # A passkey answers only under the relying party it was registered
+        # for: a dashboard-only enrolment never opens a service address.
+        if row is None or str(row.get("rp_id") or record.get("rp_id")) != pending["rp_id"]:
             return JSONResponse({"ok": False, "error": "this passkey is not enrolled here"}, status_code=403)
         try:
             verification = verify_authentication_response(
@@ -290,9 +372,11 @@ class GateApp:
         record = self.runtime.record()
         if not enrollment_open(record, token):
             return JSONResponse({"ok": False, "error": "enrollment is closed"}, status_code=403)
-        rp_id, origin = record.get("rp_id"), record.get("origin")
-        if not rp_id or not origin:
+        rp_id, origin = record.get("rp_id"), self._origin_for(record, request)
+        if not rp_id or not self._allowed_origins(record):
             return JSONResponse({"ok": False, "error": "gate is not configured"}, status_code=503)
+        if origin is None:
+            return JSONResponse({"ok": False, "error": "this address is not behind the gate"}, status_code=403)
         exclude = []
         for row in record.get("credentials") or []:
             try:

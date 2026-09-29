@@ -143,7 +143,8 @@ def test_materialize_writes_the_projection_and_describes_the_helper_container(ga
     directory = gate_env.runtime / "dashboard-passkey"
     assert first.runtime_dir == str(directory)
     projection = json.loads((directory / "gate.json").read_text())
-    assert projection["rp_id"] == HOST and projection["origin"] == "https://" + HOST
+    assert projection["rp_id"] == helper.gate_rp_id(HOST) and projection["origin"] == "https://" + HOST
+    assert projection["origins"] == ["https://" + HOST]
     assert projection["dashboard_upstream"] == "172.16.0.9:8081"
     assert projection["credentials"] == []
     assert projection["enrollment"]["token_sha256"] == helper.token_sha256(minted["token"])
@@ -161,7 +162,7 @@ def test_materialize_writes_the_projection_and_describes_the_helper_container(ga
     projection = json.loads((directory / "gate.json").read_text())
     assert projection["enrollment"] is None
     assert projection["credentials"] == [{"credential_id": "Y3JlZC0x", "public_key": "cHVibGljLWtleQ",
-                                          "sign_count": 0, "transports": ["internal"]}]
+                                          "sign_count": 0, "transports": ["internal"], "rp_id": HOST}]
     second = passkey_gate.materialize_helper(HOST, 4181, "172.16.0.9:8081")
     assert second.revision != first.revision
     # A credential enrolled for another hostname is not offered on this one.
@@ -297,3 +298,29 @@ def test_revoke_rotates_the_cookie_key_and_rewrites_the_projection(gate_env):
     assert bytes.fromhex((directory / "cookie-secret").read_text()) == after
     assert not helper.cookie_valid(after, old_cookie)
     assert json.loads((directory / "gate.json").read_text())["credentials"] == []
+
+
+# ── one passkey for every Personal service (auto-z98nc) ────────────────
+
+def test_the_projection_covers_every_gated_host_under_the_shared_relying_party(gate_env):
+    """The relying party is the operator's suffix; a passkey enrolled for it
+    is projected, a passkey enrolled for the dashboard hostname alone (from
+    before services) is projected with its own rp_id, and a passkey for an
+    unrelated name is not."""
+    suffix = helper.gate_rp_id(HOST)
+    docs = "docs." + suffix
+    minted = passkey_gate.open_enrollment(opened_by="test")
+    passkey_gate.register_credential(_credential(token=minted["token"], credential_id="c2hhcmVk", rp_id=suffix))
+    minted = passkey_gate.open_enrollment(opened_by="test")
+    passkey_gate.register_credential(_credential(token=minted["token"], credential_id="bGVnYWN5", rp_id=HOST))
+    minted = passkey_gate.open_enrollment(opened_by="test")
+    passkey_gate.register_credential(_credential(token=minted["token"], credential_id="b3RoZXI", rp_id="other.example"))
+    projection = passkey_gate.projection(HOST, "172.16.0.9:8081", (docs,))
+    assert projection["rp_id"] == suffix
+    assert projection["origins"] == sorted(["https://" + HOST, "https://" + docs])
+    assert [(c["credential_id"], c["rp_id"]) for c in projection["credentials"]] == [("c2hhcmVk", suffix), ("bGVnYWN5", HOST)]
+    assert "public_key" in projection["credentials"][0]
+    materialized = passkey_gate.materialize_helper(HOST, 4181, "172.16.0.9:8081", (docs, docs))
+    written = json.loads((passkey_gate.runtime_dir() / "gate.json").read_text())
+    assert written["origins"] == projection["origins"] and materialized.helper_id == "dashboard-passkey"
+    assert passkey_gate._last_materialization["gated_hosts"] == (docs,)

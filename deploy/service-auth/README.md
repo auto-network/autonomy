@@ -31,7 +31,9 @@ instructions describe Authorization Code, S256 PKCE, `form_post`, and
 `openid email profile`; only Okta is validated by this integration's acceptance.
 Wildcard support depends on the provider. Personal (passkey) is the dashboard's own
 gate helper (tools/network/passkey_gate.py), run from the node image beside the gateway
-for the dashboard's relay route; it uses no identity provider.
+for the dashboard's relay route and every Service set to Personal; it uses no identity
+provider. Its relying party is the operator's own suffix (`<label>.serve.auto.network`,
+or a custom zone), so one enrolled gate passkey signs in at each gated hostname.
 
 ### Configuration and runtime state
 
