@@ -296,7 +296,8 @@ async def publish(mode: str, *, org: str = DEFAULT_PUBLISHER, app_label: str | N
             raise service_publication.ServicePublicationError("label_" + check.code, 400, check.reason)
         label = check.label
     app = app_label if app_label is not None else DEFAULT_APP_LABEL
-    reservation, _created = service_publication.reserve_origin(org, app, persona_slug=label)
+    reservation, _created = await asyncio.to_thread(
+        service_publication.reserve_origin, org, app, persona_slug=label)
     reservation_id = reservation["reservation_id"]
     await service_publication.bind_service_target(
         org, reservation_id, None, service_publication.DASHBOARD_TARGET_DEFAULT_PORT,

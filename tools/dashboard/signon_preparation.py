@@ -1,4 +1,5 @@
 """Prepare encrypted root-ceremony inputs using the existing public recipient."""
+import asyncio
 import json
 import logging
 import time
@@ -178,7 +179,8 @@ async def get_preparation(request):
                 return JSONResponse({"error": "recipient_missing"}, status_code=409,
                                     headers={"Cache-Control": "no-store"})
         only_org = request.query_params.get("org") or None
-        payload = json.dumps(collect(only_org=only_org), separators=(",", ":")).encode()
+        collected = await asyncio.to_thread(collect, only_org=only_org)
+        payload = json.dumps(collected, separators=(",", ":")).encode()
         return JSONResponse({"sealed": sealing.seal(payload, public, PURPOSE).hex()},
                             headers={"Cache-Control": "no-store"})
     except Exception:

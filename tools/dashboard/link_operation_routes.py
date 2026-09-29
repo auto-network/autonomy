@@ -89,8 +89,9 @@ async def carry_out(operation_id: str, body: object, *, now: float | None = None
     current = time.time() if now is None else now
     if current >= float(entry["prepared_at"]) + PREPARED_WINDOW_SECONDS:
         raise ops.LinkOperationError("window_closed")
-    decision, persona = ops.verify(entry["op"], entry["request"], entry["staged"], body,
-                                   not_before=float(entry["prepared_at"]))
+    decision, persona = await asyncio.to_thread(
+        ops.verify, entry["op"], entry["request"], entry["staged"], body,
+        not_before=float(entry["prepared_at"]))
     return {"execution": await ops.execute(operation_id, entry, decision, persona)}
 
 

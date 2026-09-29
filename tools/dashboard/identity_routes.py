@@ -1879,7 +1879,8 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     if session:
         try:
             from tools.dashboard import org_storage_delegate
-            flags["agent"] = org_storage_delegate.status(
+            flags["agent"] = await asyncio.to_thread(
+                org_storage_delegate.status,
                 warm=delegate is not None, now_ms=int(_now() * 1000))
         except Exception:
             flags["agent"] = {"needs": True, "value": "Unknown",

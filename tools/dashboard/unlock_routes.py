@@ -1309,15 +1309,11 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         if audited_private is not None:
             _install_personal_audited_delegate(audited_private, audited_public)
         if body.get("organization_delegates"):
-            from tools.dashboard.org_storage_delegate import accept
-            for item in body["organization_delegates"]:
-                org = item["organization"]
-                try:
-                    accept(item)
-                    organization_delegates[org] = {"ok": True}
-                except Exception as exc:
-                    logger.warning("organization delegate refused for %s: %s", org, exc)
-                    organization_delegates[org] = {"ok": False, "error": str(exc)}
+            # Off the event loop: each accept opens the org's ledger and folds
+            # it, and a new grant appends to the org DB, which waits behind a
+            # running sync apply (auto-kd6tl).
+            organization_delegates = await asyncio.to_thread(
+                _accept_organization_delegates, body["organization_delegates"])
         if audited_private is not None:
             # Certificate issuance may have failed before this first recipient
             # existed. Wake it at the exact state transition that removes that
@@ -1334,17 +1330,8 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         # Strictly after _install_personal_audited_delegate: the audited
         # write is a cold delegate seal against the recipient just published.
         _ensure_sealed_settings_pepper()
-    organization_recovery = {}
-    for item in organization_kem_keys:
-        org = item.get("organization") if isinstance(item, dict) else None
-        label = org if isinstance(org, str) else "unknown"
-        try:
-            recovered = _accept_organization_kem_key(item)
-            organization_recovery[label] = {"ok": True, "recovered": recovered}
-        except Exception:
-            # Never echo request data or exception text containing private input.
-            logger.warning("organization encryption handoff refused for %s", label)
-            organization_recovery[label] = {"ok": False, "error": "organization-encryption-refused"}
+    organization_recovery = await asyncio.to_thread(
+        _accept_organization_kem_keys, organization_kem_keys)
     # Use the existing RAM-backed carrier at unlock as well as shutdown.
     snapshot = False
     try:
@@ -1372,6 +1359,38 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         **({"organization_delegates": organization_delegates} if organization_delegates else {}),
         **({"organization_recovery": organization_recovery} if organization_recovery else {}),
     })
+
+
+def _accept_organization_delegates(items: list) -> dict:
+    """Accept each organization delegate handoff; runs in a worker thread."""
+    from tools.dashboard.org_storage_delegate import accept
+
+    results = {}
+    for item in items:
+        org = item["organization"]
+        try:
+            accept(item)
+            results[org] = {"ok": True}
+        except Exception as exc:
+            logger.warning("organization delegate refused for %s: %s", org, exc)
+            results[org] = {"ok": False, "error": str(exc)}
+    return results
+
+
+def _accept_organization_kem_keys(items: list) -> dict:
+    """Accept each organization encryption handoff; runs in a worker thread."""
+    results = {}
+    for item in items:
+        org = item.get("organization") if isinstance(item, dict) else None
+        label = org if isinstance(org, str) else "unknown"
+        try:
+            recovered = _accept_organization_kem_key(item)
+            results[label] = {"ok": True, "recovered": recovered}
+        except Exception:
+            # Never echo request data or exception text containing private input.
+            logger.warning("organization encryption handoff refused for %s", label)
+            results[label] = {"ok": False, "error": "organization-encryption-refused"}
+    return results
 
 
 def _accept_organization_kem_key(item: dict) -> int:

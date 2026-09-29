@@ -384,3 +384,24 @@ def test_a_store_still_carrying_the_retired_heads_table_is_audited_and_cleaned(t
         "SELECT count(*) FROM sqlite_master WHERE name='ledger_heads'").fetchone()[0] == 0
     audit_schema(conn)
     conn.close()
+
+
+def test_opening_an_initialized_store_takes_no_write_lock(tmp_path):
+    """auto-kd6tl: sync apply holds BEGIN IMMEDIATE on the org DB. Opening the
+    ledger there must not wait for it (it used to wait out the 5 s busy timeout
+    and fail "database is locked")."""
+    import time
+
+    path = tmp_path / "org.db"
+    LedgerStore(path).close()
+    writer = sqlite3.connect(path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        started = time.monotonic()
+        with LedgerStore(path) as store:
+            assert store.db.execute(
+                "SELECT value FROM ledger_meta WHERE key = 'schema_version'").fetchone()
+        assert time.monotonic() - started < 1.0
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()

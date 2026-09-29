@@ -181,10 +181,18 @@ class LedgerStore:
             self.db.executescript(_SCHEMA)
             # Retired 2026-09-22: heads are computed from the events.
             self.db.execute("DROP TABLE IF EXISTS ledger_heads")
-            self.db.execute(
-                "INSERT OR IGNORE INTO ledger_meta(key, value) VALUES ('schema_version', ?)",
-                (str(LEDGER_SCHEMA_VERSION),),
-            )
+            # Opening an initialized store must take no write lock: the org DB
+            # is shared with sync apply, which holds BEGIN IMMEDIATE, and an
+            # unconditional INSERT here waited out the busy timeout and failed
+            # "database is locked" (auto-kd6tl). The no-op CREATE/DROP IF
+            # [NOT] EXISTS above only read the schema.
+            if self.db.execute(
+                "SELECT 1 FROM ledger_meta WHERE key = 'schema_version'"
+            ).fetchone() is None:
+                self.db.execute(
+                    "INSERT OR IGNORE INTO ledger_meta(key, value) VALUES ('schema_version', ?)",
+                    (str(LEDGER_SCHEMA_VERSION),),
+                )
         self._migrate_pending_claim_position()
         self.ledger = Ledger()
         self._hydrate()

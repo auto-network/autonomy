@@ -802,7 +802,7 @@ async def _execute_link_publish(row: dict, decision: dict, *, grant_id: str | No
     # (invite_ref, expires_at) are re-validated here before the frame is built.
     if req.get("target_type") == "org:join":
         try:
-            _org_join_request(req)
+            await asyncio.to_thread(_org_join_request, req)
         except ValueError as exc:
             return _fail(str(exc))
     return await _execute_share_link_publish_tunnel(row, decision, grant_id=grant_id)
@@ -914,7 +914,8 @@ async def _execute_share_link_publish_tunnel(
     binding, binding_error = _load_binding(org)
     if binding_error:
         return _fail(binding_error)
-    refusal = _verify_local_publish_authority(
+    refusal = await asyncio.to_thread(
+        _verify_local_publish_authority,
         envelope, subject, org, binding, "link:publish", _TUNNEL_POP_PATH)
     if refusal:
         return _fail(refusal)
@@ -1369,7 +1370,8 @@ async def _execute_share_link_revoke_tunnel(row: dict, decision: dict) -> dict:
     binding, binding_error = _load_binding(org)
     if binding_error:
         return _fail(binding_error)
-    refusal = _verify_local_publish_authority(
+    refusal = await asyncio.to_thread(
+        _verify_local_publish_authority,
         envelope, subject, org, binding, "link:revoke", _TUNNEL_REVOKE_POP_PATH)
     if refusal:
         return _fail(refusal)

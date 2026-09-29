@@ -1227,7 +1227,7 @@ async def local_runtime_context(request: Request) -> JSONResponse:
     denied = _operator_required(request)
     if denied is not None:
         return denied
-    return runtime_preparation()
+    return await asyncio.to_thread(runtime_preparation)
 
 
 def _personal_persona_pub() -> str | None:
@@ -1304,7 +1304,7 @@ async def activate_local_runtime(request: Request) -> JSONResponse:
         return denied
     try:
         body = await request.json()
-        credential = _activate_runtime(body)
+        credential = await asyncio.to_thread(_activate_runtime, body)
     except (
         ValueError,
         TypeError,
@@ -1349,7 +1349,7 @@ async def complete_local_enrollment(request: Request) -> JSONResponse:
             )
         elif existing != body["machine_id"]:
             raise ValueError("this Dashboard already has a different Fleet identity")
-        _activate_runtime(body["runtime"])
+        await asyncio.to_thread(_activate_runtime, body["runtime"])
         state.delete(recovery.request_id)
     except (
         ValueError,
@@ -1391,7 +1391,7 @@ async def restore_fleet_serving(request: Request) -> JSONResponse:
                 "status"
             ) == "missing":
                 continue
-            result = supervisor.restart(scope)
+            result = await asyncio.to_thread(supervisor.restart, scope)
             if (
                 result.get("running") is not True
                 or result.get("reason") == "owned-by-other-dashboard"

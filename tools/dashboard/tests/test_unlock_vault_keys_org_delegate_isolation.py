@@ -142,3 +142,44 @@ def test_vault_bring_up_failure_is_still_a_refusal(warm, monkeypatch):
     assert "could not be brought up" in response.json()["error"]
     assert accepted == []
     assert warm["snapshot"] == 0
+
+
+def test_delegate_acceptance_runs_off_the_event_loop(warm, monkeypatch):
+    """auto-kd6tl: accepting a delegate opens the org ledger, and a new grant
+    appends to the org DB, which waits behind a running sync apply. That wait
+    must not happen on the event loop."""
+    import threading
+
+    threads: list[str] = []
+
+    def accept(item):
+        threads.append(threading.current_thread().name)
+
+    monkeypatch.setattr(org_storage_delegate, "accept", accept)
+    monkeypatch.setattr(unlock_routes, "_accept_organization_kem_key",
+                        lambda item: threads.append(threading.current_thread().name) or 0)
+
+    loop_threads: list[str] = []
+
+    async def probe(request):
+        from starlette.responses import JSONResponse
+        loop_threads.append(threading.current_thread().name)
+        return JSONResponse({})
+
+    app = Starlette(routes=[
+        Route("/api/identity/unlock/vault-keys", unlock_routes.post_unlock_vault_keys,
+              methods=["POST"]),
+        Route("/probe", probe),
+    ])
+    with TestClient(app) as client:
+        client.get("/probe")
+        response = client.post("/api/identity/unlock/vault-keys", json={
+            "generation_keys": {},
+            "organization_delegates": [{"organization": "acme", "action": "reuse",
+                                        "key_reference": "k1"}],
+            "organization_kem_keys": [{"organization": "acme"}],
+        })
+
+    assert response.status_code == 200, response.text
+    assert len(threads) == 2 and loop_threads
+    assert loop_threads[0] not in threads

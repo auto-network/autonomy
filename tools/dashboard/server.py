@@ -23278,7 +23278,7 @@ async def _on_startup():
     # startup; a machine that never activated, or a cold boot, stays unarmed
     # and says so at WARNING.
     with contextlib.suppress(Exception):
-        fleet_enrollment_routes.rearm_local_runtime_from_vault()
+        await asyncio.to_thread(fleet_enrollment_routes.rearm_local_runtime_from_vault)
     _mark("fleet_enrollment_routes.rearm_local_runtime_from_vault")
     # The certificate worker's first check reads the audited vault. It starts
     # only now, after the restore above has handed a reloaded process its keys

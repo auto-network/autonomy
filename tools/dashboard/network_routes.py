@@ -467,7 +467,11 @@ async def post_ledger_found(request: Request) -> JSONResponse:
             status_code=404,
         )
     store_path = org_ledger_db_path(requested_org)
-    if store_path.exists():
+
+    # Every LedgerStore open/fold/append below runs in a worker thread: an
+    # append waits on the org DB write lock (up to the busy timeout) and must
+    # never stall the event loop (auto-kd6tl).
+    def _refuse_if_founded() -> JSONResponse | None:
         try:
             with LedgerStore(store_path) as existing:
                 if len(existing) > 0:
@@ -483,8 +487,14 @@ async def post_ledger_found(request: Request) -> JSONResponse:
                 {"ok": False, "error": f"could not open ledger: {exc}"},
                 status_code=500,
             )
+        return None
 
-    try:
+    if store_path.exists():
+        refused = await asyncio.to_thread(_refuse_if_founded)
+        if refused is not None:
+            return refused
+
+    def _validate_batch() -> list:
         events = [Event.from_json(wire) for wire in wires]
         expected_types = [
             "genesis",
@@ -512,13 +522,17 @@ async def post_ledger_found(request: Request) -> JSONResponse:
             for event in events:
                 candidate.append(event)
             candidate.refresh_projections(now=events[-1].hlc.ts)
+        return events
+
+    try:
+        events = await asyncio.to_thread(_validate_batch)
     except (LedgerError, ValueError, TypeError) as exc:
         return JSONResponse(
             {"ok": False, "error": f"founding batch rejected: {exc}"},
             status_code=400,
         )
 
-    try:
+    def _persist_batch() -> list | None:
         # The ledger tables are co-located inside the existing organization
         # database. Never replace that file: doing so would erase the orgs
         # row, graph content, and schema stamp. The complete batch has already
@@ -526,19 +540,25 @@ async def post_ledger_found(request: Request) -> JSONResponse:
         # durable append path.
         with LedgerStore(store_path) as durable:
             if len(durable) > 0:
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "error": "organization ledger is already founded",
-                    },
-                    status_code=409,
-                )
+                return None
             event_ids = [durable.append(event) for event in events]
             durable.refresh_projections(now=events[-1].hlc.ts)
+            return event_ids
+
+    try:
+        event_ids = await asyncio.to_thread(_persist_batch)
     except (LedgerError, OSError) as exc:
         return JSONResponse(
             {"ok": False, "error": f"could not persist founding batch: {exc}"},
             status_code=500,
+        )
+    if event_ids is None:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "organization ledger is already founded",
+            },
+            status_code=409,
         )
 
     # Record WHICH member this node is. The ledger says the founder's persona
@@ -612,7 +632,9 @@ async def get_ledger_heads(request: Request) -> JSONResponse:
             {"ok": False, "error": "organization ledger is not founded"},
             status_code=404,
         )
-    try:
+
+    # Ledger read runs in a worker thread, off the event loop (auto-kd6tl).
+    def _read_heads() -> JSONResponse:
         with LedgerStore(store_path) as store:
             genesis_id = store.ledger.genesis_id
             if genesis_id is None:
@@ -626,6 +648,9 @@ async def get_ledger_heads(request: Request) -> JSONResponse:
                     "heads": list(store.heads()),
                 }
             )
+
+    try:
+        return await asyncio.to_thread(_read_heads)
     except (LedgerError, OSError) as exc:
         return JSONResponse(
             {"ok": False, "error": f"could not read authority ledger: {exc}"},
@@ -962,7 +987,8 @@ async def post_join_outcome(request: Request) -> JSONResponse:
     from tools.network.ledger.store import LedgerStore, org_ledger_db_path
 
     # Verify the material before touching disk: fold from genesis in isolation.
-    try:
+    # The ledger work runs in a worker thread, off the event loop (auto-kd6tl).
+    def _verify_material():
         events = [Event.from_json(wire.encode("utf-8")) for wire in wires]
         # The org serves its events as a set; order them like a sync bundle
         # (genesis first, then whatever's parents are present), never by
@@ -997,13 +1023,19 @@ async def post_join_outcome(request: Request) -> JSONResponse:
             raise ValueError("the ledger does not admit this persona")
         if state.genesis_id != genesis_id:
             raise ValueError("fold genesis mismatch")
+        return events, stable_id, registry_url
+
+    try:
+        events, stable_id, registry_url = await asyncio.to_thread(_verify_material)
     except (LedgerError, ValueError, TypeError, KeyError, IndexError) as exc:
         return JSONResponse({"ok": False, "error": f"organization material rejected: {exc}"},
                             status_code=400)
 
     # Install: the org DB under the founder's stable id, the ledger, the
     # binding, the persona. Idempotent on a repeat with the same org.
-    try:
+    # Runs in a worker thread: the durable append waits on the org DB write
+    # lock and must not stall the event loop (auto-kd6tl).
+    def _install():
         slug = org_ops.local_slug_for_org(org_name, stable_id)
         identity = {"name": org_name}
         for key, limit in (("byline", 300), ("description", 300), ("color", 16)):
@@ -1017,7 +1049,7 @@ async def post_join_outcome(request: Request) -> JSONResponse:
         with LedgerStore(store_path) as durable:
             known = {event.event_id for event in durable.events()}
             if known and events[0].event_id not in known:
-                return JSONResponse({"ok": False, "error": (
+                return None, JSONResponse({"ok": False, "error": (
                     "a different ledger already lives under this organization"
                 )}, status_code=409)
             durable.append_bundle([e for e in events if e.event_id not in known])
@@ -1052,12 +1084,18 @@ async def post_join_outcome(request: Request) -> JSONResponse:
             reachability_rows=body.get("reachability_rows"),
             skip_persona=persona_pub,
         )
+        return slug, None
+
+    try:
+        slug, conflict = await asyncio.to_thread(_install)
     except (LedgerError, OSError, ValueError) as exc:
         return JSONResponse({"ok": False, "error": f"installing the organization failed: {exc}"},
                             status_code=500)
     except Exception as exc:  # a store fault must not masquerade as success
         return JSONResponse({"ok": False, "error": f"installing the organization failed: {exc}"},
                             status_code=500)
+    if conflict is not None:
+        return conflict
     # Adopt the checkpoint the sponsor served with the bundle, by folding the
     # just-installed ledger at its head (OrgAdmission.tla rule bundle_adopt),
     # bounded by the registry's seq. The registry's record is not what this
@@ -1100,7 +1138,9 @@ async def post_ledger_claim(request: Request) -> JSONResponse:
         )
     from tools.dashboard import claim_service
     try:
-        return _claim_http_response(claim_service.submit(requested_org, wire))
+        return _claim_http_response(
+            await asyncio.to_thread(claim_service.submit, requested_org, wire)
+        )
     except Exception as exc:
         return _claim_http_fault(exc)
 
@@ -1152,7 +1192,7 @@ async def get_ledger_claim_context(request: Request) -> JSONResponse:
     from tools.dashboard import claim_service
     try:
         return _claim_http_response(
-            claim_service.context(requested_org, invite_ref)
+            await asyncio.to_thread(claim_service.context, requested_org, invite_ref)
         )
     except Exception as exc:
         return _claim_http_fault(exc)
@@ -1185,7 +1225,9 @@ async def get_ledger_claim(request: Request) -> JSONResponse:
     from tools.dashboard import claim_service
     try:
         return _claim_http_response(
-            claim_service.status(requested_org, invite_ref, persona_pub)
+            await asyncio.to_thread(
+                claim_service.status, requested_org, invite_ref, persona_pub
+            )
         )
     except Exception as exc:
         return _claim_http_fault(exc)
@@ -1230,7 +1272,8 @@ async def post_ledger_claim_approval(request: Request) -> JSONResponse:
     from tools.dashboard import claim_service
     try:
         return _claim_http_response(
-            claim_service.countersign(
+            await asyncio.to_thread(
+                claim_service.countersign,
                 requested_org,
                 invite_ref,
                 persona_pub,
@@ -1374,7 +1417,9 @@ async def post_ledger_delegate(request: Request) -> JSONResponse:
             "this store has no founded ledger — a delegate is authorized by "
             "membership, and there is no roster to resolve against"
         )}, status_code=404)
-    try:
+    # Ledger open/fold/append runs in a worker thread: an append waits on
+    # the org DB write lock and must not stall the event loop (auto-kd6tl).
+    def _append_delegate():
         with LedgerStore(store_path) as store:
             current = store.heads()
             if tuple(event.parents) != tuple(current):
@@ -1385,6 +1430,10 @@ async def post_ledger_delegate(request: Request) -> JSONResponse:
                     "current heads and retry"
                 )}, status_code=409)
             event_id = store.append(event)
+        return event_id
+
+    try:
+        outcome = await asyncio.to_thread(_append_delegate)
     except LedgerError as exc:
         return JSONResponse({"ok": False, "error": f"delegate refused: {exc}"},
                             status_code=400)
@@ -1392,6 +1441,9 @@ async def post_ledger_delegate(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             f"could not append the delegate: {exc}"
         )}, status_code=500)
+    if isinstance(outcome, JSONResponse):
+        return outcome
+    event_id = outcome
     return JSONResponse({"ok": True, "event_id": event_id})
 
 
@@ -1461,7 +1513,9 @@ async def post_ledger_invite(request: Request) -> JSONResponse:
             {"ok": False, "error": "organization ledger is not founded"},
             status_code=404,
         )
-    try:
+    # Ledger open/fold/append runs in a worker thread: an append waits on
+    # the org DB write lock and must not stall the event loop (auto-kd6tl).
+    def _append_invite():
         with LedgerStore(store_path) as store:
             current_heads = store.heads()
             if event.parents != current_heads:
@@ -1497,11 +1551,18 @@ async def post_ledger_invite(request: Request) -> JSONResponse:
                 )
             invite_id = store.append(event)
             store.refresh_projections()
+        return invite_id
+
+    try:
+        outcome = await asyncio.to_thread(_append_invite)
     except (LedgerError, OSError) as exc:
         return JSONResponse(
             {"ok": False, "error": f"could not append invitation: {exc}"},
             status_code=400,
         )
+    if isinstance(outcome, JSONResponse):
+        return outcome
+    invite_id = outcome
     return JSONResponse({"ok": True, "invite_id": invite_id})
 
 
@@ -1578,7 +1639,9 @@ async def post_ledger_revoke(request: Request) -> JSONResponse:
             {"ok": False, "error": "organization ledger is not founded"},
             status_code=404,
         )
-    try:
+    # Ledger open/fold/append runs in a worker thread: an append waits on
+    # the org DB write lock and must not stall the event loop (auto-kd6tl).
+    def _append_revoke():
         with LedgerStore(store_path) as store:
             current_heads = store.heads()
             if event.parents != current_heads:
@@ -1617,11 +1680,18 @@ async def post_ledger_revoke(request: Request) -> JSONResponse:
                 )
             revoke_id = store.append(event)
             store.refresh_projections()
+        return revoke_id
+
+    try:
+        outcome = await asyncio.to_thread(_append_revoke)
     except (LedgerError, OSError) as exc:
         return JSONResponse(
             {"ok": False, "error": f"could not append revocation: {exc}"},
             status_code=400,
         )
+    if isinstance(outcome, JSONResponse):
+        return outcome
+    revoke_id = outcome
     from tools.dashboard import membership_checkpoint as cp
     checkpoint = await asyncio.to_thread(cp.publish_after_membership_change, requested_org)
     return JSONResponse({"ok": True, "revoke_id": revoke_id, "checkpoint": checkpoint})
@@ -1705,7 +1775,9 @@ async def _append_role_event(request: Request, kind: str) -> JSONResponse:
             {"ok": False, "error": "organization ledger is not founded"},
             status_code=404,
         )
-    try:
+    # Ledger open/fold/append runs in a worker thread: an append waits on
+    # the org DB write lock and must not stall the event loop (auto-kd6tl).
+    def _append_role():
         with LedgerStore(store_path) as store:
             current_heads = store.heads()
             if event.parents != current_heads:
@@ -1760,11 +1832,18 @@ async def _append_role_event(request: Request, kind: str) -> JSONResponse:
                 )
             event_id = store.append(event)
             store.refresh_projections()
+        return event_id
+
+    try:
+        outcome = await asyncio.to_thread(_append_role)
     except (LedgerError, OSError) as exc:
         return JSONResponse(
             {"ok": False, "error": f"could not append role {noun}: {exc}"},
             status_code=400,
         )
+    if isinstance(outcome, JSONResponse):
+        return outcome
+    event_id = outcome
     # A role change can change the checkpointer set (P2 triggers on either
     # root differing from the newest retained record).
     from tools.dashboard import membership_checkpoint as cp
@@ -1830,7 +1909,9 @@ async def post_ledger_invite_bearer(request: Request) -> JSONResponse:
     if not store_path.exists():
         return JSONResponse({"ok": False, "error": "organization ledger is not founded"},
                             status_code=404)
-    try:
+    # Ledger open/fold/append runs in a worker thread: an append waits on
+    # the org DB write lock and must not stall the event loop (auto-kd6tl).
+    def _verify_bearer():
         with LedgerStore(store_path) as store:
             try:
                 invite = store.get(invite_ref)
@@ -1851,9 +1932,15 @@ async def post_ledger_invite_bearer(request: Request) -> JSONResponse:
                     {"ok": False, "error": "that token is not this invitation's bearer"},
                     status_code=403,
                 )
+        return None
+
+    try:
+        outcome = await asyncio.to_thread(_verify_bearer)
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": f"could not read the invitation: {exc}"},
                             status_code=400)
+    if isinstance(outcome, JSONResponse):
+        return outcome
 
     try:
         members = settings_ops.read_owned_set(
@@ -2623,7 +2710,10 @@ async def get_unlock_plan(request: Request) -> JSONResponse:
         # verdict for ANY org and fall back to probing all of them. Isolating
         # each slug is the same rule the step runner enforces one level down.
         try:
-            plan[slug] = _org_unlock_plan(slug, org, LOCAL_STORE_KEYS)
+            # Folds the org ledger: off the event loop (auto-kd6tl).
+            plan[slug] = await asyncio.to_thread(
+                _org_unlock_plan, slug, org, LOCAL_STORE_KEYS,
+            )
         except Exception as e:
             logger.info("unlock plan: %s unavailable (%s)", slug, e)
             plan[slug] = {"slug": slug, "error": "unavailable"}
@@ -2708,16 +2798,19 @@ async def get_membership_checkpoint_decision(request: Request) -> JSONResponse:
     org_uuid = binding_member.payload.get("org_uuid") if binding_member else None
     from tools.dashboard import membership_checkpoint as cp
     try:
-        decision = cp.checkpoint_due(
-            org, persona_pub, ts=int(time.time()), genesis_id=genesis_id,
-            org_uuid=org_uuid)
+        # checkpoint_due folds the org ledger: off the event loop (auto-kd6tl).
+        decision = await asyncio.to_thread(
+            lambda: cp.checkpoint_due(
+                org, persona_pub, ts=int(time.time()), genesis_id=genesis_id,
+                org_uuid=org_uuid))
         if decision.action == "chain-missing":
             # Adopted by fold without the signed bytes: the registry serves
             # its record with the tuple; one read, then decide again.
             await asyncio.to_thread(_adopt_registry_checkpoint, org)
-            decision = cp.checkpoint_due(
-                org, persona_pub, ts=int(time.time()), genesis_id=genesis_id,
-                org_uuid=org_uuid)
+            decision = await asyncio.to_thread(
+                lambda: cp.checkpoint_due(
+                    org, persona_pub, ts=int(time.time()), genesis_id=genesis_id,
+                    org_uuid=org_uuid))
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"checkpoint check failed: {e}"},
                             status_code=500)
@@ -3168,8 +3261,9 @@ async def post_service_reservation(request: Request) -> JSONResponse:
         except ValueError as exc:
             return _service_publication_error("zone_invalid", 400, str(exc))
     try:
-        projection, created = service_publication.reserve_origin(
-            org, body.get("app_label"), zone
+        # reserve_origin opens the org ledger: off the event loop (auto-kd6tl).
+        projection, created = await asyncio.to_thread(
+            service_publication.reserve_origin, org, body.get("app_label"), zone
         )
     except ValueError:
         return _service_publication_error("invalid_app_label")
@@ -3370,7 +3464,10 @@ async def get_published_links(request: Request) -> JSONResponse:
             continue
         if not link_approvals.is_published_grant(payload):
             continue  # in flight, or left by a failed publish: no link yet
-        resolved = link_approvals._resolve_target(
+        # Resolving a target may open the org ledger: off the event loop
+        # (auto-kd6tl).
+        resolved = await asyncio.to_thread(
+            link_approvals._resolve_target,
             payload.get("target_type", ""), payload.get("target_uuid", ""), org,
         )
         meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
@@ -3413,7 +3510,9 @@ async def get_published_links(request: Request) -> JSONResponse:
     ]
     persona_domain = None
     try:
-        persona_pub, display_name = service_publication._persona_for_org(org)
+        persona_pub, display_name = await asyncio.to_thread(
+            service_publication._persona_for_org, org
+        )
         persona_domain = (
             service_publication.bound_persona_label(org, persona_pub)
             or service_publication.normalize_persona_label(display_name, persona_pub)
