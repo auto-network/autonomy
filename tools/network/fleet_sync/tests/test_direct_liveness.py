@@ -348,3 +348,95 @@ def test_a_frozen_server_is_still_caught_on_the_first_frame_wait(tmp_path, monke
         assert retries >= 1 and error == "PeerUnresponsive"
         assert time.monotonic() - started < 8.0
     asyncio.run(run())
+
+
+# ── after the reply is written, the listener never pings the applying puller ──
+
+def test_the_listener_does_not_ping_a_puller_that_is_applying_the_tail_of_its_reply(monkeypatch):
+    """Reviewer auto-0925-123637 on 1fe61c3b: after the last send, the
+    listener's next request-wait pinged the puller, which may be stalled or
+    paused while applying the reply's tail from its buffers; a 1011 there
+    aborts the TCP connection and discards the unread tail. Now the wait
+    after a reply is a plain on-wake bound; the puller's close ends it."""
+    from tools.network.fleet_sync_channel import serve_fleet_transport
+
+    monkeypatch.setattr(channel_mod, "DIRECT_PING_INTERVAL_S", 0.05)
+    monkeypatch.setattr(channel_mod, "DIRECT_PING_TIMEOUT_S", 0.05)
+    root, server_key, client_key = KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+    entries = [enroll(root, machine_pub=server_key.public_hex), enroll(root, machine_pub=client_key.public_hex)]
+    server_auth = FleetAuthenticator(server_key, root_pub=root.public_hex, roster_entries=lambda: entries)
+    client_auth = FleetAuthenticator(client_key, root_pub=root.public_hex, roster_entries=lambda: entries)
+    session = "cd" * 16
+
+    async def run():
+        import json
+        from tools.network.relaykit.channel import ChannelCrypto
+        from tools.network.relaykit.viewer import read_viewer_record
+
+        to_server: asyncio.Queue = asyncio.Queue()
+        to_client: asyncio.Queue = asyncio.Queue()
+        pings: list = []
+        closed: list = []
+
+        async def server_recv():
+            return await to_server.get()
+
+        async def server_send(payload):
+            await to_client.put(payload)
+
+        async def ping():
+            pings.append(time.monotonic())
+            return asyncio.get_running_loop().create_future()   # no pong will come: the puller is busy
+
+        async def close(code, reason):
+            closed.append((code, reason))
+
+        async def handler(_token, _message, _peer, **_kw):
+            async def stream():
+                for i in range(3):
+                    yield b"frame-%d" % i
+            return stream()
+
+        serve = asyncio.ensure_future(serve_fleet_transport(
+            token=session, recv=server_recv, send=server_send, handler=handler, close=close,
+            authenticator=server_auth, ping=ping))
+        private_key, hello = client_auth.build_client_hello(session, peer=server_key.public_hex)
+        await to_server.put(hello)
+        server_hello = read_viewer_record(await to_client.get())
+        server_eph, transcript = client_auth.verify_server(
+            server_hello, session=session, client_eph=json.loads(hello)["eph_pub"],
+            expected_machine_pub=server_key.public_hex)
+        crypto = ChannelCrypto.client(private_key, server_eph, transcript)
+        for record in crypto.seal_message(b"pull"):
+            await to_server.put(record)
+        records = [await to_client.get() for _ in range(3)]   # the whole reply, read from the buffers
+        pings_before = len(pings)
+        # The puller now applies the tail for far longer than interval + timeout.
+        await asyncio.sleep(0.5)
+        assert not serve.done() and closed == [] and len(pings) == pings_before
+        await to_server.put(None)   # the puller closes when it is done
+        await asyncio.wait_for(serve, 2)
+        assert closed == [] and len(records) == 3
+    asyncio.run(run())
+
+
+def test_the_silence_bound_is_judged_on_wake():
+    """A frame that arrives while the puller's loop is blocked longer than
+    the silence limit is a delivered frame, not a silent peer."""
+    from tools.network.fleet_sync_channel import wait_bounded_on_wake
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        frame = loop.create_future()
+
+        async def stall():
+            await asyncio.sleep(0.05)
+            loop.call_soon(frame.set_result, "frame")
+            time.sleep(0.4)   # blocked past the 0.2 s bound; the frame lands during it
+
+        stalled = asyncio.ensure_future(stall())
+        assert await wait_bounded_on_wake(frame, 0.2) == "frame"
+        await stalled
+        with pytest.raises(asyncio.TimeoutError):
+            await wait_bounded_on_wake(asyncio.sleep(10), 0.1)
+    asyncio.run(run())

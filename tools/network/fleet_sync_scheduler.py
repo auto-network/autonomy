@@ -1316,7 +1316,7 @@ async def bounded_stream_frames(
     one frame is therefore observed here as FIRST-frame silence and gets
     the larger allowance — still bounded, just at the other constant.
     """
-    from tools.network.fleet_sync_channel import wait_alive
+    from tools.network.fleet_sync_channel import wait_alive, wait_bounded_on_wake
 
     stream = channel.recv_message_stream().__aiter__()
     # The transport's ping, when the channel has one (a direct channel):
@@ -1330,7 +1330,10 @@ async def bounded_stream_frames(
     first = True
     while True:
         try:
-            item = await asyncio.wait_for(wait_alive(stream.__anext__(), ping=ping), allowance)
+            # The silence bound is a property of the peer's silence: judged
+            # on wake, so a stall of this loop during which the frame arrived
+            # is not a silent peer (reviewer auto-0925-123637, auto-fkqz6).
+            item = await wait_bounded_on_wake(wait_alive(stream.__anext__(), ping=ping), allowance)
         except StopAsyncIteration:
             return
         except asyncio.TimeoutError:

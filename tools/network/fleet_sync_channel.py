@@ -755,6 +755,35 @@ async def wait_alive(awaitable, *, ping, interval_s: float | None = None,
                 await task
 
 
+#: After a reply has been fully written, the listener waits for the puller
+#: to close (a direct pull is one request per connection) or, rarely, to ask
+#: again. That wait is NOT ping-guarded: the puller is applying the tail of
+#: the reply from its socket buffers and may be stalled or paused for longer
+#: than the ping timeout, and a 1011 close here would abort the TCP
+#: connection and discard the unread tail (reviewer auto-0925-123637,
+#: 2026-09-29). It is bounded on wake, generously.
+SERVE_IDLE_AFTER_REPLY_S = 900.0
+
+
+async def wait_bounded_on_wake(awaitable, bound_s: float):
+    """Await *awaitable* for at most ``bound_s`` seconds, judged ON WAKE:
+    when the timer fires after a stall of this event loop, the awaitable is
+    checked with done() first, so data that arrived during the stall wins
+    over the deadline. Raises asyncio.TimeoutError otherwise. The bound is a
+    property of the peer's silence, never of this loop's scheduling."""
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=bound_s)
+        if task in done:
+            return task.result()
+        raise asyncio.TimeoutError()
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+
+
 async def serve_fleet_transport(
     *, token: str, recv, send, handler, close=None,
     authenticator: FleetAuthenticator,
@@ -800,16 +829,29 @@ async def serve_fleet_transport(
             response = await response
         return response
 
+    replied = False
+
     async def guarded_recv():
-        return await wait_alive(recv(), ping=ping)
+        # Until the first reply is written the peer owes us a request, and
+        # a ping-guarded wait catches a dead one. Once a reply has been
+        # written the peer is applying it from its buffers; pinging it then
+        # could cut off the tail (SERVE_IDLE_AFTER_REPLY_S).
+        if not replied:
+            return await wait_alive(recv(), ping=ping)
+        try:
+            return await wait_bounded_on_wake(recv(), SERVE_IDLE_AFTER_REPLY_S)
+        except asyncio.TimeoutError:
+            return None   # the peer never closed after its reply: end the channel quietly
 
     async def bounded_send(payload: bytes) -> None:
+        nonlocal replied
         try:
             await asyncio.wait_for(send(payload), SERVE_SEND_STALL_S)
         except asyncio.TimeoutError:
             raise PeerUnresponsive(
                 f"peer stopped reading: a send did not complete within {SERVE_SEND_STALL_S:g}s"
             ) from None
+        replied = True
 
     try:
         await serve_established_channel(
