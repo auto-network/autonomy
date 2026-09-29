@@ -11841,11 +11841,11 @@ async def ws_terminal(websocket: WebSocket):
     # Ensure tmux mouse mode is on for reattached sessions so scroll
     # wheel triggers tmux copy-mode (scrollback lives in tmux, not xterm.js).
     # Users hold Shift to select text at the browser level.
-    subprocess.run(tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, "mouse", "on"),
+    await asyncio.to_thread(subprocess.run, tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, "mouse", "on"),
                     capture_output=True)
-    subprocess.run(tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, "set-clipboard", "on"),
+    await asyncio.to_thread(subprocess.run, tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, "set-clipboard", "on"),
                     capture_output=True)
-    subprocess.run(tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, "allow-passthrough", "on"),
+    await asyncio.to_thread(subprocess.run, tmux_route.argv(tmux_name, "set-option", "-t", tmux_name, "allow-passthrough", "on"),
                     capture_output=True)
 
     # Ensure session is tracked in DB for sessions not yet registered
@@ -11867,13 +11867,23 @@ async def ws_terminal(websocket: WebSocket):
     winsize = struct.pack("HHHH", 40, 120, 0, 0)
     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
 
-    proc = subprocess.Popen(
+    # Never fork this process on the event loop, and never with a Python
+    # callback in the child. ``preexec_fn=os.setsid`` forced CPython onto the
+    # fork() path with the GIL held for the whole fork: on 2026-09-29 22:14:51Z
+    # that fork of the 2 GB, 40-thread worker stalled and every thread of the
+    # dashboard was silent for eleven minutes until the operator restarted the
+    # container (auto-vrw8h-adjacent incident, /workspace/output/freeze-analysis.txt).
+    # ``start_new_session=True`` does the setsid in the child without Python, so
+    # CPython takes the vfork/posix_spawn path; ``to_thread`` keeps even a slow
+    # fork off the loop.
+    proc = await asyncio.to_thread(
+        subprocess.Popen,
         tmux_route.argv(tmux_name, "attach-session", "-t", tmux_name),
         stdin=slave_fd,
         stdout=slave_fd,
         stderr=slave_fd,
         env={**os.environ, "TERM": "xterm-256color"},
-        preexec_fn=os.setsid,
+        start_new_session=True,
         close_fds=True,
     )
     os.close(slave_fd)
