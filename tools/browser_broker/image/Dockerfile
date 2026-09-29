@@ -27,6 +27,10 @@ WORKDIR /opt/lease
 COPY tools/connectors/__init__.py tools/connectors/stealth_repl.py tools/connectors/repl_auth.py tools/connectors/
 COPY tools/browser_broker/__init__.py tools/browser_broker/lease_agent.py tools/browser_broker/lease_watchdog.py tools/browser_broker/
 COPY tools/browser_broker/image/entrypoint.sh /opt/lease/entrypoint.sh
+# Chrome's "unsupported command-line flag" bar is about the flag patchright adds
+# (--disable-blink-features=AutomationControlled, which keeps navigator.webdriver
+# false). This managed policy hides the bar and keeps the flag.
+COPY tools/browser_broker/image/chrome-policy.json /etc/opt/chrome/policies/managed/lease.json
 
 USER browser
 EXPOSE 7300 5900

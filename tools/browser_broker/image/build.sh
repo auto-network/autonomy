@@ -7,7 +7,8 @@ context="$(mktemp -d)"
 trap 'rm -rf "$context"' EXIT
 for path in tools/connectors/__init__.py tools/connectors/stealth_repl.py tools/connectors/repl_auth.py \
             tools/browser_broker/__init__.py tools/browser_broker/lease_agent.py \
-            tools/browser_broker/lease_watchdog.py tools/browser_broker/image/entrypoint.sh; do
+            tools/browser_broker/lease_watchdog.py tools/browser_broker/image/entrypoint.sh \
+            tools/browser_broker/image/chrome-policy.json; do
     mkdir -p "$context/$(dirname "$path")"
     cp -p "$repo/$path" "$context/$path"
 done
