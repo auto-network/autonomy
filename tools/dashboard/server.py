@@ -173,6 +173,12 @@ from tools.graph import sqlite_open_diag
 # auto-bkv3p: count every SQLite open by its opener, before anything opens
 # one, so /api/diag/sqlite-opens can name the site that leaks connections.
 sqlite_open_diag.install()
+# Organization settings rows this process writes are signed by its storage
+# delegates (auto-qrmlg.6 S2); a row it cannot sign is written unsigned and
+# said so once per organization.
+from tools.dashboard import org_storage_delegate as _org_storage_delegate  # noqa: E402
+
+_org_storage_delegate.install_settings_signer()
 from tools.dashboard import network_routes
 from tools.dashboard import org_membership_routes
 from tools.dashboard import web_push, web_push_proof, web_push_routes, web_push_worker

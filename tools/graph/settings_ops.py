@@ -2941,6 +2941,104 @@ def take_shadowed_write(set_id: str, key: str) -> "ShadowedWrite | None":
     return _LAST_SHADOWED.pop((set_id, key), None)
 
 
+# ── signed settings: the write path (auto-qrmlg.6 S2) ───────────────────────
+#
+# An organization row written into a FOUNDED organization store carries the
+# signed envelope (design of record graph://21a0da9e-1c2): the addressed
+# record signed by the node's storage delegate for that organization, with
+# the delegate's member persona as the row's terminal persona. Which key
+# signs is the process's business, not this module's (the dashboard and the
+# CLI hold the delegate through tools.dashboard.org_storage_delegate), so the
+# signer is a pluggable provider: ``install_signer_provider(fn)`` where
+# ``fn(org_slug) -> SigningContext | None``. With no provider installed, or a
+# provider that holds no delegate for the organization, the row is written
+# UNSIGNED exactly as before S2 and the gap is logged once per organization;
+# the refusal of unsigned rows on founded stores is S3's, behind the
+# migration (S4), never here.
+
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass(frozen=True)
+class SigningContext:
+    """What a process holds to sign one organization's rows."""
+
+    key: object            # idkit.KeyPair of the storage delegate
+    terminal_persona: str  # the member persona the delegate acts for
+    genesis_id: str        # the organization's ledger genesis id (64 hex)
+    witness: dict | None = None   # the attestation cited, None when none is held
+
+
+_SIGNER_PROVIDER = None
+_UNSIGNED_WARNED: set = set()
+
+
+def install_signer_provider(provider) -> None:
+    """Install ``provider(org_slug) -> SigningContext | None`` for this process."""
+    global _SIGNER_PROVIDER
+    _SIGNER_PROVIDER = provider
+
+
+def _store_is_founded(db) -> str | None:
+    """The organization genesis id this store knows, or None (not founded)."""
+    from tools.network.fleet_sync.materialize import store_genesis_id
+
+    try:
+        return store_genesis_id(db.conn)
+    except Exception:
+        return None
+
+
+def _envelope_columns(
+    db, org: "str | None", set_id: str, schema_revision: int, key: str, state: str,
+    stored_payload: dict, *, deprecated: bool = False, successor_id: "str | None" = None,
+) -> tuple:
+    """``(signed_at, signing_key, signature, witness_json, terminal_persona)``
+    for a row about to be inserted, or five Nones for an unsigned row.
+
+    Signed iff the destination is an organization store (not personal or
+    machine), that store is founded, and this process's signer provider
+    holds a signing context for the organization. The signature covers the
+    STORED payload (a vaulted set's sealed form), the same bytes
+    ``record_from_row`` rebuilds at the boundary.
+    """
+    unsigned = (None, None, None, None, None)
+    from tools.data_paths import LOCAL_STORE_KEYS
+
+    if org is None or org in LOCAL_STORE_KEYS or _SIGNER_PROVIDER is None:
+        return unsigned
+    genesis = _store_is_founded(db)
+    if genesis is None:
+        return unsigned
+    try:
+        context = _SIGNER_PROVIDER(org)
+    except Exception:
+        logger.warning("signed settings: signer provider failed for %r", org, exc_info=True)
+        context = None
+    if context is None:
+        if org not in _UNSIGNED_WARNED:
+            _UNSIGNED_WARNED.add(org)
+            logger.warning(
+                "signed settings: no storage delegate is held for organization %r; "
+                "its rows are written unsigned by this process until one is", org,
+            )
+        return unsigned
+    from tools.network.clock import now_ms as _now_ms
+    from tools.network.settingskit.envelope import build_record, sign_record
+
+    signed_at = int(_now_ms())
+    record = build_record(
+        org=context.genesis_id if context.genesis_id else genesis,
+        set_id=set_id, key=key, schema_revision=int(schema_revision),
+        publication_state=state, deprecated=bool(deprecated), successor_id=successor_id,
+        payload=stored_payload, signed_at=signed_at,
+        signing_key=context.key.public_hex, witness=context.witness,
+    )
+    signature = sign_record(context.key, record)
+    witness_json = None if context.witness is None else json.dumps(context.witness, sort_keys=True)
+    return (signed_at, context.key.public_hex, signature, witness_json, context.terminal_persona)
+
+
 def add_setting(
     set_id: str,
     schema_revision: int,
@@ -3004,12 +3102,14 @@ def add_setting(
     expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
     db = _open(org, set_id)
     try:
+        envelope = _envelope_columns(db, org, set_id, schema_revision, key, state, stored_payload)
         db.conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
-            "publication_state, created_at, updated_at, expires_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
+            "publication_state, created_at, updated_at, expires_at, "
+            "signed_at, signing_key, signature, witness, terminal_persona) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, set_id, int(schema_revision), key, json.dumps(stored_payload),
-             state, now, now, expires_at),
+             state, now, now, expires_at, *envelope),
         )
         db.conn.commit()
     finally:
@@ -3064,27 +3164,29 @@ def append_log_entries(
     now = _now_iso()
     expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
     setting_ids = [str(uuid4()) for _entry in entries]
-    rows = [
-        (
-            setting_id,
-            set_id,
-            int(schema_revision),
-            key,
-            json.dumps(payload),
-            state,
-            now,
-            now,
-            expires_at,
-        )
-        for setting_id, (key, payload) in zip(setting_ids, entries)
-    ]
     db = _open(org, set_id)
     try:
+        rows = [
+            (
+                setting_id,
+                set_id,
+                int(schema_revision),
+                key,
+                json.dumps(payload),
+                state,
+                now,
+                now,
+                expires_at,
+                *_envelope_columns(db, org, set_id, schema_revision, key, state, payload),
+            )
+            for setting_id, (key, payload) in zip(setting_ids, entries)
+        ]
         db.conn.execute("BEGIN IMMEDIATE")
         db.conn.executemany(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
-            "publication_state, created_at, updated_at, expires_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
+            "publication_state, created_at, updated_at, expires_at, "
+            "signed_at, signing_key, signature, witness, terminal_persona) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
         db.conn.commit()
@@ -3193,20 +3295,47 @@ def upsert_by_key(
         ).fetchone()
         if existing is None:
             sid = str(uuid4())
+            envelope = _envelope_columns(db, org, set_id, schema_revision, key, state, payload)
             db.conn.execute(
                 "INSERT INTO settings(id, set_id, schema_revision, key, "
                 "payload, publication_state, created_at, updated_at, "
-                "expires_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                "expires_at, signed_at, signing_key, signature, witness, terminal_persona) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sid, set_id, int(schema_revision), key, payload_json,
-                 state, created_at, updated_at, expires_at),
+                 state, created_at, updated_at, expires_at, *envelope),
             )
         else:
             sid = existing["id"]
-            db.conn.execute(
-                "UPDATE settings SET payload = ?, publication_state = ?, "
-                "updated_at = ?, expires_at = ? WHERE id = ?",
-                (payload_json, state, updated_at, expires_at, sid),
+            envelope = _envelope_columns(db, org, set_id, schema_revision, key, state, payload)
+            current = db.conn.execute(
+                "SELECT signing_key FROM settings WHERE id = ?", (sid,)
+            ).fetchone()
+            other_signer = (
+                current is not None and current[0] is not None
+                and envelope[1] is not None and current[0] != envelope[1]
             )
+            if other_signer:
+                # A signed row is another signer's statement: never rewritten.
+                # This signer's statement is its own slot (one slot per signer).
+                sid = str(uuid4())
+                db.conn.execute(
+                    "INSERT INTO settings(id, set_id, schema_revision, key, "
+                    "payload, publication_state, created_at, updated_at, "
+                    "expires_at, signed_at, signing_key, signature, witness, terminal_persona) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (sid, set_id, int(schema_revision), key, payload_json,
+                     state, created_at, updated_at, expires_at, *envelope),
+                )
+            else:
+                # Re-signed over the new payload (a signed row's signature covers
+                # its stored columns; an edit without a new signature would
+                # fail the boundary).
+                db.conn.execute(
+                    "UPDATE settings SET payload = ?, publication_state = ?, "
+                    "updated_at = ?, expires_at = ?, signed_at = ?, signing_key = ?, "
+                    "signature = ?, witness = ?, terminal_persona = ? WHERE id = ?",
+                    (payload_json, state, updated_at, expires_at, *envelope, sid),
+                )
         db.conn.commit()
     finally:
         db.close()
@@ -3795,14 +3924,17 @@ def override_setting(
         expires_at = schemas.cache_expires_at(
             target["set_id"], int(target["schema_revision"]), now,
         )
+        envelope = _envelope_columns(
+            db, org, target["set_id"], target["schema_revision"], target["key"], state, stored_payload,
+        )
         db.conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
             "publication_state, supersedes, created_at, updated_at, "
-            "expires_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "expires_at, signed_at, signing_key, signature, witness, terminal_persona) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, target["set_id"], int(target["schema_revision"]),
              target["key"], json.dumps(stored_payload),
-             state, target_id, now, now, expires_at),
+             state, target_id, now, now, expires_at, *envelope),
         )
         if deprecate_previous:
             # Collapse the fan in-transaction: every OTHER live override this
@@ -3812,14 +3944,41 @@ def override_setting(
             # base are never touched; ``id != sid`` spares the new row. read_set
             # already excludes ``deprecated = 1`` rows, so this simply drops the
             # stale layers the newest revision replaced.
-            db.conn.execute(
-                "UPDATE settings SET deprecated = 1, successor_id = ?, "
-                "updated_at = ?, expires_at = ? "
+            stale = db.conn.execute(
+                "SELECT id, payload, publication_state, signing_key FROM settings "
                 "WHERE set_id = ? AND key = ? AND supersedes = ? "
                 "  AND id != ? AND deprecated = 0",
-                (sid, now, expires_at, target["set_id"], target["key"],
-                 target_id, sid),
-            )
+                (target["set_id"], target["key"], target_id, sid),
+            ).fetchall()
+            for old_row in stale:
+                old_id, old_payload, old_state, old_signer = old_row
+                if old_signer is None:
+                    db.conn.execute(
+                        "UPDATE settings SET deprecated = 1, successor_id = ?, "
+                        "updated_at = ?, expires_at = ? WHERE id = ?",
+                        (sid, now, expires_at, old_id),
+                    )
+                    continue
+                # A signed layer: its deprecation is a new statement by ITS
+                # signer (deprecated and successor are inside the signature).
+                # This process re-signs only its own rows; another signer's
+                # row stays as written and resolution's signed_at order
+                # already prefers the newer revision.
+                if old_signer != envelope[1]:
+                    continue
+                old_payload_obj = json.loads(old_payload) if isinstance(old_payload, str) else old_payload
+                re_signed = _envelope_columns(
+                    db, org, target["set_id"], target["schema_revision"], target["key"],
+                    old_state, old_payload_obj, deprecated=True, successor_id=sid,
+                )
+                if re_signed[1] is None:
+                    continue
+                db.conn.execute(
+                    "UPDATE settings SET deprecated = 1, successor_id = ?, "
+                    "updated_at = ?, expires_at = ?, signed_at = ?, signing_key = ?, "
+                    "signature = ?, witness = ?, terminal_persona = ? WHERE id = ?",
+                    (sid, now, expires_at, *re_signed, old_id),
+                )
         db.conn.commit()
     finally:
         db.close()
@@ -3862,13 +4021,16 @@ def exclude_setting(
         expires_at = schemas.cache_expires_at(
             target["set_id"], int(target["schema_revision"]), now,
         )
+        envelope = _envelope_columns(
+            db, org, target["set_id"], target["schema_revision"], target["key"], state, {},
+        )
         db.conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
             "publication_state, excludes, created_at, updated_at, "
-            "expires_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "expires_at, signed_at, signing_key, signature, witness, terminal_persona) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, target["set_id"], int(target["schema_revision"]),
-             target["key"], "{}", state, target_id, now, now, expires_at),
+             target["key"], "{}", state, target_id, now, now, expires_at, *envelope),
         )
         db.conn.commit()
     finally:

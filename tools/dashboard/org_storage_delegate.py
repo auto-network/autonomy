@@ -140,6 +140,51 @@ def signing_key(org: str):
     return key
 
 
+_SIGNING_CONTEXTS: dict = {}
+
+
+def signing_context(org: str):
+    """The settings signer for *org* (settings_ops.SigningContext), or None.
+
+    The storage delegate's key signs the row; its member persona, resolved
+    once per grant through the fold (a delegate key walks the delegation
+    edges to the member it acts for), is the row's terminal persona. The
+    witness cited is the attestation this node holds for the organization;
+    none is held today (the adopted-checkpoint cache carries no attestation),
+    so the envelope states None, and the boundary's witness bound (step 7)
+    cannot apply until a node holds one (auto-qrmlg.6 S3).
+    """
+    from tools.graph.settings_ops import SigningContext
+    from tools.network.settingskit.boundary import resolve_signer_persona
+
+    key = signing_key(org)
+    if key is None:
+        return None
+    path = org_ledger_db_path(org)
+    with LedgerStore(path) as store:
+        genesis = store.ledger.genesis_id
+        cached = _SIGNING_CONTEXTS.get((genesis, key.public_hex))
+        if cached is not None:
+            return cached
+        from tools.network.ledger import fold as fold_ledger
+
+        frontier = fold_ledger(store.ledger, now=int(time.time() * 1000))
+    persona = resolve_signer_persona(frontier, key.public_hex)
+    if persona is None:
+        return None
+    context = SigningContext(key=key, terminal_persona=persona, genesis_id=genesis, witness=None)
+    _SIGNING_CONTEXTS[(genesis, key.public_hex)] = context
+    return context
+
+
+def install_settings_signer() -> None:
+    """Make this process sign organization settings rows with its storage
+    delegates (settings_ops.install_signer_provider)."""
+    from tools.graph import settings_ops
+
+    settings_ops.install_signer_provider(signing_context)
+
+
 def accept(item: dict) -> None:
     """After personal warm-up: reuse, or validate/store/append a browser grant."""
     org = item["organization"]

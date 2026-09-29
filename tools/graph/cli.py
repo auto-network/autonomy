@@ -5969,6 +5969,12 @@ def main():
     from tools.graph import sqlite_defaults
 
     sqlite_defaults.install()
+    try:
+        from tools.dashboard import org_storage_delegate
+
+        org_storage_delegate.install_settings_signer()
+    except Exception:  # a CLI without the dashboard package still runs
+        pass
     parser = argparse.ArgumentParser(
         prog="autonomy-graph",
         description="Autonomy Knowledge Graph CLI",
