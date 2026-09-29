@@ -2037,28 +2037,30 @@ class MutationCatalog:
 
     def origin_watermarks(self) -> dict[str, int]:
         """``{origin incarnation: cursor timestamp_ns}``: for every origin
-        this database has learned, the position through which every
-        recorded transaction of that origin is RESOLVED (applied in full,
-        or recorded empty, with no undrained quarantine row holding it).
-        This is W[origin] as a contiguous prefix, not a MAX; see
-        origin_max_timestamps for the old value, kept for diagnostics
-        (graph://d9153c5a-76e O-G). A store that predates the cursor table
-        reports MAX until its first write path creates and seeds it."""
+        with a cursor, the position through which every recorded transaction
+        of that origin is RESOLVED (applied in full, or recorded empty, with no
+        undrained quarantine row holding it). W[origin] as a contiguous
+        prefix, never a MAX (graph://d9153c5a-76e O-G).
+
+        Cursor rows only. An origin whose first transaction has not resolved
+        has no row and is not claimed, so a peer serves it from 0 -- correct,
+        where a MAX would claim rows not yet held. The cursor table is created
+        on every write path (ensure_origin_cursor_schema), so a store that
+        syncs always has it; one without it claims nothing. There is no MAX
+        fallback: origin_max_timestamps is diagnostics only. This machine's
+        own floor is its own cursor: seal_machine_write_floor sets it.
+        """
         present = self.conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_sync_origin_cursor'"
         ).fetchone() is not None
-        out = self.origin_max_timestamps()
-        if present:
-            for row in self.conn.execute(
+        if not present:
+            return {}
+        return {
+            str(row[0]): int(row[1]) for row in self.conn.execute(
                 "SELECT o.incarnation, c.timestamp_ns FROM fleet_sync_origin_cursor c "
                 "JOIN fleet_sync_origins o ON o.id=c.origin_id"
-            ):
-                out[str(row[0])] = int(row[1])
-        # The cursor alone (auto-mmwgu, corrected 2026-09-20): a held write
-        # floor is not a position until the rows below it are here, and then
-        # claim_write_floor has moved the cursor to it. This machine's own
-        # floor is its own cursor: seal_machine_write_floor sets it.
-        return out
+            )
+        }
 
     def origin_max_timestamps(self) -> dict[str, int]:
         """``{origin incarnation: MAX(timestamp_ns) recorded}`` -- what the

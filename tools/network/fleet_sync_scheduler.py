@@ -3038,11 +3038,16 @@ class FleetSyncScheduler:
             # is keyed by a peer machine, which a follower is not.
             from tools.network import fleet_sync_peer_scope
 
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(
-                    fleet_sync_peer_scope.record_frontier,
+            def record(store=store) -> None:
+                # Reduced on arrival against THIS machine's cursors now, per
+                # origin (graph://6aa9bffc-ca9 Record 3).
+                fleet_sync_peer_scope.record_frontier(
                     peer_pub, scope=scope, watermarks=watermarks,
+                    local=store.origin_watermarks(),
                 )
+
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(record)
         epoch, state_epoch = self._scope_epochs(scope)
         record_here = telemetry_stats is None
         stats = telemetry_stats if telemetry_stats is not None else {}

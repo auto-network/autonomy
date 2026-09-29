@@ -163,9 +163,10 @@ def test_a_holding_quarantine_row_pins_the_cursor_until_drained(tmp_path: Path) 
 
 
 def test_an_upgraded_store_seeds_its_cursor_at_the_newest_transaction(tmp_path: Path) -> None:
-    """Operational default S6: a store that predates the cursor reports MAX
-    until its first write, which creates the table and seeds every origin at
-    its newest transaction; enforcement is forward-only."""
+    """Operational default S6: a store that predates the cursor claims
+    NOTHING until its first write, which creates the table and seeds every
+    origin at its newest transaction; enforcement is forward-only. There is no
+    MAX fallback: a MAX would claim rows not yet resolved."""
     source, target, server, client = _pair(tmp_path)
     try:
         for i in range(3):
@@ -174,7 +175,7 @@ def test_an_upgraded_store_seeds_its_cursor_at_the_newest_transaction(tmp_path: 
             client.apply_remote_batch(items)
         target.conn.execute("DROP TABLE fleet_sync_origin_cursor")   # pre-upgrade shape
         target.conn.commit()
-        assert client.origin_watermarks()[ORIGIN_A] == 1_002          # MAX fallback
+        assert client.origin_watermarks() == {}                       # claims nothing
         _write(server, source.conn, 1_003, "t3", "s3")
         client.apply_remote_batch(_served(server)[-1][2])
         assert client.origin_watermarks()[ORIGIN_A] == 1_003

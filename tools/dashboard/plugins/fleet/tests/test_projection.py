@@ -463,18 +463,17 @@ def test_peer_counters_survive_a_roster_epoch_change(tmp_path, monkeypatch):
 
 
 def test_a_quiet_organization_is_not_reported_as_lag():
-    """The card said anchore 47h and blindhash 13h while both machines held
-    byte-identical positions on every scope and the reverse direction had just
-    drained to zero. `now - their_frontier` measures how OLD the content is;
-    on an organization nobody has written to in two days that is two days of
-    invented lag on a perfectly converged peer."""
+    """The card once said anchore 47h while both machines held identical
+    positions: `now - their_frontier` measures how OLD content is. The peer
+    row now carries how far the peer trailed us per origin, reduced when its
+    map arrived: a converged peer on a quiet organization reads 0."""
     from tools.dashboard.plugins.fleet.entrypoints import projection as proj
 
     two_days_ago = (NOW - 2 * 24 * 3_600_000) * 1_000_000
     [row] = proj._scope_rows(
-        [{"scope": "anchore", "frontier_ns": two_days_ago}],
+        [{"scope": "anchore", "frontier_ns": two_days_ago, "measured": True,
+          "behind_ns": 0, "behind_origin": "", "unreceived": 0}],
         server_time=NOW,
-        local={"anchore": two_days_ago},
     )
     assert row["lag"] == 0, "a converged peer must not read as behind"
 
@@ -482,24 +481,26 @@ def test_a_quiet_organization_is_not_reported_as_lag():
 def test_a_peer_that_trails_us_reports_the_difference():
     from tools.dashboard.plugins.fleet.entrypoints import projection as proj
 
-    theirs = (NOW - 90_000) * 1_000_000
     [row] = proj._scope_rows(
-        [{"scope": "autonomy", "frontier_ns": theirs}],
+        [{"scope": "autonomy", "frontier_ns": 1, "measured": True,
+          "behind_ns": 90_000 * 1_000_000, "behind_origin": "a1" * 32,
+          "unreceived": 0}],
         server_time=NOW,
-        local={"autonomy": NOW * 1_000_000},
     )
-    assert row["lag"] == 90_000
+    assert (row["lag"], row["behindOn"]) == (90_000, ["a1" * 32])
 
 
-def test_no_local_position_reports_unknown_rather_than_converged():
-    """We hold nothing for that scope, so we have no reference. Null renders as
-    unknown; zero would claim agreement we cannot see."""
+def test_unmeasured_or_unreceived_reports_unknown_rather_than_converged():
+    """No reduction recorded yet, or the peer held nothing of an origin we
+    hold: null renders as unknown; zero would claim agreement we cannot see."""
     from tools.dashboard.plugins.fleet.entrypoints import projection as proj
 
-    [row] = proj._scope_rows(
-        [{"scope": "blindhash", "frontier_ns": 5}], server_time=NOW, local={},
-    )
-    assert row["lag"] is None
+    [unmeasured] = proj._scope_rows(
+        [{"scope": "blindhash", "frontier_ns": 5}], server_time=NOW)
+    [unreceived] = proj._scope_rows(
+        [{"scope": "blindhash", "frontier_ns": 5, "measured": True,
+          "behind_ns": 0, "behind_origin": "", "unreceived": 2}], server_time=NOW)
+    assert unmeasured["lag"] is None and unreceived["lag"] is None
 
 
 def test_the_local_machine_gets_its_own_organization_rows():
@@ -566,58 +567,3 @@ def test_local_machine_block_carries_per_scope_states_and_dashboard_cache():
                    "cachePresent": False}
     absent = project(_inputs(entries=(LOCAL_ENTRY,)))["localMachine"]
     assert absent["scopeStates"] == [] and absent["dashboardCredentialPresent"] is None
-
-
-def test_the_local_row_shows_how_far_this_machine_trails_the_peers_it_pulls_from():
-    """auto-pmw2v: SJC-2's own Fleet page read "in sync" while it was 16k
-    transactions behind Home, because the local row's lag was hard-set to 0.
-    The local row is behind by (peer's advertised frontier - ours), the worst
-    peer wins, and it shrinks to 0 as the catch-up lands."""
-    from tools.dashboard.plugins.fleet.entrypoints import projection as proj
-
-    hour = 3_600_000 * 1_000_000
-    home_newest = 100 * hour
-    peers = {"home": [{"scope": "autonomy", "frontier_ns": home_newest,
-                       "bytes_in": 1, "bytes_out": 1}],
-             "idle": [{"scope": "autonomy", "frontier_ns": 50 * hour}]}
-
-    def lag_at(ours):
-        [row] = proj._local_scope_rows(peers, {"autonomy": ours}, {})
-        return row
-
-    far, nearer, done = lag_at(40 * hour), lag_at(99 * hour), lag_at(home_newest)
-    assert far["lag"] == 60 * 3_600_000 and far["behind"][0]["peer"] == "home"
-    assert 0 < nearer["lag"] < far["lag"], "the lag shrinks each round"
-    assert done["lag"] == 0 and done["behind"] == [], "and reaches 0 when caught up"
-
-
-def test_the_local_row_is_not_behind_a_peer_that_trails_it():
-    from tools.dashboard.plugins.fleet.entrypoints import projection as proj
-
-    [row] = proj._local_scope_rows(
-        {"slow": [{"scope": "personal", "frontier_ns": 5}]}, {"personal": 10}, {})
-    assert (row["lag"], row["behind"]) == (0, [])
-
-
-def test_a_scope_this_machine_holds_nothing_for_is_not_yet_received():
-    from tools.dashboard.plugins.fleet.entrypoints import projection as proj
-
-    hour = 3_600_000 * 1_000_000
-    [row] = proj._local_scope_rows(
-        {"home": [{"scope": "autonomy", "frontier_ns": 100 * hour,
-                   "observed_at_ns": 99 * hour}]}, {}, {})
-    assert row["lag"] is None, "not in sync, and not fifty-six years behind"
-    assert row["behind"] == [{"peer": "home", "lag": None,
-                              "observedAt": 99 * 3_600_000}]
-
-
-def test_a_peer_whose_position_was_never_recorded_is_named_not_counted():
-    from tools.dashboard.plugins.fleet.entrypoints import projection as proj
-
-    [row] = proj._local_scope_rows(
-        {"home": [{"scope": "personal", "frontier_ns": 20}],
-         "quiet": [{"scope": "personal", "bytes_in": 3}]},
-        {"personal": 10}, {})
-    assert row["lag"] == 0  # 10 ns ahead rounds to 0 ms
-    assert row["notMeasured"] == ["quiet"]
-    assert [b["peer"] for b in row["behind"]] == ["home"]

@@ -12,8 +12,16 @@ The peer already publishes that map in ``body["watermarks"]`` on every pull
 request, because the server cannot compute a delta without it. This record
 persists what already arrives; it adds no wire field and no new exchange.
 
-Lag is therefore ``now - frontier_ns`` and is never stored, and neither is any
-per-scope convergence summary — both are derived from these rows at read time.
+The map is reduced ON ARRIVAL, never stored whole (that would be O(N^2) per
+machine in an organization): ``behind_ns`` / ``behind_origin`` /
+``unreceived`` are how far the peer trails THIS machine, computed once per
+pull against this machine's cursors, per origin -- max over origins o of
+``W_L[o] - W_P[o]``. How far this machine trails its peers comes from the
+per-scope best-known vector (autonomy.machine.fleet-sync-best-known). Lag is
+NOT ``now - frontier_ns``, and ``frontier_ns`` (a minimum across the peer's
+origins) is a summary kept for diagnostics only. Definitions:
+graph://6aa9bffc-ca9 Record 3; graph://1155b8f4-8cf "Terms, and which frontier
+is which"; pitfall graph://e6dba57c-f8b.
 """
 
 from __future__ import annotations
@@ -70,9 +78,27 @@ class FleetSyncPeerScopeV1(SettingSchema):
         required=True,
         description=(
             "Lowest timestamp across the origins the peer promises for "
-            "this scope: how far behind it is, since a peer current on "
-            "four origins and a day behind on the fifth is a day behind. "
-            "Lag is now minus this value and is never stored."
+            "this scope: a summary of the peer's slowest origin, kept for "
+            "diagnostics. No lag is computed from it (see behind_ns)."
+        ),
+    )
+    behind_ns: int = field(
+        required=False,
+        description=(
+            "How far the peer trailed THIS machine at its last pull: max "
+            "over origins of (our cursor - the peer's cursor), same origin "
+            "on both sides. 0 when it held everything we held."
+        ),
+    )
+    behind_origin: str = field(
+        required=False,
+        description="The origin the peer trailed most on, or empty.",
+    )
+    unreceived: int = field(
+        required=False,
+        description=(
+            "How many origins we hold that the peer held nothing of at its "
+            "last pull. Any makes its lag unknown ('not yet received')."
         ),
     )
     observed_at_ns: int = field(
@@ -106,3 +132,8 @@ class FleetSyncPeerScopeV1(SettingSchema):
             return
         for name in ("frontier_ns", "observed_at_ns", "bytes_in", "bytes_out"):
             _counter(payload, name)
+        for name in ("behind_ns", "unreceived"):
+            if name in payload:
+                _counter(payload, name)
+        if "behind_origin" in payload and not isinstance(payload["behind_origin"], str):
+            raise SchemaValidationError("behind_origin must be a string")

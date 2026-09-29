@@ -50,12 +50,17 @@ class ProjectionInputs:
     invitation_publication: Mapping | None = None
     publishing_org: str = "personal"
     telemetry_rows: Mapping[str, Mapping] = field(default_factory=dict)
-    #: {peer: [{scope, frontier_ns, observed_at_ns, bytes_in, bytes_out}]}
+    #: {peer: [{scope, frontier_ns, measured, behind_ns, behind_origin,
+    #: unreceived, observed_at_ns, bytes_in, bytes_out}]}
     peer_scope_rows: Mapping[str, list] = field(default_factory=dict)
     #: One row per transport/direction/scope, each carrying its two rings.
     traffic_rows: tuple = ()
     #: {scope: oldest origin position THIS machine holds}
     local_frontiers: Mapping[str, int] = field(default_factory=dict)
+    #: {scope: {origin: this machine's cursor for that origin}} -- W_L[o]
+    local_cursors: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
+    #: {scope: {origin: {ns, peer}}} -- best cursor any peer reported per origin
+    best_known: Mapping[str, Mapping[str, dict]] = field(default_factory=dict)
     #: {scope: {phase, frontier}} for any scope mid-bootstrap
     bootstrap_states: Mapping[str, dict] = field(default_factory=dict)
     #: {(peer, scope): counters at the operator's last reset}
@@ -245,6 +250,8 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         peer_scope_rows=fleet_sync_peer_scope.read_peer_scopes(org="machine"),
         traffic_rows=tuple(fleet_sync_traffic.read_traffic_rows(org="machine")),
         local_frontiers=_local_frontiers(),
+        local_cursors=_local_cursors(),
+        best_known=fleet_sync_peer_scope.read_best_known(org="machine"),
         bootstrap_states=_bootstrap_states(),
         counter_baselines=fleet_counter_baseline.read(org="machine"),
         local_verdict=local_verdict,
@@ -287,18 +294,15 @@ def _milliseconds(value) -> int | None:
 
 
 def _local_frontiers() -> dict[str, int]:
-    """``{scope: oldest origin position this machine holds}``.
+    """``{scope: oldest newest-transaction position this machine holds}``.
 
-    The reference a peer's frontier is judged against. Lag is how far a peer
-    trails US, not how old the content happens to be: on a scope nobody has
-    written to for two days, ``now - their_frontier`` is two days for a peer
-    that is perfectly converged. Both machines sitting on the identical
-    position is the definition of in sync, whatever the wall clock says.
-
-    Measured live on 2026-09-10: the card showed anchore 47h and blindhash 13h
-    while both machines held byte-identical positions on every scope and the
-    reverse direction had just drained its backlog to zero. Those were quiet
-    organizations, not stranded ones.
+    Used ONLY for a scope mid-bootstrap, to say how far the sweep still has to
+    fill (its target F minus this). It is a scalar across origins, so it is
+    NEVER compared with a peer's position to compute lag: that compares two
+    different origins and measures write recency, not a gap (8ee69a22, the
+    false 5.3 d on Home). Lag is per origin -- ``_origin_gaps`` over the
+    stored watermark maps and ``_local_cursors`` (graph://6aa9bffc-ca9
+    Record 3; pitfall graph://e6dba57c-f8b).
     """
     from tools.network.fleet_sync_scheduler import discover_org_sync_scopes
 
@@ -330,6 +334,54 @@ def _local_frontiers() -> dict[str, int]:
             values = [int(row[0]) for row in rows if row[0]]
             if values:
                 out[scope] = min(values)
+        except Exception:
+            continue
+        finally:
+            conn.close()
+    return out
+
+
+def _scope_db_paths() -> dict[str, Path]:
+    from tools.network.fleet_sync_scheduler import discover_org_sync_scopes
+
+    paths = {"personal": _org_db_path("personal")}
+    try:
+        paths.update(discover_org_sync_scopes())
+    except Exception:
+        pass
+    return {scope: Path(path) for scope, path in paths.items()}
+
+
+def _local_cursors(paths: Mapping[str, Path] | None = None) -> dict[str, dict[str, int]]:
+    """``{scope: {origin: W_L[origin]}}``: this machine's cursor per origin.
+
+    ``fleet_sync_origin_cursor`` only -- the same value this machine
+    advertises (MutationCatalog.origin_watermarks) and the doctor prints as
+    "cursor at MAX". No MAX fallback: every write path creates the table, so
+    a scope without one reports nothing and its lag reads unknown
+    (graph://6aa9bffc-ca9 Record 3). A small table, one row per origin, so a
+    render never scans the transaction log.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for scope, path in (paths if paths is not None else _scope_db_paths()).items():
+        if not Path(path).exists():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+        except Exception:
+            continue
+        try:
+            present = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='fleet_sync_origin_cursor'").fetchone()
+            if present is None:
+                continue
+            out[scope] = {
+                str(origin): int(ts) for origin, ts in conn.execute(
+                    "SELECT o.incarnation, c.timestamp_ns FROM "
+                    "fleet_sync_origin_cursor c JOIN fleet_sync_origins o "
+                    "ON o.id=c.origin_id")
+            }
         except Exception:
             continue
         finally:
@@ -377,34 +429,79 @@ def _bootstrap_states() -> dict[str, dict]:
     return out
 
 
+def _origin_gaps(
+    ahead: Mapping[str, int], held: Mapping[str, int],
+) -> list[dict]:
+    """Per origin, how far ``held`` trails ``ahead``: the SAME origin on both
+    sides, never two machines' scalars (graph://6aa9bffc-ca9 Record 3; pitfall
+    graph://e6dba57c-f8b). ``ahead`` and ``held`` are cursor maps
+    {origin: timestamp_ns}; the result lists only origins where ``held`` is
+    behind, with ``lag`` in ms, or None when ``held`` has nothing of that
+    origin at all ("not yet received", never ``ahead - 0``)."""
+    gaps: list[dict] = []
+    for origin, position in (ahead or {}).items():
+        position = int(position or 0)
+        mine = int((held or {}).get(origin) or 0)
+        if position > mine:
+            gaps.append({
+                "origin": origin,
+                "lag": (position - mine) // 1_000_000 if mine else None,
+            })
+    return gaps
+
+
+def _worst(gaps: list[dict]) -> int | None:
+    """0 when nothing trails, None when any origin is not yet received."""
+    if any(gap["lag"] is None for gap in gaps):
+        return None
+    return max((gap["lag"] for gap in gaps), default=0)
+
+
+def _active_best_known(
+    best_known: Mapping[str, Mapping[str, dict]] | None, active: set[str],
+) -> dict[str, dict[str, dict]]:
+    """Only positions vouched for by an ACTIVE roster machine count: a peer
+    removed from the roster (or re-enrolled under a new key) no longer holds
+    anything this machine can pull, so its reports must not read as lag."""
+    return {
+        scope: {origin: best for origin, best in (origins or {}).items()
+                if isinstance(best, dict) and best.get("peer") in active}
+        for scope, origins in (best_known or {}).items()
+    }
+
+
 def _local_scope_rows(
     peer_scope_rows: Mapping[str, list],
     local: Mapping[str, int],
     bootstrap: Mapping[str, dict],
+    cursors: Mapping[str, Mapping[str, int]] | None = None,
+    best_known: Mapping[str, Mapping[str, dict]] | None = None,
 ) -> list[dict]:
     """The local machine's own per-organization row.
 
     It has no peer row about itself -- Record 2 is keyed by PEER -- so without
     this the local card renders an empty table and "0 / 0", which reads as a
-    fault rather than as the category error it is: this machine has nothing to
-    be behind.
+    fault rather than as the category error it is.
 
     Bytes are summed across peers for the scope, which IS this machine's total
     in and out for that organization, and is lifetime like the peer rows beside
     it.
 
-    Lag is how far THIS machine trails the peers it pulls from: for each peer
-    whose own position we hold (``frontier_ns``, recorded when it pulls from
-    us), ``their frontier - ours``, and the row shows the worst. A puller that
-    cannot apply a peer's delta is behind, and must say so on its own page:
-    hard-setting this to zero let SJC-2 read "in sync" 16k transactions
-    behind (auto-pmw2v). Mid-bootstrap it is behind by the sweep's remaining
-    distance; the larger of the two wins. ``behind`` names each peer it
-    trails (with when its position was recorded), so the row can say whom.
-    Lag is None -- unknown, never "in sync" -- when no peer's position is
-    recorded for the scope, or when this machine holds nothing yet for a
-    scope a peer has written; ``notMeasured`` names peers whose position was
-    never recorded because they never pulled from us.
+    Lag is how far THIS machine L trails its peers, PER ORIGIN
+    (graph://6aa9bffc-ca9 Record 3; terms graph://1155b8f4-8cf; pitfall
+    graph://e6dba57c-f8b): max over origins o of ``best[o] - W_L[o]``, where
+    best[o] is the highest cursor any peer has reported for o (folded from
+    every pull's map on arrival) and W_L our own cursor. That catches data a
+    peer holds from ANY origin -- including one that never syncs with us
+    directly -- in O(origins), whatever the number of peers. ``behind`` names,
+    per peer that reported a position we lack, its worst origin and when it
+    was heard. Lag is None -- unknown, never "in sync" -- when no peer has
+    reported for the scope, or when we hold nothing of an origin a peer
+    holds; ``notMeasured`` names peers never heard from. Mid-bootstrap the
+    sweep's remaining distance also counts; the larger wins.
+
+    Never compare one machine's scalar with another's: two wrong versions
+    shipped (a hard-set 0; min-vs-min in 8ee69a22).
     """
     totals: dict[str, dict] = {}
     for scopes in (peer_scope_rows or {}).values():
@@ -414,44 +511,36 @@ def _local_scope_rows(
             )
             entry["bytesIn"] += int(row.get("bytes_in") or 0)
             entry["bytesOut"] += int(row.get("bytes_out") or 0)
+    cursors = cursors or {}
     out: list[dict] = []
-    for scope in sorted(set(local) | set(totals) | set(bootstrap)):
+    for scope in sorted(set(local) | set(totals) | set(bootstrap) | set(cursors) | set(best_known or {})):
         entry = totals.get(scope) or {"bytesIn": 0, "bytesOut": 0}
         filling = bootstrap.get(scope)
-        ours = int(local.get(scope) or 0)
-        behind: list[dict] = []
-        not_measured: list[str] = []
-        recorded = 0
-        for peer, scopes in (peer_scope_rows or {}).items():
-            for row in scopes or []:
-                if row.get("scope") != scope:
-                    continue
-                theirs = int(row.get("frontier_ns") or 0)
-                if not theirs:
-                    # The peer never pulled from us, so we never learned its
-                    # position: unknown, not "not ahead".
-                    not_measured.append(peer)
-                    continue
-                recorded += 1
-                if theirs > ours:
-                    observed = int(row.get("observed_at_ns") or 0)
-                    behind.append({
-                        "peer": peer,
-                        # Holding nothing yet is "not yet received"; theirs - 0
-                        # would render as fifty-six years.
-                        "lag": (theirs - ours) // 1_000_000 if ours else None,
-                        # A recorded position ages: a peer last seen an hour
-                        # ago may be further ahead than this says.
-                        "observedAt": observed // 1_000_000 if observed else None,
-                    })
-        if not recorded or any(b["lag"] is None for b in behind):
-            lag = None
-        else:
-            lag = max((b["lag"] for b in behind), default=0)
+        held = cursors.get(scope) or {}
+        best = (best_known or {}).get(scope) or {}
+        reported = {peer: row for peer, scopes in (peer_scope_rows or {}).items()
+                    for row in scopes or [] if row.get("scope") == scope}
+        not_measured = sorted(peer for peer, row in reported.items()
+                              if not int(row.get("frontier_ns") or 0))
+        ahead = {origin: int(b.get("ns") or 0) for origin, b in best.items()}
+        by_peer: dict[str, list[dict]] = {}
+        for gap in _origin_gaps(ahead, held):
+            by_peer.setdefault(str(best[gap["origin"]].get("peer")), []).append(gap)
+        behind = []
+        for peer, gaps in by_peer.items():
+            worst = max(gaps, key=lambda g: (g["lag"] is None, g["lag"] or 0))
+            observed = int((reported.get(peer) or {}).get("observed_at_ns") or 0)
+            behind.append({
+                "peer": peer, "origin": worst["origin"], "lag": _worst(gaps),
+                "origins": len(gaps),
+                "observedAt": observed // 1_000_000 if observed else None,
+            })
+        lag = _worst([g for gaps in by_peer.values() for g in gaps]) if best else None
         if filling:
             # now - F is what remains: F is where the sweep is filling TO.
             target = max(filling["frontier"].values(), default=0)
-            fill_lag = max(0, (target - ours) // 1_000_000) if target else None
+            ours_min = int(local.get(scope) or 0)
+            fill_lag = max(0, (target - ours_min) // 1_000_000) if target else None
             lag = fill_lag if lag is None else (
                 None if fill_lag is None else max(lag, fill_lag))
         out.append({
@@ -467,38 +556,30 @@ def _local_scope_rows(
 
 
 def _scope_rows(
-    rows: list | None, *, server_time: int, local: dict | None = None,
+    rows: list | None, *, server_time: int,
     baselines: Mapping | None = None, peer: str | None = None,
 ) -> list[dict]:
-    """One row per organization for one peer, as the Fleet view reads them.
+    """One row per organization for one peer P, as the Fleet view reads them.
 
-    Lag is ``now - frontier_ns``. A peer that has never advertised a frontier
-    for a scope has none to be behind, so its lag is null rather than the age
-    of the epoch -- rendering a machine that has simply not pulled yet as
-    fifty-six years behind is worse than rendering it as unknown.
+    Lag is how far P trailed THIS machine at its last pull, per origin
+    (graph://6aa9bffc-ca9 Record 3; pitfall graph://e6dba57c-f8b): max over
+    origins o of ``W_L[o] - W_P[o]``, reduced when P's map arrived
+    (``behind_ns``). Never ``now - anything`` and never one scalar against
+    another. None -- unknown -- when P has not pulled from us since this was
+    recorded, or when P held nothing of an origin we hold.
     """
     out: list[dict] = []
     for row in rows or []:
-        # Nanoseconds by schema contract, so convert outright. _milliseconds
-        # guesses the unit from magnitude, which is right for columns that
-        # have carried both and wrong for a field that never will.
         scope = row.get("scope")
-        theirs = int(row.get("frontier_ns") or 0)
-        # Against OUR position for the same scope, not against the clock. A
-        # peer that holds what we hold is current even if neither of us has
-        # written to that organization in days.
-        ours = int((local or {}).get(scope) or 0)
-        if not theirs:
-            lag = None
-        elif ours:
-            lag = max(0, (ours - theirs) // 1_000_000)
-        else:
-            # We hold nothing for this scope, so we have no reference and
-            # cannot say. Null renders as unknown rather than as converged.
-            lag = None
+        measured = bool(row.get("measured"))
+        unreceived = int(row.get("unreceived") or 0)
+        origin = str(row.get("behind_origin") or "")
         out.append({
             "scope": scope,
-            "lag": lag,
+            "lag": (int(row.get("behind_ns") or 0) // 1_000_000
+                    if measured and not unreceived else None),
+            "behindOn": [origin] if origin else [],
+            "unreceived": unreceived,
             "bytesIn": fleet_counter_baseline.since(
                 row.get("bytes_in"),
                 (baselines or {}).get((peer, scope)), "bytes_received"),
@@ -759,13 +840,13 @@ def project(inputs: ProjectionInputs) -> dict:
             scopes=(
                 _local_scope_rows(
                     inputs.peer_scope_rows, inputs.local_frontiers,
-                    inputs.bootstrap_states,
+                    inputs.bootstrap_states, inputs.local_cursors,
+                    _active_best_known(inputs.best_known, set(active)),
                 )
                 if entry.machine_id == inputs.local_machine_id
                 else _scope_rows(
                     inputs.peer_scope_rows.get(machine_pub),
                     server_time=inputs.server_time,
-                    local=inputs.local_frontiers,
                     baselines=inputs.counter_baselines,
                     peer=machine_pub,
                 )
