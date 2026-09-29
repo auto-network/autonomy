@@ -100,6 +100,20 @@ def enrolled_count() -> int:
     return len(record().get("credentials") or [])
 
 
+def credentials_summary() -> list[dict]:
+    """The enrolled gate passkeys as the Remote access control lists them:
+    id, when enrolled, transports and sign count. Never the public key."""
+    rows = []
+    for row in record().get("credentials") or []:
+        rows.append({
+            "credential_id": row.get("credential_id"),
+            "created_at": row.get("created_at"),
+            "transports": list(row.get("transports") or []),
+            "sign_count": int(row.get("sign_count") or 0),
+        })
+    return rows
+
+
 def enrollment_state(now: float | None = None) -> dict:
     """``{open, expires_at}`` as the status routes report it."""
     enrollment = record().get("enrollment") or {}

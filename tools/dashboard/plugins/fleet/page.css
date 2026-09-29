@@ -99,3 +99,15 @@
     .or-factor-err{font-size:11.5px;color:#fca5a5;line-height:1.5;margin:6px 0 2px 40px}
     .or-cancel{font-size:13px;color:#8b93a3;text-align:center;padding:10px;cursor:pointer;margin-top:4px}
     .or-cancel:hover{color:#e5e7eb}
+
+/* Remote access control on a machine card (auto-fnj20, design 58b3dd5b). */
+.fv .ra{grid-column:1/-1;margin-top:18px;padding-top:12px;border-top:1px solid var(--line)}
+.fv .ra-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}.fv .ra-head h3{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}.fv .ra-head .ra-mode{margin-left:auto;font-size:12px}.fv .ra-head .state{white-space:nowrap;font-size:12px;font-weight:600}.fv .ra-sub{margin-top:14px}
+.fv .ra-rows{display:grid;grid-template-columns:1fr;margin:0}.fv .ra-rows div{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #34415390;min-width:0;font-size:13px}.fv .ra-rows dt{color:var(--muted);flex:none}.fv .ra-rows dd{margin:0;text-align:right;min-width:0;overflow-wrap:anywhere}.fv .ra-origin{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.fv .ra-progress{margin:6px 0 0;padding:0;list-style:none;display:grid;gap:4px}.fv .ra-progress li{display:flex;gap:8px;font-size:12px;color:var(--muted)}.fv .ra-progress li.ok{color:var(--ink)}
+.fv .ra-passkeys{margin:0;padding:0;list-style:none}.fv .ra-passkeys li{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid #34415390;font-size:13px}.fv .ra-when{color:var(--muted);font-size:12px}
+.fv .ra-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.fv .ra-passkeys .ra-actions,.fv .ra-actions .action-confirm{margin-top:0}
+.fv .ra-note{font-size:12px;color:var(--muted);margin:8px 0 0}
+.fv .ra-enrol{display:grid;grid-template-columns:1fr;gap:12px;align-items:start;margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px}.fv .ra-qr{width:160px;height:160px;background:#fff;border-radius:6px;display:grid;place-items:center;overflow:hidden}.fv .ra-qr:empty{display:none}.fv .ra-qr svg{width:100%;height:100%}.fv .ra-enrol-body{min-width:0}.fv .ra-link{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;word-break:break-all;color:var(--ink)}
+.fv .ra-choice{display:grid;gap:6px;margin:8px 0}.fv .ra-choice label{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border:1px solid var(--line);border-radius:8px;cursor:pointer;font-size:13px}.fv .ra-choice label.on{border-color:var(--blue)}.fv .ra-choice input{margin-top:3px}.fv .ra-why{display:block;color:var(--muted);font-size:12px}
+@media(min-width:768px){.fv .ra-enrol{grid-template-columns:132px 1fr}.fv .ra-qr{width:132px;height:132px}}

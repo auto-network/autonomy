@@ -789,3 +789,256 @@ function fleetPage() {
 }
 
 if (window.Alpine) Alpine.data('fleetPage', fleetPage);
+
+// ── Remote access (bead auto-fnj20, design 58b3dd5b) ──────────────────────
+//
+// One control per machine card: how the machine is reached (Autonomy
+// Network / Tailscale / Local only), where a relay publication stands
+// (certificate, route, passkey gate), the enrolled gate passkeys with
+// Revoke, and Enrol a passkey (a one-use link and its QR). For this
+// machine the control speaks to the local routes; for another machine of
+// the fleet the same routes carry `machine`, and that machine's dashboard
+// performs the operation over session-control. Through the gated relay
+// route the control is read-only: those operations are refused there by
+// design, so no button is offered.
+function remoteAccessControl(machine) {
+  const isLocal = !!(machine && machine.isLocalMachine);
+  const machineParam = isLocal ? '' : String((machine && machine.machinePublicKey) || '');
+  return {
+    machine: machine || {},
+    status: null,          // GET /api/network/remote-access/status
+    enrolment: null,       // {url, expires_at} while the link is shown here
+    loading: false,
+    busy: null,            // 'open' | 'close' | 'revoke' | 'publish'
+    error: null,
+    choosing: false,
+    draft: 'local',
+    confirmRevoke: null,
+    copied: false,
+    qrSvg: '',
+    qrFor: '',
+    _timer: null,
+    _scripts: {},
+
+    isLocal,
+    machineParam,
+
+    // ── polling while the card is expanded ──
+    start() {
+      if (this._timer) return;
+      this.refresh();
+      this._timer = setInterval(() => this.refresh({ quiet: true }), 5000);
+    },
+    stop() {
+      if (this._timer) clearInterval(this._timer);
+      this._timer = null;
+    },
+    destroy() { this.stop(); },
+
+    _url(path, params) {
+      const query = Object.assign({}, params || {});
+      if (machineParam) query.machine = machineParam;
+      const keys = Object.keys(query);
+      return path + (keys.length ? '?' + keys.map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(query[k])).join('&') : '');
+    },
+    async _call(method, path, body) {
+      const init = { method, headers: { 'Accept': 'application/json' }, cache: 'no-store' };
+      if (body !== undefined) {
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(machineParam ? Object.assign({ machine: machineParam }, body) : body);
+      }
+      const response = await fetch(method === 'GET' || method === 'DELETE' ? this._url(path) : path, init);
+      let payload = {};
+      try { payload = await response.json(); } catch (e) { payload = {}; }
+      if (!response.ok || payload.ok === false) {
+        const err = new Error(payload.error || payload.detail || ('HTTP ' + response.status));
+        err.code = payload.error || null;
+        throw err;
+      }
+      return payload;
+    },
+
+    async refresh(options) {
+      const quiet = !!(options && options.quiet);
+      if (!quiet) this.loading = true;
+      try {
+        const payload = await this._call('GET', '/api/network/remote-access/status');
+        this.status = payload.status || null;
+        this.error = null;
+        if (!this.choosing) this.draft = (this.status && this.status.mode) || 'local';
+        // The status carries the open enrollment link for a local caller:
+        // show it (a reload must not lose a link that is still good).
+        if (this.status && this.status.enrollment === 'open' && this.status.enrollment_url) {
+          if (!this.enrolment || this.enrolment.url !== this.status.enrollment_url) {
+            this.enrolment = { url: this.status.enrollment_url, expires_at: this.status.enrollment_expires_at || null };
+          }
+        } else if (this.status && this.status.enrollment !== 'open') {
+          this.enrolment = null;
+        }
+        this.renderQr();
+      } catch (error) {
+        this.error = error.code === 'through_gateway' ? null : ((error && error.message) || String(error));
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    // ── derivations (pure; the same rules welcome.js uses for the reach step) ──
+    get passkeys() { return (this.status && this.status.gate_passkeys) || []; },
+    // Viewed at the relay address itself: the recovery operations are refused
+    // through the gate by design, so the control offers none of them.
+    get readOnly() {
+      const origin = this.status && this.status.mode === 'autonomy' && this.status.origin;
+      if (!origin || typeof window === 'undefined' || !window.location) return false;
+      return origin.replace(/^https?:\/\//, '') === window.location.host;
+    },
+    live() {
+      const st = this.status || {};
+      return !!(st.advertised && st.gate === 'up' && st.gateway_state === 'healthy');
+    },
+    mode() { return (this.status && this.status.mode) || null; },
+    modeWord() {
+      return { autonomy: 'Autonomy Network', tailscale: 'Tailscale', local: 'Local only' }[this.mode()] || 'Not set';
+    },
+    statusWord() {
+      if (!this.status) return this.error ? 'Unavailable' : '…';
+      if (this.mode() !== 'autonomy') return this.modeWord();
+      if (this.live()) return this.passkeys.length ? 'Reachable' : 'Reachable · no passkey';
+      return this.status.certificate === 'failed' ? 'Certificate failed' : 'Setting up';
+    },
+    tone() {
+      if (!this.status) return this.error ? 'warn' : 'muted';
+      if (this.mode() !== 'autonomy') return '';
+      if (this.status.certificate === 'failed') return 'bad';
+      return this.live() && this.passkeys.length ? 'good' : 'warn';
+    },
+    certWord() { return { ok: 'Issued', retrying: 'Retrying', pending: 'Pending', failed: 'Failed' }[this.status && this.status.certificate] || '—'; },
+    certTone() { return { ok: 'good', retrying: 'warn', pending: 'muted', failed: 'bad' }[this.status && this.status.certificate] || 'muted'; },
+    routeWord() {
+      if (this.live()) return 'Live';
+      const st = this.status || {};
+      return st.advertised ? 'Advertised · gateway ' + (st.gateway_state || '—') : 'Not yet';
+    },
+    routeTone() { return this.live() ? 'good' : 'warn'; },
+    progress() {
+      const st = this.status || {};
+      return [
+        { name: 'certificate', label: st.certificate === 'retrying' ? 'Certificate (retrying)' : 'Certificate', done: st.certificate === 'ok' },
+        { name: 'route', label: 'Route on the relay', done: !!st.advertised },
+        { name: 'gate', label: 'Passkey gate', done: st.gate === 'up' },
+      ].map((r) => ({ name: r.name, label: r.label, tone: r.done ? 'ok' : '', mark: r.done ? '✓' : '…' }));
+    },
+    showProgress() {
+      return this.mode() === 'autonomy' && !this.live() && !!this.status && this.status.certificate !== 'failed';
+    },
+    minutesLeft() {
+      if (!this.enrolment || !this.enrolment.expires_at) return null;
+      return Math.max(0, Math.round((Number(this.enrolment.expires_at) * 1000 - Date.now()) / 60000));
+    },
+    enrolLine() {
+      const minutes = this.minutesLeft();
+      return 'Open this on the device to enrol · ' + (minutes == null ? 'one use' : 'expires in ' + minutes + ' min · one use');
+    },
+    passkeyLabel(p) {
+      const transports = (p && p.transports) || [];
+      const kind = transports.indexOf('internal') >= 0 ? 'Device passkey'
+        : (transports.indexOf('hybrid') >= 0 || transports.indexOf('cable') >= 0) ? 'Phone passkey'
+        : (transports.indexOf('usb') >= 0 || transports.indexOf('nfc') >= 0) ? 'Security key' : 'Passkey';
+      return kind;
+    },
+    passkeyWhen(p) {
+      const when = p && p.created_at ? new Date(p.created_at) : null;
+      if (!when || isNaN(when.getTime())) return '';
+      return 'enrolled ' + when.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    },
+    canEnrol() { return this.mode() === 'autonomy' && !this.enrolment && !this.readOnly && !this.busy; },
+    canChooseMode() { return isLocal && !this.readOnly && !!this.status && !this.busy; },
+
+    // ── actions ──
+    async openEnrolment() {
+      this.busy = 'open';
+      try {
+        const reply = await this._call('POST', '/api/network/remote-access/enrollment/open', {});
+        this.enrolment = { url: reply.enrollment_url, expires_at: reply.expires_at || null };
+        this.error = null;
+        this.renderQr();
+        this.refresh({ quiet: true });
+      } catch (error) {
+        this.error = (error && error.message) || String(error);
+      } finally { this.busy = null; }
+    },
+    async closeEnrolment() {
+      this.busy = 'close';
+      try {
+        await this._call('POST', '/api/network/remote-access/enrollment/close', {});
+        this.enrolment = null;
+        this.error = null;
+        this.refresh({ quiet: true });
+      } catch (error) {
+        this.error = (error && error.message) || String(error);
+      } finally { this.busy = null; }
+    },
+    async revoke(p) {
+      this.busy = 'revoke';
+      try {
+        await this._call('DELETE', '/api/network/remote-access/gate/passkeys/' + encodeURIComponent(p.credential_id));
+        this.confirmRevoke = null;
+        this.error = null;
+        if (this.status) this.status.gate_passkeys = this.passkeys.filter((x) => x.credential_id !== p.credential_id);
+        this.refresh({ quiet: true });
+      } catch (error) {
+        this.error = (error && error.message) || String(error);
+      } finally { this.busy = null; }
+    },
+    async applyMode() {
+      if (!this.canChooseMode() || this.draft === this.mode()) { this.choosing = false; return; }
+      this.busy = 'publish';
+      try {
+        await this._call('POST', '/api/network/remote-access/publish', { mode: this.draft });
+        this.choosing = false;
+        this.error = null;
+        if (typeof window !== 'undefined' && window.dispatchEvent) {
+          window.dispatchEvent(new Event('autonomy:remote-access-changed'));
+        }
+        await this.refresh({ quiet: true });
+      } catch (error) {
+        this.error = (error && error.message) || String(error);
+      } finally { this.busy = null; }
+    },
+    cancelChoice() { this.choosing = false; this.draft = this.mode() || 'local'; },
+    copy(text) {
+      const clip = (typeof navigator !== 'undefined' && navigator.clipboard) ? navigator.clipboard.writeText(text) : Promise.resolve();
+      clip.then(() => { this.copied = true; setTimeout(() => { this.copied = false; }, 1500); }).catch(() => {});
+    },
+
+    // ── the QR of the enrolment link (display only; logic never depends on it) ──
+    _loadScript(src) {
+      if (typeof document === 'undefined') return Promise.reject(new Error('no document'));
+      if (!this._scripts[src]) {
+        this._scripts[src] = new Promise((ok, fail) => {
+          const el = document.createElement('script');
+          el.src = src; el.async = true;
+          el.onload = ok; el.onerror = () => fail(new Error('failed to load ' + src));
+          setTimeout(() => fail(new Error('timed out loading ' + src)), 4000);
+          document.head.appendChild(el);
+        });
+      }
+      return this._scripts[src];
+    },
+    async renderQr() {
+      const url = this.enrolment ? this.enrolment.url : '';
+      if (url === this.qrFor) return;
+      this.qrFor = url; this.qrSvg = '';
+      if (!url) return;
+      try {
+        if (typeof window === 'undefined' || !window.qrcode) {
+          await this._loadScript('/static/vendor/qrcode-generator-1.4.4.min.js');
+        }
+        if (this.qrFor !== url) return;
+        const qr = window.qrcode(0, 'M');
+        qr.addData(url); qr.make();
+        this.qrSvg = qr.createSvgTag({ cellSize: 3, margin: 2, scalable: true });
+      } catch (e) { this.qrSvg = ''; }
+    },
+  };
+}

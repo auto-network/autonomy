@@ -126,6 +126,10 @@ def remote_api(tmp_path, monkeypatch):
         routes=[
             Route("/api/network/remote-access/publish", network_routes.post_remote_access_publish, methods=["POST"]),
             Route("/api/network/remote-access/status", network_routes.get_remote_access_status, methods=["GET"]),
+            Route("/api/network/remote-access/enrollment/open", network_routes.post_remote_access_enrollment_open, methods=["POST"]),
+            Route("/api/network/remote-access/enrollment/close", network_routes.post_remote_access_enrollment_close, methods=["POST"]),
+            Route("/api/network/remote-access/gate/passkeys/{credential_id}",
+                  network_routes.delete_remote_access_gate_passkey, methods=["DELETE"]),
         ],
         middleware=[Middleware(api_auth.ApiIdentityMiddleware, authenticate_bearer=_authenticate_bearer,
                                verify_cookie=_verify_cookie, cookie_name=COOKIE)],
@@ -376,3 +380,158 @@ def test_status_before_recording_carries_what_the_question_needs(remote_api, mon
     status = remote_api.client.get("/api/network/remote-access/status", headers=_headers()).json()["status"]
     assert status == {"mode": None, "origin": None, "recorded": False,
                       "bound_label": "jeremy", "tailnet_origin": "https://desktop.tail1234.ts.net:8080"}
+
+
+# ── the Remote access control: passkeys, revoke, and the fleet-peer path (auto-fnj20) ──
+
+def _enroll(remote_api, credential_id="Y3JlZC0x"):
+    """A gate passkey enrolled under the open token, as the helper's
+    callback records it."""
+    from tools.dashboard import passkey_gate
+
+    token = passkey_gate.open_token()["token"]
+    return passkey_gate.register_credential({
+        "token": token, "credential_id": credential_id, "public_key": "cHVibGljLWtleQ",
+        "sign_count": 3, "transports": ["internal"], "rp_id": "example.serve.auto.network",
+    })
+
+
+def _status(remote_api, **headers):
+    remote_api.remote_access._invalidate_status()
+    return remote_api.client.get("/api/network/remote-access/status", headers={**_headers(), **headers}).json()["status"]
+
+
+def test_status_lists_the_enrolled_gate_passkeys_without_their_public_keys(remote_api):
+    _publish(remote_api.client, mode="autonomy")
+    assert _status(remote_api)["gate_passkeys"] == []
+    _enroll(remote_api)
+    status = _status(remote_api)
+    assert status["enrolled"] == 1 and status["enrollment"] == "closed"
+    [row] = status["gate_passkeys"]
+    assert row["credential_id"] == "Y3JlZC0x" and row["transports"] == ["internal"] and row["sign_count"] == 3
+    assert row["created_at"] and "public_key" not in row
+
+
+def test_revoke_drops_the_passkey_and_is_refused_through_the_relay_route(remote_api):
+    from tools.dashboard import passkey_gate
+
+    row = _publish(remote_api.client, mode="autonomy").json()["remote_access"]
+    _enroll(remote_api)
+    key_before = passkey_gate.cookie_secret()
+    relay_host = row["origin"].removeprefix("https://")
+    via_relay = remote_api.client.delete("/api/network/remote-access/gate/passkeys/Y3JlZC0x",
+                                         headers={**_headers(), "X-Forwarded-Host": relay_host})
+    assert via_relay.status_code == 403 and via_relay.json()["error"] == "through_gateway"
+    assert passkey_gate.enrolled_count() == 1
+    unknown = remote_api.client.delete("/api/network/remote-access/gate/passkeys/bm9wZQ", headers=_headers())
+    assert unknown.status_code == 404 and unknown.json()["error"] == "unknown_credential"
+    unauthorized = remote_api.client.delete("/api/network/remote-access/gate/passkeys/Y3JlZC0x")
+    assert unauthorized.status_code in (401, 403)
+    revoked = remote_api.client.delete("/api/network/remote-access/gate/passkeys/Y3JlZC0x", headers=_headers())
+    assert revoked.status_code == 200 and revoked.json() == {"ok": True, "enrolled": 0}
+    assert passkey_gate.enrolled_count() == 0 and _status(remote_api)["gate_passkeys"] == []
+    # Every existing gate session is refused from the next request (U4).
+    assert passkey_gate.cookie_secret() != key_before
+
+
+def test_reopen_and_close_enrollment_from_the_local_listener(remote_api):
+    from tools.dashboard import passkey_gate
+
+    row = _publish(remote_api.client, mode="autonomy").json()["remote_access"]
+    _enroll(remote_api)
+    assert _status(remote_api)["enrollment"] == "closed"
+    opened = remote_api.client.post("/api/network/remote-access/enrollment/open", headers=_headers())
+    assert opened.status_code == 200
+    assert opened.json()["enrollment_url"].startswith(row["origin"] + "/oauth2/enroll?token=")
+    assert not passkey_gate.record()["enrollment"]["opened_by"].startswith("fleet:")
+    assert _status(remote_api)["enrollment_url"] == opened.json()["enrollment_url"]
+    closed = remote_api.client.post("/api/network/remote-access/enrollment/close", headers=_headers())
+    assert closed.status_code == 200 and _status(remote_api)["enrollment"] == "closed"
+
+
+@pytest.fixture
+def fleet_peer(remote_api, monkeypatch):
+    """Another active machine of the fleet, reached over session-control."""
+    from tools.dashboard import remote_access_ops
+
+    PEER = "b1" * 32
+    calls: list[tuple] = []
+    replies: dict[str, dict] = {}
+    monkeypatch.setattr(remote_access_ops, "is_this_machine",
+                        lambda machine: None if machine == "nowhere" else machine != PEER)
+
+    async def forward(machine, op, body=None):
+        calls.append((machine, op, body or {}))
+        return replies.get(op, {"v": 1, "ok": True, "result": {}})
+    monkeypatch.setattr(remote_access_ops, "forward", forward)
+    return SimpleNamespace(pub=PEER, calls=calls, replies=replies)
+
+
+def test_a_fleet_machine_performs_the_operations_on_the_owning_machine(remote_api, fleet_peer):
+    from tools.dashboard import remote_access_ops
+
+    client = remote_api.client
+    fleet_peer.replies[remote_access_ops.STATUS_OP] = {"v": 1, "ok": True, "result": {"status": {"mode": "autonomy", "enrolled": 1}}}
+    status = client.get("/api/network/remote-access/status", params={"machine": fleet_peer.pub}, headers=_headers())
+    assert status.status_code == 200 and status.json()["status"] == {"mode": "autonomy", "enrolled": 1}
+    fleet_peer.replies[remote_access_ops.OPEN_OP] = {"v": 1, "ok": True, "result": {
+        "enrollment_url": "https://dashboard.peer.serve.auto.network/oauth2/enroll?token=t", "expires_at": 1}}
+    opened = client.post("/api/network/remote-access/enrollment/open", json={"machine": fleet_peer.pub}, headers=_headers())
+    assert opened.status_code == 200 and opened.json()["enrollment_url"].endswith("token=t")
+    closed = client.post("/api/network/remote-access/enrollment/close", json={"machine": fleet_peer.pub}, headers=_headers())
+    assert closed.status_code == 200
+    fleet_peer.replies[remote_access_ops.REVOKE_OP] = {"v": 1, "ok": False, "refusal": "unknown_credential"}
+    revoked = client.delete("/api/network/remote-access/gate/passkeys/bm9wZQ", params={"machine": fleet_peer.pub}, headers=_headers())
+    assert revoked.status_code == 404 and revoked.json()["error"] == "unknown_credential"
+    assert [c[:2] for c in fleet_peer.calls] == [
+        (fleet_peer.pub, remote_access_ops.STATUS_OP), (fleet_peer.pub, remote_access_ops.OPEN_OP),
+        (fleet_peer.pub, remote_access_ops.CLOSE_OP), (fleet_peer.pub, remote_access_ops.REVOKE_OP)]
+    assert fleet_peer.calls[-1][2] == {"credential_id": "bm9wZQ"}
+    # A peer that does not answer is a typed refusal, not a success.
+    fleet_peer.replies[remote_access_ops.OPEN_OP] = {"v": 1, "ok": False, "refusal": "personal-connector-unavailable", "detail": "down"}
+    down = client.post("/api/network/remote-access/enrollment/open", json={"machine": fleet_peer.pub}, headers=_headers())
+    assert down.status_code == 502 and down.json()["error"] == "personal-connector-unavailable"
+    # A machine this fleet does not know.
+    nowhere = client.post("/api/network/remote-access/enrollment/open", json={"machine": "nowhere"}, headers=_headers())
+    assert nowhere.status_code == 404 and nowhere.json()["error"] == "unknown_machine"
+    # Naming this machine is the local path, not a forward.
+    _publish(client, mode="autonomy")
+    own = client.post("/api/network/remote-access/enrollment/open", json={"machine": "this-machine"}, headers=_headers())
+    assert own.status_code == 200 and len(fleet_peer.calls) == 5
+
+
+def test_the_fleet_peer_path_is_still_refused_through_the_relay_route(remote_api, fleet_peer):
+    row = _publish(remote_api.client, mode="autonomy").json()["remote_access"]
+    relay = {**_headers(), "X-Forwarded-Host": row["origin"].removeprefix("https://")}
+    for call in (
+        lambda: remote_api.client.post("/api/network/remote-access/enrollment/open", json={"machine": fleet_peer.pub}, headers=relay),
+        lambda: remote_api.client.delete("/api/network/remote-access/gate/passkeys/x", params={"machine": fleet_peer.pub}, headers=relay),
+        lambda: remote_api.client.get("/api/network/remote-access/status", params={"machine": fleet_peer.pub}, headers=relay),
+    ):
+        r = call()
+        assert r.status_code == 403 and r.json()["error"] == "through_gateway"
+    assert fleet_peer.calls == []
+
+
+def test_the_owning_machine_answers_a_fleet_peer_by_its_proven_identity(remote_api):
+    """The inbound ops: the peer the handshake proved is the recorded opener;
+    a machine not on the relay refuses to open; revoke maps its refusals."""
+    from tools.dashboard import passkey_gate, remote_access_ops
+
+    PEER = "c1" * 32
+    ops = remote_access_ops.ops()
+    refused = asyncio.run(ops[remote_access_ops.OPEN_OP]({}, PEER))
+    assert refused["ok"] is False and refused["refusal"] == "not_published"
+    row = _publish(remote_api.client, mode="autonomy").json()["remote_access"]
+    _enroll(remote_api)
+    opened = asyncio.run(ops[remote_access_ops.OPEN_OP]({}, PEER))
+    assert opened["ok"] is True and opened["result"]["enrollment_url"].startswith(row["origin"] + "/oauth2/enroll?token=")
+    assert passkey_gate.record()["enrollment"]["opened_by"] == "fleet:" + PEER[:12]
+    status = asyncio.run(ops[remote_access_ops.STATUS_OP]({}, PEER))
+    assert status["result"]["status"]["enrollment_url"] == opened["result"]["enrollment_url"]
+    assert asyncio.run(ops[remote_access_ops.CLOSE_OP]({}, PEER))["ok"] is True
+    assert passkey_gate.enrollment_state()["open"] is False
+    assert asyncio.run(ops[remote_access_ops.REVOKE_OP]({}, PEER))["refusal"] == "invalid_credential"
+    assert asyncio.run(ops[remote_access_ops.REVOKE_OP]({"credential_id": "bm9wZQ"}, PEER))["refusal"] == "unknown_credential"
+    revoked = asyncio.run(ops[remote_access_ops.REVOKE_OP]({"credential_id": "Y3JlZC0x"}, PEER))
+    assert revoked == {"v": 1, "ok": True, "result": {"enrolled": 0}}

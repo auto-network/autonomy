@@ -44,6 +44,72 @@
      <dl class="totals"><div><dt>Received</dt><dd x-text="bytesLabel(machine.bytesReceived || (machine.isLocalMachine?fleetReceived():0))"></dd></div><div><dt>Sent</dt><dd x-text="bytesLabel(machine.bytesSent || (machine.isLocalMachine?fleetSent():0))"></dd></div><div><dt>Changes applied</dt><dd x-text="numberLabel(machine.transactionsApplied || (machine.isLocalMachine?fleetChanges():0))"></dd></div><div><dt>Failed attempts</dt><dd :class="machine.attemptsFailed?'warn':''" x-text="numberLabel(machine.attemptsFailed)"></dd></div></dl>
     </div>
     <div class="local-info"><span>Connector: <span :class="machine.connectorArmed==null ? 'muted' : machine.connectorArmed ? 'good' : 'warn'" x-text="machine.connectorArmed==null ? 'Unknown' : machine.connectorArmed ? 'Online' : 'Needs Unlock'"></span></span><span>Tunnel: <span :class="tunnelTone(machine)" :title="tunnelTitle(machine)" x-text="tunnelWord(machine)"></span></span></div>
+    <div class="ra" data-testid="remote-access" x-data="remoteAccessControl(machine)" x-effect="expandedId===machine.entryId ? start() : stop()">
+     <div class="ra-head"><h3>Remote access</h3><span class="ra-mode" x-text="modeWord()"></span><span class="state" :class="tone()" x-text="statusWord()"></span></div>
+     <p class="ra-note bad" x-show="error" x-text="error"></p>
+     <template x-if="status && !choosing">
+      <div>
+       <dl class="ra-rows">
+        <div><dt>Address</dt><dd class="ra-origin" x-text="status.origin || '—'"></dd></div>
+        <template x-if="mode()==='autonomy'"><div><dt>Certificate</dt><dd :class="certTone()" x-text="certWord()"></dd></div></template>
+        <template x-if="mode()==='autonomy'"><div><dt>Route</dt><dd :class="routeTone()" x-text="routeWord()"></dd></div></template>
+        <template x-if="mode()==='autonomy'"><div><dt>Passkey gate</dt><dd :class="status.gate==='up' ? 'good' : 'warn'" x-text="status.gate==='up' ? 'Up' : 'Pending'"></dd></div></template>
+        <template x-if="mode()==='tailscale'"><div><dt>Certificate name</dt><dd :class="status.origin_verified ? 'good' : 'warn'" x-text="status.origin_verified ? 'Confirmed' : 'Not confirmed'"></dd></div></template>
+        <template x-if="status.relay_publication==='paused'"><div><dt>Relay address</dt><dd class="muted" x-text="'Paused · '+status.relay_origin"></dd></div></template>
+       </dl>
+       <ul class="ra-progress" x-show="showProgress()"><template x-for="row in progress()" :key="row.name"><li :class="row.tone"><span x-text="row.mark"></span><span x-text="row.label"></span></li></template></ul>
+       <p class="ra-note bad" x-show="mode()==='autonomy' && status.certificate==='failed'" x-text="'Certificate issuance failed: '+(status.certificate_detail||'')"></p>
+       <template x-if="mode()==='autonomy'">
+        <div>
+         <div class="ra-head ra-sub"><h3>Gate passkeys</h3><span class="ra-mode" x-text="passkeys.length+' enrolled'"></span></div>
+         <ul class="ra-passkeys" data-testid="remote-access-passkeys">
+          <template x-for="p in passkeys" :key="p.credential_id">
+           <li>
+            <span><span x-text="passkeyLabel(p)"></span> <span class="ra-when" x-text="passkeyWhen(p)"></span></span>
+            <span class="ra-actions">
+             <button type="button" class="action-btn danger" x-show="!readOnly && confirmRevoke!==p.credential_id" :disabled="busy" @click="confirmRevoke=p.credential_id">Revoke</button>
+             <span class="action-confirm" x-show="confirmRevoke===p.credential_id"><button type="button" class="action-btn" @click="confirmRevoke=null">Keep</button><button type="button" class="action-btn danger" :disabled="busy" @click="revoke(p)">Revoke now</button></span>
+            </span>
+           </li>
+          </template>
+         </ul>
+         <p class="ra-note warn" x-show="!passkeys.length && !enrolment">No passkey enrolled: the address refuses every visitor until one is.</p>
+         <template x-if="enrolment">
+          <div class="ra-enrol" data-testid="remote-access-enrolment">
+           <div class="ra-qr" x-html="qrSvg"></div>
+           <div class="ra-enrol-body">
+            <div class="ra-link" x-text="enrolment.url"></div>
+            <div class="ra-when" x-text="enrolLine()"></div>
+            <div class="ra-actions">
+             <button type="button" class="action-btn" @click="copy(enrolment.url)" x-text="copied ? 'Copied' : 'Copy link'"></button>
+             <button type="button" class="action-btn" x-show="!readOnly" :disabled="busy" @click="closeEnrolment()">Close enrolment</button>
+            </div>
+           </div>
+          </div>
+         </template>
+        </div>
+       </template>
+       <div class="ra-actions" x-show="canEnrol() || canChooseMode()">
+        <button type="button" class="action-btn" x-show="canEnrol()" :disabled="!live()" :title="live() ? '' : 'Available once the address is live'" @click="openEnrolment()">Enrol a passkey</button>
+        <button type="button" class="action-btn" x-show="canChooseMode()" @click="choosing=true; draft=mode()||'local'">Change how it is reached</button>
+       </div>
+      </div>
+     </template>
+     <template x-if="status && choosing">
+      <div>
+       <div class="ra-choice" data-testid="remote-access-choice">
+        <label :class="{on: draft==='autonomy'}"><input type="radio" name="ra-mode" value="autonomy" x-model="draft"><span>Autonomy Network<span class="ra-why">A real https address on the relay, behind your passkey.</span></span></label>
+        <label :class="{on: draft==='tailscale'}"><input type="radio" name="ra-mode" value="tailscale" x-model="draft"><span>Tailscale<span class="ra-why">Your own Tailnet; the relay address is paused.</span></span></label>
+        <label :class="{on: draft==='local'}"><input type="radio" name="ra-mode" value="local" x-model="draft"><span>Local only<span class="ra-why">This machine only; the relay address is paused.</span></span></label>
+       </div>
+       <div class="ra-actions">
+        <button type="button" class="action-btn" :disabled="draft===mode() || busy" @click="applyMode()" x-text="draft==='autonomy' ? 'Publish' : 'Apply'"></button>
+        <button type="button" class="action-btn" @click="cancelChoice()">Cancel</button>
+       </div>
+      </div>
+     </template>
+     <p class="ra-note muted" x-show="!status && loading">Reading…</p>
+    </div>
     <div class="foot-actions">
      <button type="button" class="action-btn" x-show="renamingId!==machine.entryId" @click="beginRename(machine)">Rename machine</button>
      <template x-if="renamingId===machine.entryId"><form class="rename-form" @submit.prevent="commitRename(machine)" @keydown.escape.stop.prevent="renamingId=null" x-init="$nextTick(()=>{const input=$el.querySelector('input');input.focus();input.select();})">

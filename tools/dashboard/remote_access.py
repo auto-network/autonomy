@@ -550,7 +550,8 @@ async def _status_uncached() -> dict:
 
         enrollment = passkey_gate.enrollment_state()
         result["enrollment"] = "open" if enrollment["open"] else "closed"
-        result["enrolled"] = passkey_gate.enrolled_count()
+        result["gate_passkeys"] = passkey_gate.credentials_summary()
+        result["enrolled"] = len(result["gate_passkeys"])
         if enrollment["open"]:
             result["enrollment_expires_at"] = enrollment["expires_at"]
     except Exception:

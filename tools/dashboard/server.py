@@ -23776,7 +23776,7 @@ async def _activate_worker(reason: str) -> None:
         # session-control/1 inbound: answer other fleet machines' requests
         # (graph://7eb29bc8-31a §9.1). One pump per machine, at activation.
         try:
-            from tools.dashboard import session_control_client
+            from tools.dashboard import remote_access_ops, session_control_client
             global _session_control_pump
             _session_control_pump = session_control_client.install(
                 _resolved_dispatch_limits, _create_session_from_body,
@@ -23785,7 +23785,10 @@ async def _activate_worker(reason: str) -> None:
                      "fetch-branch": _inbound_session_fetch_branch,
                      "tail": _inbound_session_tail,
                      "sessions": session_control_client.sessions_op(
-                         session_monitor.get_registry)})
+                         session_monitor.get_registry),
+                     # Remote access recovery from another fleet machine
+                     # (auto-fnj20): re-open enrollment, revoke a passkey.
+                     **remote_access_ops.ops()})
         except Exception:
             logger.exception("session-control inbound pump failed to start")
 

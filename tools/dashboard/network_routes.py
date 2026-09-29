@@ -3671,6 +3671,49 @@ async def post_remote_access_publish(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "remote_access": row}, headers={"Cache-Control": "no-store"})
 
 
+def _remote_access_through_gateway(request: Request) -> JSONResponse | None:
+    """Re-open, close, revoke and the mode switch are local-listener or
+    fleet-peer operations: through the published relay route they are
+    refused outright (graph://c9d72ea4-feb §10)."""
+    from tools.dashboard import remote_access
+
+    recorded = remote_access.current() or {}
+    if remote_access.request_came_through_gateway(request.headers, recorded.get("origin")
+                                                  if recorded.get("mode") == "autonomy" else None):
+        return _service_publication_error("through_gateway", 403)
+    return None
+
+
+def _remote_access_machine(request: Request, body: dict | None = None) -> tuple[str | None, JSONResponse | None]:
+    """The machine a remote-access request is about: ``machine`` in the query
+    (GET/DELETE) or the body (POST) names another active fleet machine, whose
+    dashboard performs the operation over session-control (auto-fnj20).
+    Returns (machine, None) for a peer, (None, None) for this machine, and a
+    refusal for a machine this fleet does not know."""
+    from tools.dashboard import remote_access_ops
+
+    machine = (body or {}).get("machine") if isinstance(body, dict) else None
+    if machine is None:
+        machine = request.query_params.get("machine")
+    if not machine:
+        return None, None
+    if not isinstance(machine, str):
+        return None, _service_publication_error("unknown_fields")
+    local = remote_access_ops.is_this_machine(machine)
+    if local is None:
+        return None, _service_publication_error("unknown_machine", 404)
+    return (None if local else machine), None
+
+
+def _forwarded(reply: dict) -> JSONResponse:
+    """A fleet peer's session-control reply as this route's response."""
+    if reply.get("ok") is True:
+        return JSONResponse({"ok": True, **(reply.get("result") or {})}, headers={"Cache-Control": "no-store"})
+    code = str(reply.get("refusal") or "peer_unavailable")
+    status = {"unknown_credential": 404, "not_published": 409, "invalid_credential": 400}.get(code, 502)
+    return _service_publication_error(code, status, str(reply.get("detail") or ""))
+
+
 async def post_remote_access_enrollment_open(request: Request) -> JSONResponse:
     """POST /api/network/remote-access/enrollment/open — mint a fresh one-time
     gate enrollment token (F3/F4): operator authority, never through the
@@ -3678,12 +3721,18 @@ async def post_remote_access_enrollment_open(request: Request) -> JSONResponse:
     _org, refused = _remote_access_org(request)
     if refused is not None:
         return refused
-    from tools.dashboard import passkey_gate, remote_access
+    from tools.dashboard import passkey_gate, remote_access, remote_access_ops
 
+    refused = _remote_access_through_gateway(request)
+    if refused is not None:
+        return refused
+    body = await _optional_json(request)
+    machine, refused = _remote_access_machine(request, body)
+    if refused is not None:
+        return refused
+    if machine is not None:
+        return _forwarded(await remote_access_ops.forward(machine, remote_access_ops.OPEN_OP))
     recorded = remote_access.current() or {}
-    if remote_access.request_came_through_gateway(request.headers, recorded.get("origin")
-                                                  if recorded.get("mode") == "autonomy" else None):
-        return _service_publication_error("through_gateway", 403)
     if recorded.get("mode") != "autonomy":
         return _service_publication_error("not_published", 409)
     principal = principal_from_request(request)
@@ -3700,14 +3749,60 @@ async def post_remote_access_enrollment_close(request: Request) -> JSONResponse:
     _org, refused = _remote_access_org(request)
     if refused is not None:
         return refused
-    from tools.dashboard import passkey_gate, remote_access
+    from tools.dashboard import passkey_gate, remote_access_ops
 
-    recorded = remote_access.current() or {}
-    if remote_access.request_came_through_gateway(request.headers, recorded.get("origin")
-                                                  if recorded.get("mode") == "autonomy" else None):
-        return _service_publication_error("through_gateway", 403)
+    refused = _remote_access_through_gateway(request)
+    if refused is not None:
+        return refused
+    machine, refused = _remote_access_machine(request, await _optional_json(request))
+    if refused is not None:
+        return refused
+    if machine is not None:
+        return _forwarded(await remote_access_ops.forward(machine, remote_access_ops.CLOSE_OP))
     await asyncio.to_thread(passkey_gate.close_enrollment)
     return JSONResponse({"ok": True})
+
+
+async def _optional_json(request: Request) -> dict | None:
+    """A POST body when one was sent; the enrollment routes take none or
+    ``{machine}``."""
+    raw = await request.body()
+    if not raw:
+        return None
+    try:
+        body = json.loads(raw)
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+async def delete_remote_access_gate_passkey(request: Request) -> JSONResponse:
+    """DELETE /api/network/remote-access/gate/passkeys/{credential_id} —
+    revoke one gate passkey (U4): operator authority, never through the
+    gated route; the gate's cookie key rotates with it so every existing
+    gate session is refused from the next request. ``?machine=`` performs
+    it on another fleet machine."""
+    _org, refused = _remote_access_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import passkey_gate, remote_access_ops
+
+    refused = _remote_access_through_gateway(request)
+    if refused is not None:
+        return refused
+    credential_id = request.path_params.get("credential_id") or ""
+    machine, refused = _remote_access_machine(request)
+    if refused is not None:
+        return refused
+    if machine is not None:
+        return _forwarded(await remote_access_ops.forward(
+            machine, remote_access_ops.REVOKE_OP, {"credential_id": credential_id}))
+    try:
+        saved = await asyncio.to_thread(passkey_gate.revoke_credential, credential_id)
+    except passkey_gate.GateRefusal as exc:
+        return _service_publication_error(exc.code, exc.status)
+    return JSONResponse({"ok": True, "enrolled": len(saved.get("credentials") or [])},
+                        headers={"Cache-Control": "no-store"})
 
 
 def _gate_helper_refused(request: Request) -> JSONResponse | None:
@@ -3760,11 +3855,18 @@ async def get_remote_access_status(request: Request) -> JSONResponse:
     _org, refused = _remote_access_org(request)
     if refused is not None:
         return refused
-    from tools.dashboard import remote_access
+    from tools.dashboard import remote_access, remote_access_ops
 
     recorded = remote_access.current() or {}
     local = not remote_access.request_came_through_gateway(
         request.headers, recorded.get("origin") if recorded.get("mode") == "autonomy" else None)
+    machine, refused = _remote_access_machine(request)
+    if refused is not None:
+        return refused
+    if machine is not None:
+        if not local:
+            return _service_publication_error("through_gateway", 403)
+        return _forwarded(await remote_access_ops.forward(machine, remote_access_ops.STATUS_OP))
     return JSONResponse({"ok": True, "status": await remote_access.status(enrollment_link=local)},
                         headers={"Cache-Control": "no-store"})
 
@@ -3777,6 +3879,7 @@ ROUTES = [
     Route("/api/network/remote-access/enrollment/close", post_remote_access_enrollment_close, methods=["POST"]),
     Route("/api/network/remote-access/gate/registered", post_remote_access_gate_registered, methods=["POST"]),
     Route("/api/network/remote-access/gate/sign-count", post_remote_access_gate_sign_count, methods=["POST"]),
+    Route("/api/network/remote-access/gate/passkeys/{credential_id}", delete_remote_access_gate_passkey, methods=["DELETE"]),
     Route("/api/network/service-reservations", get_service_reservations, methods=["GET"]),
     Route("/api/network/service-reservations", post_service_reservation, methods=["POST"]),
     Route("/api/network/serve-zones", get_serve_zones, methods=["GET"]),
