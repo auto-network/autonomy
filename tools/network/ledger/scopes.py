@@ -75,6 +75,31 @@ def covered_subset(scopes, parent_set) -> frozenset:
 UNIVERSE = frozenset({"*"})
 
 
+#: The signed-settings scope family (graph://21a0da9e-1c2, boundary step 4;
+#: auto-qrmlg.6 S1): ``settings:sign:<set_id>`` entitles a persona to sign
+#: organization rows of that set under a delegate; ``settings:sign:*`` covers
+#: every set. A ROLE scope held by the persona, never a scope on the storage
+#: delegate grant (scopes.py self_delegable_exact admits only the storage
+#: shape): the boundary resolves the signing key to its member persona and
+#: re-derives the entitlement from the fold at use time.
+SETTINGS_SIGN_PREFIX = "settings:sign:"
+SETTINGS_SIGN_ANY = SETTINGS_SIGN_PREFIX + "*"
+#: Every scope of the ``settings:`` family, for "does this role name any".
+SETTINGS_FAMILY_PREFIX = "settings:"
+
+
+def settings_sign_scope(set_id: str) -> str:
+    """The scope that entitles signing rows of *set_id*."""
+    return validate_scope(SETTINGS_SIGN_PREFIX + validate_scope(set_id, "set_id"), "settings scope")
+
+
+def names_settings_scope(scopes) -> bool:
+    """Whether a scope set names ANY scope of the settings family — the
+    opt-in to restriction (operator ruling 2026-09-27 23:41Z: every member
+    role carries ``settings:sign:*`` unless the organization narrows it)."""
+    return any(isinstance(s, str) and s.startswith(SETTINGS_FAMILY_PREFIX) for s in scopes)
+
+
 #: The two storage scope families a CURRENT MEMBER PERSONA may
 #: self-delegate (auto-wrkaq): a strictly weaker, non-redelegable,
 #: expiring instrument of its own held authority — PIN 6b, "a persona

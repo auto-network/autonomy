@@ -81,6 +81,13 @@ const CATALOG = [
     "label": "Sign membership checkpoints",
     "sentence": "Sign the committed-membership checkpoints the registry trusts.",
     "enforced_by": "membership_commitment (CHECKPOINT_SCOPE)"
+  },
+  {
+    "pattern": "settings:sign:*",
+    "family": "settings",
+    "label": "Write organization settings",
+    "sentence": "Sign organization settings rows under your delegate; every role holds this unless the organization narrows it to named sets.",
+    "enforced_by": "settingskit.boundary (persona holds settings:sign:<set_id>)"
   }
 ];
 /* CATALOG-END */
