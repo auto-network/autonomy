@@ -1,8 +1,9 @@
 """Settings-native central approval origin authority.
 
-The service owns request derivation and the first valid human/cancellation/
-expiry answer.  It deliberately does not expose HTTP routes and never invokes
-the application that consumes a granted resolution.
+The service owns request derivation and the first valid human or cancellation
+answer; expiry is read from the request's deadline and never stored.  It
+deliberately does not expose HTTP routes and never invokes the application
+that consumes a granted resolution.
 """
 
 from __future__ import annotations
@@ -696,9 +697,7 @@ class ApprovalService:
 
     def get_request(self, approval_id: str, *, now: float | None = None) -> ApprovalRecord:
         with _ApprovalLocks.for_id(approval_id):
-            request = self._require_request(approval_id)
-            self._reconcile_expiry_locked(request, self._now(now))
-            return request
+            return self._require_request(approval_id)
 
     def get_resolution(
         self, approval_id: str, *, now: float | None = None,
@@ -706,13 +705,13 @@ class ApprovalService:
         with _ApprovalLocks.for_id(approval_id):
             request = self._require_request(approval_id)
             resolution = self._store_call(self.store.get_resolution, approval_id)
-            return resolution or self._reconcile_expiry_locked(request, self._now(now))
+            return resolution or self._expiry_locked(request, self._now(now))
 
     def status(self, approval_id: str, *, now: float | None = None) -> ApprovalStatus:
         with _ApprovalLocks.for_id(approval_id):
             request = self._require_request(approval_id)
             resolution = self._store_call(self.store.get_resolution, approval_id)
-            resolution = resolution or self._reconcile_expiry_locked(request, self._now(now))
+            resolution = resolution or self._expiry_locked(request, self._now(now))
             return ApprovalStatus(
                 state="resolved" if resolution is not None else "open",
                 request=request,
@@ -736,7 +735,7 @@ class ApprovalService:
             request = self._require_request(approval_id)
             self._authorize_session_requester(request, principal)
             resolution = self._store_call(self.store.get_resolution, approval_id)
-            resolution = resolution or self._reconcile_expiry_locked(
+            resolution = resolution or self._expiry_locked(
                 request, self._now(now),
             )
             return ApprovalStatus(
@@ -744,14 +743,6 @@ class ApprovalService:
                 request=request,
                 resolution=resolution,
             )
-
-    def reconcile_expiry(
-        self, approval_id: str, *, now: float | None = None,
-    ) -> ApprovalRecord | None:
-        with _ApprovalLocks.for_id(approval_id):
-            request = self._require_request(approval_id)
-            existing = self._store_call(self.store.get_resolution, approval_id)
-            return existing or self._reconcile_expiry_locked(request, self._now(now))
 
     def decide(
         self,
@@ -771,7 +762,7 @@ class ApprovalService:
             if existing is not None:
                 return existing
             decision_time = self._now(now)
-            expired = self._reconcile_expiry_locked(request, decision_time)
+            expired = self._expiry_locked(request, decision_time)
             if expired is not None:
                 raise ApprovalServiceError("expired", resolution=expired)
             registration = self._registration(str(request.payload["kind"]))
@@ -843,7 +834,7 @@ class ApprovalService:
         existing = self._store_call(self.store.get_resolution, request.approval_id)
         if existing is not None:
             return existing
-        expired = self._reconcile_expiry_locked(request, now)
+        expired = self._expiry_locked(request, now)
         if expired is not None:
             raise ApprovalServiceError("expired", resolution=expired)
         return self._commit_resolution(request.approval_id, {
@@ -929,18 +920,21 @@ class ApprovalService:
             raise ApprovalServiceError("not_found")
         return request
 
-    def _reconcile_expiry_locked(
+    def _expiry_locked(
         self, request: ApprovalRecord, now: float,
     ) -> ApprovalRecord | None:
+        # Expiry is read from the request's own deadline and never written: a
+        # machine that has not yet received a decision by sync must not record
+        # one of its own, or its row would replace the real decision (auto-vrw8h).
         deadline = request.payload.get("expires_at")
         if deadline is None or now < float(deadline):
             return None
         existing = self._store_call(self.store.get_resolution, request.approval_id)
         if existing is not None:
             return existing
-        return self._commit_resolution(request.approval_id, {
+        return ApprovalRecord(request.approval_id, {
             "outcome": "expired",
-            "resolved_at": now,
+            "resolved_at": float(deadline),
         })
 
     def _commit_resolution(

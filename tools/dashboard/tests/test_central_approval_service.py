@@ -437,11 +437,15 @@ def test_expiry_modes_and_exact_deadline_precedence():
             service.create_from_principal(
                 "test_kind", _local(), {"requested_expiry_seconds": value},
             )
-    expired = service.reconcile_expiry(explicit.approval_id, now=1020.0)
-    assert expired is not None and expired.payload["outcome"] == "expired"
-    assert service.decide(
-        explicit.approval_id, _human(), outcome="granted", decision={}, now=1020.0,
-    ) == expired
+    expired = service.get_resolution(explicit.approval_id, now=1020.0)
+    # Expiry is read from the deadline and never stored.
+    assert expired is not None and expired.payload == {"outcome": "expired", "resolved_at": 1020.0}
+    assert service.store.get_resolution(explicit.approval_id) is None
+    with pytest.raises(ApprovalServiceError, match="expired") as late:
+        service.decide(
+            explicit.approval_id, _human(), outcome="granted", decision={}, now=1020.0,
+        )
+    assert late.value.resolution == expired
     boundary = service.create_from_principal(
         "test_kind", _local(), {"requested_expiry_seconds": 20},
     )

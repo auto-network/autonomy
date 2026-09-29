@@ -60,7 +60,6 @@ from tools.dashboard.dashboard_access_central import (
     _opaque_digest,
 )
 from tools.graph import settings_ops
-from tools.graph.schemas.central_attention import APPROVAL_REQUEST_SET_ID, ApprovalRequestV1
 from tools.graph.schemas.mailbox_send import MAILBOX_SEND_REVISION, MAILBOX_SEND_SET_ID
 
 logger = logging.getLogger(__name__)
@@ -397,19 +396,6 @@ class EmailSendCoordinator(DashboardAccessCoordinator):
             self.consumer.materialize(status)
         return status
 
-    def _scan_ids(self) -> tuple[str, ...]:
-        rows = settings_ops.read_set(APPROVAL_REQUEST_SET_ID, org=None, peers=[])
-        if any(rows.dropped.values()):
-            raise RuntimeError("partial Central approval request read")
-        selected = []
-        for row in rows:
-            if not isinstance(row.payload, dict):
-                raise RuntimeError("invalid Central approval request row")
-            ApprovalRequestV1.validate(row.payload)
-            if row.payload.get("kind") == KIND:
-                selected.append(_bounded_approval_id(row.key))
-        return tuple(sorted(set(selected)))
-
 
 class ReconcilerGroup:
     """Several kind coordinators behind the runtime's one reconciler slot."""
@@ -429,18 +415,14 @@ class ReconcilerGroup:
         for m in self.members:
             m.offer(approval_id)
 
-    def offer_gap(self) -> None:
-        for m in self.members:
-            m.offer_gap()
-
     def offer_local_setting(self, **kwargs) -> None:
         for m in self.members:
             m.offer_local_setting(**kwargs)
 
-    def offer_synced(self, **kwargs) -> None:
-        addresses = tuple(kwargs.pop("addresses", ()) or ())
+    def offer_synced(self, *, addresses=()) -> None:
+        addresses = tuple(addresses or ())
         for m in self.members:
-            m.offer_synced(addresses=addresses, **kwargs)
+            m.offer_synced(addresses=addresses)
 
     def reconcile_exact(self, approval_id: str) -> ApprovalStatus | None:
         for m in self.members:

@@ -62,8 +62,6 @@ from tools.dashboard.dashboard_access_central import (
     _opaque_digest,
 )
 from tools.dashboard.vault_open_central import this_machine_label
-from tools.graph import settings_ops
-from tools.graph.schemas.central_attention import APPROVAL_REQUEST_SET_ID, ApprovalRequestV1
 
 logger = logging.getLogger(__name__)
 
@@ -413,20 +411,6 @@ class EnrollmentCoordinator(DashboardAccessCoordinator):
             return None
         self.index.publish(self.producer, status)
         return status
-
-    def _scan_ids(self) -> tuple[str, ...]:
-        self.desk.prune()
-        rows = settings_ops.read_set(APPROVAL_REQUEST_SET_ID, org=None, peers=[])
-        if any(rows.dropped.values()):
-            raise RuntimeError("partial Central approval request read")
-        selected = []
-        for row in rows:
-            if not isinstance(row.payload, dict):
-                raise RuntimeError("invalid Central approval request row")
-            ApprovalRequestV1.validate(row.payload)
-            if row.payload.get("kind") == KIND:
-                selected.append(_bounded_approval_id(row.key))
-        return tuple(sorted(set(selected)))
 
 
 __all__ = [

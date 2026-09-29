@@ -423,7 +423,7 @@ def test_timely_existing_application_result_remains_idempotent_after_expiry(
     assert writes == []
 
 
-def test_coordinator_coalesces_sync_hints_and_reconciles_exact_id(monkeypatch):
+def test_coordinator_reconciles_a_synced_approval_on_its_event():
     approvals, index, producer, _registry, _attention = _composition()
     request = _create(approvals)
     consumer = central.DashboardAccessResultConsumer(
@@ -438,7 +438,6 @@ def test_coordinator_coalesces_sync_hints_and_reconciles_exact_id(monkeypatch):
     )
 
     async def exercise():
-        monkeypatch.setattr(coordinator, "_scan_ids", lambda: (request.approval_id,))
         await coordinator.start()
         coordinator.offer_synced(addresses=[central.SyncedSettingsAddress(
             set_id="dashboard.approval.request",
@@ -458,7 +457,7 @@ def test_coordinator_coalesces_sync_hints_and_reconciles_exact_id(monkeypatch):
     assert item.payload["source_version"] == 1
 
 
-def test_coordinator_retries_gap_scan_without_losing_durable_truth(monkeypatch):
+def test_coordinator_neither_scans_nor_retries(monkeypatch):
     approvals, index, producer, _registry, _attention = _composition()
     request = _create(approvals)
     coordinator = central.DashboardAccessCoordinator(
@@ -470,32 +469,28 @@ def test_coordinator_retries_gap_scan_without_losing_durable_truth(monkeypatch):
             destination_resolver=lambda: "x" * 43,
         ),
     )
-    scans = 0
+    calls = []
 
-    def scan():
-        nonlocal scans
-        scans += 1
-        if scans == 1:
-            raise RuntimeError("partial Settings read")
-        return (request.approval_id,)
+    def failing(approval_id):
+        calls.append(approval_id)
+        raise RuntimeError("store unavailable")
 
     async def exercise():
-        monkeypatch.setattr(coordinator, "_scan_ids", scan)
         await coordinator.start()
-        for _ in range(100):
-            item = index.get_query_item(
-                central.dashboard_access_attention_id(APPROVAL_ID)
-            )
-            if item is not None:
-                await coordinator.stop()
-                return item
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        # Starting reads nothing: no startup scan publishes the open request.
+        assert index.get_query_item(central.dashboard_access_attention_id(APPROVAL_ID)) is None
+        monkeypatch.setattr(coordinator, "reconcile_exact", failing)
+        coordinator.offer(request.approval_id)
+        await asyncio.sleep(0.2)
         await coordinator.stop()
-        return None
+        coordinator.offer(request.approval_id)
+        await asyncio.sleep(0.05)
 
-    item = asyncio.run(exercise())
-    assert scans >= 2
-    assert item is not None and item.payload["source_version"] == 1
+    asyncio.run(exercise())
+    # One event, one attempt: a failure is logged, never retried, and an
+    # event after stop is ignored.
+    assert calls == [request.approval_id]
 
 
 def test_session_secret_is_manifest_rooted_with_identity_store(tmp_path, monkeypatch):

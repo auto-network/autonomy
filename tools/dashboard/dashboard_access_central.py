@@ -51,12 +51,10 @@ from tools.dashboard.attention_registry import (
     RegisteredAttentionProducer,
 )
 from tools.dashboard.dao import identity_sessions
-from tools.graph import settings_ops
 from tools.graph.schemas.central_attention import (
     APPROVAL_REQUEST_SET_ID,
     APPROVAL_RESOLUTION_SET_ID,
     CENTRAL_ATTENTION_REVISION,
-    ApprovalRequestV1,
 )
 from tools.network.idkit.canonical import canonical_json
 from tools.network.idkit.errors import IdkitError
@@ -76,9 +74,6 @@ GRANT_SIGNING_DOMAIN = b"autonomy.identity.dashboard-access-grant.v1\n"
 _DESTINATION_DOMAIN = b"dashboard.identity.access-result-destination.v1"
 _ATTENTION_DOMAIN = "dashboard.attention.approval-recipient"
 _CENTRAL_ID_PREFIX = "central-"
-_MAX_PENDING_IDS = 256
-_MIN_RETRY_SECONDS = 0.25
-_MAX_RETRY_SECONDS = 30.0
 
 
 def _opaque_digest(value: Any) -> str:
@@ -517,7 +512,12 @@ class SyncedSettingsAddress:
 
 
 class DashboardAccessCoordinator:
-    """Bounded wake coordinator; durable Settings remain the only queue."""
+    """Runs this kind's reconciliation once for each approval change event.
+
+    A Settings change event (a local commit, or a row arriving by sync) names
+    an approval, and its reconciliation runs once on the executor. There is no
+    queue, rescan or retry: a missed event is recovered by the requester asking
+    again (operator ruling 2026-08-26)."""
 
     def __init__(
         self,
@@ -532,13 +532,7 @@ class DashboardAccessCoordinator:
         self.producer = producer
         self.consumer = consumer
         self._lock = threading.Lock()
-        self._pending: set[str] = set()
-        self._full_scan_due = False
-        self._scheduled = False
-        self._stopping = False
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._task: asyncio.Task | None = None
-        self._retry_seconds = _MIN_RETRY_SECONDS
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -546,32 +540,10 @@ class DashboardAccessCoordinator:
             if self._loop is not None and self._loop is not loop:
                 raise RuntimeError("dashboard access coordinator loop changed")
             self._loop = loop
-            self._stopping = False
-            self._full_scan_due = True
-            self._retry_seconds = _MIN_RETRY_SECONDS
-            self._schedule_locked(loop)
 
     async def stop(self) -> None:
         with self._lock:
-            self._stopping = True
             self._loop = None
-            self._pending.clear()
-            self._full_scan_due = False
-            self._scheduled = False
-        task = self._task
-        self._task = None
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    def _schedule_locked(self, loop: asyncio.AbstractEventLoop) -> None:
-        if self._scheduled:
-            return
-        self._scheduled = True
-        try:
-            loop.call_soon_threadsafe(self._begin_drain)
-        except RuntimeError:
-            self._scheduled = False
 
     def offer(self, approval_id: Any) -> None:
         try:
@@ -580,22 +552,23 @@ class DashboardAccessCoordinator:
             return
         with self._lock:
             loop = self._loop
-            if loop is None or loop.is_closed() or self._stopping:
-                return
-            if bounded not in self._pending and len(self._pending) >= _MAX_PENDING_IDS:
-                self._pending.clear()
-                self._full_scan_due = True
-            else:
-                self._pending.add(bounded)
-            self._schedule_locked(loop)
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(self._dispatch, bounded)
+        except RuntimeError:
+            return
 
-    def offer_gap(self) -> None:
-        with self._lock:
-            loop = self._loop
-            if loop is None or loop.is_closed() or self._stopping:
-                return
-            self._full_scan_due = True
-            self._schedule_locked(loop)
+    def _dispatch(self, approval_id: str) -> None:
+        asyncio.get_running_loop().run_in_executor(None, self._reconcile_once, approval_id)
+
+    def _reconcile_once(self, approval_id: str) -> None:
+        try:
+            self.reconcile_exact(approval_id)
+        except AttentionIndexError as exc:
+            logger.warning("approval %s: attention not published (%s)", approval_id, exc.code)
+        except Exception:
+            logger.exception("approval reconciliation failed for %s", approval_id)
 
     def offer_local_setting(
         self,
@@ -619,17 +592,14 @@ class DashboardAccessCoordinator:
                 return
             self.offer(snapshot.get("key"))
         except Exception:
-            self.offer_gap()
+            logger.warning("approval change hint dropped", exc_info=True)
 
     def offer_synced(
         self,
         *,
         addresses: Iterable[Any] = (),
-        gap: bool = False,
     ) -> None:
         try:
-            if gap:
-                self.offer_gap()
             for address in addresses:
                 set_id = getattr(address, "set_id", None)
                 revision = getattr(address, "schema_revision", None)
@@ -644,7 +614,7 @@ class DashboardAccessCoordinator:
                 ):
                     self.offer(key)
         except Exception:
-            self.offer_gap()
+            logger.warning("synced approval hint dropped", exc_info=True)
 
     def reconcile_exact(self, approval_id: str) -> ApprovalStatus | None:
         try:
@@ -659,67 +629,6 @@ class DashboardAccessCoordinator:
         if status.resolution is not None:
             self.consumer.materialize(status)
         return status
-
-    def _scan_ids(self) -> tuple[str, ...]:
-        rows = settings_ops.read_set(
-            APPROVAL_REQUEST_SET_ID,
-            org=None,
-            peers=[],
-        )
-        if any(rows.dropped.values()):
-            raise RuntimeError("partial Central approval request read")
-        selected: list[str] = []
-        for row in rows:
-            if not isinstance(row.payload, dict):
-                raise RuntimeError("invalid Central approval request row")
-            ApprovalRequestV1.validate(row.payload)
-            if row.payload.get("kind") == KIND:
-                selected.append(_bounded_approval_id(row.key))
-        return tuple(sorted(set(selected)))
-
-    def _begin_drain(self) -> None:
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._drain())
-
-    async def _drain(self) -> None:
-        try:
-            while True:
-                with self._lock:
-                    if self._stopping or self._loop is None:
-                        self._scheduled = False
-                        return
-                    pending = tuple(sorted(self._pending))
-                    self._pending.clear()
-                    scan = self._full_scan_due
-                    self._full_scan_due = False
-                try:
-                    for approval_id in pending:
-                        await asyncio.to_thread(self.reconcile_exact, approval_id)
-                    if scan:
-                        selected = await asyncio.to_thread(self._scan_ids)
-                        for approval_id in selected:
-                            await asyncio.to_thread(self.reconcile_exact, approval_id)
-                    self._retry_seconds = _MIN_RETRY_SECONDS
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception("dashboard access reconciliation failed")
-                    with self._lock:
-                        if self._loop is not None and not self._stopping:
-                            self._full_scan_due = True
-                    await asyncio.sleep(self._retry_seconds)
-                    self._retry_seconds = min(
-                        _MAX_RETRY_SECONDS,
-                        self._retry_seconds * 2,
-                    )
-                with self._lock:
-                    if not self._pending and not self._full_scan_due:
-                        self._scheduled = False
-                        return
-        finally:
-            with self._lock:
-                if self._loop is None or self._stopping:
-                    self._scheduled = False
 
 
 __all__ = [

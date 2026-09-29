@@ -22805,7 +22805,7 @@ async def _on_startup():
 
     def _settings_sync_materialized(addresses=(), gap=False):
         try:
-            attention_routes.emit_personal_sync_change(addresses=addresses, gap=gap)
+            attention_routes.emit_personal_sync_change(addresses=addresses)
         except Exception:
             logger.warning("personal-sync approval hint failed", exc_info=True)
         try:

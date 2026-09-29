@@ -598,11 +598,13 @@ def test_shared_terminal_envelopes_are_explicit_and_grant_waits_for_output():
     service.decide(granted_id, _human(), outcome="granted", decision={})
     assert bridge.envelope(granted_id, principal)["result"] is None
 
-    expired, expired_service, _ = _build(
+    clock = [1000.0]
+    expired, _expired_service, _ = _build(
         expiry=ApprovalExpiryPolicy(mode=ExpiryMode.FIXED, fixed_seconds=1),
+        clock=lambda: clock[0],
     )
     expired_id = expired.create(KIND, principal, {"operation": "expire"})
-    expired_service.reconcile_expiry(expired_id, now=1001.0)
+    clock[0] = 1001.0
     assert expired.envelope(expired_id, principal)["result"] == {
         "approved": False, "outcome": "expired",
     }
@@ -627,12 +629,14 @@ def test_legacy_decision_exact_replay_and_terminal_conflicts():
     with pytest.raises(ApprovalHttpBridgeError, match="approval_conflict"):
         bridge.decide_legacy(canceled_id, _human(), {"approved": True})
 
+    clock = [1000.0]
     expiring, _expiring_service, _ = _build(
         expiry=ApprovalExpiryPolicy(mode=ExpiryMode.FIXED, fixed_seconds=1),
+        clock=lambda: clock[0],
     )
     expired_id = expiring.create(KIND, principal, {"operation": "expire"})
-    expiring.approvals.reconcile_expiry(expired_id, now=1001.0)
-    with pytest.raises(ApprovalHttpBridgeError, match="approval_conflict"):
+    clock[0] = 1001.0
+    with pytest.raises(ApprovalHttpBridgeError, match="expired"):
         expiring.decide_legacy(expired_id, _human(), {"approved": True})
 
     malformed_id = bridge.create(KIND, principal, {"operation": "malformed"})

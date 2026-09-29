@@ -475,17 +475,14 @@ def build_production_runtime() -> AttentionRouteRuntime:
         **{kind: link_approval_central.build_approval_runtime(kind) for kind in link_approval_central.KINDS},
     })
     approval_waiters = ApprovalWaitHub()
-    coordinator_holder: dict[str, Any] = {}
 
     def approval_after_commit(record_type: str, approval_id: str) -> None:
+        # The kind handlers hear this same commit as a Settings change event
+        # (emit_setting_change); only waiters and Fleet are woken here.
         approval_waiters.notify(record_type, approval_id)
         record = approvals.store.get_request(approval_id)
         if record is not None and record.payload.get("kind") == fleet.KIND:
             fleet.reconcile(approval_id)
-            return
-        coordinator = coordinator_holder.get("coordinator")
-        if coordinator is not None:
-            coordinator.offer(approval_id)
 
     approvals = ApprovalService(
         registry=approval_registry,
@@ -617,7 +614,6 @@ def build_production_runtime() -> AttentionRouteRuntime:
         coordinator, email_coordinator, vault_coordinator, enrollment_coordinator,
         crosstalk_coordinator, visitor_coordinator, jira_coordinator, *link_coordinators,
     )
-    coordinator_holder["coordinator"] = reconcilers
     approval_http = ApprovalHttpBridge(
         approvals=approvals,
         registry=ApprovalHttpRegistry(
@@ -735,21 +731,13 @@ def emit_setting_change(*, operation: str, snapshot: Mapping[str, Any], org: str
         logger.warning("private attention post-commit hint failed", exc_info=True)
 
 
-def emit_personal_sync_change(*, addresses=(), gap: bool = False) -> None:
+def emit_personal_sync_change(*, addresses=()) -> None:
     """Accept one payload-free post-materialization hint from Fleet sync."""
     try:
         if _runtime.approval_reconciler is not None:
-            _runtime.approval_reconciler.offer_synced(
-                addresses=addresses,
-                gap=gap,
-            )
+            _runtime.approval_reconciler.offer_synced(addresses=addresses)
     except Exception:
         logger.warning("personal-sync approval hint failed", exc_info=True)
-        try:
-            if _runtime.approval_reconciler is not None:
-                _runtime.approval_reconciler.offer_gap()
-        except Exception:
-            pass
 
 
 def _no_store(payload: Mapping[str, Any], *, status_code: int = 200) -> JSONResponse:
