@@ -638,7 +638,7 @@ graph set add autonomy.workspace.primer#1 --key {{ config.id }}:<block> --from /
 graph set override autonomy.workspace.primer {{ config.id }}:<block> --inline '{"enabled": false}'
 
 # preview the render without starting a session
-curl -sk -H "X-Graph-Org: {{ org }}" "$GRAPH_API/api/primers/workspace/{{ config.id }}"
+curl -sk -H "X-Graph-Org: {{ org }}" -H "Authorization: Bearer $CROSSTALK_TOKEN" "$GRAPH_API/api/primers/workspace/{{ config.id }}"
 ```
 
 Leave overlay rows at `raw` — promoting pushes the content onto peer orgs and undoes the isolation the Setting exists to provide. And a Setting edit only reaches *new* sessions; your own primer is fixed for the rest of this one, so verify with the preview above rather than re-reading this file.
