@@ -150,7 +150,8 @@ def test_an_unfounded_store_and_the_run_wrapper(tmp_path, monkeypatch):
     monkeypatch.setattr(pass_module, "org_slugs", lambda: [ORG, "missing-org"])
     reports = pass_module.run(apply=False)
     assert [r["org"] for r in reports] == [ORG, "missing-org"]
-    assert reports[0]["founded"] is False and "error" in reports[1]
+    # A store that is not there is reported not founded, never an error.
+    assert reports[0]["founded"] is False and reports[1]["founded"] is False
     GraphDB.close_all_pooled()
 
 
@@ -166,3 +167,43 @@ def test_the_unlock_hook_runs_only_on_the_singular_ownership_machine(monkeypatch
     monkeypatch.setattr(fleet_tunnel_server, "state", lambda: SimpleNamespace(allowed=True, reason=None))
     pass_module.run_after_unlock()
     assert calls == [True]
+
+
+def test_the_pass_does_not_hold_up_a_concurrent_reader_on_the_pooled_connection(founded, monkeypatch):
+    """Live 2026-09-29 19:10-19:16Z: the pass ran on the dashboard's pooled
+    connection and every reader of the store, the event loop included,
+    queued behind it. The pass now opens its own connection; a reader on
+    the pooled handle answers while it runs."""
+    import threading
+    import time
+
+    # A bigger UNSIGNED population (written with no signer installed), so
+    # the pass takes long enough to overlap the reader.
+    signer = settings_ops._SIGNER_PROVIDER
+    settings_ops.install_signer_provider(lambda org: None)
+    for i in range(1500):
+        settings_ops.add_setting(SET_ID, 1, f"bulk{i}", {"label": str(i)}, org=ORG)
+    settings_ops.install_signer_provider(signer)
+    monkeypatch.setattr(pass_module, "CHUNK_ROWS", 100)
+    reads: list[float] = []
+    stop = threading.Event()
+
+    def reader():
+        pooled = settings_ops._open(ORG)
+        while not stop.is_set():
+            started = time.perf_counter()
+            pooled.conn.execute("SELECT count(*) FROM settings WHERE set_id=?", (SET_ID,)).fetchone()
+            reads.append(time.perf_counter() - started)
+            time.sleep(0.002)
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    try:
+        report = pass_module.sign_org_store(ORG, apply=True, chunk_rows=100, pause_s=0.001)
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+    assert report["signed"] >= 1500 and report["transactions"] >= 15
+    assert reads, "the reader never ran"
+    # No single read waited on the pass for more than a chunk's write.
+    assert max(reads) < 0.25, f"slowest concurrent read {max(reads):.3f}s over {len(reads)} reads"

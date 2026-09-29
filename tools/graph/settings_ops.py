@@ -3004,9 +3004,45 @@ def _store_is_founded(db) -> str | None:
         return None
 
 
+@dataclass(frozen=True)
+class PreparedSigner:
+    """What ``_envelope_columns`` looks up per write, looked up once for a
+    batch (the signing pass): the store's genesis, this process's signing
+    context for the organization, and the store's fold at the batch's
+    ledger depth. ``context`` None means the batch writes unsigned."""
+
+    genesis: "str | None"
+    context: "SigningContext | None"
+    fold: object
+
+
+def prepare_signer(db, org: "str | None") -> PreparedSigner:
+    """The per-write lookups of ``_envelope_columns``, once. Unsigned
+    (``context`` None) for a personal/machine/unfounded destination or a
+    process holding no signer for *org*."""
+    from tools.data_paths import LOCAL_STORE_KEYS
+
+    if org is None or org in LOCAL_STORE_KEYS or _SIGNER_PROVIDER is None:
+        return PreparedSigner(None, None, None)
+    genesis = _store_is_founded(db)
+    if genesis is None:
+        return PreparedSigner(None, None, None)
+    try:
+        context = _SIGNER_PROVIDER(org)
+    except Exception:
+        logger.warning("signed settings: signer provider failed for %r", org, exc_info=True)
+        context = None
+    if context is None:
+        return PreparedSigner(genesis, None, None)
+    from tools.network.settingskit.authority import store_fold
+
+    return PreparedSigner(genesis, context, store_fold(db.conn))
+
+
 def _envelope_columns(
     db, org: "str | None", set_id: str, schema_revision: int, key: str, state: str,
     stored_payload: dict, *, deprecated: bool = False, successor_id: "str | None" = None,
+    prepared: "PreparedSigner | None" = None,
 ) -> tuple:
     """``(signed_at, signing_key, signature, witness_json, terminal_persona)``
     for a row about to be inserted, or five Nones for an unsigned row.
@@ -3018,18 +3054,11 @@ def _envelope_columns(
     ``record_from_row`` rebuilds at the boundary.
     """
     unsigned = (None, None, None, None, None)
-    from tools.data_paths import LOCAL_STORE_KEYS
-
-    if org is None or org in LOCAL_STORE_KEYS or _SIGNER_PROVIDER is None:
-        return unsigned
-    genesis = _store_is_founded(db)
+    if prepared is None:
+        prepared = prepare_signer(db, org)
+    genesis, context = prepared.genesis, prepared.context
     if genesis is None:
         return unsigned
-    try:
-        context = _SIGNER_PROVIDER(org)
-    except Exception:
-        logger.warning("signed settings: signer provider failed for %r", org, exc_info=True)
-        context = None
     if context is None:
         if org not in _UNSIGNED_WARNED:
             _UNSIGNED_WARNED.add(org)
@@ -3054,7 +3083,7 @@ def _envelope_columns(
         # The delegate signs unattended; only a persona envelope may write
         # here, and no inbound for one exists yet.
         raise SettingsSignerRefused(org, set_id, key, "signer_tier_persona_required")
-    frontier = store_fold(db.conn)
+    frontier = prepared.fold if prepared.fold is not None else store_fold(db.conn)
     if frontier is None:
         raise SettingsSignerRefused(org, set_id, key, "ledger_unavailable")
     verdict = check_signer(

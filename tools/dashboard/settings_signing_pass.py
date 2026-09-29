@@ -52,12 +52,52 @@ logger = logging.getLogger(__name__)
 CHUNK_ROWS = 4_000
 
 
-def sign_org_store(org: str, *, apply: bool = True, chunk_rows: int = CHUNK_ROWS) -> dict[str, Any]:
+class _OwnStore:
+    """The pass's PRIVATE connection to the organization store: never the
+    dashboard's pooled GraphDB handle. Live 2026-09-29 19:10-19:16Z: the
+    first dry run ran on the pooled connection, so every request handler
+    that read the same store queued behind 37,000 short statements, the
+    event loop's own synchronous reads stalled 283 s, and Home's dashboard
+    stopped answering until the worker was killed. A private connection
+    shares only the FILE with the rest of the process: WAL readers never
+    wait on it, and its short write transactions are the only thing a
+    concurrent writer waits for. Opened the way the sync scheduler opens
+    a store (SQLiteFleetSyncStore._open): with the capture catalog
+    attached, so an UPDATE replicates."""
+
+    def __init__(self, path):
+        import sqlite3
+
+        from tools.graph import sqlite_defaults
+        from tools.network.fleet_sync.catalog import attach_active_production_catalog
+        from tools.network.fleet_sync_connection import FleetSyncConnection
+
+        self.path = path
+        self.conn = sqlite3.connect(str(path), factory=FleetSyncConnection, timeout=30.0)
+        sqlite_defaults.apply(self.conn)
+        self.conn.row_factory = sqlite3.Row
+        # None on a store whose fleet writers are not activated: writes
+        # then replicate nowhere, which is that store's existing state.
+        self.catalog = attach_active_production_catalog(self.conn)
+
+    def close(self) -> None:
+        self.conn.close()
+
+
+def sign_org_store(org: str, *, apply: bool = True, chunk_rows: int = CHUNK_ROWS,
+                   pause_s: float = 0.0) -> dict[str, Any]:
     """Sign every unsigned settings row of the founded organization store
     *org* with this process's signer for it. Returns a report:
     ``{org, founded, unsigned, signed, persona_tier, refused: {reason: n},
     no_signer, transactions, seconds}``. With ``apply=False`` nothing is
-    written and the report says what would be."""
+    written and the report says what would be. *pause_s* sleeps between
+    chunks so a concurrent writer gets the file between them.
+
+    Per-row work is the envelope only (canonicalize and sign, ~0.2 ms):
+    the genesis, the signing context and the fold are looked up once per
+    chunk (settings_ops.prepare_signer), on this pass's private
+    connection.
+    """
     from tools.graph.schemas.registry import declared_signer
 
     started = time.perf_counter()
@@ -65,80 +105,86 @@ def sign_org_store(org: str, *, apply: bool = True, chunk_rows: int = CHUNK_ROWS
         "org": org, "founded": False, "unsigned": 0, "signed": 0, "persona_tier": 0,
         "refused": {}, "no_signer": False, "transactions": 0, "apply": bool(apply),
     }
-    db = settings_ops._open(org)
+    from pathlib import Path
+
+    path = settings_ops._db_path(org)
+    if not path or not Path(path).is_file():
+        report["seconds"] = round(time.perf_counter() - started, 3)
+        return report
+    db = _OwnStore(path)
     try:
         if settings_ops._store_is_founded(db) is None:
             return report
         report["founded"] = True
-        rows = db.conn.execute(
-            "SELECT id, set_id, schema_revision, key, payload, publication_state, "
-            "deprecated, successor_id FROM settings WHERE signature IS NULL "
-            "AND set_id != ? ORDER BY rowid", (LEDGER_EVENT_SET_ID,),
-        ).fetchall()
-        report["unsigned"] = len(rows)
-        if not rows:
+        ids = [str(r[0]) for r in db.conn.execute(
+            "SELECT id FROM settings WHERE signature IS NULL AND set_id != ? ORDER BY rowid",
+            (LEDGER_EVENT_SET_ID,),
+        )]
+        report["unsigned"] = len(ids)
+        if not ids:
             return report
-        pending: list[tuple] = []
-
-        def flush() -> None:
-            if not pending or not apply:
-                pending.clear()
-                return
-            db.conn.execute("BEGIN IMMEDIATE")
-            try:
-                db.conn.executemany(
-                    "UPDATE settings SET signed_at=?, signing_key=?, signature=?, "
-                    "witness=?, terminal_persona=? WHERE id=? AND signature IS NULL",
-                    pending,
-                )
-                db.conn.commit()
-            except BaseException:
-                db.conn.rollback()
-                raise
-            report["transactions"] += 1
-            pending.clear()
-
-        for row in rows:
-            row_id, set_id, revision, key, payload, state, deprecated, successor_id = (
-                str(row[0]), str(row[1]), int(row[2]), str(row[3]), row[4], str(row[5]),
-                bool(row[6]), row[7],
-            )
-            if declared_signer(set_id, revision) == "persona":
-                report["persona_tier"] += 1
-                continue
-            try:
-                stored_payload = json.loads(payload) if isinstance(payload, str) else payload
-            except ValueError:
-                report["refused"]["payload_unreadable"] = report["refused"].get("payload_unreadable", 0) + 1
-                continue
-            try:
-                envelope = settings_ops._envelope_columns(
-                    db, org, set_id, revision, key, state, stored_payload,
-                    deprecated=deprecated, successor_id=successor_id,
-                )
-            except settings_ops.SettingsSignerRefused as refused:
-                report["refused"][refused.reason] = report["refused"].get(refused.reason, 0) + 1
-                continue
-            except EnvelopeFormatError as exc:
-                # A row the envelope cannot encode (a non-finite float, a
-                # foreign type): left unsigned and named, never the whole
-                # store's failure.
-                reason = "envelope:" + str(exc)[:80]
-                report["refused"][reason] = report["refused"].get(reason, 0) + 1
-                continue
-            if envelope[1] is None:
+        for offset in range(0, len(ids), chunk_rows):
+            chunk_ids = ids[offset:offset + chunk_rows]
+            prepared = settings_ops.prepare_signer(db, org)
+            if prepared.context is None:
                 # No signer held for this organization in this process:
                 # nothing was, or will be, written by this call.
                 report["no_signer"] = True
-                pending.clear()
                 break
-            report["signed"] += 1
-            pending.append((*envelope, row_id))
-            if len(pending) >= chunk_rows:
-                flush()
-        flush()
-        if not apply:
-            report["transactions"] = -(-report["signed"] // max(1, chunk_rows)) if report["signed"] else 0
+            placeholders = ",".join("?" * len(chunk_ids))
+            rows = db.conn.execute(
+                "SELECT id, set_id, schema_revision, key, payload, publication_state, "
+                f"deprecated, successor_id FROM settings WHERE id IN ({placeholders}) "
+                "AND signature IS NULL", chunk_ids,
+            ).fetchall()
+            pending: list[tuple] = []
+            for row in rows:
+                row_id, set_id, revision, key, payload, state, deprecated, successor_id = (
+                    str(row[0]), str(row[1]), int(row[2]), str(row[3]), row[4], str(row[5]),
+                    bool(row[6]), row[7],
+                )
+                if declared_signer(set_id, revision) == "persona":
+                    report["persona_tier"] += 1
+                    continue
+                try:
+                    stored_payload = json.loads(payload) if isinstance(payload, str) else payload
+                except ValueError:
+                    report["refused"]["payload_unreadable"] = report["refused"].get("payload_unreadable", 0) + 1
+                    continue
+                try:
+                    envelope = settings_ops._envelope_columns(
+                        db, org, set_id, revision, key, state, stored_payload,
+                        deprecated=deprecated, successor_id=successor_id, prepared=prepared,
+                    )
+                except settings_ops.SettingsSignerRefused as refused:
+                    report["refused"][refused.reason] = report["refused"].get(refused.reason, 0) + 1
+                    continue
+                except EnvelopeFormatError as exc:
+                    # A row the envelope cannot encode (a non-finite float, a
+                    # foreign type): left unsigned and named, never the whole
+                    # store's failure.
+                    reason = "envelope:" + str(exc)[:80]
+                    report["refused"][reason] = report["refused"].get(reason, 0) + 1
+                    continue
+                report["signed"] += 1
+                pending.append((*envelope, row_id))
+            if pending and apply:
+                db.conn.execute("BEGIN IMMEDIATE")
+                try:
+                    db.conn.executemany(
+                        "UPDATE settings SET signed_at=?, signing_key=?, signature=?, "
+                        "witness=?, terminal_persona=? WHERE id=? AND signature IS NULL",
+                        pending,
+                    )
+                    db.conn.commit()
+                except BaseException:
+                    db.conn.rollback()
+                    raise
+                report["transactions"] += 1
+            elif pending:
+                report["transactions"] += 1   # what apply would commit
+            if pause_s and offset + chunk_rows < len(ids):
+                time.sleep(pause_s)
         return report
     finally:
         db.close()
@@ -157,12 +203,12 @@ def org_slugs() -> list[str]:
         return []
 
 
-def run(*, apply: bool = True, orgs: list[str] | None = None) -> list[dict[str, Any]]:
+def run(*, apply: bool = True, orgs: list[str] | None = None, pause_s: float = 0.05) -> list[dict[str, Any]]:
     """The pass over every organization store (or *orgs*)."""
     reports = []
     for slug in (orgs if orgs is not None else org_slugs()):
         try:
-            reports.append(sign_org_store(slug, apply=apply))
+            reports.append(sign_org_store(slug, apply=apply, pause_s=pause_s))
         except Exception as exc:   # one store's failure must not stop the rest
             logger.warning("settings signing pass: %r failed", slug, exc_info=True)
             reports.append({"org": slug, "error": f"{type(exc).__name__}: {exc}"})
