@@ -172,6 +172,21 @@ RUN chmod 0755 /usr/local/bin/autonomy-grok-auth
 ARG CLAUDE_VERSION
 LABEL codex.version=$CODEX_VERSION claude.version=$CLAUDE_VERSION grok.version=$GROK_VERSION
 
+# ── autonomy/mermaid capability dependencies (diagram contract) ──
+# The capability's code is mounted from the host at
+# /opt/autonomy/capabilities/autonomy-mermaid; its imports resolve by walking
+# up to /opt/node_modules, so a workspace renders diagrams with no per-host
+# npm step. Interim until the capability dependency design lands; pinned
+# within the package's own ranges (package.json). The browser is
+# agent-browser's Chromium, so puppeteer downloads none.
+ARG MERMAID_VERSION=11.17.2
+ARG PUPPETEER_CORE_VERSION=23.11.1
+RUN PUPPETEER_SKIP_DOWNLOAD=1 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1 \
+    npm install --prefix /opt --omit=optional --no-save \
+      "mermaid@${MERMAID_VERSION}" "puppeteer-core@${PUPPETEER_CORE_VERSION}" \
+    && test -f /opt/node_modules/mermaid/dist/mermaid.min.js \
+    && test -d /opt/node_modules/puppeteer-core
+
 # ── Pre-configure agent-browser for container use ──
 RUN mkdir -p /home/agent/.agent-browser \
     && echo '{"colorScheme":"dark","screenshotFormat":"png","screenshotDir":"/tmp/screenshots","args":"--no-sandbox,--disable-dev-shm-usage"}' \

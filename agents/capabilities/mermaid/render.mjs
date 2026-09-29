@@ -9,14 +9,49 @@
 // used because Mermaid's layout calls SVGTextElement.getBBox() for text
 // measurement, which only a real layout engine implements.
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import puppeteer from 'puppeteer-core';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_CHROMIUM = '/home/agent/.agent-browser/browsers/chrome-148.0.7778.56/chrome';
-const MERMAID_PATH = resolve(__dirname, 'node_modules/mermaid/dist/mermaid.min.js');
+// agent-browser's Chromium: its directory carries the version, which moves
+// with every agent-browser release, so find the newest installed one rather
+// than naming a version that the next image no longer has.
+const BROWSERS = '/home/agent/.agent-browser/browsers';
+function newestChromium() {
+  let dirs = [];
+  try { dirs = readdirSync(BROWSERS).filter((d) => d.startsWith('chrome-')); } catch { return null; }
+  const version = (d) => d.slice('chrome-'.length).split('.').map(Number);
+  dirs.sort((a, b) => {
+    const [x, y] = [version(a), version(b)];
+    for (let i = 0; i < Math.max(x.length, y.length); i++) {
+      if ((x[i] || 0) !== (y[i] || 0)) return (y[i] || 0) - (x[i] || 0);
+    }
+    return 0;
+  });
+  for (const d of dirs) {
+    const bin = resolve(BROWSERS, d, 'chrome');
+    if (existsSync(bin)) return bin;
+  }
+  return null;
+}
+const DEFAULT_CHROMIUM = newestChromium() || `${BROWSERS}/chrome-<none installed>/chrome`;
+// The same lookup Node uses for the puppeteer-core import above: the nearest
+// node_modules walking up from this file. That finds a host install beside
+// the package (package_root/node_modules) first, then the image's
+// /opt/node_modules (agents/Dockerfile) when the package is mounted at
+// /opt/autonomy/capabilities/autonomy-mermaid.
+function findMermaid(start) {
+  for (let dir = start; ; dir = dirname(dir)) {
+    const candidate = resolve(dir, 'node_modules/mermaid/dist/mermaid.min.js');
+    if (existsSync(candidate)) return candidate;
+    if (dirname(dir) === dir) {
+      throw new Error('render.mjs: mermaid is not installed in any node_modules above ' + start);
+    }
+  }
+}
+const MERMAID_PATH = findMermaid(__dirname);
 
 // Canonical palette — applied automatically when the source uses the
 // well-known class names (:::setting, :::file, :::step, :::out, :::err,
