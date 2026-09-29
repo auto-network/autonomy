@@ -65,19 +65,19 @@ class Bus:
         self.events.append((topic, data))
 
 
-def _mirror():
+def _subscriptions():
     bus = Bus()
-    mirror = remote_sessions.Mirror(bus, control=lambda *a, **k: {"ok": True})
-    mirror._names = {SJC: "sjc-2"}
-    return mirror, bus
+    subs = remote_sessions.Subscriptions(bus, control=lambda *a, **k: {"ok": True})
+    subs._names = {SJC: "sjc-2"}
+    return subs, bus
 
 
 def test_forwarded_rows_are_keyed_by_machine_pub_and_named_for_display():
-    mirror, bus = _mirror()
+    subs, bus = _subscriptions()
 
     async def run():
-        await mirror._apply({"machine_pub": SJC, "subscribed": True}, "p")
-        await mirror._apply({"machine_pub": SJC, "event": {"topic": "session:registry",
+        await subs._apply({"machine_pub": SJC, "subscribed": True}, "p")
+        await subs._apply({"machine_pub": SJC, "event": {"topic": "session:registry",
             "data": [{"session_id": "auto-7", "startup_state": "harness_starting"}]}}, "p")
 
     asyncio.run(run())
@@ -86,17 +86,17 @@ def test_forwarded_rows_are_keyed_by_machine_pub_and_named_for_display():
     (row,) = data["rows"]
     assert (row["session_id"], row["machine"], row["machine_pub"], row["startup_state"]) == (
         f"auto-7@{SJC}", "sjc-2", SJC, "harness_starting")
-    assert mirror.connected(SJC)
+    assert subs.connected(SJC)
 
 
 def test_messages_and_endings_are_republished_under_the_key():
-    mirror, bus = _mirror()
+    subs, bus = _subscriptions()
 
     async def run():
-        await mirror._apply({"machine_pub": SJC, "event": {"topic": "session:messages",
+        await subs._apply({"machine_pub": SJC, "event": {"topic": "session:messages",
             "data": {"session_id": "auto-9", "entries": [{"type": "assistant"}],
                      "span": {"file": "f", "from": 0, "to": 9}}}}, "p")
-        await mirror._apply({"machine_pub": SJC, "event": {"topic": "session:ended",
+        await subs._apply({"machine_pub": SJC, "event": {"topic": "session:ended",
             "data": {"id": "auto-9", "tmux_session": "auto-9", "state": "FAILED"}}}, "p")
 
     asyncio.run(run())
@@ -109,12 +109,12 @@ def test_messages_and_endings_are_republished_under_the_key():
 
 
 def test_an_ended_subscription_this_machine_serves_stops_its_forwarder():
-    mirror, _bus = _mirror()
+    subs, _bus = _subscriptions()
 
     async def run():
         task = asyncio.create_task(asyncio.sleep(60))
         remote_sessions._forwarders["s1"] = task
-        await mirror._apply({"ended_sub_id": "s1"}, "p")
+        await subs._apply({"ended_sub_id": "s1"}, "p")
         await asyncio.sleep(0)
         assert task.cancelled() and "s1" not in remote_sessions._forwarders
 
@@ -122,18 +122,18 @@ def test_an_ended_subscription_this_machine_serves_stops_its_forwarder():
 
 
 def test_a_lost_subscription_resubscribes_and_a_refused_one_does_not(monkeypatch):
-    mirror, _bus = _mirror()
+    subs, _bus = _subscriptions()
     again = []
 
     async def later(pub, persona):
         again.append(pub)
 
-    monkeypatch.setattr(mirror, "_resubscribe_later", later)
+    monkeypatch.setattr(subs, "_resubscribe_later", later)
 
     async def run():
-        await mirror._apply({"machine_pub": SJC, "end": "subscription-lost",
+        await subs._apply({"machine_pub": SJC, "end": "subscription-lost",
                              "refused": False}, "p")
-        await mirror._apply({"machine_pub": SJC, "end": "peer-not-in-roster",
+        await subs._apply({"machine_pub": SJC, "end": "peer-not-in-roster",
                              "refused": True}, "p")
         await asyncio.sleep(0)
 

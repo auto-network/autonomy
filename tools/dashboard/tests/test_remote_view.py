@@ -90,7 +90,7 @@ def test_the_viewers_tail_is_proxied_and_rewritten(monkeypatch):
         return {"v": 1, "ok": True, "tail": {"session_id": "auto-9", "entries": [],
                                              "chain": ["s1"], "offset": 42}}
 
-    class Mirror:
+    class Subscriptions:
         def connected(self, machine_pub):
             return machine_pub == PEER
 
@@ -100,7 +100,7 @@ def test_the_viewers_tail_is_proxied_and_rewritten(monkeypatch):
     monkeypatch.setattr(fleet_machines, "label_for", lambda pub: "sjc-2")
     monkeypatch.setattr(api_auth, "require_global_api_authority", lambda r: None)
     monkeypatch.setattr(remote_view, "fetch_tail", fake_fetch)
-    monkeypatch.setattr(server, "_remote_mirror", Mirror())
+    monkeypatch.setattr(server, "_remote_subscriptions", Subscriptions())
     response = asyncio.run(server.api_session_tail(_Req(
         {"project": "p", "session_id": ADDRESS},
         {"tail_entries": "100", "ignored": "x"})))

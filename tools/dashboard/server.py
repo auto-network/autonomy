@@ -7010,7 +7010,7 @@ def _parse_and_enrich_segments(
 
 
 #: Live session events from the operator's other machines (remote_sessions).
-_remote_mirror = None
+_remote_subscriptions = None
 
 
 async def _remote_session_tail(request, project: str, address: str):
@@ -7067,7 +7067,8 @@ async def _remote_session_tail(request, project: str, address: str):
     data["machine_pub"] = machine_pub
     data["machine_reachable"] = True
     # New entries arrive over the machine's subscription (remote_sessions).
-    data["live_updates"] = bool(_remote_mirror and _remote_mirror.connected(machine_pub))
+    data["live_updates"] = bool(
+        _remote_subscriptions and _remote_subscriptions.connected(machine_pub))
     return JSONResponse(data)
 
 
@@ -23522,9 +23523,9 @@ async def _on_shutdown():
         _write_restart_notice({"started_at_ms": int(time.time() * 1000)})
     # Close the subscription channels in both directions: peers reconnect to
     # the next dashboard, and this one's own subscriptions end with it.
-    if _remote_mirror is not None:
+    if _remote_subscriptions is not None:
         try:
-            await _remote_mirror.stop()
+            await _remote_subscriptions.stop()
         except Exception:
             logger.debug("remote sessions stop failed", exc_info=True)
     global _plain_listener
@@ -23808,7 +23809,7 @@ async def _activate_worker(reason: str) -> None:
         try:
             from tools.dashboard import (
                 remote_access_ops, remote_sessions, session_control_client)
-            global _session_control_pump, _remote_mirror
+            global _session_control_pump, _remote_subscriptions
             _session_control_pump = session_control_client.install(
                 _resolved_dispatch_limits, _create_session_from_body,
                 ops={"send": _inbound_session_send, "stop": _inbound_session_stop,
@@ -23819,8 +23820,8 @@ async def _activate_worker(reason: str) -> None:
                      # Remote access recovery from another fleet machine
                      # (auto-fnj20): re-open enrollment, revoke a passkey.
                      **remote_access_ops.ops()})
-            _remote_mirror = remote_sessions.Mirror(event_bus)
-            _remote_mirror.start()
+            _remote_subscriptions = remote_sessions.Subscriptions(event_bus)
+            _remote_subscriptions.start()
         except Exception:
             logger.exception("session-control inbound pump failed to start")
 

@@ -1241,7 +1241,7 @@ window.ensureSessionMessages = function() {
     _emitSessionRegistryChanged(Object.keys(activeIds));
   });
 
-  // Another machine's forwarded registry rows (remote_sessions.Mirror): each
+  // Another machine's forwarded registry rows (remote_sessions.Subscriptions): each
   // updates the one session it names. A session missing from them has not
   // ended -- only session:ended or its presence row says so.
   window.registerHandler('session:remote-rows', function(data) {

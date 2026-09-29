@@ -8,7 +8,7 @@ machine, opened at startup with the operator's persona and kept open
   event of its own bus about the persona's sessions as it happens --
   ``session:registry`` (rows cut to SESSIONS_ROW_FIELDS), ``session:messages``
   and ``session:ended``. Nothing else crosses. There is no snapshot.
-* SUBSCRIBER side (:class:`Mirror`): rewrites each session to
+* SUBSCRIBER side (:class:`Subscriptions`): rewrites each session to
   ``name@machine_pub`` -- the machine's key, never its display name -- and
   republishes on this machine's bus: registry rows as
   ``session:remote-rows``, messages and endings as themselves. Each updates
@@ -140,7 +140,7 @@ def _address(name: str, machine_pub: str) -> str:
     return f"{name}@{machine_pub}"
 
 
-class Mirror:
+class Subscriptions:
     """Holds this machine's subscriptions and republishes what they carry."""
 
     def __init__(self, bus, *, control=None):
