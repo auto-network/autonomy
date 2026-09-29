@@ -168,3 +168,55 @@ describe('templates', () => {
     assert.equal((js.match(/\|\| this\.isRemote\) return;/g) || []).length, 4);
   });
 });
+
+describe('machine list not ready', () => {
+  it('opens the chooser in its loading state instead of launching here unasked', () => {
+    const p = makeSessionsPage({ CustomEvent });
+    const created = [];
+    p.__window.addEventListener('create-terminal', (e) => created.push(e.detail));
+    p.launchTargetsState = 'loading';
+    assert.equal(p.pickWorkspace({ id: 'autonomy-docs', name: 'Docs' }), false);
+    assert.equal(p.launchPanel, 'machines');
+    assert.equal(created.length, 0);
+  });
+
+  it('opens the chooser with the failure, and launches here only when asked', () => {
+    const p = makeSessionsPage({ CustomEvent });
+    const created = [];
+    p.__window.addEventListener('create-terminal', (e) => created.push(e.detail));
+    p.launchTargetsState = 'failed';
+    p.launchTargetsError = 'HTTP 502';
+    assert.equal(p.pickWorkspace({ id: 'autonomy-docs', name: 'Docs' }), false);
+    assert.equal(created.length, 0);
+    assert.equal(p.launchHere(), true);
+    assert.equal(created.length, 1);
+    assert.equal(created[0].project, 'autonomy-docs');
+  });
+
+  it('launches here directly once the list is ready and no other machine exists', () => {
+    const p = makeSessionsPage({ CustomEvent });
+    p.launchTargetsState = 'ready';
+    p.launchTargets = [HOME];
+    assert.equal(p.pickWorkspace({ id: 'autonomy-docs', name: 'Docs' }), true);
+  });
+});
+
+describe('a refused create is stated, not swallowed', () => {
+  it('names the machine, the refusal in words, its code and the detail', () => {
+    const p = makeSessionsPage({ CustomEvent });
+    loadRefusalText(p.__window);
+    p.launchTargets = [HOME];
+    const text = p._createErrorText(
+      { refusal: 'destination-slot-absent', at: 'local', error: 'the relay reports no serving slot' },
+      { machineLabel: 'sjc' });
+    assert.match(text, /^Could not launch on sjc: /);
+    assert.match(text, /\[destination-slot-absent\]/);
+    assert.match(text, /the relay reports no serving slot$/);
+  });
+
+  it('falls back to the server error when no refusal code came back', () => {
+    const p = makeSessionsPage({ CustomEvent });
+    assert.equal(p._createErrorText({ error: 'Unknown project' }, {}),
+                 'Could not launch: Unknown project');
+  });
+});

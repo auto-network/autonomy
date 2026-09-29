@@ -360,6 +360,9 @@
       // Fetched when + opens so the chooser is ready when a workspace is
       // picked; empty or local-only means no chooser at all.
       launchTargets: [],
+      //: 'idle' | 'loading' | 'ready' | 'failed' -- the machine list's state
+      launchTargetsState: 'idle',
+      launchTargetsError: '',
       launchPanel: 'workspaces',
       launchWorkspace: null,
       // Sessions on the operator's other machines, as Active-list rows
@@ -1440,7 +1443,7 @@
             });
             if (!res.ok && res.status !== 202) {
               var err = await res.json().catch(function () { return {}; });
-              throw new Error(err.error || 'Session create failed');
+              throw new Error(this._createErrorText(err, detail));
             }
             var created = await res.json();
             // Bind the optimistic placeholder to the REAL session id the
@@ -1464,6 +1467,9 @@
               this._updateFromStore();
             } catch (_) {}
             console.warn('[sessionsPage] create-terminal failed', err);
+            if (typeof window.showToast === 'function') {
+              window.showToast(String((err && err.message) || err), 'error');
+            }
           } finally {
             this._creating = false;
           }
@@ -1476,12 +1482,46 @@
       },
 
       async _fetchLaunchTargets() {
+        // The machine step must know whether other machines exist BEFORE a
+        // workspace is picked; while this is loading or has failed, picking
+        // a workspace opens the chooser in that state instead of launching
+        // here unasked.
+        this.launchTargetsState = 'loading';
+        this.launchTargetsError = '';
         try {
-          var data = await fetch('/api/fleet/launch-targets').then(function(r) { return r.json(); });
+          var res = await fetch('/api/fleet/launch-targets');
+          var data = await res.json().catch(function() { return {}; });
+          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
           this.launchTargets = Array.isArray(data.targets) ? data.targets : [];
+          this.launchTargetsState = 'ready';
         } catch (e) {
           this.launchTargets = [];
+          this.launchTargetsState = 'failed';
+          this.launchTargetsError = String((e && e.message) || e);
         }
+      },
+
+      // Launch the chosen workspace on this machine, from the chooser.
+      launchHere() {
+        if (!this.launchWorkspace) return false;
+        window.dispatchEvent(new CustomEvent('create-terminal',
+          {detail: {project: this.launchWorkspace.id}}));
+        this.launchPanel = 'workspaces';
+        this.launchWorkspace = null;
+        return true;
+      },
+
+      // What a refused create says: the refusal code in words, which machine
+      // decided it, and the server's detail. Never swallowed to the console.
+      _createErrorText(err, detail) {
+        err = err || {};
+        var there = (detail && detail.machineLabel) || '';
+        var text = err.refusal && typeof window.describeRefusal === 'function'
+          ? window.describeRefusal({reason: err.refusal, at: err.at},
+                                   {here: this._localMachineLabel(), there: there})
+          : (err.error || 'Session create failed');
+        if (err.refusal && err.error && err.error !== err.refusal) text += ' \u2014 ' + err.error;
+        return (there ? 'Could not launch on ' + there + ': ' : 'Could not launch: ') + text;
       },
 
       // A refusal names its check and where it was decided (``at``); the
@@ -1550,6 +1590,11 @@
       // else to launch; otherwise it opens the machine chooser. Returns true
       // when the menu should close.
       pickWorkspace(p) {
+        if (this.launchTargetsState === 'loading' || this.launchTargetsState === 'failed') {
+          this.launchWorkspace = p;
+          this.launchPanel = 'machines';
+          return false;
+        }
         if (!this.remoteLaunchTargets.length) {
           window.dispatchEvent(new CustomEvent('create-terminal', {detail: {project: p.id}}));
           return true;

@@ -897,3 +897,9 @@ body.zoom-compact .sc-phase-chip {
 .lmt-track.lmt-warning { background: #4a3410; } .lmt-warning .lmt-fill { background: #f59e0b; }
 .lmt-track.lmt-danger  { background: #4c1d1d; } .lmt-danger  .lmt-fill { background: #ef4444; }
 .lmt-reason { margin-top: .25rem; font-size: .75rem; color: #9ca3af; }
+
+/* Machine chooser: the machine list is still loading or could not be read */
+.lmt-status { margin: .25rem .75rem .5rem; font-size: .75rem; color: #9ca3af; }
+.lmt-status-error { color: #fca5a5; display: flex; flex-direction: column; gap: .375rem; }
+.lmt-status-action { align-self: flex-start; font-size: .75rem; color: #e5e7eb;
+  background: #374151; border-radius: .25rem; padding: .125rem .5rem; }

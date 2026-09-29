@@ -98,6 +98,14 @@
                       aria-label="Back to workspaces">&larr;</button>
               <span x-text="launchWorkspace ? 'Launch ' + launchWorkspace.name + ' on' : ''"></span>
             </div>
+            <div class="lmt-status" x-show="launchTargetsState === 'loading'"
+                 data-testid="launch-machines-loading">Checking machines&hellip;</div>
+            <div class="lmt-status lmt-status-error" x-show="launchTargetsState === 'failed'"
+                 data-testid="launch-machines-failed">
+              <span x-text="'Could not read the machine list: ' + launchTargetsError"></span>
+              <button type="button" class="lmt-status-action" @click.stop="if (launchHere()) open = false"
+                      data-testid="launch-here">Launch on this machine</button>
+            </div>
             <div class="launch-machine-tiles">
             <template x-for="t in launchTargets" :key="t.machine_pub">
               <button type="button" @click="if (launchOn(t)) open = false"
