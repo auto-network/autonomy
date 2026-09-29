@@ -160,7 +160,14 @@ def test_the_unlock_hook_runs_only_on_the_singular_ownership_machine(monkeypatch
     from tools.network import fleet_tunnel_server
 
     calls = []
-    monkeypatch.setattr(pass_module, "run", lambda apply=True, orgs=None: calls.append(apply) or [])
+    monkeypatch.setattr(pass_module, "run", lambda apply=True, orgs=None, pause_s=0.05: calls.append(apply) or [])
+    monkeypatch.setattr(fleet_tunnel_server, "state", lambda: SimpleNamespace(allowed=True, reason=None))
+    # Off by default: a worker respawn re-warms the vault through the same
+    # seam as an unlock and must not start the pass unasked.
+    monkeypatch.setattr(pass_module, "RUN_AFTER_UNLOCK", False)
+    pass_module.run_after_unlock()
+    assert calls == []
+    monkeypatch.setattr(pass_module, "RUN_AFTER_UNLOCK", True)
     monkeypatch.setattr(fleet_tunnel_server, "state", lambda: SimpleNamespace(allowed=False, reason="not-elected"))
     pass_module.run_after_unlock()
     assert calls == []

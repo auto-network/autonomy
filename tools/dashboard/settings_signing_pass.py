@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -50,6 +51,14 @@ logger = logging.getLogger(__name__)
 #: Rows per replicated transaction: 2 operations per row, well under
 #: catalog.MAX_TRANSACTION_OPERATIONS (16,384).
 CHUNK_ROWS = 4_000
+
+#: The unlock hook is OPT-IN. The vault hot-reload path (a worker respawn)
+#: takes the same seam as an unlock, so with this on, every restart of the
+#: dashboard started the pass on the node unasked — on Home at 19:16:43Z
+#: on 2026-09-29, right after the outage the first run had caused. Off,
+#: the pass runs only through the operator-authority route; the host flips
+#: this on for a node once the pass has been measured there.
+RUN_AFTER_UNLOCK = os.environ.get("AUTONOMY_SETTINGS_SIGNING_PASS_AFTER_UNLOCK", "") == "1"
 
 
 class _OwnStore:
@@ -218,6 +227,9 @@ def run(*, apply: bool = True, orgs: list[str] | None = None, pause_s: float = 0
 def run_after_unlock() -> None:
     """The unlock hook: on the fleet's singular-ownership machine only, sign
     what is unsigned. Best-effort; never raises into the unlock."""
+    if not RUN_AFTER_UNLOCK:
+        logger.info("settings signing pass: unlock hook is off (AUTONOMY_SETTINGS_SIGNING_PASS_AFTER_UNLOCK != 1)")
+        return
     try:
         from tools.network import fleet_tunnel_server
 
