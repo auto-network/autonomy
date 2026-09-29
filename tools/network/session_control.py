@@ -93,6 +93,8 @@ PEER_CLOSED_AT_OPEN = "peer-closed-at-open"         # peer connector declined th
 PEER_CLOSED_IN_HANDSHAKE = "peer-closed-in-handshake"  # closed with no typed refusal
 HANDSHAKE_TIMEOUT = "handshake-timeout"
 REPLY_TIMEOUT = "reply-timeout"
+REPLY_LOST = "reply-lost"                           # sent, then the channel closed: outcome unknown
+CLOSED_AT_SEND = "channel-closed-at-send"           # a new channel closed before the request left
 REPLY_NOT_JSON = "reply-not-json"
 REPLY_MALFORMED = "reply-malformed"
 STREAM_CHUNK_TIMEOUT = "stream-chunk-timeout"
@@ -706,15 +708,24 @@ class _RequestChannel:
 _request_channels: dict[str, _RequestChannel] = {}
 
 
-async def _exchange(channel, record: bytes, timeout: float, stream: bool) -> dict:
-    await channel.send_message(record)
-    if stream:
-        return await _receive_stream(channel, timeout)
+class _NotSent(Exception):
+    """The request never left: the channel was closed when it was sent."""
+
+
+async def _exchange(channel, record: bytes, timeout: float) -> dict:
+    try:
+        await channel.send_message(record)
+    except (FleetStreamClosed, ConnectionError) as exc:
+        raise _NotSent() from exc
     try:
         raw = await asyncio.wait_for(channel.recv_message(), timeout)
     except asyncio.TimeoutError:
         raise SessionControlError(
             REPLY_TIMEOUT, f"no reply within {timeout}s") from None
+    except (FleetStreamClosed, ConnectionError) as exc:
+        # The host may already have carried it out: never sent again.
+        raise SessionControlError(
+            REPLY_LOST, f"the channel closed before the reply: {exc}") from exc
     return _decode_reply(raw)
 
 
@@ -732,36 +743,48 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
     try:
         record = encode({"v": SESSION_CONTROL_VERSION, "op": op, "body": body},
                         too_large=REQUEST_TOO_LARGE)
-        entry = _request_channels.setdefault(machine_pub, _RequestChannel())
-        async with entry.lock:
-            reused = entry.usable()
-            if reused:
-                # Our own grant is checked on every request; opening a
-                # channel checks it anyway.
-                session_authenticator(runtime)
-            else:
-                await entry.close()
-                await entry.open(connector, runtime, machine_pub, timeout, resolve_slot)
-            try:
-                reply = await _exchange(entry.channel, record, timeout, stream)
-            except (FleetStreamClosed, ConnectionError):
-                await entry.close()
-                if not reused:
-                    raise
-                # The reused channel was closed before any reply (the peer's
-                # idle close, or its check of us failing): once more on a new
-                # channel, whose handshake names any refusal.
-                await entry.open(connector, runtime, machine_pub, timeout, resolve_slot)
+        if stream:
+            # A transfer gets its own channel, so it never holds up the
+            # small requests queued on the shared one.
+            async with _open_channel(connector, runtime, machine_pub, timeout,
+                                     resolve_slot) as (channel, _endpoint):
+                await channel.send_message(record)
+                reply = await _receive_stream(channel, timeout)
+        else:
+            entry = _request_channels.setdefault(machine_pub, _RequestChannel())
+            async with entry.lock:
+                reused = entry.usable()
+                if reused:
+                    # Our own grant is checked on every request; opening a
+                    # channel checks it anyway.
+                    session_authenticator(runtime)
+                else:
+                    await entry.close()
+                    await entry.open(connector, runtime, machine_pub, timeout, resolve_slot)
                 try:
-                    reply = await _exchange(entry.channel, record, timeout, stream)
+                    reply = await _exchange(entry.channel, record, timeout)
+                except _NotSent:
+                    await entry.close()
+                    if not reused:
+                        raise SessionControlError(
+                            CLOSED_AT_SEND, "the new channel closed") from None
+                    # The reused channel had closed (the host's idle close)
+                    # and the request never left: once more on a new channel.
+                    await entry.open(connector, runtime, machine_pub, timeout, resolve_slot)
+                    try:
+                        reply = await _exchange(entry.channel, record, timeout)
+                    except _NotSent:
+                        await entry.close()
+                        raise SessionControlError(
+                            CLOSED_AT_SEND, "the new channel closed") from None
+                    except BaseException:
+                        await entry.close()
+                        raise
                 except BaseException:
+                    # A channel whose exchange failed or timed out may still
+                    # carry that reply later; it is never reused.
                     await entry.close()
                     raise
-            except BaseException:
-                # A channel whose exchange failed or timed out may still carry
-                # that reply later; it is never reused.
-                await entry.close()
-                raise
         if reply.get("ok") is False and "at" not in reply:
             reply = {**reply, "at": "peer"}
         return reply

@@ -139,3 +139,44 @@ def test_a_dashboard_too_far_behind_ends_the_subscription_not_an_event(monkeypat
     assert session_control._deliver({"event": 1}, 8) is True
     assert session_control._deliver({"event": 2}, 8) is False       # the caller ends the subscription
     assert session_control._deliver({"end": "subscription-behind"}, 0, force=True) is True
+
+
+def test_a_request_the_host_received_is_never_sent_twice(monkeypatch):
+    """The channel closes after the host received a request and before it
+    replied: the requester reports the reply lost and does not resend it."""
+    root = KeyPair.generate()
+    port = _free_port()
+    with _live_registry(port):
+        asyncio.run(_lost_reply_scenario(root, port, monkeypatch))
+
+
+async def _lost_reply_scenario(root, port, monkeypatch):
+    monkeypatch.setattr(session_control, "_request_channels", {})
+    _register(port, root)
+    machine_a, machine_b = KeyPair.generate(), KeyPair.generate()
+    id_a, id_b = "a1" * 32, "b1" * 32
+    roster = (
+        fleet_roster.enroll(root, machine_id=id_a, machine_pub=machine_a.public_hex, seq=0),
+        fleet_roster.enroll(root, machine_id=id_b, machine_pub=machine_b.public_hex, seq=0),
+    )
+    caps = (CAP_FLEET_DIRECTED_STREAM, CAP_SESSION_CONTROL)
+    runtime_a = Runtime(root, machine_a, id_a, roster)
+    runtime_b = Runtime(root, machine_b, id_b, roster)
+    broker_a, broker_b = session_control.InboundBroker(), session_control.InboundBroker()
+    a, task_a = await _connector(port, root, machine_a, runtime_a, broker_a, caps=caps)
+    b, task_b = await _connector(port, root, machine_b, runtime_b, broker_b, caps=caps)
+    try:
+        asking = asyncio.create_task(session_control.request(
+            a, runtime_a, machine_pub=machine_b.public_hex, op="send",
+            body={"text": "hi"}, timeout=5))
+        item = await broker_b.next(10)
+        assert item["op"] == "send"
+        # The host has the request; its channel goes before it answers.
+        entry = session_control._request_channels[machine_b.public_hex]
+        await entry.endpoint.close()
+        reply = await asyncio.wait_for(asking, 10)
+        assert (reply["refusal"], reply["at"]) == (session_control.REPLY_LOST, "local")
+        assert await broker_b.next(1) is None        # never sent a second time
+    finally:
+        await _stop(a, task_a)
+        await _stop(b, task_b)
