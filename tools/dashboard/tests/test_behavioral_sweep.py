@@ -1067,10 +1067,16 @@ SWEEP_EXPERIMENT = {
         "exp-sweep-00000000-0000-0000-0000-000000000002",
         "exp-sweep-00000000-0000-0000-0000-000000000003",
     ],
-    "alpine": 0,
+    "alpine": 1,
     "variants": [
-        {"id": "v-sweep-001", "html": "<h1>Sweep toolbar test</h1>"}
+        {"id": "v-sweep-001",
+         "html": '<div x-data="window.FIXTURE"><h1>Sweep toolbar test</h1>'
+                 '<span id="sweep-fixture-label" x-text="label"></span></div>'}
     ],
+    # Two named states: the toolbar's fixture-state strip lists them under the
+    # revision toggle (never inside the design's iframe) and switches the
+    # design's Alpine data in place.
+    "fixture": '{"states": {"FIRST": {"label": "first"}, "SECOND": {"label": "second"}}}',
 }
 
 
@@ -7456,6 +7462,27 @@ EXPERIMENT_TOOLBAR_CHECKS = """(async () => {
   r.disc_capture = shown('design-linked-capture');
   r.disc_no_chat_close = !shown('design-chat-close');
   r.disc_no_session = !q('toolbar-session-row');
+  // Fixture states: a short strip under the revision toggle, the toolbar's
+  // full width, one button per state; nothing is drawn over the design.
+  var strip = q('toolbar-fixture-states');
+  var iframe = document.getElementById('design-iframe');
+  var idoc = iframe && iframe.contentDocument;
+  r.states_strip = !!strip && strip.querySelectorAll('[data-fixture-state]').length === 2;
+  r.states_strip_short = !!strip && strip.getBoundingClientRect().height <= 32;
+  var stripParent = strip && strip.parentElement, stripParentStyle = stripParent && getComputedStyle(stripParent);
+  var stripLane = stripParent && (stripParent.getBoundingClientRect().width - parseFloat(stripParentStyle.paddingLeft) - parseFloat(stripParentStyle.paddingRight));
+  r.states_strip_full_width = !!strip && Math.abs(strip.getBoundingClientRect().width - stripLane) < 2;
+  r.states_none_in_iframe = !!idoc && !idoc.getElementById('fixture-state-picker');
+  r.states_first_on = !!strip && strip.querySelector('.on')?.dataset.fixtureState === 'FIRST';
+  // Wait for the iframe's Alpine to render the first state, then switch.
+  for (var i = 0; i < 50 && idoc.getElementById('sweep-fixture-label')?.textContent !== 'first'; i++) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  r.states_first_rendered = idoc.getElementById('sweep-fixture-label')?.textContent === 'first';
+  strip && strip.querySelector('[data-fixture-state="SECOND"]')?.click();
+  await tick();
+  r.states_second_on = !!strip && strip.querySelector('.on')?.dataset.fixtureState === 'SECOND';
+  r.states_second_rendered = idoc.getElementById('sweep-fixture-label')?.textContent === 'second';
 
   // PICKER: chatOpen=true, chatConnected=false
   ep.chatOpen = true;
@@ -7617,6 +7644,22 @@ class TestExperimentToolbar:
         """DISCONNECTED: no session row visible."""
         c = self._checks
         assert c.get("disc_no_session"), "Session row should be hidden in DISCONNECTED"
+
+    def test_fixture_states_strip_under_the_revision_toggle(self):
+        """A multi-state fixture lists its states in a short, full-width strip
+        of the toolbar, never inside the design's iframe."""
+        c = self._checks
+        assert c.get("states_strip"), "Strip missing or not one button per state"
+        assert c.get("states_strip_short"), "Strip must be one line of text tall"
+        assert c.get("states_strip_full_width"), "Strip must span the toolbar's width"
+        assert c.get("states_none_in_iframe"), "No picker may be drawn over the design"
+        assert c.get("states_first_on"), "First state is selected on load"
+
+    def test_fixture_state_click_switches_the_design(self):
+        c = self._checks
+        assert c.get("states_first_rendered"), "Design did not render the first state"
+        assert c.get("states_second_on"), "Clicked state is not marked selected"
+        assert c.get("states_second_rendered"), "Design data did not switch to the clicked state"
 
     # ── LIVE_UI state ─────────────────────────────────────────────
 

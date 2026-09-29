@@ -37,46 +37,18 @@
     };
   }
 
-  // ── State picker HTML generator (for multi-state fixtures) ────────────────
-  function _buildStatePickerHtml(stateKeys) {
-    var pills = stateKeys.map(function (key, i) {
-      var isActive = i === 0;
-      var bg = isActive ? '#334155' : 'transparent';
-      var color = isActive ? '#f1f5f9' : '#94a3b8';
-      var esc = key.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-      return '<button data-fixture-state="' + esc + '" style="padding:5px 12px;border:none;border-radius:8px;' +
-        'font-size:12px;font-weight:500;cursor:pointer;background:' + bg + ';color:' + color +
-        ';font-family:inherit;transition:all 0.15s;">' + esc + '</button>';
-    }).join('');
-
-    var script = '<script>' +
-      'document.getElementById("fixture-state-picker").addEventListener("click",function(e){' +
-      'var btn=e.target.closest("[data-fixture-state]");if(!btn)return;' +
-      'var key=btn.dataset.fixtureState;' +
-      'window.FIXTURE=window.FIXTURE_STATES[key];' +
-      'var root=document.querySelector("[x-data]");' +
-      'if(root&&typeof Alpine!=="undefined"){' +
-      'var d=Alpine.$data(root),s=window.FIXTURE_STATES[key];' +
-      'Object.keys(s).forEach(function(k){d[k]=s[k]});' +
-      '}' +
-      'this.querySelectorAll("[data-fixture-state]").forEach(function(b){' +
-      'var a=b.dataset.fixtureState===key;' +
-      'b.style.background=a?"#334155":"transparent";' +
-      'b.style.color=a?"#f1f5f9":"#94a3b8"});' +
-      'window.dispatchEvent(new CustomEvent("fixture-state-change",{detail:{state:key,data:window.FIXTURE}}))' +
-      '});' +
-      '<\/script>';
-
-    // Pinned to the TOP of the iframe, not the bottom. The bottom band is
-    // owned by realistic designs (composer / .sv-input) and, on mobile, by the
-    // voice live-caption gutter — both of which buried this picker and made it
-    // untappable. z-index is maxed so no overlay (caption gutter included) can
-    // cover it.
-    return '<div id="fixture-state-picker" style="position:fixed;top:12px;left:50%;transform:translateX(-50%);' +
-      'display:flex;align-items:center;gap:2px;background:#0f172a;border:1px solid #1e293b;' +
-      'border-radius:10px;padding:3px;box-shadow:0 4px 24px rgba(0,0,0,0.5);z-index:2147483000;">' +
-      pills + '</div>' + script;
-  }
+  // ── Fixture states: the picker lives in the toolbar (below the revision
+  // toggle), never over the design. The iframe carries one hook that swaps
+  // window.FIXTURE and patches the Alpine root's data in place.
+  var FIXTURE_APPLY_HOOK = '<script>window.__applyFixtureState=function(key){' +
+    'var s=window.FIXTURE_STATES&&window.FIXTURE_STATES[key];if(!s)return false;' +
+    'window.FIXTURE=s;' +
+    'var root=document.querySelector("[x-data]");' +
+    'if(root&&typeof Alpine!=="undefined"){' +
+    'var d=Alpine.$data(root);Object.keys(s).forEach(function(k){d[k]=s[k]});' +
+    '}' +
+    'window.dispatchEvent(new CustomEvent("fixture-state-change",{detail:{state:key,data:s}}));' +
+    'return true};<\/script>';
 
   function _registerDesignPage() {
     if (!window.Alpine || window.__designStudioDesignPageRegistered) return;
@@ -92,6 +64,8 @@
         designId: '',       // stable design ID (shared across revisions)
         iterCount: 0,
         iterIndex: 0,
+        fixtureStates: [],   // named fixture states of the shown revision ([] when the fixture is flat)
+        fixtureState: '',
         linkedSessionId: '',
 
         // Chat toggle
@@ -396,18 +370,22 @@
           var fixtureObj;
           try { fixtureObj = JSON.parse(fixtureRaw); } catch (e) { fixtureObj = null; }
 
-          var alpineHead, pickerHtml = '';
+          var alpineHead;
           if (fixtureObj && fixtureObj.states && typeof fixtureObj.states === 'object' &&
               Object.keys(fixtureObj.states).length > 0) {
             var stateKeys = Object.keys(fixtureObj.states);
             var firstState = fixtureObj.states[stateKeys[0]];
             alpineHead = '<script>window.FIXTURE = ' + JSON.stringify(firstState) + ';' +
               'window.FIXTURE_STATES = ' + JSON.stringify(fixtureObj.states) + ';<\/script>' +
+              FIXTURE_APPLY_HOOK +
               '<script defer src="/static/vendor/alpine-3.15.12.min.js"><\/script>';
-            pickerHtml = _buildStatePickerHtml(stateKeys);
+            this.fixtureStates = stateKeys;
+            this.fixtureState = stateKeys[0];
           } else {
             alpineHead = '<script>window.FIXTURE = ' + fixtureRaw + ';<\/script>' +
               '<script defer src="/static/vendor/alpine-3.15.12.min.js"><\/script>';
+            this.fixtureStates = [];
+            this.fixtureState = '';
           }
 
           doc.open();
@@ -417,7 +395,7 @@
             '<style>' + parentCSS + '</style>' +
             '<style>html,body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;overflow:auto !important;}</style>' +
             alpineHead +
-            '</head><body>' + safeHtml + pickerHtml +
+            '</head><body>' + safeHtml +
             '<script>document.addEventListener("wheel",function(e){' +
             'var el=document.scrollingElement||document.documentElement;' +
             'el.scrollBy(0,e.deltaY);' +
@@ -428,6 +406,16 @@
           // Auto-capture after render
           var revisionId = this.revisionId;
           setTimeout(function () { captureTabScreenshot(revisionId); }, 1500);
+        },
+
+        // Toolbar strip → the iframe's hook. The design keeps its own data;
+        // the strip only records which state is shown.
+        selectFixtureState: function (key) {
+          if (this.fixtureStates.indexOf(key) < 0) return;
+          var iframe = document.getElementById('design-iframe');
+          var win = iframe && iframe.contentWindow;
+          if (!win || typeof win.__applyFixtureState !== 'function') return;
+          if (win.__applyFixtureState(key)) this.fixtureState = key;
         },
 
         // ── Series: presence + share state ────────────────────────────────

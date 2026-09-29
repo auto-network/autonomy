@@ -414,6 +414,19 @@
           </div>
         </template>
 
+        <!-- Row 2c: fixture states — one short line under the revision toggle,
+             full width, side-scrollable when the names overflow (phones). -->
+        <template x-if="fixtureStates.length > 1 && toolbarState !== 'PICKER'">
+          <div data-testid="toolbar-fixture-states" class="design-state-strip" role="tablist" aria-label="Fixture states">
+            <template x-for="key in fixtureStates" :key="key">
+              <button type="button" role="tab" :data-fixture-state="key"
+                      :aria-selected="key === fixtureState"
+                      :class="key === fixtureState ? 'on' : ''"
+                      @click="selectFixtureState(key)" x-text="key"></button>
+            </template>
+          </div>
+        </template>
+
         <!-- Row 2b: session row (LIVE_CHAT) -->
         <template x-if="toolbar.row2Session">
           <div data-testid="toolbar-session-row"
