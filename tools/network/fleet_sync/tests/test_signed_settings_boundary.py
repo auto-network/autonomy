@@ -365,3 +365,56 @@ def test_key_strategy_resolution():
     assert authority.signing_key_strategy(PROFILE_SET, 1) == "persona"
     assert authority.signing_key_strategy(SET_ID, 1) == "delegate"
     assert authority.signing_key_strategy("autonomy.org.primer", 1) == "delegate"
+
+
+def test_deleting_a_signed_row_tombstones_its_slot_only(pair):
+    """Live 2026-09-29 18:37Z: the first tombstone of a signed base row
+    raised ValueError (a strict zip of the five-column policy key against
+    the six-part signed address) and stopped SJC-2's autonomy pull on every
+    round. The tombstone deletes exactly the signer's slot."""
+    a_db, a, b_db, b = pair
+    sim = Sim()
+    member = _member(sim, "member")
+    other = _member(sim, "member")
+    _write_ledger(a_db, a, 10, sim)
+    _write_ledger(b_db, b, 11, sim)
+    mine = _signed_row(sim.genesis_id, member, member.public_hex, {"v": "mine"}, 1_000)
+    theirs = _signed_row(sim.genesis_id, other, other.public_hex, {"v": "theirs"}, 1_000)
+    _write_signed(a_db, a, 100, mine)
+    _write_signed(a_db, a, 101, theirs)
+    _exchange(a, "a" * 64, b)
+    assert _rows(b_db) == sorted([(member.public_hex, "mine"), (other.public_hex, "theirs")])
+    with a.transaction(200, "remove-mine"):
+        a_db.conn.execute("DELETE FROM settings WHERE id=?", (mine[0],))
+    _exchange(a, "a" * 64, b)
+    assert _rows(b_db) == [(other.public_hex, "theirs")]
+    assert _quarantine(b_db) == []
+
+
+def test_signing_an_existing_row_in_place_moves_it_to_its_signer_slot(pair):
+    """The one-time signing pass (S4) UPDATEs an unsigned row in place; the
+    address gains the signer slot, so it replicates as a tombstone of the
+    unsigned address and an insert at the signed one, under one row id."""
+    a_db, a, b_db, b = pair
+    sim = Sim()
+    member = _member(sim, "member")
+    _write_ledger(a_db, a, 10, sim)
+    _write_ledger(b_db, b, 11, sim)
+    row_id = str(uuid.uuid4())
+    with a.transaction(100, "unsigned"):
+        a_db.conn.execute(
+            "INSERT INTO settings (id,set_id,schema_revision,key,payload,publication_state)"
+            " VALUES (?,?,1,?,?,'published')", (row_id, SET_ID, KEY, json.dumps({"v": "plain"})),
+        )
+    _exchange(a, "a" * 64, b)
+    assert _rows(b_db) == [(None, "plain")]
+    signed = _signed_row(sim.genesis_id, member, member.public_hex, {"v": "plain"}, 1_000, row_id=row_id)
+    with a.transaction(200, "sign-in-place"):
+        a_db.conn.execute(
+            "UPDATE settings SET signed_at=?, signing_key=?, signature=?, witness=?, terminal_persona=? WHERE id=?",
+            (signed[8], signed[9], signed[10], signed[11], signed[12], row_id),
+        )
+    _exchange(a, "a" * 64, b)
+    assert _rows(b_db) == [(member.public_hex, "plain")]
+    assert b_db.conn.execute("SELECT COUNT(*) FROM settings WHERE id=?", (row_id,)).fetchone()[0] == 1
+    assert _quarantine(b_db) == []

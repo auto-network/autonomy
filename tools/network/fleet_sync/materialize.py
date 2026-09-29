@@ -269,15 +269,20 @@ def _delete(conn: sqlite3.Connection, mutation: Mutation) -> None:
                 conn.execute("DELETE FROM note_versions WHERE id=?", (row_id,))
         return
     row = _row(mutation)
-    # Tombstones carry no values, so their logical address supplies keys.
-    if not row:
-        row = dict(zip(policy.key, mutation.address, strict=True))
-    key_columns = policy.key
     if mutation.table == "settings":
-        # The fifth logical address component is a synthetic row role.
-        key_columns = ("set_id", "schema_revision", "key", "publication_state")
-        row = dict(zip(policy.key, mutation.address, strict=True))
-        role = str(row["row_role"])
+        # The fifth logical address component is a synthetic row role; a
+        # SIGNED row's address carries a sixth, its signer slot (the
+        # terminal persona), and the tombstone must delete that slot only.
+        # Zipping the five-column policy key strictly against the six-part
+        # address raised ValueError on the first tombstone of a signed row
+        # (live 2026-09-29 18:37Z: SJC-2's autonomy pull failed every round
+        # behind Home's deletion of one signed row).
+        address = tuple(mutation.address)
+        if len(address) not in (5, 6):
+            raise MaterializationError(
+                f"settings tombstone address has {len(address)} parts: {address!r}"
+            )
+        role = str(address[4])
         if role != "base":
             try:
                 row_id = role.rsplit(":", 1)[1]
@@ -287,7 +292,20 @@ def _delete(conn: sqlite3.Connection, mutation: Mutation) -> None:
                 ) from exc
             conn.execute("DELETE FROM settings WHERE id=?", (row_id,))
             return
-    where, params = _where(key_columns, row)
+        clauses = ["set_id=?", "schema_revision=?", '"key"=?', "publication_state=?",
+                   "supersedes IS NULL", "excludes IS NULL"]
+        params: list[object] = list(address[:4])
+        if len(address) == 6:
+            clauses.append("terminal_persona=?")
+            params.append(address[5])
+        else:
+            clauses.append("terminal_persona IS NULL")
+        conn.execute("DELETE FROM settings WHERE " + " AND ".join(clauses), params)
+        return
+    # Tombstones carry no values, so their logical address supplies keys.
+    if not row:
+        row = dict(zip(policy.key, mutation.address, strict=True))
+    where, params = _where(policy.key, row)
     conn.execute(f'DELETE FROM "{mutation.table}" WHERE {where}', params)
 
 
