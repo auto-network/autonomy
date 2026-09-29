@@ -149,3 +149,57 @@ def test_a_transaction_of_exactly_one_group_completes_on_the_puller_and_its_curs
             await puller.stop()
             await server.stop()
     asyncio.run(run())
+
+
+def test_a_serve_stream_opens_the_store_once_for_all_its_pages_and_groups(tmp_path, monkeypatch):
+    """Every heads page and every transaction group used to open a fresh
+    connection and re-attach the catalog (~2 s each on Home's store,
+    auto-fkqz6). One serve stream now opens the store exactly once on its
+    own thread, however many transactions and groups it serves."""
+    monkeypatch.setattr(scheduler_mod, "SERVE_GROUP_OPERATIONS", 5)
+    monkeypatch.setattr(scheduler_mod, "SERVE_PAGE_TRANSACTIONS", 4)
+    sessions: list = []
+    real_init = scheduler_mod._ServeSession.__init__
+
+    def recording_init(self, store):
+        real_init(self, store)
+        sessions.append(self)
+
+    monkeypatch.setattr(scheduler_mod._ServeSession, "__init__", recording_init)
+    root, server_key, puller_key = KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+    server_db, puller_db = tmp_path / "server.db", tmp_path / "puller.db"
+    _prepare(server_db, server_key)
+    _prepare(puller_db, puller_key)
+    _write_one_transaction(server_db, 1, "seed")
+    entries = [enroll(root, machine_pub=server_key.public_hex), enroll(root, machine_pub=puller_key.public_hex)]
+
+    async def run():
+        server = FleetSyncScheduler(FleetSyncRuntimeConfig(
+            machine_key=server_key, personal_root_pub=root.public_hex, roster_entries=lambda: entries,
+            peer_addresses=lambda: {}, personal_db_path=server_db, poll_interval=0.05,
+            min_backoff=0.01, max_backoff=0.05, listen_host="127.0.0.1", listen_port=0))
+        await server.start()
+        puller = FleetSyncScheduler(FleetSyncRuntimeConfig(
+            machine_key=puller_key, personal_root_pub=root.public_hex, roster_entries=lambda: entries,
+            peer_addresses=lambda: {server_key.public_hex: [f"ws://127.0.0.1:{server.port}"]},
+            personal_db_path=puller_db, poll_interval=0.05, min_backoff=0.01, max_backoff=0.05))
+        await puller.start()
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and not any(c for _t, c, _n in _transactions(puller_db)):
+                await asyncio.sleep(0.2)
+            # 30 transactions of 12 rows: 8 heads pages, 3 groups each.
+            for i in range(30):
+                _write_one_transaction(server_db, 12, f"tx{i:02d}")
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and sum(1 for _t, c, _n in _transactions(puller_db) if c) < 31:
+                await asyncio.sleep(0.2)
+            assert sum(1 for _t, c, _n in _transactions(puller_db) if c) == 31
+        finally:
+            await puller.stop()
+            await server.stop()
+        assert sessions, "no serve stream ran"
+        assert all(session.opens <= 1 for session in sessions), [s.opens for s in sessions]
+        assert any(session.opens == 1 for session in sessions)
+        assert all(session._conn is None for session in sessions), "a serve left its connection open"
+    asyncio.run(run())

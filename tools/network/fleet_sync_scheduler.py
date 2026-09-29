@@ -1298,31 +1298,117 @@ def _digest_add(digest, message: bytes) -> None:
     digest.update(message)
 
 
-async def in_worker_thread(fn, *args, **kwargs):
-    """Run *fn* in the loop's worker pool and return
-    ``(result, waited_s, ran_s)``: how long the call sat in the pool's queue
-    before a thread took it, and how long it ran. On Home (2026-09-29) every
-    serve phase logged 2-3 s while the same calls measured 0-57 ms in
-    isolation; the split says whether the pool is saturated (waited) or the
-    call is starved of the GIL / the disk once running (ran)."""
-    submitted = time.monotonic()
+class _ServeSession:
+    """One store connection, on one thread, for the life of a serve stream.
 
-    def run():
-        started = time.monotonic()
-        result = fn(*args, **kwargs)
-        return result, started, time.monotonic()
+    Every page of transaction heads and every group of a transaction used
+    to open a fresh connection — ``SQLiteFleetSyncStore._open``: a sqlite
+    open, the catalog attach with a ``PRAGMA table_info`` per policed table,
+    the schema-object check and the trigger refresh — because
+    ``asyncio.to_thread`` runs each call on whichever pool thread is free and
+    sqlite connections are thread-bound. On Home's 2.8 GB autonomy store
+    that open cost ~2 s, once per transaction and once per page, 175 % CPU
+    continuously, and the serve ran at ~4 transactions per second while the
+    same calls took 0-57 ms on an already-open connection (auto-fkqz6,
+    2026-09-29, the "(0.0s waiting for a worker thread, 2.0s running)"
+    lines). This session owns a single-thread executor; the connection is
+    opened on that thread the first time it is needed and every store read
+    of the stream runs there, so the attach happens once per serve.
 
-    result, started, ended = await asyncio.to_thread(run)
-    return result, started - submitted, ended - started
+    The connection stays in autocommit between calls (no open read
+    transaction), so each query sees the latest committed state exactly as
+    a fresh connection would, and the WAL is not pinned by it.
+    """
 
+    def __init__(self, store) -> None:
+        import concurrent.futures
 
-def _executor_queue_depth() -> int | None:
-    """Calls queued in the running loop's default executor, when readable."""
-    try:
-        executor = asyncio.get_running_loop()._default_executor
-        return executor._work_queue.qsize() if executor is not None else 0
-    except Exception:
-        return None
+        self._store = store
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="fleet-serve",
+        )
+        self._conn = None
+        self._catalog = None
+        self.opens = 0
+
+    # -- on the session thread only --
+
+    def _bound(self):
+        if self._conn is None:
+            self._conn, self._catalog = self._store._open()
+            self.opens += 1
+        return self._conn, self._catalog
+
+    def origin_list(self):
+        _conn, catalog = self._bound()
+        return catalog.origin_list()
+
+    def next_transaction_heads_for_origin(self, incarnation, after_timestamp_ns,
+                                          after_transaction_id=None, *, limit=200,
+                                          through_ns=None):
+        _conn, catalog = self._bound()
+        return catalog.next_transaction_heads_for_origin(
+            incarnation, after_timestamp_ns, after_transaction_id, limit=limit,
+            through_ns=through_ns,
+        )
+
+    def next_follow_transaction_heads(self, after_timestamp_ns, after_transaction_id,
+                                      *, through_ns, limit):
+        _conn, catalog = self._bound()
+        return catalog.next_follow_transaction_heads(
+            after_timestamp_ns, after_transaction_id, through_ns=through_ns, limit=limit,
+        )
+
+    def transaction_group(self, transaction_ref, incarnation, transaction_id,
+                          *, offset: int, limit: int,
+                          projection: "Projection" = None):
+        _conn, catalog = self._bound()
+        kwargs = {} if projection is None else {"projection": projection}
+        return catalog.transaction_group(
+            transaction_ref, incarnation, transaction_id, offset=offset, limit=limit, **kwargs,
+        )
+
+    def sweep_page(self, frontier, start_after, max_records: int, max_bytes: int,
+                   *, projection: "Projection" = None):
+        from tools.network.fleet_sync.authored_sweep import read_live_authored_page
+
+        conn, _catalog = self._bound()
+        kwargs = {} if projection is None else {"projection": projection}
+        return read_live_authored_page(
+            conn, frontier=frontier, start_after=start_after,
+            max_records=max_records, max_bytes=max_bytes, **kwargs,
+        )
+
+    # -- from the event loop --
+
+    async def run(self, fn, *args, **kwargs):
+        """Run *fn* on the session thread; ``(result, waited_s, ran_s)``:
+        how long the call queued behind the session's previous call, and
+        how long it ran."""
+        submitted = time.monotonic()
+
+        def work():
+            started = time.monotonic()
+            result = fn(*args, **kwargs)
+            return result, started, time.monotonic()
+
+        loop = asyncio.get_running_loop()
+        result, started, ended = await loop.run_in_executor(self._executor, work)
+        return result, started - submitted, ended - started
+
+    async def close(self) -> None:
+        def _close():
+            if self._conn is not None:
+                with contextlib.suppress(Exception):
+                    self._conn.close()
+                self._conn = None
+                self._catalog = None
+
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(self._executor, _close)
+        finally:
+            self._executor.shutdown(wait=False)
 
 
 async def bounded_stream_frames(
@@ -2975,6 +3061,8 @@ class FleetSyncScheduler:
             deferred_after_done = False
             outcome = "failed"
             error_code = "stream_incomplete"
+            # One connection for every page and group of this stream.
+            session = _ServeSession(store)
             try:
                 # Frames are only intelligible between machines that agree on
                 # the replicated surface. Refuse a mixed-schema pull with a
@@ -3116,8 +3204,8 @@ class FleetSyncScheduler:
                     swept_records = 0
                     while True:
                         authorize(peer_pub)
-                        page = await asyncio.to_thread(
-                            store.sweep_page, sweep_frontier, sweep_cursor,
+                        page, _waited_s, _ran_s = await session.run(
+                            session.sweep_page, sweep_frontier, sweep_cursor,
                             SERVE_GROUP_OPERATIONS, MAX_TRANSACTION_FRAME_BYTES,
                             projection=projection,
                         )
@@ -3220,26 +3308,25 @@ class FleetSyncScheduler:
                     # delivered everything at or below F) there is no delta in
                     # this reply; a delta reply serves (c, F] as one origin.
                     pager = (
-                        _FollowPager(store, follow_frontier, follow_frontier)
+                        _FollowPager(session, follow_frontier, follow_frontier)
                         if served_bootstrap else
-                        _FollowPager(store, follow_cursor, follow_frontier, bounds=serve_snapshot[0])
+                        _FollowPager(session, follow_cursor, follow_frontier, bounds=serve_snapshot[0])
                     )
                 else:
-                    pager = _OriginPager(store, origin_watermarks, None, bounds=serve_snapshot[0])
+                    pager = _OriginPager(session, origin_watermarks, None, bounds=serve_snapshot[0])
                 slowest_phase = ("", 0.0, "")
                 while True:
                     authorize(peer_pub)
-                    page, waited_s, ran_s = await in_worker_thread(pager.next)
+                    page, waited_s, ran_s = await session.run(pager.next)
                     phase_s = waited_s + ran_s
                     if phase_s > slowest_phase[1]:
                         slowest_phase = ("heads", phase_s, "")
                     if phase_s >= SLOW_SERVE_PHASE_S:
                         logger.warning(
                             "fleet sync serve %s scope %r: fetching the next "
-                            "transaction heads took %.1fs (%.1fs waiting for a "
-                            "worker thread, %.1fs running; %s queued)",
+                            "transaction heads took %.1fs (%.1fs waiting for the "
+                            "serve thread, %.1fs running)",
                             peer_pub[:12], scope, phase_s, waited_s, ran_s,
-                            _executor_queue_depth(),
                         )
                     if page is None:
                         break
@@ -3258,8 +3345,8 @@ class FleetSyncScheduler:
                             # carries its own header and the receiver
                             # applies them as they land.
                             group_limit = SERVE_GROUP_OPERATIONS
-                            (items, more), waited_s, ran_s = await in_worker_thread(
-                                store.transaction_group, ref, origin_key,
+                            (items, more), waited_s, ran_s = await session.run(
+                                session.transaction_group, ref, origin_key,
                                 transaction_id, offset=offset,
                                 limit=group_limit, projection=projection,
                             )
@@ -3271,11 +3358,10 @@ class FleetSyncScheduler:
                                 logger.warning(
                                     "fleet sync serve %s scope %r: building "
                                     "%d row(s) of transaction %s (offset %d, "
-                                    "tables %s) took %.1fs (%.1fs waiting for a "
-                                    "worker thread, %.1fs running; %s queued)",
+                                    "tables %s) took %.1fs (%.1fs waiting for the "
+                                    "serve thread, %.1fs running)",
                                     peer_pub[:12], scope, len(items), transaction_id,
                                     offset, ",".join(tables), phase_s, waited_s, ran_s,
-                                    _executor_queue_depth(),
                                 )
                             offset += group_limit
                             if not items:
@@ -3406,6 +3492,7 @@ class FleetSyncScheduler:
                 error_code = type(exc).__name__
                 raise
             finally:
+                await session.close()
                 if outcome != "success":
                     # A serve that did not reach its done frame: the
                     # generator was closed (peer gone, connector stopping)

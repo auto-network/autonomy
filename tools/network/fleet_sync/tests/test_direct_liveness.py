@@ -339,7 +339,9 @@ def test_a_frozen_server_is_still_caught_on_the_first_frame_wait(tmp_path, monke
         started = time.monotonic()
         await puller.start()
         try:
-            await _eventually(lambda: _peer_row(puller_db, server_key.public_hex)[0] >= 1, timeout=10)
+            # The verdict, not merely a retry: an earlier attempt can record a
+            # retry for a connect refused before the listener accepted.
+            await _eventually(lambda: _peer_row(puller_db, server_key.public_hex)[1] == "PeerUnresponsive", timeout=15)
         finally:
             frozen["release"].set()
             await puller.stop()
