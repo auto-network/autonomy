@@ -203,3 +203,66 @@ def test_a_serve_stream_opens_the_store_once_for_all_its_pages_and_groups(tmp_pa
         assert any(session.opens == 1 for session in sessions)
         assert all(session._conn is None for session in sessions), "a serve left its connection open"
     asyncio.run(run())
+
+
+def test_a_transaction_already_held_incomplete_flips_complete_when_reserved(tmp_path, monkeypatch):
+    """The recovery path: a puller that received the last group of an
+    exact-multiple transaction under the old rule (last=false, nothing
+    after) holds every row and complete=0. When the fixed server re-serves
+    it, the group arrives as pure duplicates with last=true and the
+    transaction must flip to complete so the cursor can pass it (SJC-2's
+    local:7bc8d6be…, 2,000 rows on both sides, complete=1 on Home and 0 on
+    SJC-2 after the fixed serve, 2026-09-29 17:43Z)."""
+    from tools.network.fleet_sync import catalog as catalog_mod
+
+    monkeypatch.setattr(scheduler_mod, "SERVE_GROUP_OPERATIONS", 50)
+    root, server_key, puller_key = KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+    server_db, puller_db = tmp_path / "server.db", tmp_path / "puller.db"
+    _prepare(server_db, server_key)
+    _prepare(puller_db, puller_key)
+    _write_one_transaction(server_db, 1, "seed")
+    entries = [enroll(root, machine_pub=server_key.public_hex), enroll(root, machine_pub=puller_key.public_hex)]
+    fixed = catalog_mod.MutationCatalog.transaction_group
+
+    def old_rule(self, transaction_ref, incarnation, transaction_id, *, offset, limit, projection=catalog_mod.Projection.FULL):
+        items, _more = fixed(self, transaction_ref, incarnation, transaction_id, offset=offset, limit=limit, projection=projection)
+        n = self.conn.execute(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM fleet_sync_catalog WHERE transaction_ref=? ORDER BY operation_index LIMIT ? OFFSET ?)",
+            (int(transaction_ref), int(limit), int(offset))).fetchone()[0]
+        return items, n == int(limit)
+
+    def _row(path, prefix):
+        return [(c, n) for t, c, n in _transactions(path) if t.startswith("local:") and n == 50]
+
+    async def run():
+        server = FleetSyncScheduler(FleetSyncRuntimeConfig(
+            machine_key=server_key, personal_root_pub=root.public_hex, roster_entries=lambda: entries,
+            peer_addresses=lambda: {}, personal_db_path=server_db, poll_interval=0.05,
+            min_backoff=0.01, max_backoff=0.05, listen_host="127.0.0.1", listen_port=0))
+        await server.start()
+        puller = FleetSyncScheduler(FleetSyncRuntimeConfig(
+            machine_key=puller_key, personal_root_pub=root.public_hex, roster_entries=lambda: entries,
+            peer_addresses=lambda: {server_key.public_hex: [f"ws://127.0.0.1:{server.port}"]},
+            personal_db_path=puller_db, poll_interval=0.05, min_backoff=0.01, max_backoff=0.05))
+        await puller.start()
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and not any(c for _t, c, _n in _transactions(puller_db)):
+                await asyncio.sleep(0.2)
+            # Phase 1: the old rule serves a transaction of exactly one group.
+            monkeypatch.setattr(catalog_mod.MutationCatalog, "transaction_group", old_rule)
+            _write_one_transaction(server_db, 50, "exact")
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and _row(puller_db, "exact") != [(0, 50)]:
+                await asyncio.sleep(0.2)
+            assert _row(puller_db, "exact") == [(0, 50)], "the old rule should leave it held incomplete"
+            # Phase 2: the fixed server re-serves it from the puller's cursor.
+            monkeypatch.setattr(catalog_mod.MutationCatalog, "transaction_group", fixed)
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and _row(puller_db, "exact") != [(1, 50)]:
+                await asyncio.sleep(0.2)
+            assert _row(puller_db, "exact") == [(1, 50)], _row(puller_db, "exact")
+        finally:
+            await puller.stop()
+            await server.stop()
+    asyncio.run(run())
