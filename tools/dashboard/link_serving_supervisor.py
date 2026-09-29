@@ -1162,6 +1162,10 @@ class ServingSupervisor:
         self._locks: dict = {}       # org -> open file holding flock ownership
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        # Set by detach_all: this dashboard has handed its connectors on, so a
+        # reconcile still in flight (the watchdog, or a request) must neither
+        # retake an ownership lock nor spawn one.
+        self._detached = False
         self._watchdog: threading.Thread | None = None
 
     def ensure(self, org: str) -> dict:
@@ -1791,6 +1795,8 @@ class ServingSupervisor:
         connector reads it as ``--key-file``. A vault that cannot open it yet
         is a reason to wait, not a fault: the watchdog retries after the
         restore or the sign-on that warms it."""
+        if self._detached:
+            return {"running": False, "reason": "handed-to-next-dashboard"}
         key_path, release_error = _release_serving_key(state)
         if release_error is not None:
             return {"running": False, "reason": release_error}
@@ -1930,6 +1936,7 @@ class ServingSupervisor:
         if self._watchdog is not None:
             return
         self._stop.clear()
+        self._detached = False
 
         def loop():
             while not self._stop.wait(interval):
@@ -1949,6 +1956,42 @@ class ServingSupervisor:
                     proc.stop()
                 except Exception:
                     pass
+            self._procs.clear()
+            self._credentials.clear()
+            self._managed.clear()
+            self._started_at.clear()
+            self._last_served.clear()
+            for org in list(self._locks):
+                self._release_lock(org)
+        if watchdog is not None and watchdog is not threading.current_thread():
+            watchdog.join(timeout=2)
+        self._watchdog = None
+
+    def detach_all(self) -> None:
+        """Stop the watchdog and hand every connector to the next dashboard.
+
+        The dashboard's shutdown path. Connectors are spawned detached so they
+        survive the worker (``_default_spawn``); terminating them here undid
+        that on every graceful shutdown, and every landing is one: the old
+        worker's watchdog replaced its stale connectors with current ones,
+        then its shutdown killed those, and the successor started them all a
+        second time (auto-2am2l, SJC-2 2026-09-29). Now the connectors keep
+        running and their .ctl stays in place; releasing the ownership lock
+        lets the successor's ``_launch`` adopt a current one or replace a stale
+        one through ``_adopt_incumbent``. Credentials are not retired: the
+        connector still holds them, and adoption re-registers its pid."""
+        self._stop.set()
+        watchdog = self._watchdog
+        with self._lock:
+            self._detached = True
+            for org, proc in self._procs.items():
+                pid = None
+                with contextlib.suppress(Exception):
+                    pid = proc.pid()
+                _log.info(
+                    "leaving serving connector pid=%s for org=%s running for "
+                    "the next dashboard to adopt", pid, org,
+                )
             self._procs.clear()
             self._credentials.clear()
             self._managed.clear()

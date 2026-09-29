@@ -1689,3 +1689,53 @@ def test_incumbent_on_an_older_commit_with_unchanged_code_is_adopted(env, monkey
     monkeypatch.setattr(supervisor, "_reap_strays", lambda org: None)
     assert supervisor._launch(ORG, state) == {"running": True, "reason": "adopted"}
     assert supervisor._boot_commit[ORG] == "b" * 40
+
+
+def test_shutdown_hands_connectors_to_the_next_dashboard(env, monkeypatch):
+    """auto-2am2l: the dashboard's shutdown leaves its connector running and
+    releases ownership; the successor adopts it and spawns nothing. Stopping
+    it here was the second restart of every landing (SJC-2, 2026-09-29)."""
+    from tools.network import build_version
+
+    _provision_serve_cert(env)
+    _put_grant()
+    first_spawn = FakeSpawn()
+    first = sup.ServingSupervisor(spawn=first_spawn)
+    assert first.ensure(ORG)["reason"] == "launched"
+    connector = first_spawn.procs[0]
+
+    first.detach_all()
+    assert connector.alive() is True, "shutdown must not terminate the connector"
+    assert first.ensure(ORG) == {
+        "running": False, "reason": "handed-to-next-dashboard"}
+    assert len(first_spawn.calls) == 1, "a detached dashboard spawns nothing"
+
+    monkeypatch.setattr(sup, "_adopt_connector_credential", lambda *args: True)
+    monkeypatch.setattr(
+        sup, "_probe_ctl_status",
+        lambda ctl, *_a: {"ok": True, "serving": True,
+                          "boot_commit": build_version.disk_head()},
+    )
+    monkeypatch.setattr(
+        sup, "_iter_connector_pids", lambda org_uuid: iter([os.getpid() + 100000]))
+    second = sup.ServingSupervisor(spawn=_refusing_spawn)
+    assert second._launch(ORG, sup.serve_cert_state(ORG)) == {
+        "running": True, "reason": "adopted"}
+    second.stop_all()
+
+
+def test_detached_dashboard_does_not_retake_ownership(env):
+    """A reconcile that runs after the hand-off (the watchdog tick that was
+    already waiting on the lock) must not retake the lock: the successor
+    would read the org as owned by another dashboard until this one exits."""
+    _provision_serve_cert(env)
+    _put_grant()
+    first = sup.ServingSupervisor(spawn=FakeSpawn())
+    assert first.ensure(ORG)["reason"] == "launched"
+    first.detach_all()
+    first.ensure(ORG)
+    assert first._locks == {}
+    second_spawn = FakeSpawn()
+    second = sup.ServingSupervisor(spawn=second_spawn)
+    assert second.ensure(ORG)["reason"] != "owned-by-other-dashboard"
+    second.stop_all()
