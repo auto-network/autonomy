@@ -93,15 +93,19 @@ createWorkflow({scope:onboardingOnly?'identity-and-organization-onboarding':'mem
     withStep('alice','open membership rail',()=>action('alice','[data-testid="orgset-rail-membership"]',{},'[data-testid="membership-members"]'));
     withStep('alice','open invites tab',()=>action('alice','button[data-tab="invites"]',{},'[data-action="open-mint"]'));
     withStep('alice','open mint form',()=>action('alice','[data-action="open-mint"]',{},'[data-action="mint"]'));
-    withStep('alice','set invite label and continue',()=>action('alice','[data-action="mint"]',{'[data-mint-label]':'Bob invitation'},'.or-in-bare','.mem-error'));
-    withStep('alice','acknowledge password prompt',()=>action('alice','.or-ok',{'.or-in-bare':alicePassword},'[data-testid="approval-dialog"]','.mem-error'));
-    withStep('alice','show publish password',()=>action('alice','#primary',{},'#password','.mem-error'));
-    withStep('alice','submit publish password',()=>action('alice','.verify',{'#password':alicePassword},'#result[aria-busy="false"] #result-title','.mem-error, #error:not([hidden])'));
+    // One approval (auto-xvqxz): the dialog opens before anything is signed,
+    // and its single unlock signs the invitation and publishes its link.
+    withStep('alice','set invite label and review',()=>action('alice','[data-action="mint"]',{'[data-mint-label]':'Bob invitation'},'[data-testid="approval-dialog"]','.mem-error'));
+    withStep('alice','show approval password',()=>action('alice','#primary',{},'#password','.mem-error'));
+    withStep('alice','submit approval password',()=>action('alice','.verify',{'#password':alicePassword},'#result[aria-busy="false"] #result-title','.mem-error, #error:not([hidden])'));
     const publicationResult=js('alice',`document.querySelector('[data-testid="approval-dialog"]').shadowRoot.querySelector('#result-title').textContent`);
-    if(publicationResult!=='Link published')throw new Error('Publish approval failed: '+js('alice',`document.querySelector('[data-testid="approval-dialog"]').shadowRoot.querySelector('#result-copy').textContent`));
+    if(publicationResult!=='Invitation published')throw new Error('Invitation approval failed: '+js('alice',`document.querySelector('[data-testid="approval-dialog"]').shadowRoot.querySelector('#error').textContent||document.querySelector('[data-testid="approval-dialog"]').shadowRoot.querySelector('#result-copy').textContent`));
     withStep('alice','show invitation code',()=>action('alice','#primary',{},'.mem-link-code','.mem-error'));
     const invitation=textOf('alice','.mem-link-code');
-    withStep('alice','finish mint',()=>action('alice','[data-action="finish-mint"]',{},'[data-invite]','.mem-error'));
+    withStep('alice','finish mint',()=>action('alice','[data-action="finish-mint"]',{},'[data-invite] [data-action="copy"]','.mem-error'));
+    // The published link stays displayable: Invitations copies the same link.
+    const listed=withStep('alice','copy invitation from the list',()=>js('alice',`(async()=>{let copied=null;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async t=>{copied=t;}}});document.querySelector('[data-invite] [data-action="copy"]').click();for(let i=0;i<50&&copied===null;i++)await new Promise(r=>setTimeout(r,20));return copied;})()`));
+    if(listed!==invitation)throw new Error('Invitations copies a different link than the one shown at publish: '+listed);
     withStep('alice','save invitation-published',()=>save('alice','invitation-published',browser('alice','snapshot','-i')));
 
     withStep('bob','open bob home',()=>{browser('bob','open','https://localhost:'+bobPort+'/');browser('bob','set','viewport','1280','900');});

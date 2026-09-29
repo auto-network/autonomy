@@ -228,7 +228,7 @@ Peer selection sources (fleet_sync_scheduler.py:_org_peer_candidates): reachabil
 
 ### Scenario from self_admit, built rules
 
-Recorded: current {'founder': 2, 'joiner': 1}, minimal {'founder': 1, 'joiner': 1}.
+Recorded: current {'founder': 1, 'joiner': 1}, minimal {'founder': 1, 'joiner': 1}.
 
 ```text
 goal org_sync_pull from self_admit (built rules)
@@ -247,18 +247,17 @@ root openings: founder 1, joiner 1 (total 2); steps 11
 11. ceremony.fleet_runtime_mint[joiner]              window joiner#1      -> persona_cert_fleet_sync@joiner
 
 goal org_sync_pull from self_admit: current order reaches the goal
-current root openings: founder 2, joiner 1
+current root openings: founder 1, joiner 1
 minimal root openings: founder 1, joiner 1 (built rules)
 
 
 needed F1         founder  needed: first opening of founder
-EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
 needed J3         joiner   needed: first opening of joiner
 ```
 
 ### Scenario from approval, built rules
 
-Recorded: current {'founder': 3, 'joiner': 2}, minimal {'founder': 2, 'joiner': 2}.
+Recorded: current {'founder': 2, 'joiner': 2}, minimal {'founder': 2, 'joiner': 2}.
 
 ```text
 goal org_sync_pull from approval (built rules)
@@ -279,14 +278,13 @@ root openings: founder 2, joiner 2 (total 4); steps 13
 13. ceremony.fleet_runtime_mint[joiner]              window joiner#2      -> persona_cert_fleet_sync@joiner
 
 goal org_sync_pull from approval: current order reaches the goal
-current root openings: founder 3, joiner 2
+current root openings: founder 2, joiner 2
 minimal root openings: founder 2, joiner 2 (built rules)
 
 
 needed F1         founder  needed: first opening of founder
-EXTRA  F2         founder  mergeable into F1: F1 closed without: link_publish_approval (from approval.link_publish[founder])
 needed J3         joiner   needed: first opening of joiner
-needed F3         founder  needed: not obtainable in F2's window; it lacked: claim_staged
+needed F3         founder  needed: not obtainable in F1's window; it lacked: claim_staged
 needed J5         joiner   needed: not obtainable in J3's window; it lacked: bootstrap_snapshot, checkpoint_including_joiner, ledger_heads@joiner, registry_binding@joiner
 ```
 - proof: tla OrgAdmission: EveryAdmittedMemberPulls

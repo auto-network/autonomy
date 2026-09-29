@@ -82,19 +82,19 @@ See the [reading guide](../GUIDE.md) and [key register](key-register.md).
 
 **Preconditions**
 
-- A pending link_publish approval row {org, target_uuid, target_type org:join, invite_ref, expires_at, meta} (org-membership.js:1008-1030).
+- A prepared link operation {op publish, request {org, target_uuid, target_type org:join, invite_ref, expires_at, meta}} (POST /api/links/operations, org-membership.js Controller.prototype.mint).
 
 **Writes**
 
-- approved link_publish decision; Gate 2 org-scoped sign-on
+- signed link-operation envelope; org-scoped sign-on
 
 **Workflow:** actors founder; opens root; requires personal_root_seed AND invite_event; produces link_publish_approval
 
-**Source:** `tools/dashboard/static/js/pages/worktrees.js:signOnWithRootSeed` (ceremony)
+**Source:** `tools/dashboard/static/js/components/link-signing.js:signLinkWithOpenRoot` (ceremony)
 
 **Crib:** §8
 
-Step F2 (Gate 2, worktrees.js:173-203, :267). The root is opened for the approval, not reused from F1.
+Step F2, in F1's window (auto-xvqxz): the invitation approval hands the root F1 opened to link-signing.js signLinkWithOpenRoot, which signs on and signs the frozen org:join payload. No second opening.
 
 <a id="workflow-armor-enroll_factor"></a>
 ## armor.enroll_factor

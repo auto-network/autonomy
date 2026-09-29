@@ -127,7 +127,6 @@
     this.mintExpiryDays = '7';
     this.mintMaxUses = '1';
     this.mintResult = null;
-    this.pendingMint = null;
     this.busy = null;
     this.error = '';
     this.readyClaims = {};
@@ -345,7 +344,6 @@
       html += '</div></div>';
     }
     if (this.mintStep === 'form') html += this.mintFormHtml();
-    if (this.mintStep === 'publishing') html += this.publishingHtml();
     if (this.mintStep === 'show-once') html += this.showOnceHtml();
     html += '<div class="mem-section"><div class="mem-heading"><h2>Invitations</h2>'
       + (this.mintStep === null ? '<button type="button" class="mem-secondary" data-action="open-mint">Invite</button>' : '')
@@ -454,19 +452,9 @@
       + '<div class="mem-panel-actions">'
       + '<button type="button" class="mem-secondary" data-action="cancel-mint">Cancel</button>'
       + '<button type="button" class="mem-primary" data-action="mint"' + (this.busy === 'mint' ? ' disabled' : '') + '>'
-      + (this.busy === 'mint' ? 'Creating' : 'Create invitation') + '</button>'
+      + (this.busy === 'mint' ? 'Opening' : 'Review and publish…') + '</button>'
       + '</div></div></div>';
     return html;
-  };
-
-  Controller.prototype.publishingHtml = function () {
-    return '<div class="mem-section"><div class="mem-panel">'
-      + '<h3>Invitation signed</h3>'
-      + '<p>One step left: confirm publishing its public join link in the review that just opened.</p>'
-      + (this.error ? '<p class="mem-once" style="color:#fca5a5">' + esc(this.error) + '</p>' : '')
-      + '<div class="mem-panel-actions">'
-      + '<button type="button" class="mem-secondary" data-action="finish-mint">Close</button>'
-      + '</div></div></div>';
   };
 
   Controller.prototype.showOnceHtml = function () {
@@ -487,7 +475,7 @@
       + '<h3>Invitation ready</h3>'
       + '<p>Send this link to the person you are inviting. It contains their secret entry code.</p>'
       + '<button type="button" class="mem-link-code" data-action="copy-once">' + esc(full) + '</button>'
-      + '<p class="mem-once">Shown once — the secret code lives only on this screen. Copy it before you leave.</p>'
+      + '<p class="mem-once">You can copy it again from Invitations until it expires or you deactivate it.</p>'
       + '<div class="mem-panel-actions">'
       + '<button type="button" class="mem-secondary" data-action="copy-once" data-once-copy>Copy link</button>'
       + '<button type="button" class="mem-primary" data-action="finish-mint">Done</button>'
@@ -844,6 +832,53 @@
     if (opened && opened.seed && opened.seed.fill) { opened.seed.fill(0); opened.seed = null; }
   }
 
+  Controller.prototype.loadApprovalDialog = function () {
+    if (hooks().approvalDialog) return Promise.resolve(hooks().approvalDialog);
+    return import('/static/js/components/approval-dialog.js');
+  };
+  Controller.prototype.loadInviteCeremony = function () {
+    if (hooks().inviteCeremony) return Promise.resolve(hooks().inviteCeremony);
+    return import('/static/js/ceremony/org-invite.js');
+  };
+  Controller.prototype.loadLinkSigning = function () {
+    if (hooks().linkSigning) return Promise.resolve(hooks().linkSigning);
+    return import('/static/js/components/link-signing.js');
+  };
+  // The unlock renders inside the approval dialog (its signal and view).
+  Controller.prototype.openRootIn = function (title, detail, options) {
+    if (hooks().openRoot) return Promise.resolve(hooks().openRoot({ title: title, detail: detail }));
+    return import('/static/js/ceremony/open-root.js').then(function (module) {
+      return module.openRoot({ title: title, detail: detail, signal: options.signal, view: options.view });
+    });
+  };
+  Controller.prototype.orgIdentity = function () {
+    var slug = this.slug;
+    return request('/api/orgs').then(function (body) {
+      var row = (body.orgs || []).find(function (o) { return o.org && o.org.slug === slug; });
+      var payload = (row && row.identity && row.identity.payload) || {};
+      return { name: payload.name || slug, image: payload.favicon || '' };
+    }).catch(function () { return { name: slug, image: '' }; });
+  };
+  // A link operation's refusal carries its reason in `detail`.
+  function linkOperation(url, body) {
+    return fetch(url, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (data) {
+        if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
+        return data;
+      });
+    });
+  }
+
+  // Inviting is one approval (auto-xvqxz): the dialog explains both halves,
+  // and its single unlock signs the invitation (persona) and then signs on
+  // and publishes its join link (organization session) in the same window.
+  // Nothing is signed until Approve. The shared approval control is used as
+  // is: its result reads "Invitation published", and Done lands on the
+  // show-once panel with Copy link.
   Controller.prototype.mint = function () {
     var self = this;
     if (this.busy) return;
@@ -851,39 +886,131 @@
     var roleSelect = this.root.querySelector('[data-mint-role]');
     var role = roleSelect ? roleSelect.value : (roles[0] && roles[0].name);
     if (!role) { this.error = 'This organization defines no roles to grant.'; return this.render(); }
+    var label = this.mintLabel.trim();
+    var title = label || (roleWord([role]) + ' invitation');
+    var days = Number(this.mintExpiryDays);
+    var maxUses = Number(this.mintMaxUses);
     this.busy = 'mint';
     this.error = '';
     this.render();
+
     var opened = null;
-    var expiry = Date.now() + Number(this.mintExpiryDays) * 86400000;
-    var maxUses = Number(this.mintMaxUses);
-    Promise.all([
-      this.openRoot('Invite to this organization', 'Unlock your personal root to sign this invitation.'),
-      import('/static/js/ceremony/org-invite.js'),
-    ]).then(function (loaded) {
-      opened = loaded[0];
-      if (!opened) return null;
-      return loaded[1].mintOrgInvite({
-        fetchImpl: window.fetch.bind(window),
-        org: self.slug,
-        genesisId: self.view.genesis_id,
-        personalRootSeed: opened.seed,
-        role: role,
-        expiry: expiry,
-        maxUses: maxUses,
-      });
-    }).then(function (minted) {
+    var minted = null;
+    var operationId = null;
+    var unpublished = 'The invitation link was not published. The signed invitation stays active '
+      + 'without a link; deactivate it if that was unintended.';
+
+    var authorize = function (org, options) {
+      return self.openRootIn('Invite someone to ' + org.name,
+        'Unlock your personal identity to sign the invitation and publish its link.', options || {}).then(function (root) {
+        opened = root;
+        if (!opened) throw new Error('Approval cancelled.');
+        if (options && options.onAuthenticated) options.onAuthenticated();
+        return Promise.all([self.loadInviteCeremony(), self.loadLinkSigning()]);
+      }).then(function (loaded) {
+        return loaded[0].mintOrgInvite({
+          fetchImpl: window.fetch.bind(window),
+          org: self.slug,
+          genesisId: self.view.genesis_id,
+          personalRootSeed: opened.seed,
+          role: role,
+          expiry: Date.now() + days * 86400000,
+          maxUses: maxUses,
+        }).then(function (result) {
+          minted = result;
+          return linkOperation('/api/links/operations', {
+            op: 'publish',
+            request: {
+              org: self.slug,
+              target_uuid: self.view.org_uuid,
+              target_type: 'org:join',
+              invite_ref: minted.inviteId,
+              expires_at: minted.expiry,
+              meta: label ? { label: label } : {},
+            },
+          });
+        }).then(function (prepared) {
+          operationId = prepared.operation_id;
+          var signing = prepared.signing || {};
+          var blocking = signing.blocking_error
+            || (signing.binding_drift ? 'This organization changed after the request was prepared. Close it and ask again.' : '')
+            || (!signing.registry_request ? 'This request is missing its auto.network details. Close it and try again.' : '');
+          if (blocking) throw new Error(blocking);
+          var req = {
+            op: 'publish', orgSlug: self.slug, orgUuid: signing.org_uuid || null,
+            fixedExpiry: true, registryRequest: signing.registry_request,
+          };
+          req.allowSessionApprovals = loaded[1]._matchingApprovalAuthority(req);
+          return loaded[1].signLinkWithOpenRoot(req, opened);
+        });
+      }).catch(function (error) {
+        var message = (error && error.message) || String(error);
+        throw new Error(minted ? message + ' ' + unpublished : message);
+      }).finally(function () { zero(opened); });
+    };
+
+    var execute = function (signed) {
+      return linkOperation('/api/links/operations/' + encodeURIComponent(operationId), { envelope: signed.envelope })
+        .then(function (response) {
+          var execution = response.execution || {};
+          if (execution.ok !== true) throw new Error((execution.error || 'The link could not be published.') + ' ' + unpublished);
+          // The executor returns the canonical url and the channel public key
+          // separately; the complete link is built with the locally minted
+          // bearer by the shared serializer (graph://4f9e881c-a9 §3).
+          self.mintResult = { url: execution.url, channel_pub: execution.channel_pub, bearer: minted.bearer };
+          // Retain the bearer on the link's grant row so Invitations can hand
+          // the link out again (graph://e75ebdde-6df).
+          return request('/api/network/ledger/invite/bearer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ org: self.slug, invite_ref: minted.inviteId, token: minted.bearer }),
+          }).catch(function () { /* the link shown next still works */ })
+            .then(function () { return { approved: true, execution: execution }; });
+        })
+        .finally(function () { signed.envelope = null; });
+    };
+
+    Promise.all([this.loadApprovalDialog(), this.orgIdentity()]).then(function (loaded) {
+      var org = loaded[1];
       self.busy = null;
-      if (!minted) return self.render();
-      self.pendingMint = minted;
-      self.mintStep = 'publishing';
       self.render();
-      return self.publishMint();
+      loaded[0].openApprovalDialog({
+        review: {
+          kind: 'invite',
+          title: 'Invite someone to ' + org.name,
+          intro: 'Approving does both halves in one step: it signs the invitation with your membership key, '
+            + 'and publishes the link people open to ask to join. Nothing is signed or published until you approve.',
+          organization: org,
+          target: {
+            type: 'Invitation', name: title,
+            byline: 'Whoever opens the link can ask to join. You approve each request before they become a member.',
+          },
+          facts: [['Joins as', roleWord([role])], ['Link expires', 'In ' + days + ' days'],
+            ['Can be used by', maxUses === 1 ? 'One person' : 'Up to ' + maxUses + ' people'],
+            ['Join link', 'Published on auto.network']],
+          requester: { kind: 'Requested from', name: 'Membership · Invitations', byline: 'This screen, by you' },
+          consequence: 'After approving, Done opens the link on this screen to copy. It stays in Invitations, '
+            + 'where you can copy it again or deactivate it.',
+        },
+        authorize: function (options) { return authorize(org, options); },
+        execute: execute,
+        result: {
+          working: 'Publishing the invitation', success: 'Invitation published',
+          copy: title + ' is signed and its join link is live.',
+          fact: { name: title, byline: 'Published on auto.network' },
+        },
+        onClose: function () {
+          zero(opened);
+          if (self.mintResult) self.mintStep = 'show-once';
+          self.render();
+          self.refresh();
+        },
+      });
     }).catch(function (error) {
       self.busy = null;
       self.error = (error && error.message) || String(error);
       self.render();
-    }).finally(function () { zero(opened); });
+    });
   };
 
   Controller.prototype.loadRoleCeremony = function () {
@@ -1003,58 +1130,6 @@
         : ((error && error.message) || String(error));
       self.render();
     }).finally(function () { zero(opened); });
-  };
-
-  Controller.prototype.publishMint = function () {
-    var self = this;
-    var minted = this.pendingMint;
-    if (!minted) return;
-    var label = this.mintLabel.trim();
-    var request_body = {
-      org: this.slug,
-      target_uuid: this.view.org_uuid,
-      target_type: 'org:join',
-      invite_ref: minted.inviteId,
-      expires_at: minted.expiry,
-      meta: label ? { label: label } : {},
-    };
-    // The operator is the one acting: prepare, review, sign on confirm, and
-    // publish from this Dashboard (auto-fkhq0.10a). No approval to wait for.
-    return import('/static/js/components/link-central-approval.js').then(function (links) {
-      return links.operateLinkDirectly(
-        { op: 'publish', request: request_body, requester: 'Organization membership' });
-    }).then(function (execution) {
-      if (!execution && self.mintStep === 'publishing') {
-        throw new Error('The invitation link was not published. The signed invitation stays active without a link; deactivate it if that was unintended.');
-      }
-      return execution;
-    }).then(function (execution) {
-      if (!execution) return;
-      // The executor returns the CANONICAL url and the minted channel public
-      // key separately; the complete link is built (with the locally minted
-      // bearer) by the shared serializer, never here (graph://4f9e881c-a9 §3).
-      self.mintResult = {
-        url: execution.url, channel_pub: execution.channel_pub, bearer: minted.bearer,
-      };
-      self.pendingMint = null;
-      self.mintStep = 'show-once';
-      self.render();
-      // Retain the bearer on the org's grant row so the invitation can be
-      // handed out again (graph://e75ebdde-6df). The route proves the token
-      // against the invite's own token_hash before storing it, so a failure
-      // here costs only re-shareability — the link on screen still works.
-      return request('/api/network/ledger/invite/bearer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          org: self.slug, invite_ref: minted.inviteId, token: minted.bearer,
-        }),
-      }).catch(function () { /* the shown link is unaffected */ })
-        .then(function () { return self.refresh(); });
-    }).catch(function (error) {
-      self.error = (error && error.message) || String(error);
-      self.render();
-    });
   };
 
   Controller.prototype.approve = function (claim) {

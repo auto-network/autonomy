@@ -34,13 +34,14 @@ def test_recorded_scenarios_match_the_record(registry):
     """Every proposed rule is built (auto-qrmlg.3 C3..C5): the bundle adopt,
     the delegate checkpoint at admission and the admission event. The
     founder's checkpoint-scoped delegate is minted at its own sign-on (F0),
-    so both starting states hold it. Self-admitting role: founder 2 / joiner
-    2 in the built order, minimal 1 / 1; approval role: 3 / 2 and 2 / 2,
-    the final-rules table of auto-qrmlg.12."""
+    so both starting states hold it. The invitation's publish runs in the
+    invite's own opening (F2 continues F1, auto-xvqxz), so the built order is
+    minimal: self-admitting role 1 / 1, approval role 2 / 2 (the final-rules
+    table of auto-qrmlg.12)."""
     table = {(s["from"], tuple(s["rules"])): (s["current"], s["minimal"])
              for s in _scenarios(registry)}
-    assert table[("self_admit", ())] == ({"founder": 2, "joiner": 1}, {"founder": 1, "joiner": 1})
-    assert table[("approval", ())] == ({"founder": 3, "joiner": 2}, {"founder": 2, "joiner": 2})
+    assert table[("self_admit", ())] == ({"founder": 1, "joiner": 1}, {"founder": 1, "joiner": 1})
+    assert table[("approval", ())] == ({"founder": 2, "joiner": 2}, {"founder": 2, "joiner": 2})
 
 
 def test_final_rules_adopt_at_install(registry):
@@ -88,15 +89,15 @@ def test_minimal_joiner_window_holds_claim_install_and_certificates(registry):
     assert adopt == []
 
 
-def test_explain_names_the_forcing_artifacts(registry):
+def test_explain_finds_no_extra_opening(registry):
+    """The invitation's publish runs inside the invite's opening (F2
+    continues F1, auto-xvqxz), and the joiner's install-time mints inside the
+    claim's (J5 continues J3): no opening is extra any more."""
     _current, _minimal, openings = keyreg.explain_current(registry, GOAL, "self_admit")
     by_step = {o.step: o for o in openings}
-    assert by_step["F2"].extra and ("link_publish_approval", "approval.link_publish[founder]") \
-        in by_step["F2"].missing
-    # The joiner's install-time mints run inside the claim's opening (J5
-    # continues J3), so the founder's F2 is the only extra opening left.
+    assert "F2" not in by_step
     assert "J6" not in by_step and "F4" not in by_step and "J6.repeat" not in by_step
-    assert [o.step for o in openings if o.extra] == ["F2"]
+    assert [o.step for o in openings if o.extra] == []
 
 
 def test_unknown_rule_is_refused(registry):
@@ -119,8 +120,8 @@ def test_cli_plan_and_explain(capsys, registry):
     assert "root openings: founder 2, joiner 2" in out
     assert keyreg.main(["explain-current", GOAL]) == 0
     out = capsys.readouterr().out
-    assert "current root openings: founder 2, joiner 1" in out
-    assert "EXTRA  F2" in out and "J6" not in out
+    assert "current root openings: founder 1, joiner 1" in out
+    assert "EXTRA" not in out and "J6" not in out
 
 
 # ── The current-order lints ──────────────────────────────────────────────────

@@ -1450,20 +1450,21 @@ mutations:
       passed to publishMint (:1008), so F2 opens the root again.
 
   approval.link_publish:
-    source: {kind: ceremony, file: tools/dashboard/static/js/pages/worktrees.js, symbol: signOnWithRootSeed}
+    source: {kind: ceremony, file: tools/dashboard/static/js/components/link-signing.js, symbol: signLinkWithOpenRoot}
     authority: [personal_root_seed]
     preconditions:
-      - A pending link_publish approval row {org, target_uuid, target_type org:join, invite_ref, expires_at, meta} (org-membership.js:1008-1030).
+      - A prepared link operation {op publish, request {org, target_uuid, target_type org:join, invite_ref, expires_at, meta}} (POST /api/links/operations, org-membership.js Controller.prototype.mint).
     effects:
-      writes: [approved link_publish decision; Gate 2 org-scoped sign-on]
+      writes: [signed link-operation envelope; org-scoped sign-on]
     actors: [founder]
     opens: root
     requires: [personal_root_seed, invite_event]
     produces: [link_publish_approval]
     crib: ["§8"]
     notes: >-
-      Step F2 (Gate 2, worktrees.js:173-203, :267). The root is opened for the
-      approval, not reused from F1.
+      Step F2, in F1's window (auto-xvqxz): the invitation approval hands the
+      root F1 opened to link-signing.js signLinkWithOpenRoot, which signs on
+      and signs the frozen org:join payload. No second opening.
 
   route.link_publish:
     source: {kind: route, file: tools/dashboard/link_approvals.py, symbol: _execute_link_publish}
@@ -2198,7 +2199,7 @@ goals:
           - policy_approval
     current_order:
       - {step: F1, actor: founder, ceremony: true, runs: [ceremony.org_invite_mint]}
-      - {step: F2, actor: founder, ceremony: true, runs: [approval.link_publish, route.link_publish]}
+      - {step: F2, actor: founder, ceremony: true, continues_window: F1, runs: [approval.link_publish, route.link_publish]}
       - {step: J1, actor: joiner, ceremony: false, runs: [route.invite_resolve]}
       - {step: J2, actor: founder, ceremony: false, runs: [route.join_context]}
       - {step: J3, actor: joiner, ceremony: true, runs: [ceremony.member_claim_mint]}
@@ -2219,5 +2220,5 @@ goals:
       - {framework: tla, theory: OrgAdmissionLeaves, lemma: RekeyedOldKeyExcluded}
       - {framework: tla, theory: OrgAdmissionLeaves, lemma: ReAdmitAfterRemoval}
     scenarios:
-      - {from: self_admit, rules: [], current: {founder: 2, joiner: 1}, minimal: {founder: 1, joiner: 1}}
-      - {from: approval, rules: [], current: {founder: 3, joiner: 2}, minimal: {founder: 2, joiner: 2}}
+      - {from: self_admit, rules: [], current: {founder: 1, joiner: 1}, minimal: {founder: 1, joiner: 1}}
+      - {from: approval, rules: [], current: {founder: 2, joiner: 2}, minimal: {founder: 2, joiner: 2}}

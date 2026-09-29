@@ -100,6 +100,22 @@ export async function _signLinkDecision(self, req, { mount, signal, view, onAuth
   return _signAuthorizedLinkDecision(req, session, signer, rr);
 }
 
+// The operator's one-approval invitation (auto-xvqxz) signs the invitation and
+// publishes its link in the same window: it opens the personal root once and
+// hands it here, instead of this module opening it a second time. The caller
+// owns the opened root and zeroes it.
+export async function signLinkWithOpenRoot(req, opened) {
+  const session = window.AutonomyNetworkSession;
+  const signer = window.AutonomyNetworkSigner;
+  if (!session || typeof session.signOnWithRootSeed !== 'function' ||
+      !signer || typeof signer.signRegistryRequest !== 'function') {
+    throw new Error('Approval is unavailable in this browser. Reload the dashboard and try again.');
+  }
+  if (typeof session.ready === 'function') await session.ready();
+  await _authorizeLinkDecision(req, session, opened);
+  return _signAuthorizedLinkDecision(req, session, signer, req.registryRequest);
+}
+
 // Establish authority for one link action from an opened personal root: sign
 // on as this organization's persona unless a retained session already
 // carries it.

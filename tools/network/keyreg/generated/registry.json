@@ -414,6 +414,7 @@
         {
           "actor": "founder",
           "ceremony": true,
+          "continues_window": "F1",
           "runs": [
             "approval.link_publish",
             "route.link_publish"
@@ -593,7 +594,7 @@
       "scenarios": [
         {
           "current": {
-            "founder": 2,
+            "founder": 1,
             "joiner": 1
           },
           "from": "self_admit",
@@ -605,7 +606,7 @@
         },
         {
           "current": {
-            "founder": 3,
+            "founder": 2,
             "joiner": 2
           },
           "from": "approval",
@@ -1700,13 +1701,13 @@
       ],
       "effects": {
         "writes": [
-          "approved link_publish decision; Gate 2 org-scoped sign-on"
+          "signed link-operation envelope; org-scoped sign-on"
         ]
       },
-      "notes": "Step F2 (Gate 2, worktrees.js:173-203, :267). The root is opened for the approval, not reused from F1.",
+      "notes": "Step F2, in F1's window (auto-xvqxz): the invitation approval hands the root F1 opened to link-signing.js signLinkWithOpenRoot, which signs on and signs the frozen org:join payload. No second opening.",
       "opens": "root",
       "preconditions": [
-        "A pending link_publish approval row {org, target_uuid, target_type org:join, invite_ref, expires_at, meta} (org-membership.js:1008-1030)."
+        "A prepared link operation {op publish, request {org, target_uuid, target_type org:join, invite_ref, expires_at, meta}} (POST /api/links/operations, org-membership.js Controller.prototype.mint)."
       ],
       "produces": [
         "link_publish_approval"
@@ -1716,9 +1717,9 @@
         "invite_event"
       ],
       "source": {
-        "file": "tools/dashboard/static/js/pages/worktrees.js",
+        "file": "tools/dashboard/static/js/components/link-signing.js",
         "kind": "ceremony",
-        "symbol": "signOnWithRootSeed"
+        "symbol": "signLinkWithOpenRoot"
       }
     },
     "armor.enroll_factor": {
