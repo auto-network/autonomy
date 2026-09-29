@@ -1330,6 +1330,7 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         # Strictly after _install_personal_audited_delegate: the audited
         # write is a cold delegate seal against the recipient just published.
         _ensure_sealed_settings_pepper()
+        _schedule_settings_signing_pass()
     organization_recovery = await asyncio.to_thread(
         _accept_organization_kem_keys, organization_kem_keys)
     # Use the existing RAM-backed carrier at unlock as well as shutdown.
@@ -1476,6 +1477,58 @@ def _install_personal_audited_delegate(private_hex: str,
         store.put_delegate_audited_recipient(public_hex)
     settings_ops.set_personal_delegate_audited_key(private_hex)
     _VAULT_CACHE["audited_delegate"] = private_hex
+
+
+def _schedule_settings_signing_pass() -> None:
+    """TEMPORARY (auto-qrmlg.6 S4): once the audited delegate is warm, sign
+    the organization settings rows that predate signed writes, off the
+    unlock's own path. Idempotent and election-gated inside; removed with
+    tools/dashboard/settings_signing_pass.py when the fleet has migrated."""
+    try:
+        from tools.dashboard import settings_signing_pass
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.run_in_executor(None, settings_signing_pass.run_after_unlock)
+        else:
+            import threading
+
+            threading.Thread(
+                target=settings_signing_pass.run_after_unlock,
+                name="settings-signing-pass", daemon=True,
+            ).start()
+    except Exception:  # noqa: BLE001 — never fail the unlock for this
+        logger.warning("settings signing pass could not be scheduled", exc_info=True)
+
+
+async def post_settings_signing_pass(request: Request) -> JSONResponse:
+    """POST /api/settings/signing-pass — TEMPORARY (auto-qrmlg.6 S4).
+    Body ``{"org": slug | null, "apply": bool}``; ``apply`` defaults to
+    false (a report of what would be signed). Operator authority. Runs the
+    pass in a worker thread and returns its per-store reports."""
+    from tools.dashboard.api_auth import principal_from_request
+
+    if not principal_from_request(request).global_authority:
+        return JSONResponse(
+            {"error": "the settings signing pass requires operator authority"},
+            status_code=403,
+        )
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    org = body.get("org")
+    orgs = [str(org)] if isinstance(org, str) and org else None
+    apply = bool(body.get("apply", False))
+    from tools.dashboard import settings_signing_pass
+
+    reports = await asyncio.to_thread(settings_signing_pass.run, apply=apply, orgs=orgs)
+    return JSONResponse({"ok": True, "apply": apply, "reports": reports})
 
 
 def _ensure_sealed_settings_pepper() -> None:
@@ -1765,6 +1818,7 @@ def restore_vault_across_hot_reload() -> bool:
             _VAULT_CACHE["kem_private"] = kem_private_hex
         _install_personal_audited_delegate(private_hex, public_hex)
         _ensure_sealed_settings_pepper()
+        _schedule_settings_signing_pass()
         logger.info(
             "vault keys successfully hot-reloaded: personal recipient and %d "
             "recovered generation key(s)", len(generation_keys),
@@ -1874,6 +1928,8 @@ def _org_fold(org):
 from tools.dashboard.signon_preparation import get_preparation
 
 ROUTES = [
+    # TEMPORARY (auto-qrmlg.6 S4): removed with settings_signing_pass.py.
+    Route("/api/settings/signing-pass", post_settings_signing_pass, methods=["POST"]),
     Route("/api/identity/unlock/preparation", get_preparation, methods=["GET"]),
     Route("/api/identity/unlock/passkey/options", post_unlock_passkey_options,
           methods=["POST"]),
