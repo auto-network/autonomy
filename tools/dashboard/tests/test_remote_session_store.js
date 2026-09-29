@@ -99,3 +99,14 @@ describe('remote sessions in the store', () => {
     assert.equal(g.sessions()[KEY].isLive, false);
   });
 });
+
+describe('what people read for a remote session', () => {
+  it('shows name@<display name>, never the machine key', () => {
+    const h = makeStore();
+    h.handlers['session:remote-rows']({ rows: [ROW] });
+    assert.equal(h.win.sessionDisplayName(KEY), 'auto-9@sjc-2');
+    assert.equal(h.win.sessionDisplayName(KEY, 'SJC'), 'auto-9@SJC');
+    assert.equal(h.win.sessionDisplayName('auto-1'), 'auto-1');
+  });
+});
+

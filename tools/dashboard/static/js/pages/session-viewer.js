@@ -80,6 +80,12 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.isLive : false;
       },
+      // What people read for this session: a remote key name@machine_pub
+      // shown as name@<machine's display name>.
+      get _sessionDisplayName() {
+        var m = this.remoteMachine;
+        return window.sessionDisplayName(this.sessionKey, m && m.name);
+      },
       get _tmuxSession() {
         // sessionKey is tmux_name — the stable identifier
         return this.sessionKey;

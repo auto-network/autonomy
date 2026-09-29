@@ -303,7 +303,7 @@
          muted color (e.g. "review_report · auto-dkhyx — Fix X"); all other
          session types stick with the bare label. -->
     <div class="sc-title">
-      <span x-text="s.label || s.tmux_session || (s.id || '').slice(0, 12)"></span>
+      <span x-text="s.label || window.sessionDisplayName(s.tmux_session, s.machine) || (s.id || '').slice(0, 12)"></span>
       <template x-if="s.session_type === 'librarian' && s.librarian_target_bead_title">
         <span class="text-gray-500 font-normal"
               x-text="' — ' + s.librarian_target_bead_title"
@@ -395,7 +395,7 @@
           <!-- dispatch/librarian tmux names are synthetic internals
                (agent-auto-*, librarian-auto-*): the fixed grid keeps the
                column, the cell stays blank for them. -->
-          <span class="sc-footer-value" x-text="(s.session_type === 'dispatch' || s.session_type === 'librarian') ? '—' : (s.tmux_session || '—')"></span>
+          <span class="sc-footer-value" x-text="(s.session_type === 'dispatch' || s.session_type === 'librarian') ? '—' : (window.sessionDisplayName(s.tmux_session, s.machine) || '—')"></span>
         </div>
       </template>
       <template x-if="s.org">

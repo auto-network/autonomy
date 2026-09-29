@@ -227,12 +227,12 @@
             <template x-if="_tmuxSession && isLive">
               <span class="session-title"
                     style="font-size:14px;font-weight:500;color:#e5e7eb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1;"
-                    x-text="_label || _tmuxSession"></span>
+                    x-text="_label || _sessionDisplayName"></span>
             </template>
             <template x-if="_tmuxSession && !isLive">
               <span class="session-title"
                     style="font-size:14px;font-weight:500;color:#e5e7eb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1;"
-                    x-text="_label || _tmuxSession"></span>
+                    x-text="_label || _sessionDisplayName"></span>
             </template>
             <template x-if="!_tmuxSession">
               <span class="session-title"
@@ -374,8 +374,8 @@
                   <button class="sv-exp-stat-val sv-exp-stat-copyable"
                           :class="{ 'is-copied': copiedField === 'tmux' }"
                           @click.stop="copyTmuxSession()"
-                          :title="'Copy teamwork session: ' + _tmuxSession"
-                          x-text="_tmuxSession"></button>
+                          :title="'Copy teamwork session: ' + _sessionDisplayName"
+                          x-text="_sessionDisplayName"></button>
                 </div>
               </template>
               <template x-if="org">

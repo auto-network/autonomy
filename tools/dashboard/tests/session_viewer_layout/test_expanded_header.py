@@ -44,7 +44,7 @@ def test_live_unset_identity_balances_badge_with_session_id(test_client):
     assert '>New Session</span>' in html
     # Both live and ended untitled sessions keep their stable machine
     # identifier beneath the badge/title row.
-    assert html.count('x-text="_label || _tmuxSession"') == 2
+    assert html.count('x-text="_label || _sessionDisplayName"') == 2
 
 
 def test_expanded_block_references_required_getters(test_client):
