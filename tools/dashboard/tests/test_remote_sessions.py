@@ -68,19 +68,12 @@ class Bus:
 def _mirror():
     bus = Bus()
     mirror = remote_sessions.Mirror(bus, control=lambda *a, **k: {"ok": True})
-    mirror._labels = {SJC: "sjc-2"}
+    mirror._names = {SJC: "sjc-2"}
     return mirror, bus
 
 
-def test_the_list_starts_from_presence_and_each_machines_rows_replace_its_part():
+def test_forwarded_rows_are_keyed_by_machine_pub_and_named_for_display():
     mirror, bus = _mirror()
-    mirror._seed([{"tmux_name": "auto-9", "machine_pub": SJC, "label": "Sweep",
-                   "state": "ACTIVE", "since": 5}])
-    (topic, data), = bus.events
-    assert topic == remote_sessions.REMOTE_REGISTRY_TOPIC
-    (row,) = data["machines"]["sjc-2"]
-    assert (row["session_id"], row["label"], row["machine_reachable"]) == (
-        "auto-9@sjc-2", "Sweep", False)
 
     async def run():
         await mirror._apply({"machine_pub": SJC, "subscribed": True}, "p")
@@ -88,12 +81,15 @@ def test_the_list_starts_from_presence_and_each_machines_rows_replace_its_part()
             "data": [{"session_id": "auto-7", "startup_state": "harness_starting"}]}}, "p")
 
     asyncio.run(run())
-    rows = bus.events[-1][1]["machines"]["sjc-2"]
-    assert [(r["session_id"], r["startup_state"], r["machine_reachable"]) for r in rows] == [
-        ("auto-7@sjc-2", "harness_starting", True)]
+    (topic, data), = bus.events
+    assert topic == remote_sessions.REMOTE_ROWS_TOPIC
+    (row,) = data["rows"]
+    assert (row["session_id"], row["machine"], row["machine_pub"], row["startup_state"]) == (
+        f"auto-7@{SJC}", "sjc-2", SJC, "harness_starting")
+    assert mirror.connected(SJC)
 
 
-def test_messages_and_endings_are_republished_under_the_address():
+def test_messages_and_endings_are_republished_under_the_key():
     mirror, bus = _mirror()
 
     async def run():
@@ -104,12 +100,25 @@ def test_messages_and_endings_are_republished_under_the_address():
             "data": {"id": "auto-9", "tmux_session": "auto-9", "state": "FAILED"}}}, "p")
 
     asyncio.run(run())
-    (t1, messages), (t2, _rows), (t3, ended) = bus.events
-    assert t1 == "session:messages" and messages["session_id"] == "auto-9@sjc-2"
+    (t1, messages), (t2, ended) = bus.events
+    assert t1 == "session:messages" and messages["session_id"] == f"auto-9@{SJC}"
     assert messages["span"] == {"file": "f", "from": 0, "to": 9}
-    assert t3 == "session:ended"
-    assert (ended["id"], ended["tmux_session"], ended["state"]) == (
-        "auto-9@sjc-2", "auto-9@sjc-2", "FAILED")
+    assert t2 == "session:ended"
+    assert (ended["id"], ended["tmux_session"], ended["state"], ended["machine"]) == (
+        f"auto-9@{SJC}", f"auto-9@{SJC}", "FAILED", "sjc-2")
+
+
+def test_an_ended_subscription_this_machine_serves_stops_its_forwarder():
+    mirror, _bus = _mirror()
+
+    async def run():
+        task = asyncio.create_task(asyncio.sleep(60))
+        remote_sessions._forwarders["s1"] = task
+        await mirror._apply({"ended_sub_id": "s1"}, "p")
+        await asyncio.sleep(0)
+        assert task.cancelled() and "s1" not in remote_sessions._forwarders
+
+    asyncio.run(run())
 
 
 def test_a_lost_subscription_resubscribes_and_a_refused_one_does_not(monkeypatch):
@@ -130,3 +139,15 @@ def test_a_lost_subscription_resubscribes_and_a_refused_one_does_not(monkeypatch
 
     asyncio.run(run())
     assert again == [SJC]
+
+
+def test_presence_rows_are_keyed_by_machine_pub(monkeypatch):
+    from tools.dashboard import fleet_machines, session_presence
+
+    monkeypatch.setattr(session_presence, "read_presence", lambda: [
+        {"tmux_name": "auto-9", "machine_pub": SJC, "machine": "sjc-2", "local": False,
+         "reachable": True, "label": "Sweep", "state": "ACTIVE", "since": 5},
+        {"tmux_name": "auto-1", "machine_pub": "a1" * 32, "machine": "home", "local": True}])
+    (row,) = fleet_machines.presence_rows()
+    assert (row["session_id"], row["machine"], row["machine_pub"], row["label"]) == (
+        f"auto-9@{SJC}", "sjc-2", SJC, "Sweep")

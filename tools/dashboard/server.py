@@ -7017,8 +7017,10 @@ async def _remote_session_tail(request, project: str, address: str):
     """The tail of ``<name>@<machine>``, a session on another fleet machine
     (graph://7eb29bc8-31a §9.6): the far machine runs its own tail with the
     viewer's exact query, the identity fields are rewritten to the address,
-    and a watcher republishes new entries on this bus while it is viewed."""
-    from tools.dashboard import remote_view
+    and new entries arrive over the machine's subscription (remote_sessions).
+    The address names the machine by its key, ``machine_pub``; its display
+    name is looked up for the viewer and never used as a key."""
+    from tools.dashboard import fleet_machines, remote_view, session_control_client
 
     refused = api_auth.require_global_api_authority(request)
     if refused is not None:
@@ -7026,6 +7028,9 @@ async def _remote_session_tail(request, project: str, address: str):
     name, _, machine = address.rpartition("@")
     if not _TMUX_NAME_RE.match(name or "") or not machine:
         return JSONResponse({"error": "invalid session address"}, status_code=400)
+    machine_pub = await asyncio.to_thread(session_control_client.resolve_machine, machine)
+    display = (await asyncio.to_thread(fleet_machines.label_for, machine_pub)
+               if machine_pub else machine)
     query = {k: str(v) for k, v in request.query_params.items()
              if k in remote_view.TAIL_QUERY_KEYS}
     reply = await remote_view.fetch_tail(machine, name, project, query)
@@ -7036,9 +7041,9 @@ async def _remote_session_tail(request, project: str, address: str):
             return JSONResponse({
                 "entries": [], "is_live": False, "session_id": address,
                 "tmux_session": address, "tmux_name": address,
-                "machine": machine, "machine_reachable": False,
+                "machine": display, "machine_pub": machine_pub, "machine_reachable": False,
                 "machine_not_enabled": {
-                    "machine": machine, "reason": refusal,
+                    "machine": display, "reason": refusal,
                     "detail": reply.get("detail"), "at": reply.get("at")},
                 "live_updates": False,
             })
@@ -7050,18 +7055,19 @@ async def _remote_session_tail(request, project: str, address: str):
             return JSONResponse({
                 "entries": [], "is_live": False, "session_id": address,
                 "tmux_session": address, "tmux_name": address,
-                "machine": machine, "machine_reachable": False,
-                "machine_unreachable": {"machine": machine, "since": since},
+                "machine": display, "machine_pub": machine_pub, "machine_reachable": False,
+                "machine_unreachable": {"machine": display, "since": since},
                 "live_updates": False,
             })
         status = 404 if refusal == "no-such-session" else 502
         return JSONResponse({"error": reply.get("detail") or refusal,
                              "refusal": refusal}, status_code=status)
     data = remote_view.rewrite_identity(reply["tail"], address)
-    data["machine"] = machine
+    data["machine"] = display
+    data["machine_pub"] = machine_pub
     data["machine_reachable"] = True
     # New entries arrive over the machine's subscription (remote_sessions).
-    data["live_updates"] = bool(_remote_mirror and _remote_mirror.connected(machine))
+    data["live_updates"] = bool(_remote_mirror and _remote_mirror.connected(machine_pub))
     return JSONResponse(data)
 
 
@@ -14337,6 +14343,18 @@ async def api_fleet_launch_targets(request):
     from tools.dashboard import fleet_machines
 
     return JSONResponse({"targets": await fleet_machines.launch_targets()})
+
+
+async def api_sessions_presence(request):
+    """GET /api/sessions/presence — the other machines' sessions from the
+    synced presence Settings, keyed ``name@machine_pub`` (the session list's
+    rows for them; forwarded events update them). Global authority."""
+    refused = api_auth.require_global_api_authority(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import fleet_machines
+
+    return JSONResponse({"sessions": await asyncio.to_thread(fleet_machines.presence_rows)})
 
 
 
@@ -22331,6 +22349,7 @@ routes = [
     Route("/api/dao/session_status", api_dao_session_status),
     Route("/api/fleet/remote/{machine}/status", api_remote_machine_status),
     Route("/api/fleet/launch-targets", api_fleet_launch_targets),
+    Route("/api/sessions/presence", api_sessions_presence),
     Route("/api/worktrees", api_worktrees),
     Route("/api/worktrees/orgs", api_worktrees_orgs),
     Route("/api/worktrees/refresh", api_worktrees_refresh, methods=["POST"]),
@@ -22996,6 +23015,21 @@ async def _on_startup():
             logger.warning(
                 "fleet crosstalk sync delivery scheduling failed", exc_info=True,
             )
+        # A synced presence row changes which sessions the list shows: tell
+        # the page, as a local write would (sync applies rows without the
+        # settings emit hook).
+        try:
+            from tools.graph.schemas.personal_session_presence import (
+                PERSONAL_SESSION_PRESENCE_SET_ID,
+            )
+            if gap or any(getattr(a, "set_id", None) == PERSONAL_SESSION_PRESENCE_SET_ID
+                          for a in addresses):
+                _materialization_loop.call_soon_threadsafe(
+                    event_bus.broadcast_sync, "setting.changed",
+                    {"set_id": PERSONAL_SESSION_PRESENCE_SET_ID, "operation": "sync"},
+                    False)
+        except Exception:
+            logger.warning("presence sync notice failed", exc_info=True)
 
     set_settings_materialization_hook(_settings_sync_materialized)
     # The scheduler itself starts at ACTIVATION (see _activate_worker): it

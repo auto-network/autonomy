@@ -91,9 +91,13 @@ def test_the_viewers_tail_is_proxied_and_rewritten(monkeypatch):
                                              "chain": ["s1"], "offset": 42}}
 
     class Mirror:
-        def connected(self, label):
-            return label == "sjc-2"
+        def connected(self, machine_pub):
+            return machine_pub == PEER
 
+    from tools.dashboard import fleet_machines
+
+    monkeypatch.setattr(scc, "resolve_machine", lambda name: PEER)
+    monkeypatch.setattr(fleet_machines, "label_for", lambda pub: "sjc-2")
     monkeypatch.setattr(api_auth, "require_global_api_authority", lambda r: None)
     monkeypatch.setattr(remote_view, "fetch_tail", fake_fetch)
     monkeypatch.setattr(server, "_remote_mirror", Mirror())
@@ -103,6 +107,7 @@ def test_the_viewers_tail_is_proxied_and_rewritten(monkeypatch):
     assert response.status_code == 200
     body = json.loads(response.body)
     assert body["session_id"] == ADDRESS
+    assert (body["machine"], body["machine_pub"]) == ("sjc-2", PEER)   # display, key
     assert body["live_updates"] is True     # new entries arrive over the subscription
 
 

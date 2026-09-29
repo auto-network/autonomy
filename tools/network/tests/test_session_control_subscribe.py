@@ -30,9 +30,12 @@ def test_one_subscription_carries_every_published_event_until_it_ends(monkeypatc
 
 
 async def _next_items(count, timeout=5.0):
+    """The subscriber's next *count* items. Both connectors share this
+    process, so the host's own ended-subscription notices land here too."""
     items = []
     while len(items) < count:
-        items.extend(await asyncio.wait_for(session_control._collect(timeout), timeout + 1))
+        got = await asyncio.wait_for(session_control._collect(timeout), timeout + 1)
+        items.extend(i for i in got if "ended_sub_id" not in i)
     return items
 
 
@@ -89,7 +92,7 @@ async def _scenario(root, port, monkeypatch):
         broker_b.reply(item["id"], {"v": 1, "ok": True, "result": {"subscribed": True}})
         await _next_items(1)
         session_control._subscribed.pop(machine_b.public_hex).cancel()
-        for _ in range(100):
+        for _ in range(20):      # within 1 s, with nothing published
             if sub_id not in session_control._published:
                 break
             await asyncio.sleep(0.05)
@@ -110,13 +113,29 @@ async def _scenario(root, port, monkeypatch):
 def test_a_subscription_too_far_behind_is_ended(monkeypatch):
     async def run():
         monkeypatch.setattr(session_control, "_published", {})
-        queue = asyncio.Queue(maxsize=2)
+        monkeypatch.setattr(session_control, "_published_bytes", {})
+        monkeypatch.setattr(session_control, "_received", asyncio.Queue())
+        monkeypatch.setattr(session_control, "SUBSCRIPTION_QUEUE_BYTES", 40)
+        queue = asyncio.Queue()
         session_control._published["s"] = queue
         assert session_control.publish("s", {"n": 1}) == {"ok": True}
         assert session_control.publish("s", {"n": 2}) == {"ok": True}
-        assert session_control.publish("s", {"n": 3})["error_kind"] == \
+        # The next event would pass the byte bound: the subscription ends,
+        # rather than this one event being dropped.
+        assert session_control.publish("s", {"n": 3, "pad": "x" * 20})["error_kind"] == \
             session_control.SUBSCRIPTION_BEHIND
         assert "s" not in session_control._published
         assert queue.get_nowait() is None    # the channel's end marker
+        # and this machine's dashboard is told, to stop its forwarder
+        assert await session_control._collect(0.1) == [{"ended_sub_id": "s"}]
 
     asyncio.run(run())
+
+
+def test_a_dashboard_too_far_behind_ends_the_subscription_not_an_event(monkeypatch):
+    monkeypatch.setattr(session_control, "_received", asyncio.Queue())
+    monkeypatch.setattr(session_control, "_received_bytes", 0)
+    monkeypatch.setattr(session_control, "RECEIVED_QUEUE_BYTES", 10)
+    assert session_control._deliver({"event": 1}, 8) is True
+    assert session_control._deliver({"event": 2}, 8) is False       # the caller ends the subscription
+    assert session_control._deliver({"end": "subscription-behind"}, 0, force=True) is True

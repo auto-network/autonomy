@@ -124,3 +124,26 @@ async def launch_targets() -> list[dict]:
 
     targets.extend(await asyncio.gather(*(ask(pub) for pub in others)))
     return targets
+
+
+def label_for(pub: str) -> str:
+    """The display name of roster machine *pub* (its key is *pub*)."""
+    _local, roster, names, _last = _context()
+    return _label(pub, roster, names)
+
+
+def presence_rows() -> list[dict]:
+    """The other machines' sessions from the synced presence Settings, as
+    session-store rows keyed ``name@machine_pub``. Which sessions exist is
+    presence's to say; live detail arrives as forwarded events."""
+    from tools.dashboard import session_presence
+
+    return [{
+        "session_id": f"{r['tmux_name']}@{r['machine_pub']}",
+        "project": r.get("project") or "", "type": r.get("type") or "container",
+        "label": r.get("label") or "", "role": r.get("role") or "",
+        "harness": r.get("harness"), "model": r.get("model"),
+        "state": r.get("state"), "is_live": True, "started_at": r.get("since"),
+        "machine": r["machine"], "machine_pub": r["machine_pub"],
+        "machine_reachable": bool(r.get("reachable")),
+    } for r in session_presence.read_presence() if not r.get("local")]

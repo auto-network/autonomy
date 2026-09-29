@@ -710,22 +710,28 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
 # when the subscriber closes it or it is lost; the subscriber then subscribes
 # again, and stops on a refusal.
 
-#: Events handed over by the host's dashboard for one subscription and not
-#: yet written to its channel. A channel this far behind is ended, and its
-#: subscriber reconnects.
-SUBSCRIPTION_QUEUE_LIMIT = 256
-#: Received events waiting for this machine's dashboard to collect them.
-RECEIVED_QUEUE_LIMIT = 1024
+#: Bytes of events handed over by the host's dashboard for one subscription
+#: and not yet written to its channel. A channel this far behind is ended,
+#: and its subscriber reconnects.
+SUBSCRIPTION_QUEUE_BYTES = 8 * 1024 * 1024
+#: Bytes of received events waiting for this machine's dashboard to collect.
+RECEIVED_QUEUE_BYTES = 8 * 1024 * 1024
+#: Most received events handed to the dashboard per collect.
+COLLECT_BATCH = 256
 SUBSCRIPTION_NOT_FOUND = "subscription-not-found"  # publish to an ended subscription
-SUBSCRIPTION_BEHIND = "subscription-behind"        # the channel fell SUBSCRIPTION_QUEUE_LIMIT behind
+SUBSCRIPTION_BEHIND = "subscription-behind"        # the channel fell SUBSCRIPTION_QUEUE_BYTES behind
 SUBSCRIPTION_LOST = "subscription-lost"            # the channel ended under the subscriber
 EVENT_TOO_LARGE = "event-too-large"                # one event exceeds MAX_RECORD_BYTES
 
 #: sub_id -> queue of encoded records, for channels other machines opened here.
 _published: dict[str, asyncio.Queue] = {}
+#: sub_id -> bytes waiting in that queue.
+_published_bytes: dict[str, int] = {}
 #: machine_pub -> the task holding this machine's subscription to it.
 _subscribed: dict[str, asyncio.Task] = {}
-_received: asyncio.Queue = asyncio.Queue(maxsize=RECEIVED_QUEUE_LIMIT)
+#: (item, size) received and not yet collected, and their total size.
+_received: asyncio.Queue = asyncio.Queue()
+_received_bytes = 0
 
 
 class _Live:
@@ -745,9 +751,11 @@ async def _subscription(sub_id: str, queue: asyncio.Queue, first: bytes, endpoin
     try:
         yield first
         while (record := await queue.get()) is not None:
+            _published_bytes[sub_id] = _published_bytes.get(sub_id, 0) - len(record)
             yield record
     finally:
         _published.pop(sub_id, None)
+        _published_bytes.pop(sub_id, None)
         # The subscription is the whole exchange: ending it ends the stream.
         with contextlib.suppress(Exception):
             asyncio.ensure_future(endpoint.close())
@@ -756,7 +764,7 @@ async def _subscription(sub_id: str, queue: asyncio.Queue, first: bytes, endpoin
 async def _accept_subscription(request: dict, client_pub: str,
                                broker: "InboundBroker", endpoint):
     sub_id = secrets.token_hex(16)
-    queue: asyncio.Queue = asyncio.Queue(maxsize=SUBSCRIPTION_QUEUE_LIMIT)
+    queue: asyncio.Queue = asyncio.Queue()
     _published[sub_id] = queue
     # The dashboard learns the sub_id from this connector, never from the peer.
     reply = await broker.submit("subscribe", {**request["body"], "sub_id": sub_id},
@@ -767,18 +775,22 @@ async def _accept_subscription(request: dict, client_pub: str,
     # The live response waits on the queue, not the stream, so it would see
     # a closed stream only at its next send: end it the moment the stream
     # closes (a subscriber whose connector restarted), not at the next event.
-    watch = asyncio.ensure_future(endpoint.closed.wait())
-    watch.add_done_callback(lambda _done: _end_subscription(sub_id))
+    asyncio.ensure_future(endpoint.closed.wait()).add_done_callback(
+        lambda _done: _end_subscription(sub_id))
     return _Live(_subscription(sub_id, queue, encode(reply), endpoint))
 
 
 def _end_subscription(sub_id: str) -> None:
     queue = _published.pop(sub_id, None)
+    _published_bytes.pop(sub_id, None)
     if queue is None:
         return
     while not queue.empty():
         queue.get_nowait()
     queue.put_nowait(None)
+    # The host dashboard's forwarder learns it from the events it already
+    # collects, so it stops now and not at its next event.
+    _deliver({"ended_sub_id": sub_id}, force=True)
 
 
 def publish(sub_id: str, record: dict) -> dict:
@@ -791,21 +803,25 @@ def publish(sub_id: str, record: dict) -> dict:
         data = encode(record, too_large=EVENT_TOO_LARGE)
     except SessionControlError as exc:
         return {"ok": False, "error_kind": exc.refusal, "error": exc.detail}
-    try:
-        queue.put_nowait(data)
-    except asyncio.QueueFull:
+    waiting = _published_bytes.get(sub_id, 0) + len(data)
+    if waiting > SUBSCRIPTION_QUEUE_BYTES:
         _end_subscription(sub_id)
         return {"ok": False, "error_kind": SUBSCRIPTION_BEHIND,
-                "error": f"{SUBSCRIPTION_QUEUE_LIMIT} events behind; ended"}
+                "error": f"{waiting} bytes behind; ended"}
+    _published_bytes[sub_id] = waiting
+    queue.put_nowait(data)
     return {"ok": True}
 
 
-def _deliver(item: dict) -> None:
-    try:
-        _received.put_nowait(item)
-    except asyncio.QueueFull:
-        logger.warning("session-control: dropped an event from %s; the dashboard "
-                       "is not collecting", str(item.get("machine_pub"))[:12])
+def _deliver(item: dict, size: int = 0, *, force: bool = False) -> bool:
+    """Queue *item* for the dashboard; False when that would exceed
+    RECEIVED_QUEUE_BYTES (only an end or a notice is *force*d past it)."""
+    global _received_bytes
+    if not force and _received_bytes + size > RECEIVED_QUEUE_BYTES:
+        return False
+    _received_bytes += size
+    _received.put_nowait((item, size))
+    return True
 
 
 async def _hold_subscription(connector, runtime, machine_pub: str, persona: str,
@@ -828,9 +844,15 @@ async def _hold_subscription(connector, runtime, machine_pub: str, persona: str,
                 end.update(end=ack.get("refusal") or PEER_REFUSED, at="peer",
                            detail=str(ack.get("detail", "")), refused=True)
                 return
-            _deliver({"machine_pub": machine_pub, "subscribed": True})
+            _deliver({"machine_pub": machine_pub, "subscribed": True}, force=True)
             async for message, final in stream:
-                _deliver({"machine_pub": machine_pub, "event": json.loads(message)})
+                if not _deliver({"machine_pub": machine_pub,
+                                 "event": json.loads(message)}, len(message)):
+                    # An event is never dropped: the subscription ends, and
+                    # the dashboard knows to subscribe again.
+                    raise SessionControlError(
+                        SUBSCRIPTION_BEHIND,
+                        f"the dashboard is {RECEIVED_QUEUE_BYTES} bytes behind")
                 if final:
                     return
     except asyncio.CancelledError:
@@ -847,7 +869,7 @@ async def _hold_subscription(connector, runtime, machine_pub: str, persona: str,
         end.update(detail=f"{type(exc).__name__}: {exc}"[:300])
     finally:
         if end is not None:
-            _deliver(end)
+            _deliver(end, force=True)
 
 
 def subscribe(connector, runtime, machine_pub: str, persona: str,
@@ -879,20 +901,22 @@ def close_subscriptions() -> int:
 
 
 async def _collect(wait_s: float) -> list:
+    global _received_bytes
     try:
-        items = [await asyncio.wait_for(_received.get(), max(0.0, wait_s))]
+        pending = [await asyncio.wait_for(_received.get(), max(0.0, wait_s))]
     except asyncio.TimeoutError:
         return []
-    while not _received.empty() and len(items) < SUBSCRIPTION_QUEUE_LIMIT:
-        items.append(_received.get_nowait())
-    return items
+    while not _received.empty() and len(pending) < COLLECT_BATCH:
+        pending.append(_received.get_nowait())
+    _received_bytes -= sum(size for _item, size in pending)
+    return [item for item, _size in pending]
 
 
 def ctl_op(op: str) -> bool:
     return op in ("session-control-request", "session-control-next",
                   "session-control-reply", "session-control-subscribe",
                   "session-control-events", "session-control-publish",
-                  "session-control-close-subscriptions")
+                  "session-control-close-subscriptions", "session-control-end")
 
 
 async def handle_ctl(connector, runtime, op: str, args: Any,
@@ -933,6 +957,9 @@ async def handle_ctl(connector, runtime, op: str, args: Any,
         if not isinstance(sub_id, str) or not isinstance(record, dict):
             return {"ok": False, "error": "sub_id and record are required"}
         return publish(sub_id, record)
+    if op == "session-control-end":
+        _end_subscription(str(args.get("sub_id") or ""))
+        return {"ok": True}
     if op == "session-control-close-subscriptions":
         return {"ok": True, "closed": close_subscriptions()}
     return {"ok": False, "error": f"unknown session-control ctl op {op!r}"}

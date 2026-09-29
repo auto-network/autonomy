@@ -9,10 +9,12 @@ machine, opened at startup with the operator's persona and kept open
   ``session:registry`` (rows cut to SESSIONS_ROW_FIELDS), ``session:messages``
   and ``session:ended``. Nothing else crosses. There is no snapshot.
 * SUBSCRIBER side (:class:`Mirror`): rewrites each session to
-  ``name@machine`` and republishes on this machine's bus. The session list
-  starts from the synced presence rows and each machine's registry rows
-  replace its part as they arrive (``session:remote-registry``); transcript
-  gaps are repaired by the viewer's span check and tail catch-up.
+  ``name@machine_pub`` -- the machine's key, never its display name -- and
+  republishes on this machine's bus: registry rows as
+  ``session:remote-rows``, messages and endings as themselves. Each updates
+  only the sessions it names. Which sessions exist is the synced presence
+  Settings' to say (``GET /api/sessions/presence``); nothing here keeps a
+  list of them.
 
 A personal fleet has one persona -- the operator's root -- so a host serves
 every session it runs. Org personas wait for org admission on the channel.
@@ -26,7 +28,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 TOPICS = ("session:registry", "session:messages", "session:ended")
-REMOTE_REGISTRY_TOPIC = "session:remote-registry"
+REMOTE_ROWS_TOPIC = "session:remote-rows"
 #: The event proxy's bound: a bus queue this far behind drops events.
 MAX_PENDING = 256
 #: ctl long-poll for received events.
@@ -76,7 +78,11 @@ async def forward(bus, sub_id: str, *, control=None) -> None:
             if topic not in TOPICS or seq == 0:
                 continue    # seq 0 is the bus's cached replay, not an event
             if queue.qsize() > MAX_PENDING:
-                continue
+                # Never drop an event: end the subscription, and the
+                # subscriber subscribes again.
+                await asyncio.to_thread(control, "session-control-end",
+                                        {"sub_id": sub_id})
+                return
             payload = _project(topic, data)
             if payload is None:
                 continue
@@ -93,13 +99,22 @@ async def forward(bus, sub_id: str, *, control=None) -> None:
         bus.unsubscribe(queue)
 
 
+#: sub_id -> the task forwarding this machine's events on that subscription.
+_forwarders: dict = {}
+
+
+def end_forwarder(sub_id: str) -> None:
+    """The connector says subscription *sub_id* ended: stop forwarding now."""
+    task = _forwarders.pop(sub_id, None)
+    if task is not None:
+        task.cancel()
+
+
 def subscribe_op(bus):
     """The inbound ``subscribe`` op: the persona must be this machine's own
     (a personal fleet; the peer is already a roster machine of it, proved by
     the session:control handshake)."""
     from tools.dashboard import session_control_client as scc
-
-    tasks: set = set()
 
     async def op(body: dict, peer: str) -> dict:
         sub_id, persona = body.get("sub_id"), body.get("persona")
@@ -110,8 +125,8 @@ def subscribe_op(bus):
             return scc.refusal(SUBSCRIBE_PERSONA_REFUSED,
                                "this machine serves only its own persona's sessions")
         task = asyncio.get_running_loop().create_task(forward(bus, sub_id))
-        tasks.add(task)
-        task.add_done_callback(tasks.discard)
+        _forwarders[sub_id] = task
+        task.add_done_callback(lambda _t: _forwarders.pop(sub_id, None))
         logger.info("remote sessions: %s subscribed (%s)", peer[:12], sub_id[:8])
         return scc.ok({"subscribed": True})
 
@@ -121,24 +136,23 @@ def subscribe_op(bus):
 # ── subscriber side ──────────────────────────────────────────────────────────
 
 
-def _address(name: str, label: str) -> str:
-    return f"{name}@{label}"
+def _address(name: str, machine_pub: str) -> str:
+    return f"{name}@{machine_pub}"
 
 
 class Mirror:
-    """This machine's view of every other roster machine's sessions."""
+    """Holds this machine's subscriptions and republishes what they carry."""
 
     def __init__(self, bus, *, control=None):
         self._bus = bus
         self._control = control or _control
-        self._labels: dict[str, str] = {}     # machine_pub -> label
-        self._rows: dict[str, list] = {}      # label -> rows (name@label)
+        self._names: dict[str, str] = {}      # machine_pub -> display name
         self._live: set[str] = set()          # machine_pubs with an open subscription
         self._retry: dict[str, float] = {}    # machine_pub -> next backoff
         self._task: asyncio.Task | None = None
 
-    def connected(self, label: str) -> bool:
-        return any(self._labels.get(pub) == label for pub in self._live)
+    def connected(self, machine_pub: str | None) -> bool:
+        return machine_pub in self._live
 
     def start(self) -> None:
         if self._task is None:
@@ -151,16 +165,15 @@ class Mirror:
         await asyncio.to_thread(self._control, "session-control-close-subscriptions", {})
 
     async def _run(self) -> None:
-        from tools.dashboard import fleet_machines, session_presence
+        from tools.dashboard import fleet_machines
 
         local, roster, names, _last = await asyncio.to_thread(fleet_machines._context)
         persona = await asyncio.to_thread(_personal_persona)
         if local is None or persona is None:
             logger.info("remote sessions: no fleet identity; not subscribing")
             return
-        self._labels = {pub: fleet_machines._label(pub, roster, names)
-                        for pub in roster if pub != local.machine_pub}
-        self._seed(await asyncio.to_thread(session_presence.read_presence))
+        self._names = {pub: fleet_machines._label(pub, roster, names)
+                       for pub in roster if pub != local.machine_pub}
         # The connector holds the channels. Until it answers -- at startup,
         # and after it restarted, which ended every channel without a word --
         # nothing is subscribed; on its first answer, subscribe to everyone.
@@ -172,7 +185,7 @@ class Mirror:
                     # an earlier dashboard left, both ways, before opening ours.
                     await asyncio.to_thread(
                         self._control, "session-control-close-subscriptions", {})
-                    for pub in self._labels:
+                    for pub in self._names:
                         await self._subscribe(pub, persona)
                     stale = False
                 reply = await asyncio.to_thread(
@@ -183,7 +196,6 @@ class Mirror:
                     logger.info("remote sessions: the connector is not answering; "
                                 "resubscribing when it does")
                     self._live.clear()
-                    self._publish_rows()
                 stale = True
                 await asyncio.sleep(RESUBSCRIBE_INITIAL_S)
                 continue
@@ -193,18 +205,6 @@ class Mirror:
                 continue
             for item in reply.get("items") or []:
                 await self._apply(item, persona)
-
-    def _seed(self, presence: list) -> None:
-        """The list before any live event: the synced presence rows."""
-        for pub, label in self._labels.items():
-            self._rows[label] = [{
-                "session_id": _address(r["tmux_name"], label),
-                "project": r.get("project") or "", "type": r.get("type") or "container",
-                "label": r.get("label") or "", "role": r.get("role") or "",
-                "harness": r.get("harness"), "model": r.get("model"),
-                "state": r.get("state"), "is_live": True, "started_at": r.get("since"),
-            } for r in presence if r.get("machine_pub") == pub]
-        self._publish_rows()
 
     async def _subscribe(self, pub: str, persona: str) -> None:
         await asyncio.to_thread(self._control, "session-control-subscribe",
@@ -217,50 +217,42 @@ class Mirror:
         await self._subscribe(pub, persona)
 
     async def _apply(self, item: dict, persona: str) -> None:
+        if "ended_sub_id" in item:      # a subscription this machine serves
+            end_forwarder(item["ended_sub_id"])
+            return
         pub = item.get("machine_pub")
-        label = self._labels.get(pub)
-        if label is None:
+        if pub not in self._names:
             return
         if item.get("subscribed"):
             self._live.add(pub)
             self._retry.pop(pub, None)
-            logger.info("remote sessions: subscribed to %s", label)
-            self._publish_rows()
+            logger.info("remote sessions: subscribed to %s", self._names[pub])
             return
         if "end" in item:
             self._live.discard(pub)
-            self._publish_rows()
-            logger.info("remote sessions: subscription to %s ended: %s %s", label,
-                        item.get("end"), item.get("detail", ""))
+            logger.info("remote sessions: subscription to %s ended: %s %s",
+                        self._names[pub], item.get("end"), item.get("detail", ""))
             if not item.get("refused"):
                 asyncio.get_running_loop().create_task(
                     self._resubscribe_later(pub, persona))
             return
         event = item.get("event") or {}
         topic, data = event.get("topic"), event.get("data")
+        machine = {"machine": self._names[pub], "machine_pub": pub,
+                   "machine_reachable": True}
         if topic == "session:registry" and isinstance(data, list):
-            self._rows[label] = [
-                {**row, "session_id": _address(row["session_id"], label)}
-                for row in data if isinstance(row, dict) and row.get("session_id")]
-            self._publish_rows()
+            await self._bus.broadcast(REMOTE_ROWS_TOPIC, {"rows": [
+                {**row, **machine, "session_id": _address(row["session_id"], pub)}
+                for row in data if isinstance(row, dict) and row.get("session_id")]},
+                dedup=False)
         elif topic == "session:messages" and isinstance(data, dict) and data.get("session_id"):
             from tools.dashboard import remote_view
 
-            address = _address(data["session_id"], label)
-            await self._bus.broadcast("session:messages",
-                                      remote_view.rewrite_identity(data, address),
-                                      dedup=False)
+            await self._bus.broadcast(
+                "session:messages",
+                remote_view.rewrite_identity(data, _address(data["session_id"], pub)),
+                dedup=False)
         elif topic == "session:ended" and isinstance(data, dict) and data.get("id"):
-            address = _address(data["id"], label)
-            self._rows[label] = [r for r in self._rows.get(label, [])
-                                 if r["session_id"] != address]
-            self._publish_rows()
+            address = _address(data["id"], pub)
             await self._bus.broadcast("session:ended", {
-                **data, "id": address, "tmux_session": address, "machine": label})
-
-    def _publish_rows(self) -> None:
-        self._bus.broadcast_sync(REMOTE_REGISTRY_TOPIC, {"machines": {
-            label: [{**row, "machine": label, "machine_pub": pub,
-                     "machine_reachable": pub in self._live}
-                    for row in self._rows.get(label, [])]
-            for pub, label in self._labels.items()}})
+                **data, "id": address, "tmux_session": address, **machine})

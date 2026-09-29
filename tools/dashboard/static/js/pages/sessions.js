@@ -1449,9 +1449,10 @@
             // re-fired _updateFromStore to expire it).
             if (created && created.tmux_name) {
               var ph = Alpine.store('sessions')[pendingId];
-              // A remote launch's real row is addressed <name>@<machine>.
-              if (ph) ph._realSession = detail.machineLabel
-                ? created.tmux_name + '@' + detail.machineLabel : created.tmux_name;
+              // A remote launch's real row is keyed <name>@<machine_pub>; the
+              // machine's display name is never part of a key.
+              if (ph) ph._realSession = detail.machine
+                ? created.tmux_name + '@' + detail.machine : created.tmux_name;
             }
           } catch (err) {
             // Create failed — drop the optimistic tile immediately so it
@@ -1781,7 +1782,7 @@
             // navigation until the real session reconciles in).
             _launching: s._launching === true,
             _hasData: !!hasData,
-            // A session on another fleet machine (session:remote-registry).
+            // A session on another fleet machine: presence + its forwarded events.
             machine: s.machine || undefined,
             machine_pub: s.machinePub || undefined,
             machine_reachable: s.machine ? s.machineReachable !== false : undefined,

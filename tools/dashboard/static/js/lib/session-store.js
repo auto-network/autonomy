@@ -1137,7 +1137,8 @@ window.ensureSessionMessages = function() {
   });
 
   // One registry row into its session's store: this machine's rows, and the
-  // other machines' rows (session:remote-registry, addressed name@machine).
+  // other machines' forwarded rows (session:remote-rows, keyed
+  // name@machine_pub; ``machine`` is only the display name).
   function _applyRegistryRow(s) {
     var store = window.getSessionStore(s.session_id);
     if (s.machine) {
@@ -1225,8 +1226,8 @@ window.ensureSessionMessages = function() {
     // its true FAILED state (Setup failed + Retry) from the DAO.
     var allSessions = Alpine.store('sessions');
     for (var id in allSessions) {
-      // name@machine runs on another machine: only its own machine's rows
-      // (session:remote-registry below) say whether it is live.
+      // name@machine_pub runs on another machine: its presence row and its
+      // own forwarded events say whether it is live, never this registry.
       if (id.indexOf('@') !== -1) continue;
       if (!activeIds[id] && allSessions[id].isLive) {
         allSessions[id].isLive = false;
@@ -1240,25 +1241,62 @@ window.ensureSessionMessages = function() {
     _emitSessionRegistryChanged(Object.keys(activeIds));
   });
 
-  // The other machines' sessions (remote_sessions.Mirror): {machines: {label:
-  // rows}}. Each machine's rows are that machine's live sessions, so one of
-  // its addresses missing from them is no longer live.
-  window.registerHandler('session:remote-registry', function(data) {
-    var machines = (data && data.machines) || {};
-    var allSessions = Alpine.store('sessions');
-    Object.keys(machines).forEach(function(label) {
-      var rows = machines[label] || [];
-      var present = {};
-      rows.forEach(function(row) { present[row.session_id] = true; _applyRegistryRow(row); });
-      var suffix = '@' + label;
-      for (var id in allSessions) {
-        if (id.slice(-suffix.length) === suffix && !present[id] && allSessions[id].isLive) {
-          allSessions[id].isLive = false;
-        }
-      }
-    });
+  // Another machine's forwarded registry rows (remote_sessions.Mirror): each
+  // updates the one session it names. A session missing from them has not
+  // ended -- only session:ended or its presence row says so.
+  window.registerHandler('session:remote-rows', function(data) {
+    ((data && data.rows) || []).forEach(_applyRegistryRow);
     _emitSessionStoreChanged('registry');
   });
+
+  window.registerHandler('session:ended', function(data) {
+    var id = data && data.id;
+    if (!id || String(id).indexOf('@') === -1) return;   // this machine: the registry
+    var s = Alpine.store('sessions')[id];
+    if (s) { s.isLive = false; _emitSessionStoreChanged('registry'); }
+  });
+
+  // Which sessions the other machines run: the synced presence Settings
+  // (GET /api/sessions/presence), re-read whenever a presence row changes.
+  // A presence row sets only what presence owns, so it never clears a phase
+  // or activity a forwarded event set.
+  var PRESENCE_SET_ID = 'autonomy.personal.session-presence';
+  function _applyPresenceRow(r) {
+    var store = window.getSessionStore(r.session_id);
+    store._presence = true;
+    store.machine = r.machine;
+    store.machinePub = r.machine_pub;
+    store.machineReachable = r.machine_reachable !== false;
+    store.project = r.project || store.project || '';
+    store.sessionType = r.type || store.sessionType || '';
+    if (r.label) store.label = r.label;
+    if (r.role) store.role = r.role;
+    if (r.harness) store.harness = r.harness;
+    if (r.model) store.model = r.model;
+    if (!store.state) store.state = r.state || null;
+    if (!store.startedAt) store.startedAt = r.started_at || 0;
+    store.isLive = true;
+  }
+  window.loadRemotePresence = async function() {
+    var data;
+    try {
+      var res = await fetch('/api/sessions/presence');
+      if (!res.ok) return;
+      data = await res.json();
+    } catch (e) { return; }
+    var present = {};
+    (data.sessions || []).forEach(function(r) { present[r.session_id] = true; _applyPresenceRow(r); });
+    // A presence row that is gone (deprecated when the session ended) ends it.
+    var all = Alpine.store('sessions');
+    for (var id in all) {
+      if (all[id]._presence && !present[id] && all[id].isLive) all[id].isLive = false;
+    }
+    _emitSessionStoreChanged('registry');
+  };
+  window.loadRemotePresence();
+  if (window.dashboardEvents && window.dashboardEvents.onSettingChanged) {
+    window.dashboardEvents.onSettingChanged(PRESENCE_SET_ID, window.loadRemotePresence);
+  }
 
   // Handle label_update events — update stored session's label field
   window.registerHandler('label_update', function(data) {
