@@ -127,7 +127,7 @@ RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
     && ln -sf /usr/local/bin/claude /home/agent/.local/bin/claude \
     && echo '{"numStartups":1,"hasCompletedOnboarding":true,"hasSeenTasksHint":true,"hasSeenStashHint":true,"remoteDialogSeen":true,"resumeReturnDismissed":true,"installMethod":"native","autoUpdates":false,"projects":{"/workspace/repo":{"hasTrustDialogAccepted":true,"effortCalloutV2Dismissed":true}}}' \
        > /home/agent/.claude.json \
-    && echo '{"skipDangerousModePermissionPrompt":true,"effortLevel":"high","disableArtifact":true,"permissions":{"deny":["AskUserQuestion","ExitPlanMode","Artifact"]}}' \
+    && echo '{"skipDangerousModePermissionPrompt":true,"effortLevel":"high","disableArtifact":true,"permissions":{"deny":["AskUserQuestion","ExitPlanMode","Artifact","SendFeedback"]}}' \
        > /home/agent/.claude/settings.json \
     && chown -R agent:agent /home/agent/.claude /home/agent/.codex /home/agent/.grok /home/agent/.agents /home/agent/.claude.json /home/agent/.local
 
