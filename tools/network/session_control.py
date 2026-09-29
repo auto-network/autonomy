@@ -764,6 +764,11 @@ async def _accept_subscription(request: dict, client_pub: str,
     if not reply.get("ok"):
         _published.pop(sub_id, None)
         return encode(reply)
+    # The live response waits on the queue, not the stream, so it would see
+    # a closed stream only at its next send: end it the moment the stream
+    # closes (a subscriber whose connector restarted), not at the next event.
+    watch = asyncio.ensure_future(endpoint.closed.wait())
+    watch.add_done_callback(lambda _done: _end_subscription(sub_id))
     return _Live(_subscription(sub_id, queue, encode(reply), endpoint))
 
 

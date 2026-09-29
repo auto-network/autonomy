@@ -81,6 +81,20 @@ async def _scenario(root, port, monkeypatch):
         assert session_control.publish(sub_id, {"topic": "t", "data": {}})["error_kind"] == \
             session_control.SUBSCRIPTION_NOT_FOUND
 
+        # The subscriber goes away (its connector restarted): the host ends
+        # its side at once, without waiting for an event to fail on it.
+        session_control.subscribe(a, runtime_a, machine_b.public_hex, "persona-p", timeout=5)
+        item = await broker_b.next(10)
+        sub_id = item["body"]["sub_id"]
+        broker_b.reply(item["id"], {"v": 1, "ok": True, "result": {"subscribed": True}})
+        await _next_items(1)
+        session_control._subscribed.pop(machine_b.public_hex).cancel()
+        for _ in range(100):
+            if sub_id not in session_control._published:
+                break
+            await asyncio.sleep(0.05)
+        assert sub_id not in session_control._published
+
         # A dashboard that refuses the persona: reported, and marked refused.
         session_control.subscribe(a, runtime_a, machine_b.public_hex, "persona-q", timeout=5)
         item = await broker_b.next(10)
