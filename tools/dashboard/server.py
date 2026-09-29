@@ -445,49 +445,6 @@ _RESTART_EXPECTED_MS = 30_000
 _RESTART_TOKEN_HEADER = "x-dashboard-restart-token"
 _restart_notice_lock = asyncio.Lock()
 _restart_notice_payload: dict[str, int] | None = None
-#: When the reloader last told this worker a successor is coming (monotonic),
-#: refreshed by every notice and consumed by the shutdown that honours it.
-#: Separate from _restart_notice_payload, which is announced once per worker
-#: and never cleared: an abandoned reload (the replacement died or timed out,
-#: and the incumbent kept serving) must not make a later real stop hand the
-#: connectors on to a successor that never comes (auto-2am2l).
-_reload_notice_at: float | None = None
-
-
-def _reload_notice_bound_seconds() -> float:
-    """The oldest a reload notice can be when its hand-over really happens.
-
-    The reloader sends the notice, then waits up to its ready timeout for the
-    replacement, then gives the incumbent its stop grace. Anything older came
-    from a reload that was abandoned. A shorter fixed bound would misfire on a
-    slow but real startup (observed at three minutes) and restart every
-    connector twice again."""
-    from tools.dashboard import reload_with_notice
-    return (reload_with_notice._ready_timeout_seconds()
-            + reload_with_notice._STOP_GRACE_SECONDS)
-
-
-def _note_reload_notice() -> None:
-    global _reload_notice_at
-    _reload_notice_at = time.monotonic()
-
-
-def _take_reload_notice() -> bool:
-    """Consume the reload notice: True once, and only if it is recent enough
-    that this shutdown is the hand-over it announced."""
-    global _reload_notice_at
-    at, _reload_notice_at = _reload_notice_at, None
-    return at is not None and time.monotonic() - at <= _reload_notice_bound_seconds()
-
-
-def _release_serving_connectors(supervisor) -> str:
-    """Shutdown: hand the connectors to the successor on an announced reload,
-    otherwise stop them. Returns which ("detach" or "stop")."""
-    if _take_reload_notice():
-        supervisor.detach_all()
-        return "detach"
-    supervisor.stop_all()
-    return "stop"
 
 
 def _write_restart_notice(payload: dict[str, Any]) -> None:
@@ -14607,7 +14564,6 @@ async def api_internal_restart_notice(request):
             changed_files = [str(f) for f in body["changed_files"] if f]
     except Exception:
         body, changed_files = {}, []
-    _note_reload_notice()
     if isinstance(body, dict) and body.get("mode") == "handoff":
         # Snapshot first: the vault is what a slow answer loses (auto-wb6ok).
         # Then announce so the operator sees the reload begin (cause + progress
@@ -23640,13 +23596,17 @@ async def _on_shutdown():
     # A reload hands the connectors to the next process: they are detached so
     # they outlive this worker, and the successor adopts a current one or
     # replaces a stale one (_adopt_incumbent). Terminating them here restarted
-    # every connector twice per landing (auto-2am2l). Only a recent reloader
+    # every connector twice per landing (auto-2am2l). Only the reloader's
     # notice (api_internal_restart_notice) proves a successor is coming; any
     # other shutdown is a real stop and takes the connectors with it, so none
     # serves with no dashboard to supervise it.
     try:
         from tools.dashboard import link_serving_supervisor
-        _release_serving_connectors(link_serving_supervisor.get_supervisor())
+        _supervisor = link_serving_supervisor.get_supervisor()
+        if _restart_notice_payload is not None:
+            _supervisor.detach_all()
+        else:
+            _supervisor.stop_all()
     except Exception:
         logger.exception("error stopping the serving supervisor")
     # Drain settings-mediator BEFORE cancelling the dispatcher tasks so
