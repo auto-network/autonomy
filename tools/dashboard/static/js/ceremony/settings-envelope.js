@@ -12,6 +12,7 @@
 import {
   bytesToHex,
   canonicalJson,
+  compareLikePython,
   domainBytes,
   hexToBytes,
 } from './primitives.js';
@@ -44,6 +45,47 @@ if (
 }
 if (!webCrypto?.subtle) {
   throw new Error('settings envelopes require WebCrypto');
+}
+
+/**
+ * Canonical JSON for the envelope: primitives.canonicalJson's rules
+ * (sorted keys, no whitespace, ASCII escapes) plus finite floats in
+ * ECMAScript Number::toString form — which is what String(number) IS, and
+ * what Python's ecmascript_number reproduces. Non-finite numbers and
+ * foreign types are refused. Floats are application data (a timing, a
+ * ratio); refusing them refused every such write (2026-09-29).
+ */
+function canonicalEnvelopeJson(value) {
+  if (value === null) return 'null';
+  const type = typeof value;
+  if (type === 'boolean') return value ? 'true' : 'false';
+  if (type === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new Error(`non-finite number ${value} has no JSON encoding`);
+    }
+    if (Number.isInteger(value) && !Number.isSafeInteger(value) && Math.abs(value) < 1e21) {
+      // Prints as plain digits JavaScript cannot round-trip and Python
+      // reads back as an integer outside D11's domain; both sides refuse
+      // it (Python: ecmascript_number). From 1e21 the form carries an
+      // exponent and is a float on both sides.
+      throw new Error(`integer-valued number ${value} is outside the JavaScript-safe range`);
+    }
+    return String(value);   // -0 prints as 0; Number::toString == Python ecmascript_number
+  }
+  if (type === 'string') return canonicalJson(value);
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalEnvelopeJson).join(',')}]`;
+  }
+  if (type === 'object') {
+    const parts = [];
+    for (const key of Object.keys(value).sort(compareLikePython)) {
+      const member = value[key];
+      if (member === undefined) continue;
+      parts.push(`${canonicalJson(key)}:${canonicalEnvelopeJson(member)}`);
+    }
+    return `{${parts.join(',')}}`;
+  }
+  throw new Error(`type ${type} is not allowed in a settings envelope`);
 }
 
 function requireLowerHex(value, length, name) {
@@ -104,7 +146,9 @@ function buildSettingsRecord({
   if (successorId !== null) {
     requireNonEmptyString(successorId, 'successor_id');
   }
-  requirePlainObject(payload, 'payload');
+  if (payload === undefined) {
+    throw new Error('payload must be present (any JSON value the row stores)');
+  }
   if (!Number.isSafeInteger(signedAt) || signedAt < 0) {
     throw new Error('signed_at must be a non-negative integer (unix milliseconds)');
   }
@@ -140,7 +184,7 @@ function buildSettingsRecord({
   };
   // This also rejects values outside the shared canonical-JSON grammar
   // (floats, undefined, foreign types) anywhere in payload or witness.
-  canonicalJson(record);
+  canonicalEnvelopeJson(record);
   return record;
 }
 
@@ -161,7 +205,7 @@ function validateSettingsRecord(record) {
 function settingsSigningInput(record) {
   return domainBytes(
     SETTINGS_ENVELOPE_DOMAIN,
-    canonicalJson(validateSettingsRecord(record)),
+    canonicalEnvelopeJson(validateSettingsRecord(record)),
   );
 }
 
@@ -228,6 +272,7 @@ async function verifySettingsRecord(record, signatureHex) {
 }
 
 export {
+  canonicalEnvelopeJson,
   ENVELOPE_FIELDS,
   PUBLICATION_STATES,
   SETTINGS_ENVELOPE_DOMAIN,

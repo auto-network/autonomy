@@ -166,6 +166,10 @@ def build_vectors() -> dict:
     unsafe_refusals = {
         "unsafe_int_signed_at": {**base_fields, "signed_at": 2**53},
         "unsafe_int_payload": {**base_fields, "payload": {"n": 2**53}},
+        # An integer-valued float that prints as plain digits beyond the
+        # safe range: JavaScript cannot round-trip it and Python would read
+        # it back as an unsafe integer, so both builders refuse it.
+        "unsafe_float_payload": {**base_fields, "payload": {"n": 1e20}},
         "unsafe_int_witness": {
             **base_fields,
             "witness": {
@@ -182,8 +186,29 @@ def build_vectors() -> dict:
         else:
             raise AssertionError("Python accepted an integer JS cannot encode")
 
+    # Floats: application data in ECMAScript Number::toString form on both
+    # sides; and a payload that is not an object (a vault-sealed set stores
+    # a JSON string). Both must encode identically — live 2026-09-29 both
+    # shapes were refused, failing every such write for an hour.
+    float_payload = {
+        "duration_s": 0.125, "ratio": 0.1, "big": 1e21, "small": 1e-7, "tiny": 5e-324,
+        "huge": 1.7976931348623157e308, "neg": -2.5, "whole": 100.0, "micro": 1e-6,
+        "safe_edge": 9007199254740991.0, "zero": 0.0, "negzero": -0.0,
+        "list": [3.14, 2.5e-5, 1234567.0],
+    }
+    floats = build_record(**{**base_fields, "payload": float_payload})
+    sealed = build_record(**{**base_fields, "payload": "autonomy.vault.v1.eyJkb21haW5faWQiOiJ4In0"})
+    listed = build_record(**{**base_fields, "payload": [1, "two", None, {"k": 0.5}]})
+
     return {
         "personal_root_seed_hex": PERSONAL_ROOT_SEED.hex(),
+        "floats": {
+            "input": floats,
+            "canonical_hex": record_bytes(floats).hex(),
+            "signature_hex": sign_record(persona_a, floats),
+        },
+        "sealed_payload": {"input": sealed, "canonical_hex": record_bytes(sealed).hex()},
+        "array_payload": {"input": listed, "canonical_hex": record_bytes(listed).hex()},
         "genesis_ids": GENESIS_IDS,
         "base": {
             "input": base,

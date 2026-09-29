@@ -3,12 +3,13 @@ import { readFile } from 'node:fs/promises';
 
 import { derivePersona } from '../ledger-event.js';
 import {
+  canonicalEnvelopeJson,
   buildSettingsRecord,
   settingsSigningInput,
   signSettingsRecord,
   verifySettingsRecord,
 } from '../settings-envelope.js';
-import { bytesToHex, canonicalJson, hexToBytes } from '../primitives.js';
+import { bytesToHex, hexToBytes } from '../primitives.js';
 
 const fixturePath = process.argv[2];
 if (!fixturePath) {
@@ -18,7 +19,7 @@ const fixture = JSON.parse(await readFile(fixturePath, 'utf8'));
 const textEncoder = new TextEncoder();
 
 function canonicalHex(record) {
-  return bytesToHex(textEncoder.encode(canonicalJson(buildSettingsRecord(record))));
+  return bytesToHex(textEncoder.encode(canonicalEnvelopeJson(buildSettingsRecord(record))));
 }
 
 // --- base record: byte-identical encoding, signing input, both signatures ---
@@ -159,10 +160,41 @@ for (const [name, input] of Object.entries(fixture.refusals)) {
     `refusal ${name}: an envelope that cannot name its signer cannot exist`,
   );
 }
-assert.throws(
-  () => buildSettingsRecord({ ...base.input, payload: { bad: 1.5 } }),
-  'refusal: floats are outside the canonical grammar',
+// --- floats and non-object payloads: byte-identical on both sides ---
+assert.equal(canonicalHex(fixture.floats.input), fixture.floats.canonical_hex, 'floats: canonical bytes');
+assert.equal(
+  await verifySettingsRecord(fixture.floats.input, fixture.floats.signature_hex),
+  true,
+  'floats: Python signature verifies in Node',
 );
+assert.equal(
+  canonicalHex(fixture.sealed_payload.input),
+  fixture.sealed_payload.canonical_hex,
+  'sealed string payload: canonical bytes',
+);
+assert.equal(
+  canonicalHex(fixture.array_payload.input),
+  fixture.array_payload.canonical_hex,
+  'array payload: canonical bytes',
+);
+assert.throws(
+  () => buildSettingsRecord({ ...base.input, payload: { bad: Number.NaN } }),
+  /non-finite/,
+  'NaN is refused',
+);
+assert.throws(
+  () => buildSettingsRecord({ ...base.input, payload: { bad: Number.POSITIVE_INFINITY } }),
+  /non-finite/,
+  'Infinity is refused',
+);
+// An undefined member is omitted, as JSON.stringify and primitives.canonicalJson omit it.
+assert.equal(canonicalEnvelopeJson({ a: undefined, b: 1 }), '{"b":1}', 'undefined members are omitted');
+assert.throws(
+  () => canonicalEnvelopeJson({ n: 1e20 }),
+  /safe range/,
+  'an integer-valued double beyond the safe range and below 1e21 is refused',
+);
+assert.equal(canonicalEnvelopeJson({ n: 1e21 }), '{"n":1e+21}', 'from 1e21 the form is exponential');
 assert.throws(
   () => buildSettingsRecord({ ...base.input, deprecated: 0 }),
   'refusal: deprecated must be a boolean, not an integer',

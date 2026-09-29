@@ -327,6 +327,7 @@ def test_unsigned_rows_are_refused_only_behind_the_flag(pair, monkeypatch):
                 " VALUES (?,?,1,?,?,'raw')", (str(uuid.uuid4()), SET_ID, key, json.dumps({"v": value})),
             )
 
+    monkeypatch.setattr(materialize_module, "REQUIRE_SIGNED_ORG_ROWS", False)
     unsigned(100, "k-off", "flag off")
     _exchange(a, "a" * 64, b)
     assert _rows(b_db, SET_ID, "k-off") == [(None, "flag off")]

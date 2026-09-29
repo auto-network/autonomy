@@ -29,7 +29,8 @@ The record is::
   signing key is not the row key, so a row that cannot name its signer cannot
   be written at all.
 
-The signature is Ed25519 over ``SETTINGS_ENVELOPE_DOMAIN || canonical_json(record)``.
+The signature is Ed25519 over ``SETTINGS_ENVELOPE_DOMAIN || canonical_envelope_json(record)``:
+idkit's canonical JSON rules plus floats in ECMAScript number form.
 Both languages share one canonicalization: :mod:`tools.network.idkit.canonical`
 here, ``canonicalJson`` in ``ceremony/primitives.js`` in the browser. Do not
 add a second one.
@@ -39,7 +40,10 @@ from __future__ import annotations
 
 import json
 
-from tools.network.idkit import KeyPair, canonical_json, verify_signature
+import json
+import math
+
+from tools.network.idkit import KeyPair, verify_signature
 from tools.network.idkit.errors import MalformedError
 from tools.network.idkit.keys import PUBLIC_KEY_HEX_LEN, _decode_hex
 
@@ -75,6 +79,94 @@ MAX_SAFE_INTEGER = 2**53 - 1
 
 class EnvelopeFormatError(MalformedError):
     """A settings envelope record is structurally malformed."""
+
+
+def ecmascript_number(value: float) -> str:
+    """The ECMAScript ``Number::toString`` form of a finite float: the
+    shortest round-trip digits (which Python's ``repr`` also produces),
+    laid out exactly as JavaScript lays them out — ``0.1``, ``100``,
+    ``1e+21``, ``1e-7``, ``0.000001`` — so the browser builder's
+    ``String(number)`` and this encoder agree byte for byte. ``-0`` is
+    ``0``, as in JavaScript. Non-finite values are refused."""
+    if isinstance(value, bool) or not isinstance(value, float):
+        raise EnvelopeFormatError("ecmascript_number takes a float")
+    if not math.isfinite(value):
+        raise EnvelopeFormatError("non-finite floats have no JSON encoding")
+    if value == 0.0:
+        return "0"
+    if value.is_integer() and MAX_SAFE_INTEGER < abs(value) < 1e21:
+        # Prints as plain digits (no exponent) that JavaScript cannot round
+        # trip and that Python reads back as an INTEGER outside D11's
+        # domain: the two sides would disagree, so both refuse it. From
+        # 1e21 the form carries an exponent and reads back as a float.
+        raise EnvelopeFormatError(
+            f"integer-valued float {value!r} is outside the JavaScript-safe "
+            f"range and has no shared encoding"
+        )
+    text = repr(value)
+    sign = ""
+    if text[0] == "-":
+        sign, text = "-", text[1:]
+    mantissa, _, exponent = text.partition("e")
+    e = int(exponent) if exponent else 0
+    integer_part, _, fraction = mantissa.partition(".")
+    digits = (integer_part + fraction).lstrip("0")
+    scale = e - len(fraction)
+    stripped = digits.rstrip("0")
+    scale += len(digits) - len(stripped)
+    digits = stripped
+    k = len(digits)
+    n = k + scale                      # value = 0.d1…dk × 10^n
+    if k <= n <= 21:
+        out = digits + "0" * (n - k)
+    elif 0 < n <= 21:
+        out = digits[:n] + "." + digits[n:]
+    elif -6 < n <= 0:
+        out = "0." + "0" * (-n) + digits
+    else:
+        exp10 = n - 1
+        head = digits[0] + ("." + digits[1:] if k > 1 else "")
+        out = f"{head}e{'+' if exp10 >= 0 else '-'}{abs(exp10)}"
+    return sign + out
+
+
+def _canonical_value(value: object, where: str) -> str:
+    """Canonical JSON text of one envelope value: the idkit rules (sorted
+    keys, no whitespace, ASCII-only, no NaN) plus floats in ECMAScript
+    form. Floats ARE allowed here, unlike idkit's canonical_json: a
+    settings payload is application data (timings, ratios) and refusing
+    them refused every such write (live 2026-09-29: the testing plugin's
+    event log failed on every write for an hour after S2)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        try:
+            return ecmascript_number(value)
+        except EnvelopeFormatError as exc:
+            raise EnvelopeFormatError(f"{where}: {exc}") from None
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=True)
+    if isinstance(value, dict):
+        parts = []
+        for key in sorted(value):
+            if not isinstance(key, str):
+                raise EnvelopeFormatError(f"{where}: object keys must be strings")
+            parts.append(json.dumps(key, ensure_ascii=True) + ":" + _canonical_value(value[key], f"{where}.{key}"))
+        return "{" + ",".join(parts) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_canonical_value(v, f"{where}[{i}]") for i, v in enumerate(value)) + "]"
+    raise EnvelopeFormatError(
+        f"{where}: type {type(value).__name__} is not allowed in a settings envelope"
+    )
+
+
+def canonical_envelope_json(record: dict) -> bytes:
+    """The envelope's canonical bytes (the JS builder's canonicalEnvelopeJson)."""
+    return _canonical_value(record, "record").encode("ascii")
 
 
 def _check_safe_integers(value: object, where: str) -> None:
@@ -155,8 +247,10 @@ def build_record(
         raise EnvelopeFormatError("deprecated must be a boolean")
     if successor_id is not None:
         _require_str(successor_id, "successor_id")
-    if not isinstance(payload, dict):
-        raise EnvelopeFormatError("payload must be a JSON object")
+    # The payload is whatever the row stores: an object for a plain set, a
+    # JSON string for a vault-sealed set (the sealed blob), an array or a
+    # scalar where a schema says so. The canonical grammar below is the
+    # only shape rule.
     if isinstance(signed_at, bool) or not isinstance(signed_at, int) or signed_at < 0:
         raise EnvelopeFormatError(
             "signed_at must be a non-negative integer (unix milliseconds)"
@@ -166,12 +260,9 @@ def build_record(
             "witness must be the served attestation object, or None for an "
             "organization that has never published"
         )
-    # The canonical grammar is the last gate: floats, non-string keys and
-    # foreign types anywhere in payload or witness are refused here.
-    try:
-        canonical_json(record)
-    except MalformedError as exc:
-        raise EnvelopeFormatError(str(exc)) from None
+    # The canonical grammar is the last gate: non-finite floats, non-string
+    # keys and foreign types anywhere in payload or witness are refused.
+    canonical_envelope_json(record)
     # Then the shared-domain gate: every integer anywhere in the record must
     # be representable by BOTH builders (D11), so the JavaScript-safe bound
     # applies recursively — payload and witness included.
@@ -196,7 +287,7 @@ def validate_record(record: object) -> dict:
 
 def record_bytes(record: dict) -> bytes:
     """The canonical bytes of the validated record."""
-    return canonical_json(validate_record(record))
+    return canonical_envelope_json(validate_record(record))
 
 
 def signing_input(record: dict) -> bytes:
@@ -232,7 +323,7 @@ def verify_record(record: dict, sig_hex: str) -> dict:
     """
     validated = validate_record(record)
     verify_signature(
-        validated["signing_key"], sig_hex, SETTINGS_ENVELOPE_DOMAIN + canonical_json(validated)
+        validated["signing_key"], sig_hex, SETTINGS_ENVELOPE_DOMAIN + canonical_envelope_json(validated)
     )
     return validated
 

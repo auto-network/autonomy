@@ -206,6 +206,7 @@ async function importEd25519RootSigningKey(ed25519SigningSeed) {
 // Byte-compatible with the canonical Python (tools/network/idkit/armor.py):
 export {
   canonicalJson,
+  compareLikePython,
   hexToBytes,
   bytesToHex,
   b64ToBytes,

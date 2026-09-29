@@ -177,12 +177,16 @@ def test_an_envelope_with_no_signing_key_is_refused_for_both_strategies():
         ("deprecated", 0),
         ("deprecated", 1),
         ("successor_id", ""),
-        ("payload", ["not", "an", "object"]),
-        ("payload", {"pi": 3.14}),
         ("signed_at", -1),
         ("signed_at", True),
         ("witness", {}),
-        ("witness", {"entry": {"t": 1.5}}),
+        ("payload", {"nan": float("nan")}),
+        ("payload", [float("inf")]),
+        ("payload", {"bytes": b"x"}),
+        ("payload", {"f": 1e20}),
+        ("payload", {"f": 9007199254740992.0}),
+        ("payload", [-1.2345678901234568e20]),
+        ("payload", {1: "non-string key"}),
     ],
 )
 def test_structural_defects_are_refused(field, value):
@@ -306,3 +310,49 @@ def test_signing_input_is_domain_separated():
         b"autonomy.network.settings.envelope.v1\n"
     )
     assert signing_input(record)[38:] == record_bytes(record)
+
+
+# ECMAScript Number::toString forms, which String(number) produces in the
+# browser builder; the vectors test asserts the same table against Node.
+ECMASCRIPT_FORMS = [
+    (0.1, "0.1"), (100.0, "100"), (1234567.0, "1234567"), (123.456, "123.456"),
+    (1e-6, "0.000001"), (2.5e-5, "0.000025"), (1e-7, "1e-7"), (5e-324, "5e-324"),
+    (1e21, "1e+21"), (1.5e300, "1.5e+300"), (9007199254740991.0, "9007199254740991"),
+    (1.7976931348623157e308, "1.7976931348623157e+308"), (-2.5, "-2.5"),
+    (-0.0, "0"), (0.0, "0"),
+]
+
+
+@pytest.mark.parametrize("value,text", ECMASCRIPT_FORMS)
+def test_floats_encode_in_ecmascript_number_form(value, text):
+    from tools.network.settingskit.envelope import ecmascript_number
+    assert ecmascript_number(value) == text
+
+
+def test_float_payloads_sign_and_verify_and_stay_byte_sensitive():
+    """Live 2026-09-29: the testing plugin's event log carried timings and
+    every write into the organization store failed the envelope for an
+    hour after signed writes went live. Floats are application data."""
+    record = build_record(**base_fields(payload={"duration_s": 0.125, "ratios": [0.1, 1e21, -2.5e-7], "n": 3}))
+    assert b'"duration_s":0.125' in record_bytes(record) and b"1e+21" in record_bytes(record)
+    persona = KeyPair.generate()
+    record = build_record(**base_fields(signing_key=persona.public_hex, payload={"t": 0.1}))
+    sig = sign_record(persona, record)
+    verify_record(record, sig)
+    with pytest.raises(SignatureError):
+        verify_record(build_record(**base_fields(signing_key=persona.public_hex, payload={"t": 0.10000000000000002})), sig)
+    # An integer-valued float and the integer encode identically, as in
+    # JavaScript, where they are one value.
+    assert record_bytes(build_record(**base_fields(payload={"n": 5.0}))) == \
+        record_bytes(build_record(**base_fields(payload={"n": 5})))
+
+
+def test_a_sealed_string_and_an_array_payload_are_envelope_values():
+    """A vault-sealed set stores its payload as a JSON string (the sealed
+    blob); live 2026-09-29 dynbench held seven such rows the envelope
+    refused as 'payload must be a JSON object'."""
+    sealed = build_record(**base_fields(payload="autonomy.vault.v1.eyJkb21haW5faWQiOiJ4In0"))
+    assert b'"payload":"autonomy.vault.v1.' in record_bytes(sealed)
+    listed = build_record(**base_fields(payload=[1, "two", None]))
+    assert b'"payload":[1,"two",null]' in record_bytes(listed)
+    assert record_bytes(sealed) != record_bytes(listed)

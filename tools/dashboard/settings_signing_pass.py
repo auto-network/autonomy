@@ -43,6 +43,7 @@ from typing import Any
 
 from tools.graph import settings_ops
 from tools.network.fleet_sync.materialize import LEDGER_EVENT_SET_ID
+from tools.network.settingskit.envelope import EnvelopeFormatError
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,13 @@ def sign_org_store(org: str, *, apply: bool = True, chunk_rows: int = CHUNK_ROWS
                 )
             except settings_ops.SettingsSignerRefused as refused:
                 report["refused"][refused.reason] = report["refused"].get(refused.reason, 0) + 1
+                continue
+            except EnvelopeFormatError as exc:
+                # A row the envelope cannot encode (a non-finite float, a
+                # foreign type): left unsigned and named, never the whole
+                # store's failure.
+                reason = "envelope:" + str(exc)[:80]
+                report["refused"][reason] = report["refused"].get(reason, 0) + 1
                 continue
             if envelope[1] is None:
                 # No signer held for this organization in this process:
