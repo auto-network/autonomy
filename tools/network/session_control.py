@@ -64,7 +64,7 @@ INBOUND_REPLY_TIMEOUT_S = 30.0
 INBOUND_QUEUE_LIMIT = 64
 
 #: A reply may stream one local file after its JSON header
-#: (graph://7eb29bc8-31a §9.2 ``output`` / ``fetch-branch``): records cap at
+#: (graph://7eb29bc8-31a §9.2 ``output``): records cap at
 #: MAX_RECORD_BYTES, so the dashboard names a file and this process streams
 #: it in chunks. Bounded per transfer.
 STREAM_CHUNK_BYTES = 192 * 1024

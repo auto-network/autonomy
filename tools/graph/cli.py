@@ -2237,32 +2237,6 @@ def cmd_session(args):
             sys.exit(2)
 
 
-def cmd_worktree_fetch(args):
-    """Fetch a remote session's branch into this machine's Worktrees."""
-    client = get_client()
-    if not isinstance(client, HttpClient):
-        print("Error: graph worktree fetch needs the dashboard API", file=sys.stderr)
-        sys.exit(1)
-    try:
-        reply = client.worktree_remote_fetch(args.session, args.repo)
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(2)
-    failed = False
-    for repo in (reply or {}).get("repos") or []:
-        if repo.get("empty"):
-            print(f"  = {repo['repo']}: nothing new ({str(repo.get('head'))[:12]})")
-        elif repo.get("head") and not repo.get("error") and not repo.get("refusal"):
-            print(f"  \u2713 {repo['repo']}: {str(repo['head'])[:12]} -> "
-                  f"{repo.get('worktree')}{'  (' + repo['warning'] + ')' if repo.get('warning') else ''}")
-        else:
-            failed = True
-            print(f"  \u2717 {repo.get('repo')}: {repo.get('refusal') or ''} "
-                  f"{repo.get('error') or ''}".rstrip(), file=sys.stderr)
-    if failed:
-        sys.exit(2)
-
-
 def cmd_set_role(args):
     """Set the session role."""
     role = " ".join(args.role)
@@ -6623,12 +6597,6 @@ def main():
     p_wt_list = wt_sub.add_parser("list", help="List session worktree directories")
     p_wt_list.add_argument("--worktrees-dir", help="Override data/worktrees/ path")
     p_wt_list.set_defaults(func=cmd_worktree_list)
-
-    p_wt_fetch = wt_sub.add_parser(
-        "fetch", help="Bring a remote session's branch home: <name>@<machine>")
-    p_wt_fetch.add_argument("session", help="<name>@<machine>")
-    p_wt_fetch.add_argument("--repo", help="Only this repo (default: every writable repo)")
-    p_wt_fetch.set_defaults(func=cmd_worktree_fetch)
 
     for command, handler, help_text in (
         ("status", cmd_worktree_status, "Show sync and merge readiness"),

@@ -105,7 +105,7 @@ async def request(machine: str, op: str, body: dict | None = None, *,
     """Send *op* to the fleet machine named *machine*; the reply record.
 
     ``stream`` asks for a reply that carries a file (``output``,
-    ``fetch-branch``): the personal connector writes it under
+    a large ``tail``): the personal connector writes it under
     data/session-transfer and ``result.file`` names it; the caller owns
     deleting it."""
     machine_pub = await asyncio.to_thread(resolve_machine, machine)

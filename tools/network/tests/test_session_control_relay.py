@@ -349,7 +349,7 @@ async def _stream_scenario(root, port, source, payload, data_root):
         answering = asyncio.create_task(answer(
             {"stream_file": str(staged), "stream_delete": True}))
         reply = await session_control.request(
-            a, runtime_a, machine_pub=machine_b.public_hex, op="fetch-branch",
+            a, runtime_a, machine_pub=machine_b.public_hex, op="output",
             body={}, timeout=10, stream=True)
         await answering
         assert Path(reply["result"]["file"]).read_bytes() == b"bundle"
