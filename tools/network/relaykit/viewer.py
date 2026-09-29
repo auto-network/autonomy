@@ -224,6 +224,11 @@ class ViewerChannel:
                 if opened.stream_final:
                     return
 
+    async def ping(self):
+        """Send a transport ping; the returned future completes on the pong
+        (fleet_sync_channel.wait_alive judges liveness by it, on wake)."""
+        return await self._ws.ping()
+
     async def close(self) -> None:
         with contextlib.suppress(Exception):
             await self._ws.close()

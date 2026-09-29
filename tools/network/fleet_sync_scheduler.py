@@ -1316,12 +1316,21 @@ async def bounded_stream_frames(
     one frame is therefore observed here as FIRST-frame silence and gets
     the larger allowance — still bounded, just at the other constant.
     """
+    from tools.network.fleet_sync_channel import wait_alive
+
     stream = channel.recv_message_stream().__aiter__()
+    # The transport's ping, when the channel has one (a direct channel):
+    # each wait for the next frame proves the peer alive under wait_alive —
+    # pinging only WHILE waiting, judged on wake — so a dead or frozen peer
+    # is caught in 40 s on any wait, and a busy local loop, or this
+    # consumer's own apply between frames, can never fail a live peer
+    # (auto-fkqz6; the direct channel carries no library keepalive).
+    ping = getattr(channel, "ping", None)
     allowance = first_allowance_s
     first = True
     while True:
         try:
-            item = await asyncio.wait_for(stream.__anext__(), allowance)
+            item = await asyncio.wait_for(wait_alive(stream.__anext__(), ping=ping), allowance)
         except StopAsyncIteration:
             return
         except asyncio.TimeoutError:

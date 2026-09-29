@@ -101,13 +101,16 @@ class DirectChannelServer:
         return len(self._server.connections) if self._server is not None else 0
 
     async def start(self) -> int:
-        # ping/pong pinned, not defaulted: fleet sync's stream liveness
-        # policy (auto-fzy8s) counts on this layer to detect dead and
-        # frozen peers, so a websockets upgrade must never silently
-        # disable it.
+        # No library keepalive on the direct listener (auto-fkqz6): its
+        # pong deadline closed every large pull ~90 s in, because a peer
+        # whose event loop is busy applying (SJC-2: stalls of 7-28 s,
+        # 2026-09-29) reads the pong late and the library fails the socket
+        # on a wall deadline. Liveness is fleet_sync_channel.wait_alive's
+        # (pinging only while waiting on the peer, judged on wake) and the
+        # serve's send bound; the ping is handed to the channel server.
         self._server = await websockets.serve(
             self._handle, self._host, self._port, max_size=2**22,
-            compression=None, ping_interval=20, ping_timeout=20,
+            compression=None, ping_interval=None, ping_timeout=None,
         )
         self._port = self._server.sockets[0].getsockname()[1]
         return self._port
@@ -153,7 +156,7 @@ class DirectChannelServer:
             else:
                 await self._channel_server(
                     token=data["session"], recv=recv, send=ws.send,
-                    handler=self._handler, close=ws.close,
+                    handler=self._handler, close=ws.close, ping=ws.ping,
                 )
         except Exception:  # HandshakeError, RecordError, transport failures
             pass

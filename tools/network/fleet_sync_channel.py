@@ -19,6 +19,7 @@ import contextlib
 import hashlib
 import inspect
 import json
+import logging
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -76,6 +77,8 @@ _SERVER_FIELDS = frozenset(
     }
 )
 
+
+logger = logging.getLogger(__name__)
 
 def _hex64(value: object, what: str) -> str:
     if (
@@ -671,18 +674,92 @@ class FleetDirectServer:
     async def stop(self) -> None:
         await self._server.stop()
 
-    async def _serve(self, *, token: str, recv, send, handler, close=None) -> None:
+    async def _serve(self, *, token: str, recv, send, handler, close=None, ping=None) -> None:
         await serve_fleet_transport(
             token=token, recv=recv, send=send, handler=handler, close=close,
             authenticator=self.authenticator,
-            org_channel_for=self._org_channel_for,
+            org_channel_for=self._org_channel_for, ping=ping,
         )
+
+
+#: Direct-channel liveness (auto-fkqz6): while an endpoint WAITS ON ITS PEER
+#: (the puller for the next frame, the listener for the next request) it
+#: pings every DIRECT_PING_INTERVAL_S and declares the peer dead only when,
+#: DIRECT_PING_TIMEOUT_S later, neither a frame nor the pong has arrived —
+#: judged by done() on wake, never by a wall deadline, so a stall of the
+#: local event loop (SJC-2's puller loop: 7-28 s, 2026-09-29) cannot fail a
+#: peer that answered. No ping is in flight while an endpoint is busy with
+#: its own work (applying a batch, building a page): the peer's silence is
+#: then not the peer's fault. Dead peers are still caught in
+#: interval + timeout = 40 s on any wait, as the 2026-09-03 policy wanted.
+DIRECT_PING_INTERVAL_S = 20.0
+DIRECT_PING_TIMEOUT_S = 20.0
+#: A serve's send that cannot complete in this long means the peer stopped
+#: reading: a puller reads continuously except while it applies one bounded
+#: batch (APPLY_BATCH_TRANSACTIONS / APPLY_FLUSH_INTERVAL_S) or its loop
+#: stalls; two minutes is an order of magnitude above both. Progress, not
+#: pong latency, is the liveness signal of a streaming serve (the relay pull
+#: learned the same on 2026-09-06: fleet_relay_sync.PULL_PING_TIMEOUT_S).
+SERVE_SEND_STALL_S = 120.0
+
+
+class PeerUnresponsive(ConnectionError):
+    """A wait on the peer ended with neither data nor a pong: the peer is
+    dead or frozen (killed, SIGSTOPped, its event loop starved)."""
+
+
+async def wait_alive(awaitable, *, ping, interval_s: float | None = None,
+                     timeout_s: float | None = None):
+    """Await *awaitable* while proving the peer alive.
+
+    Whenever nothing has arrived for ``interval_s``, send a ping; the peer is
+    declared dead only if ``timeout_s`` later NEITHER the awaitable NOR the
+    pong has completed. Both are checked with ``done()`` after the wait
+    returns, so a local loop stall longer than the timeout — during which
+    the pong arrived and sits in the socket — resolves as alive the moment
+    the loop wakes. ``ping`` is the transport's ``ping()``; a ping that
+    cannot even be SENT within ``timeout_s`` (the peer stopped draining our
+    writes) is the same verdict. With ``ping=None`` this is a plain await."""
+    if ping is None:
+        return await awaitable
+    # Read at call time, not bound at definition: the constants are the
+    # policy, and a test shrinks them.
+    interval_s = DIRECT_PING_INTERVAL_S if interval_s is None else interval_s
+    timeout_s = DIRECT_PING_TIMEOUT_S if timeout_s is None else timeout_s
+    task = asyncio.ensure_future(awaitable)
+    try:
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=interval_s)
+            if task in done:
+                return task.result()
+            try:
+                pong = await asyncio.wait_for(ping(), timeout_s)
+            except asyncio.TimeoutError:
+                raise PeerUnresponsive(
+                    f"peer stopped reading: a ping could not be sent within {timeout_s:g}s"
+                ) from None
+            done, _pending = await asyncio.wait(
+                {task, pong}, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED,
+            )
+            if task in done:
+                return task.result()
+            if pong.done() and not pong.cancelled() and pong.exception() is None:
+                continue   # alive: keep waiting for the data
+            raise PeerUnresponsive(
+                f"peer sent neither data nor a pong within {timeout_s:g}s of a ping"
+            )
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
 
 
 async def serve_fleet_transport(
     *, token: str, recv, send, handler, close=None,
     authenticator: FleetAuthenticator,
     org_channel_for: "Callable[[str], OrgFleetAuthenticator | None] | None" = None,
+    ping=None,
 ) -> None:
     """Serve the existing fleet handshake and records on carrier callbacks.
 
@@ -690,8 +767,13 @@ async def serve_fleet_transport(
     cleanup, just as DirectChannelServer does. ``close(code=, reason=)``
     is the transport's close, used to end an org-admitted connection whose
     persona left the newest adopted member set with CLOSE_MEMBERSHIP_STALE
-    (4417), the code the registry uses for the same condition."""
-    raw = await recv()
+    (4417), the code the registry uses for the same condition.
+
+    ``ping`` is the transport's ping when the carrier has one (the direct
+    listener): every wait for the peer's next request runs under
+    :func:`wait_alive`, and every send is bounded by SERVE_SEND_STALL_S; a
+    peer found dead or no longer reading is closed with 1011."""
+    raw = await wait_alive(recv(), ping=ping)
     if raw is None:
         return
     admission = accept_client_hello(
@@ -718,14 +800,31 @@ async def serve_fleet_transport(
             response = await response
         return response
 
+    async def guarded_recv():
+        return await wait_alive(recv(), ping=ping)
+
+    async def bounded_send(payload: bytes) -> None:
+        try:
+            await asyncio.wait_for(send(payload), SERVE_SEND_STALL_S)
+        except asyncio.TimeoutError:
+            raise PeerUnresponsive(
+                f"peer stopped reading: a send did not complete within {SERVE_SEND_STALL_S:g}s"
+            ) from None
+
     try:
         await serve_established_channel(
             crypto,
             token=token,
-            recv=recv,
-            send=send,
+            recv=guarded_recv,
+            send=bounded_send,
             handler=authorized_handler,
         )
+    except PeerUnresponsive as exc:
+        logger.warning("fleet direct serve %s: %s", client_pub[:12], exc)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                await close(code=1011, reason=str(exc)[:120])
+        raise
     except HandshakeError as exc:
         code = getattr(exc, "close_code", None)
         if code is None or close is None:
@@ -792,14 +891,14 @@ async def fleet_direct_connect(
     """
 
     async def attempt() -> ViewerChannel:
-        # ping/pong pinned, not defaulted: the sync stream liveness policy
-        # (auto-fzy8s) counts on this layer to break the socket for dead
-        # and frozen peers — recv unblocks in ping_interval + ping_timeout
-        # + close_timeout (measured 50.0s) — leaving only wedged-but-
-        # responsive serves to the application-level silence bounds.
+        # No library keepalive (auto-fkqz6): its pong deadline killed every
+        # pull longer than ~90 s, because the puller's own event loop is
+        # busy applying and reads the pong late (SJC-2, 2026-09-29). The
+        # frame waits run under wait_alive (pings only while waiting, judged
+        # on wake), and the silence bounds remain the wedge detector.
         ws = await websockets.connect(
             addr, max_size=2**22, compression=None, open_timeout=timeout,
-            ping_interval=20, ping_timeout=20,
+            ping_interval=None, ping_timeout=None,
         )
         try:
             await ws.send(json.dumps({"v": DIRECT_VERSION, "session": session}))
