@@ -1248,7 +1248,10 @@ window.ensureSessionMessages = function() {
     var at = text.lastIndexOf('@');
     if (at === -1) return text;
     var entry = Alpine.store('sessions') && Alpine.store('sessions')[text];
-    return text.slice(0, at) + '@' + (machine || (entry && entry.machine));
+    var name = machine || (entry && entry.machine);
+    // Until the page has loaded the machine's name (a viewer opened by URL
+    // before presence answered), the session's own name alone.
+    return name ? text.slice(0, at) + '@' + name : text.slice(0, at);
   };
 
   // Another machine's forwarded registry rows (remote_sessions.Subscriptions): each

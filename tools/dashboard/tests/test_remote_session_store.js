@@ -107,6 +107,7 @@ describe('what people read for a remote session', () => {
     assert.equal(h.win.sessionDisplayName(KEY), 'auto-9@sjc-2');
     assert.equal(h.win.sessionDisplayName(KEY, 'SJC'), 'auto-9@SJC');
     assert.equal(h.win.sessionDisplayName('auto-1'), 'auto-1');
+    assert.equal(h.win.sessionDisplayName('auto-5@' + PUB), 'auto-5');   // name not loaded yet
   });
 });
 
