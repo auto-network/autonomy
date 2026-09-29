@@ -1,10 +1,11 @@
-"""Browser broker caller routes (auto-czoc0; design graph://c330323d-986).
+"""The ``browser`` plugin's routes (auto-czoc0; design graph://c330323d-986).
 
-``POST /api/browser/leases``, ``GET /api/browser/leases/{lease}`` and
-``DELETE /api/browser/leases/{lease}``, authorized by the session token and
-the workspace's ``browser`` capability. Organization, workspace and session
-come only from the authenticated caller; a lease owned by another session
-answers 404, like one that does not exist.
+Caller routes (``/api/browser/leases`` and below) are authorized by the
+session token and the workspace's ``browser`` capability. Organization,
+workspace and session come only from the authenticated caller; a lease owned
+by another session answers 404, like one that does not exist. The operator
+routes, the viewer WebSocket and the ``/browser`` page need operator
+authority. ``session_contributions`` puts the globe on the session viewer.
 """
 
 from __future__ import annotations
@@ -25,10 +26,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from tools.dashboard import browser_containers as containers
-from tools.dashboard import browser_reconciler as reconciler
+from tools.dashboard.plugins.browser import containers
+from tools.dashboard.plugins.browser import reconciler
 from tools.dashboard.capability_gate import CapabilityRefused, require_capability
-from tools.dashboard.dao import browser_leases as store
+from tools.dashboard.plugins.browser import store
 
 logger = logging.getLogger(__name__)
 
@@ -443,7 +444,12 @@ async def post_lease(request: Request) -> JSONResponse:
         body = await request.json()
     except ValueError:
         return JSONResponse({"error": "body is not JSON"}, status_code=400)
-    return await _serve(create_lease, request.headers.get("Authorization"), body)
+    response = await _serve(create_lease, request.headers.get("Authorization"), body)
+    if response.status_code == 201:
+        import json as _json
+        lease_id = _json.loads(response.body).get("lease", "")
+        await _refresh_session_icon(await asyncio.to_thread(_session_of, lease_id))
+    return response
 
 
 async def get_lease(request: Request) -> JSONResponse:
@@ -452,8 +458,11 @@ async def get_lease(request: Request) -> JSONResponse:
 
 
 async def delete_lease(request: Request) -> JSONResponse:
-    return await _serve(release_lease, request.headers.get("Authorization"),
-                        request.path_params["lease"])
+    response = await _serve(release_lease, request.headers.get("Authorization"),
+                            request.path_params["lease"])
+    if response.status_code == 200:
+        await _refresh_session_icon(await asyncio.to_thread(_session_of, request.path_params["lease"]))
+    return response
 
 
 # ── operator side (auto-8q7oe.7) ───────────────────────────────────────
@@ -461,7 +470,7 @@ async def delete_lease(request: Request) -> JSONResponse:
 from starlette.routing import WebSocketRoute  # noqa: E402
 from starlette.websockets import WebSocket, WebSocketDisconnect  # noqa: E402
 
-from tools.dashboard import browser_viewer as viewer  # noqa: E402
+from tools.dashboard.plugins.browser import viewer  # noqa: E402
 
 _VIEWER_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
@@ -525,9 +534,11 @@ async def post_control(request: Request) -> JSONResponse:
         return JSONResponse({"error": "not found"}, status_code=404)
     fn = viewer.take_control if action == "take" else viewer.return_control
     try:
-        return JSONResponse(await asyncio.to_thread(fn, lease, viewer_id))
+        result = await asyncio.to_thread(fn, lease, viewer_id)
     except viewer.ControlRefused as exc:
         return JSONResponse({"error": exc.error}, status_code=exc.status)
+    await _refresh_session_icon(lease.session)  # the globe turns amber / back
+    return JSONResponse(result)
 
 
 class _WsReader:
@@ -660,7 +671,64 @@ async def _relay(websocket, client, reader, writer, lease, viewer_id, cookie) ->
             task.cancel()
 
 
-_PAGE = Path(__file__).resolve().parent / "static" / "browser" / "browser.html"
+# ── session viewer icon ────────────────────────────────────────────────
+
+_GLOBE_SVG = (
+    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<circle cx="10" cy="10" r="7.25"></circle>'
+    '<path d="M2.75 10h14.5M10 2.75c2 2 3 4.4 3 7.25s-1 5.25-3 7.25c-2-2-3-4.4-3-7.25s1-5.25 3-7.25z"></path>'
+    '</svg>'
+)
+_RUNNING = ("starting", "ready", "busy", "locked", "unhealthy")
+
+
+def session_contributions(session_ids: list[str], request) -> dict[str, list[dict]]:
+    """A globe on each session that has a browser running, linking to its live
+    view. Operator only: the viewer is operator-only, and an agent session must
+    not learn about other sessions' browsers."""
+    from tools.dashboard import api_auth
+
+    result: dict[str, list[dict]] = {session_id: [] for session_id in session_ids}
+    if not api_auth.principal_from_request(request).global_authority:
+        return result
+    for lease in store.list_leases(_RUNNING):
+        if lease.session not in result:
+            continue
+        operator = lease.state == "locked" and lease.lock_holder == "human"
+        result[lease.session].append({
+            "id": lease.lease_hash[:16], "kind": "action", "label": "Browser",
+            "title": "Operator has control of this browser" if operator else "Open this session's browser",
+            "href": f"/browser/{lease.lease_hash[:16]}", "icon_svg": _GLOBE_SVG,
+            "accent": "#f59e0b" if operator else "#38bdf8", "hard_reload": True,
+        })
+    return result
+
+
+async def _refresh_session_icon(session: str | None) -> None:
+    if not session:
+        return
+    try:
+        from tools.dashboard import event_bus
+        from tools.dashboard.plugin_api.session_contributions import SESSION_CONTRIBUTIONS_TOPIC
+
+        await event_bus.broadcast(SESSION_CONTRIBUTIONS_TOPIC, {"session_id": session}, dedup=False)
+    except Exception:
+        logger.debug("browser: session icon refresh failed", exc_info=True)
+
+
+def _session_of(lease_key: str) -> str | None:
+    lease_hash = store.lease_hash(lease_key) if lease_key.startswith("brl_") else None
+    lease = store.get(lease_hash) if lease_hash else viewer_find(lease_key)
+    return lease.session if lease is not None else None
+
+
+def viewer_find(lease_ref: str):
+    from tools.dashboard.plugins.browser import viewer as browser_viewer
+    return browser_viewer.find_lease(lease_ref)
+
+
+_PAGE = Path(__file__).resolve().parent.parent / "browser.html"
 
 
 async def browser_page(request: Request):

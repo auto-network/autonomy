@@ -24,8 +24,8 @@ import threading
 import time
 from typing import Optional
 
-from tools.dashboard import browser_containers as containers
-from tools.dashboard.dao import browser_leases as store
+from tools.dashboard.plugins.browser import containers
+from tools.dashboard.plugins.browser import store
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +309,7 @@ def _health_pass(lease: store.Lease, epoch_: int, now: float) -> None:
 
 
 async def run_forever() -> None:
-    """The dashboard's background task (started at worker activation)."""
+    """The plugin background task (entrypoints/background.py starts it once the worker is activated)."""
     import asyncio
 
     try:

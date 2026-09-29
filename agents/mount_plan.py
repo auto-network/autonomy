@@ -197,7 +197,7 @@ def _own_container_id() -> Optional[str]:
     return hostname or None
 
 
-#: The browser broker's lease network (tools/dashboard/browser_containers.py).
+#: The browser broker's lease network (tools/dashboard/plugins/browser/containers.py).
 #: The dashboard joins it to reach lease containers; sessions must never.
 _BROWSER_LEASE_NETWORK = "autonomy_leases"
 

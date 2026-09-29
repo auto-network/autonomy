@@ -1,0 +1,22 @@
+id: browser
+api_version: 1
+org: personal
+
+# The broker was core until this move; it ships enabled so the move is not
+# an outage. Disabling it 404s /api/browser/* and stops the reconciler;
+# running lease containers still end at expiry through their own watchdog.
+default_enabled: true
+
+# Agent-facing usage; embedded into session primers while enabled and
+# served at GET /api/plugins/browser/skill.
+skill: SKILL.md
+
+entrypoints:
+  # Caller, operator and page routes plus the viewer WebSocket. The page
+  # (/browser) is a standalone document, not an SPA fragment.
+  api: tools.dashboard.plugins.browser.entrypoints.api:ROUTES
+  # The reconciler: lease epoch, adoption of running containers, expiry,
+  # health. Waits for worker activation (single writer per machine).
+  background: tools.dashboard.plugins.browser.entrypoints.background:tasks
+  # The globe on the session viewer while that session holds a browser.
+  session_contributions: tools.dashboard.plugins.browser.entrypoints.api:session_contributions

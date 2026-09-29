@@ -6,10 +6,10 @@ import time
 
 import pytest
 
-from tools.dashboard import browser_containers as containers
-from tools.dashboard import browser_reconciler as reconciler
-from tools.dashboard import browser_viewer as viewer
-from tools.dashboard.dao import browser_leases as store
+from tools.dashboard.plugins.browser import containers
+from tools.dashboard.plugins.browser import reconciler
+from tools.dashboard.plugins.browser import viewer
+from tools.dashboard.plugins.browser import store
 from tools.dashboard.dao import dashboard_db
 
 
@@ -195,7 +195,8 @@ def _control_app(monkeypatch, principal):
     from starlette.applications import Starlette
     from starlette.testclient import TestClient
 
-    from tools.dashboard import api_auth, browser_routes
+    from tools.dashboard import api_auth
+    from tools.dashboard.plugins.browser.entrypoints import api as browser_routes
 
     monkeypatch.setattr(api_auth, "principal_from_request", lambda request: principal)
     monkeypatch.setattr(viewer, "find_lease", lambda ref: None)
@@ -251,7 +252,7 @@ def test_take_control_survives_the_aborted_command_freeing_the_lease(lease):
             store.transition(h, epoch=reconciler.epoch(), to="ready", expect=("busy",))
         return 200, {"locked": body["locked"]}
 
-    import tools.dashboard.browser_containers as bc
+    import tools.dashboard.plugins.browser.containers as bc
     original = bc.agent_request
     bc.agent_request = lock_and_free
     try:
@@ -276,7 +277,7 @@ def test_the_pages_are_served_and_load_novnc_from_our_own_origin():
     from starlette.applications import Starlette
     from starlette.testclient import TestClient
 
-    from tools.dashboard import browser_routes
+    from tools.dashboard.plugins.browser.entrypoints import api as browser_routes
 
     app = Starlette(routes=[r for r in browser_routes.ROUTES if getattr(r, "path", "").startswith("/browser")])
     client = TestClient(app)

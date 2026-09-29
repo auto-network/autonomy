@@ -24,9 +24,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from tools.dashboard import browser_containers as containers
-from tools.dashboard import browser_reconciler as reconciler
-from tools.dashboard.dao import browser_leases as store
+from tools.dashboard.plugins.browser import containers
+from tools.dashboard.plugins.browser import reconciler
+from tools.dashboard.plugins.browser import store
 
 logger = logging.getLogger(__name__)
 

@@ -9,11 +9,11 @@ import time
 
 import pytest
 
-from tools.dashboard import browser_containers as containers
-from tools.dashboard import browser_reconciler as reconciler
-from tools.dashboard import browser_routes as routes
+from tools.dashboard.plugins.browser import containers
+from tools.dashboard.plugins.browser import reconciler
+from tools.dashboard.plugins.browser.entrypoints import api as routes
 from tools.dashboard.capability_gate import CallerScope, CapabilityRefused
-from tools.dashboard.dao import browser_leases as store
+from tools.dashboard.plugins.browser import store
 from tools.dashboard.dao import dashboard_db
 from tools.graph.schemas import browser_defaults
 

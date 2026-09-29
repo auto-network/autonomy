@@ -25,34 +25,39 @@ graph://c330323d-986; epic `auto-8q7oe`.
   (`BROWSER_LEASE_EXPIRES_AT`, or the newest value from `POST /expiry`) with
   no request from the dashboard.
 
-## Dashboard side (`auto-czoc0`)
+## Dashboard side: the `browser` plugin (`tools/dashboard/plugins/browser/`)
 
-- `tools/dashboard/browser_routes.py` — `POST /api/browser/leases`,
-  `GET|DELETE /api/browser/leases/{lease}`; session token plus the
-  workspace's `browser` capability. Admission: fewer than `max_leases` active
-  and `min_free_gib` free, else 503 with the reason; a busy persistent profile
-  is 409.
-- `tools/dashboard/browser_containers.py` — `docker create/start` with the
-  caps (memory = memory-swap, CPUs, pids, 1 GiB shm), `--rm`, restart `no`,
-  `no-new-privileges`, the seccomp profile, no published ports, on the
-  `autonomy-browser` network (only the dashboard and leases join it).
-- `tools/dashboard/browser_reconciler.py` — started at worker activation:
-  takes a new epoch (fencing the previous worker's writes), adopts running
-  leases, then every 5 s health-checks and releases on the ending events.
-- `tools/dashboard/dao/browser_leases.py` — the `browser_leases` table in
-  `dashboard.db`; per-lease secret and VNC password AES-GCM-sealed under a key
-  derived from `dashboard-session.secret`.
+- `entrypoints/api.py`: the caller routes (`POST /api/browser/leases`,
+  `GET|DELETE /api/browser/leases/{lease}`, `/commands`, `/secure-login`), which
+  need the session token plus the workspace's `browser` capability. It also
+  holds the operator routes (`/api/browser/operator/leases`, `/control`), the
+  viewer WebSocket `/ws/browser/{lease}/view`, the `/browser` page, and the globe
+  on the session viewer. Admission: fewer than `max_leases` active and
+  `min_free_gib` free, else 503 with the reason; a busy persistent profile is
+  409.
+- `containers.py`: `docker create/start` with the caps (memory = memory-swap,
+  CPUs, pids, 1 GiB shm), `--rm`, restart `no`, `no-new-privileges`, the seccomp
+  profile, no published ports, on the `autonomy_leases` network.
+- `reconciler.py`: the plugin background task. It starts once the worker is
+  activated, takes a new epoch (fencing the previous worker's writes), adopts
+  running leases, then every 5 s health-checks and releases on the ending
+  events.
+- `viewer.py`: the RFB relay for the operator's viewer, with take and return of
+  control.
+- `store.py`: the `browser_leases` table in `dashboard.db`. Each lease's secret
+  and VNC password are AES-GCM-sealed under a key derived from
+  `dashboard-session.secret`.
+- Disabling the plugin (`dashboard.plugin` toggle) makes `/api/browser/*`
+  answer 404 and stops the reconciler. Running leases still end at their
+  expiry through the in-container watchdog.
 - Limits: the machine Setting `autonomy.browser.defaults`
   (`tools/graph/schemas/browser_defaults.py`).
 
 ### Invariants and residual risk (review of auto-czoc0)
 
-- **Paused for the network redesign (auto-8c2df).** Lease requests answer 503
-  `isolation`. The dashboard does not join `autonomy-browser` and installs no
-  firewall rules: the earlier in-namespace refusal and host egress chains were
-  reverted after they cut the host's own path to the dashboard (note
-  cfedf15c-5b6). The redesign makes the browser network internal, with Chrome's
-  egress through a forward proxy and dashboard control through a relay.
+- **Lease network.** `autonomy_leases` is a plain bridge that only the
+  dashboard and the leases join (no firewall rules, auto-8c2df). Session
+  containers never join it (`agents/mount_plan.py`).
 - A lease never ignores certificate errors (pinned in `tests/test_lease_agent.py`).
 
 - **Leases have egress from the node's network.** A page in a lease can reach
