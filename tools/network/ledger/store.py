@@ -166,30 +166,14 @@ CREATE TABLE IF NOT EXISTS ledger_pending_claims (
 """
 
 
-#: SQLite's own default: what a caller on the dashboard's event loop may
-#: block for. Keep it short there -- a blocked loop answers nothing.
-LEDGER_DEFAULT_TIMEOUT_S = 5.0
-#: For background work (a worker thread) that must outlast fleet sync's
-#: back-to-back batches on the shared org database during a catch-up.
-LEDGER_BUSY_TIMEOUT_S = 30.0
-
-
 class LedgerStore:
     """A durable, self-verifying replica. Not thread-safe (one writer)."""
 
-    def __init__(self, path=":memory:", *, timeout: float | None = None):
+    def __init__(self, path=":memory:"):
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        # The ledger tables live inside the org's own database, which fleet
-        # sync writes in exclusive per-batch transactions; during a large
-        # catch-up those arrive back to back. A background caller passes
-        # LEDGER_BUSY_TIMEOUT_S to wait them out (SJC-2, 2026-09-29: an
-        # organization delegate activation failed "database is locked" at
-        # the 5 s default); the default stays short for event-loop callers.
-        self.db = sqlite3.connect(
-            self.path,
-            timeout=LEDGER_DEFAULT_TIMEOUT_S if timeout is None else timeout)
+        self.db = sqlite3.connect(self.path)
         self.db.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")

@@ -1313,16 +1313,10 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             for item in body["organization_delegates"]:
                 org = item["organization"]
                 try:
-                    # Off the event loop: accept() may wait up to
-                    # LEDGER_BUSY_TIMEOUT_S for fleet sync's writer on the
-                    # org database, and a blocked loop answers nothing.
-                    await asyncio.to_thread(accept, item)
+                    accept(item)
                     organization_delegates[org] = {"ok": True}
                 except Exception as exc:
-                    # With the traceback: the message alone ("database is
-                    # locked") does not say which of accept()'s writes failed.
-                    logger.warning("organization delegate refused for %s: %s", org, exc,
-                                   exc_info=True)
+                    logger.warning("organization delegate refused for %s: %s", org, exc)
                     organization_delegates[org] = {"ok": False, "error": str(exc)}
         if audited_private is not None:
             # Certificate issuance may have failed before this first recipient
