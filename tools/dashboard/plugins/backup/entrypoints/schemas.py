@@ -15,7 +15,7 @@ second machine every row would be false, so all three sets are
 machine-homed and never publish (band raw..raw).
 CARDINALITY — config is a singleton; runs and drills are one row per
 event. KEY — runs key by ``<tier>:<stamp>`` (the capture directory's
-own name, the handle the reconciler and the operator both hold);
+own name, the handle the backup run and the operator both hold);
 drills key by their start stamp. Key segments are not repeated in the
 payload. Trails: the store upserts rows whole, so a drill's per-check
 outcomes are an explicit ``checks`` array written at finalization.
@@ -40,7 +40,7 @@ SCHEMA_REVISION = 1
 TIERS = ("hourly", "daily")
 RUN_VERDICTS = ("complete", "failed")
 OFFSITE_VERDICTS = ("complete", "failed", "skipped", "unknown")
-DRILL_VERDICTS = ("running", "pass", "fail", "timeout")
+DRILL_VERDICTS = ("pass", "fail", "timeout")
 ORIGINS = ("host", "node")
 
 _STORE_ELEMENT = {
@@ -73,8 +73,8 @@ _CHECK_ELEMENT = {
 @home("machine")
 @singleton()
 class BackupConfigV1(SettingSchema):
-    """The machine's backup policy. One row; the background loop and the
-    reconciler read it, the /backup page edits it. Offsite credentials
+    """The machine's backup policy. One row; the backup run and the
+    /backup page read it, the page edits it. Offsite credentials
     are deliberately NOT here (custody decision, bead auto-uy896)."""
 
     set_id = CONFIG_SET_ID
@@ -98,10 +98,6 @@ class BackupConfigV1(SettingSchema):
     keep_daily: int = field(
         default=7,
         description="Capture directories retained on the daily tier")
-    drill_cadence_days: float = field(
-        default=7.0,
-        description="Scheduled restore-drill cadence; 0 disables "
-                    "scheduled drills (on-demand still works)")
     drill_timeout_minutes: int = field(
         default=30,
         description="A drill running longer is killed and recorded "
@@ -119,14 +115,9 @@ class BackupConfigV1(SettingSchema):
         default="",
         description="Offsite bucket/repository name (configuration, "
                     "not a secret)")
-    schedule_owner: str = field(
-        default="cron", enum=["cron", "plugin"],
-        description="Who triggers captures on this machine: the host "
-                    "crontab, or the plugin's background loop "
-                    "(stakeholder decision 3, graph://7c45a180-345)")
     run_retention: int = field(
         default=50,
-        description="backup.run rows kept per tier by the reconciler; "
+        description="backup.run rows kept per tier; "
                     "Settings must stay bounded")
     drill_retention: int = field(
         default=25,
@@ -146,8 +137,6 @@ class BackupConfigV1(SettingSchema):
             raise SchemaValidationError(
                 "staleness_multiple below 1 would alert on a tier that "
                 "is exactly on schedule")
-        if float(payload.get("drill_cadence_days", 7.0)) < 0:
-            raise SchemaValidationError("drill_cadence_days cannot be negative")
 
 
 @publication_band(min="raw", max="raw")
@@ -156,7 +145,7 @@ class BackupConfigV1(SettingSchema):
 class BackupRunV1(SettingSchema):
     """One capture run. Key: ``<tier>:<stamp>`` — the capture
     directory's own name (``hourly:20260906-040812``), so a row and its
-    on-disk evidence name each other. Upserted whole by the reconciler
+    on-disk evidence name each other. Upserted whole by the backup run itself (record.py)
     from the engine's run-report.json; never hand-written."""
 
     set_id = RUN_SET_ID
@@ -223,8 +212,8 @@ class BackupRunV1(SettingSchema):
         super().validate(payload)
         # Dict-shaped element specs are descriptive metadata to the
         # substrate; the row shape is enforced here because these rows
-        # are machine-written (the reconciler) and a malformed one is a
-        # reconciler bug to surface, not tolerate.
+        # are machine-written (record.py) and a malformed one is a
+        # bug to surface, not tolerate.
         for index, row in enumerate(payload.get("stores") or []):
             if not isinstance(row, dict) or not row.get("name") \
                     or not row.get("status"):
@@ -245,26 +234,26 @@ class BackupRunV1(SettingSchema):
 @keyed_per_entity(key_strategy="stamp")
 class BackupDrillV1(SettingSchema):
     """One restore drill. Key: the drill's start stamp
-    (``20260906-051500``). A row is upserted ``running`` when the drill
-    starts and finalized whole when it ends, so an in-flight drill is
-    visible and a crashed one is diagnosable."""
+    (``20260906-051500``). Written once, whole, when the drill ends; a
+    drill in flight is known only to the process running it."""
 
     set_id = DRILL_SET_ID
     schema_revision = SCHEMA_REVISION
 
     verdict: str = field(
         required=True, enum=list(DRILL_VERDICTS),
-        description="running while in flight; pass only when every "
-                    "check is ok; timeout when the subprocess was killed")
+        description="pass only when every check is ok; timeout when "
+                    "the subprocess was killed")
     trigger: str = field(
         default="manual", enum=["manual", "scheduled"],
-        description="Operator-initiated or cadence-initiated")
+        description="Operator-initiated; scheduled marks drills from "
+                    "the retired drill schedule")
     started_at: str = field(
         required=True,
         description="ISO-8601 start")
     finished_at: str = field(
         default="",
-        description="ISO-8601 end; empty while running")
+        description="ISO-8601 end")
     duration_seconds: float = field(
         default=0.0,
         description="Wall-clock drill duration")
@@ -297,6 +286,3 @@ class BackupDrillV1(SettingSchema):
             if bad:
                 raise SchemaValidationError(
                     f"a passing drill cannot carry failed checks: {bad}")
-        if verdict == "running" and payload.get("finished_at"):
-            raise SchemaValidationError(
-                "a running drill has no finish time")

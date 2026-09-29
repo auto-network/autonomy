@@ -97,13 +97,21 @@ class TestSummarize:
         drills = [{"key": "20260906-100000", "verdict": "fail"}]
         assert api.summarize(runs, drills, {}, now=NOW)["overall"] == "stale"
 
-    def test_running_drill_surfaces(self):
+    def test_running_drill_comes_from_the_process(self, monkeypatch):
+        from tools.dashboard.plugins.backup import drill as drill_mod
+        # A stored "running" row (written before this change) is dead: the
+        # in-flight drill is whatever this process is running.
         drills = [{"key": "20260906-113000", "verdict": "running"},
                   {"key": "20260906-100000", "verdict": "pass",
                    "checks": [{"name": "integrity", "status": "ok"}]}]
         summary = api.summarize([], drills, {}, now=NOW)
-        assert summary["running_drill"]["key"] == "20260906-113000"
+        assert summary["running_drill"] is None
         assert summary["last_drill"]["key"] == "20260906-100000"
+        monkeypatch.setattr(drill_mod, "_running", {
+            "key": "20260906-120000", "trigger": "manual",
+            "started_at": "2026-09-06T12:00:00+00:00"})
+        summary = api.summarize([], drills, {}, now=NOW)
+        assert summary["running_drill"]["key"] == "20260906-120000"
 
 
 def _request(method="GET", query=b"", body: dict | None = None,

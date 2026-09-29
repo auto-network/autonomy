@@ -23,7 +23,7 @@ machine that accepted the request (its frozen ``result_destination_id``):
 - Minted only while the canonical resolution is a Grant, re-read under the
   approval's lock at mint time.
 
-Mirrors vault_open_central.py (planner, attention projection, HTTP adapter,
+Mirrors vault_open_central.py (planner, inbox text, HTTP adapter,
 coordinator).
 """
 
@@ -49,20 +49,11 @@ from tools.dashboard.approval_kind_registry import (
 )
 from tools.dashboard.approval_service import (
     ApprovalService,
-    ApprovalServiceError,
     ApprovalStatus,
     _ApprovalLocks,
 )
-from tools.dashboard.attention_index_service import AttentionIndexError
-from tools.dashboard.attention_registry import (
-    AttentionProjectionPlan,
-    AttentionPublicationRuntime,
-    AttentionSourceEvidence,
-)
 from tools.dashboard.dashboard_access_central import (
-    DashboardAccessCoordinator,
     _bounded_approval_id,
-    _opaque_digest,
 )
 from tools.dashboard.mailbox_central import _requesting_session
 from tools.dashboard.vault_open_central import this_machine_label
@@ -74,7 +65,6 @@ APPLICATION_SCOPE = "mission_control"
 RENDERER_ID = "approval.visitor_token.review"
 CONSUMER_ID = "visitor_token.local_mint.v1"
 _DESTINATION_DOMAIN = b"dashboard.mission-control.visitor-mint-destination.v1"
-_ATTENTION_DOMAIN = "dashboard.attention.visitor-token-recipient"
 _REQUEST_FIELDS = {"display_name", "avatar", "reason"}
 
 #: A person's name, as it will appear beside everything they ever ask.
@@ -101,11 +91,6 @@ def result_destination_id(secret: bytes | None = None) -> str:
         raise ValueError("Dashboard session secret is unavailable")
     digest = hmac.new(secret, _DESTINATION_DOMAIN, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def visitor_token_attention_id(approval_id: str) -> str:
-    _bounded_approval_id(approval_id)
-    return "attention-" + _opaque_digest([_ATTENTION_DOMAIN, 1, approval_id])
 
 
 def _check_request(body: Any) -> tuple[str, str | None, str]:
@@ -201,40 +186,10 @@ def build_approval_runtime(**planner_options) -> ApprovalKindRuntime:
     )
 
 
-def build_attention_runtime(approvals: ApprovalService) -> AttentionPublicationRuntime:
-    def plan(source: Any) -> AttentionProjectionPlan:
-        if not isinstance(source, ApprovalStatus):
-            raise ValueError("visitor_token projection requires approval status")
-        request = source.request.payload
-        if request.get("kind") != KIND:
-            raise ValueError("visitor_token projection kind mismatch")
-        resolution = source.resolution
-        review = request.get("safe_review") or {}
-        label = review.get("requester_label") or "A session"
-        return AttentionProjectionPlan(
-            attention_id=visitor_token_attention_id(source.request.approval_id),
-            object_ref=source.request.approval_id,
-            participant_role="recipient",
-            attention_state="resolved" if resolution is not None else "needs_attention",
-            safe_title="Let this person in?",
-            safe_summary=f"{label} wants a link for {review.get('display_name') or '?'}"[:240],
-            counterparty_ref=None,
-            occurred_at=(float(resolution.payload["resolved_at"]) if resolution is not None
-                         else float(request["created_at"])),
-            source_version=2 if resolution is not None else 1,
-        )
-
-    def evidence(object_ref: str, source_version: int) -> AttentionSourceEvidence:
-        status = approvals.status(_bounded_approval_id(object_ref))
-        actual = 2 if status.resolution is not None else 1
-        if actual != source_version or status.request.payload.get("kind") != KIND:
-            raise AttentionIndexError("stale_source")
-        return AttentionSourceEvidence(
-            source_guard={"kind": "approval", "ref": object_ref, "version": source_version},
-            source_expires_at=status.request.payload.get("expires_at"),
-        )
-
-    return AttentionPublicationRuntime(projection_planner=plan, source_evidence_builder=evidence)
+def inbox_text(status: ApprovalStatus) -> tuple[str, str | None]:
+    """The inbox's title and summary for one approval of this kind."""
+    review = status.request.payload.get("safe_review") or {}
+    return "Let this person in?", f"{review.get('requester_label') or 'A session'} wants a link for {review.get('display_name') or '?'}"
 
 
 def _mint(name: str, *, avatar_attachment_id: str | None, approval_id: str) -> dict | None:
@@ -340,11 +295,7 @@ class VisitorDesk:
             return {"approved": True, "execution": execution}
 
 
-def build_http_adapter(
-    desk: VisitorDesk,
-    *,
-    reconcile: Callable[[str], ApprovalStatus | None] | None = None,
-) -> ApprovalHttpKindAdapter:
+def build_http_adapter(desk: VisitorDesk) -> ApprovalHttpKindAdapter:
     def project_request(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         request = payload.get("request")
         if not isinstance(request, Mapping):
@@ -357,8 +308,6 @@ def build_http_adapter(
         raise ApprovalHttpBridgeError("invalid_decision")
 
     def project_result(status: ApprovalStatus) -> Mapping[str, Any] | None:
-        if reconcile is not None:
-            reconcile(status.request.approval_id)
         return desk.collect(status.request.approval_id)
 
     return ApprovalHttpKindAdapter(kind=KIND, request_projector=project_request,
@@ -366,29 +315,8 @@ def build_http_adapter(
                                    legacy_decision_mapper=map_decision)
 
 
-class VisitorCoordinator(DashboardAccessCoordinator):
-    """The dashboard-access wake coordinator, publishing ``visitor_token``
-    attention items. It never mints: only the requester's collect does."""
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(consumer=None, **kwargs)
-
-    def reconcile_exact(self, approval_id: str) -> ApprovalStatus | None:
-        try:
-            status = self.approvals.status(_bounded_approval_id(approval_id))
-        except ApprovalServiceError as exc:
-            if exc.code == "not_found":
-                return None
-            raise
-        if status.request.payload.get("kind") != KIND:
-            return None
-        self.index.publish(self.producer, status)
-        return status
-
-
 __all__ = [
     "APPLICATION_SCOPE", "CONSUMER_ID", "KIND", "RENDERER_ID",
-    "VisitorCoordinator", "VisitorDesk",
-    "build_approval_runtime", "build_attention_runtime", "build_http_adapter",
-    "result_destination_id", "visitor_token_attention_id",
-]
+    "VisitorDesk",
+    "build_approval_runtime", "inbox_text", "build_http_adapter",
+    "result_destination_id", ]

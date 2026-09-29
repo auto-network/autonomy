@@ -26,7 +26,7 @@ logs or echoes the CEK.
   resumes on its own.
 - The requester's result stays null until the receipt exists.
 
-Mirrors mailbox_central.py (planner, attention projection, HTTP adapter,
+Mirrors mailbox_central.py (planner, inbox text, HTTP adapter,
 coordinator).
 """
 
@@ -54,16 +54,9 @@ from tools.dashboard.approval_kind_registry import (
     ApprovalRequestPlan,
 )
 from tools.dashboard.approval_service import ApprovalService, ApprovalServiceError, ApprovalStatus
-from tools.dashboard.attention_index_service import AttentionIndexError
-from tools.dashboard.attention_registry import (
-    AttentionProjectionPlan,
-    AttentionPublicationRuntime,
-    AttentionSourceEvidence,
-)
 from tools.dashboard.dashboard_access_central import (
     DashboardAccessCoordinator,
     _bounded_approval_id,
-    _opaque_digest,
 )
 from tools.dashboard.mailbox_central import _requesting_session
 
@@ -76,7 +69,6 @@ CONSUMER_ID = "vault_open.local_delivery.v1"
 #: How long after the Grant the operator may still post the content key.
 DELIVERY_WINDOW_SECONDS = 1800
 _DESTINATION_DOMAIN = b"dashboard.vault.open-delivery-destination.v1"
-_ATTENTION_DOMAIN = "dashboard.attention.vault-open-recipient"
 _REQUEST_FIELDS = {"set_id", "key", "ttl_seconds"}
 _HEX = frozenset("0123456789abcdef")
 
@@ -121,11 +113,6 @@ def this_machine_label() -> str:
         logger.debug("vault_open: machine name unavailable", exc_info=True)
     import socket
     return (socket.gethostname() or "this machine")[:80]
-
-
-def vault_open_attention_id(approval_id: str) -> str:
-    _bounded_approval_id(approval_id)
-    return "attention-" + _opaque_digest([_ATTENTION_DOMAIN, 1, approval_id])
 
 
 def _principal(context: ApprovalPlanningContext) -> api_auth.ApiPrincipal:
@@ -188,41 +175,10 @@ def build_approval_runtime(**planner_options) -> ApprovalKindRuntime:
     )
 
 
-def build_attention_runtime(approvals: ApprovalService) -> AttentionPublicationRuntime:
-    def plan(source: Any) -> AttentionProjectionPlan:
-        if not isinstance(source, ApprovalStatus):
-            raise ValueError("vault_open projection requires approval status")
-        request = source.request.payload
-        if request.get("kind") != KIND:
-            raise ValueError("vault_open projection kind mismatch")
-        resolution = source.resolution
-        review = request.get("safe_review") or {}
-        label = review.get("requester_label") or "A session"
-        return AttentionProjectionPlan(
-            attention_id=vault_open_attention_id(source.request.approval_id),
-            object_ref=source.request.approval_id,
-            participant_role="recipient",
-            attention_state="resolved" if resolution is not None else "needs_attention",
-            safe_title="Release a vault item",
-            safe_summary=(f"{label} wants {review.get('target') or '?'} "
-                          f"(deliverable only from {review.get('machine_label') or '?'})")[:240],
-            counterparty_ref=None,
-            occurred_at=(float(resolution.payload["resolved_at"]) if resolution is not None
-                         else float(request["created_at"])),
-            source_version=2 if resolution is not None else 1,
-        )
-
-    def evidence(object_ref: str, source_version: int) -> AttentionSourceEvidence:
-        status = approvals.status(_bounded_approval_id(object_ref))
-        actual = 2 if status.resolution is not None else 1
-        if actual != source_version or status.request.payload.get("kind") != KIND:
-            raise AttentionIndexError("stale_source")
-        return AttentionSourceEvidence(
-            source_guard={"kind": "approval", "ref": object_ref, "version": source_version},
-            source_expires_at=status.request.payload.get("expires_at"),
-        )
-
-    return AttentionPublicationRuntime(projection_planner=plan, source_evidence_builder=evidence)
+def inbox_text(status: ApprovalStatus) -> tuple[str, str | None]:
+    """The inbox's title and summary for one approval of this kind."""
+    review = status.request.payload.get("safe_review") or {}
+    return "Release a vault item", f"{review.get('requester_label') or 'A session'} wants {review.get('target') or '?'} (deliverable only from {review.get('machine_label') or '?'})"
 
 
 def _session_live(session: str | None) -> bool:
@@ -262,7 +218,6 @@ class VaultOpenDelivery:
         self,
         *,
         approvals: ApprovalService,
-        index: Any = None,
         destination_resolver: Callable[[], str] = result_destination_id,
         session_live: Callable[[str | None], bool] = _session_live,
         lease: Callable[[str], dict | None] = _lease,
@@ -272,7 +227,6 @@ class VaultOpenDelivery:
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.approvals = approvals
-        self.index = index
         self._destination_resolver = destination_resolver
         self._session_live = session_live
         self._lease = lease
@@ -357,31 +311,19 @@ class VaultOpenDelivery:
 
     # ── operator actions ─────────────────────────────────────────────────
 
-    def _approval_for_item(self, attention_id: Any) -> ApprovalStatus:
-        if self.index is None:
-            raise VaultOpenDeliveryError("not_found")
-        try:
-            item = self.index.get_query_item(attention_id)
-        except ValueError:
-            raise VaultOpenDeliveryError("not_found") from None
-        except Exception:
-            raise VaultOpenDeliveryError("unavailable") from None
-        if item is None:
-            raise VaultOpenDeliveryError("not_found")
-        approval_id = item.payload.get("object_ref")
+    def _approval(self, approval_id: Any) -> ApprovalStatus:
         try:
             status = self.approvals.status(_bounded_approval_id(approval_id))
         except (ApprovalServiceError, ValueError):
             raise VaultOpenDeliveryError("not_found") from None
-        if status.request.payload.get("kind") != KIND or \
-                item.attention_id != vault_open_attention_id(status.request.approval_id):
+        if status.request.payload.get("kind") != KIND:
             raise VaultOpenDeliveryError("not_found")
         return status
 
-    def bootstrap(self, attention_id: Any) -> dict:
+    def bootstrap(self, approval_id: Any) -> dict:
         """The factor ceremony and open bundle, for the accepting machine's
         operator, while the request is pending or granted and undelivered."""
-        status = self._approval_for_item(attention_id)
+        status = self._approval(approval_id)
         state = self.state(status)
         if state == ELSEWHERE:
             raise VaultOpenDeliveryError("elsewhere")
@@ -393,7 +335,7 @@ class VaultOpenDelivery:
         except Exception:
             raise VaultOpenDeliveryError("binding_drift") from None
 
-    def deliver(self, attention_id: Any, body: Any) -> dict:
+    def deliver(self, approval_id: Any, body: Any) -> dict:
         """Open the granted revision with the operator's CEK and deliver it.
 
         Every refusal is a fixed code. The body is never interpolated into an
@@ -406,7 +348,7 @@ class VaultOpenDelivery:
             raise VaultOpenDeliveryError("invalid_request")
         content_key = bytearray.fromhex(raw)
         try:
-            status = self._approval_for_item(attention_id)
+            status = self._approval(approval_id)
             approval_id = status.request.approval_id
             payload = status.request.payload
             with self._lock:
@@ -482,10 +424,8 @@ def build_http_adapter(
 
 
 class VaultOpenCoordinator(DashboardAccessCoordinator):
-    """The dashboard-access wake coordinator, reconciling ``vault_open``.
-
-    It publishes the attention item and wakes the requester on a decline or
-    expiry. It never delivers: delivery needs the operator's CEK."""
+    """Tells the requesting session when its ``vault_open`` request is declined
+    or expired. It never delivers: delivery needs the operator's CEK."""
 
     def __init__(self, *, delivery: VaultOpenDelivery, **kwargs) -> None:
         super().__init__(consumer=delivery, **kwargs)
@@ -501,7 +441,6 @@ class VaultOpenCoordinator(DashboardAccessCoordinator):
         payload = status.request.payload
         if payload.get("kind") != KIND:
             return None
-        self.index.publish(self.producer, status)
         resolution = status.resolution
         if resolution is not None and resolution.payload.get("outcome") in ("declined", "expired") \
                 and self.delivery._here(payload):
@@ -520,6 +459,5 @@ class VaultOpenCoordinator(DashboardAccessCoordinator):
 __all__ = [
     "APPLICATION_SCOPE", "CONSUMER_ID", "DELIVERY_WINDOW_SECONDS", "KIND", "RENDERER_ID",
     "VaultOpenCoordinator", "VaultOpenDelivery", "VaultOpenDeliveryError",
-    "build_approval_runtime", "build_attention_runtime", "build_http_adapter",
-    "result_destination_id", "this_machine_label", "vault_open_attention_id",
-]
+    "build_approval_runtime", "inbox_text", "build_http_adapter",
+    "result_destination_id", "this_machine_label", ]

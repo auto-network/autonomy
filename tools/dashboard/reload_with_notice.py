@@ -152,21 +152,18 @@ def _describe_failure(exc: BaseException) -> str:
 
 def _notify_dashboard(
     config: SimpleNamespace, changed_paths=None, *, mode: str = "handoff",
-    failures: list | None = None, sleep=time.sleep,
+    sleep=time.sleep,
 ) -> bool:
     """Ask the incumbent to snapshot hand-off state. Failure never blocks the
     reload beyond the bounded retries.
 
     ``changed_paths`` (the files uvicorn saw change) is forwarded so the worker
     can attribute the reload to a merge or a direct host edit. Returns True
-    once delivered; on failure, appends a short description of the last
-    failure to *failures* when given.
+    once delivered.
     """
     token = os.environ.get("DASHBOARD_RESTART_TOKEN")
     if not token:
         logger.warning("hand-off notice skipped: DASHBOARD_RESTART_TOKEN is unset")
-        if failures is not None:
-            failures.append("DASHBOARD_RESTART_TOKEN is unset")
         return False
     body = json.dumps({
         "mode": mode,
@@ -198,31 +195,23 @@ def _notify_dashboard(
             sleep(_NOTICE_BACKOFF_SECONDS[min(attempt, len(_NOTICE_BACKOFF_SECONDS)) - 1])
     logger.error("hand-off notice failed (%s); the incumbent's SIGTERM snapshot is "
                  "the remaining vault hand-off", failure)
-    if failures is not None:
-        failures.append(failure)
     return False
 
 
 # ── process helpers ────────────────────────────────────────────────────────
 
-def _spawn(self: BaseReload, predecessor_pid: int | None,
-           notice_failure: str | None = None):
+def _spawn(self: BaseReload, predecessor_pid: int | None):
     """Start a worker with the hand-off environment; returns (process, marker)."""
     marker = _handoff_directory() / f"{uuid.uuid4().hex}.ready"
     previous = {
         key: os.environ.get(key)
-        for key in (worker_handoff.READY_MARKER_ENV, worker_handoff.PREDECESSOR_PID_ENV,
-                    worker_handoff.NOTICE_FAILURE_ENV)
+        for key in (worker_handoff.READY_MARKER_ENV, worker_handoff.PREDECESSOR_PID_ENV)
     }
     os.environ[worker_handoff.READY_MARKER_ENV] = str(marker)
     if predecessor_pid is not None:
         os.environ[worker_handoff.PREDECESSOR_PID_ENV] = str(predecessor_pid)
     else:
         os.environ.pop(worker_handoff.PREDECESSOR_PID_ENV, None)
-    if notice_failure:
-        os.environ[worker_handoff.NOTICE_FAILURE_ENV] = notice_failure[:200]
-    else:
-        os.environ.pop(worker_handoff.NOTICE_FAILURE_ENV, None)
     try:
         process = get_subprocess(config=self.config, target=self.target, sockets=self.sockets)
         process.start()
@@ -297,21 +286,17 @@ def _restart_with_handoff(self: BaseReload) -> None:
     old = self.process
     old_marker = getattr(self, "_ready_marker", None)
     incumbent_alive = old.is_alive()
-    notice_failures: list = []
     if incumbent_alive:
-        _notify_dashboard(self.config, getattr(self, "_last_changed_paths", None),
-                          failures=notice_failures)
+        _notify_dashboard(self.config, getattr(self, "_last_changed_paths", None))
     else:
         logger.warning(
             "incumbent worker [%s] is not running; the replacement activates "
             "immediately", old.pid,
         )
-    notice_failure = notice_failures[-1] if notice_failures else None
     t0 = time.monotonic()
     timeout = _ready_timeout_seconds()
     while True:
-        child, marker = _spawn(self, old.pid if incumbent_alive else None,
-                               notice_failure)
+        child, marker = _spawn(self, old.pid if incumbent_alive else None)
         logger.info(
             "spawned replacement worker [%s]; incumbent [%s] keeps serving until it is ready",
             child.pid, old.pid,

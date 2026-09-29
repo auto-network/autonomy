@@ -58,7 +58,6 @@ CHANNELS: dict[str, tuple[str, ...]] = {
         "tools.dashboard.session_monitor",
         "tools.dashboard.worktree_monitor",
         "tools.dashboard.resource_monitor",
-        "tools.dashboard.attention_index_service",
         "agents.workspace_manager",
     ),
     "fleet": (

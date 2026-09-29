@@ -23,10 +23,6 @@ Env contract (child side):
 ``DASHBOARD_WORKER_PREDECESSOR_PID``
     PID of the incumbent worker, when there is one. Absent on a cold start,
     in which case the worker activates immediately.
-``DASHBOARD_HANDOFF_NOTICE_FAILURE``
-    Set only when the supervisor could not deliver its hand-off notice to the
-    incumbent: a short description of the last failure. The replacement
-    raises a Central attention item for it (auto-wb6ok).
 
 The activation marker is ``<ready marker> + ".activate"``. A worker also
 activates if the predecessor PID has vanished without a marker (the
@@ -49,7 +45,6 @@ logger = logging.getLogger(__name__)
 
 READY_MARKER_ENV = "DASHBOARD_WORKER_READY_MARKER"
 PREDECESSOR_PID_ENV = "DASHBOARD_WORKER_PREDECESSOR_PID"
-NOTICE_FAILURE_ENV = "DASHBOARD_HANDOFF_NOTICE_FAILURE"
 ACTIVATE_SUFFIX = ".activate"
 
 #: Reasons ``wait_for_activation`` resolves with; stable strings for logs/tests.
@@ -75,11 +70,6 @@ def predecessor_pid(environ=None) -> int | None:
         logger.warning("ignoring malformed %s=%r", PREDECESSOR_PID_ENV, raw)
         return None
     return pid if pid > 0 else None
-
-
-def notice_failure(environ=None) -> str | None:
-    env = os.environ if environ is None else environ
-    return env.get(NOTICE_FAILURE_ENV) or None
 
 
 def install_snapshot_on_sigterm(snapshot: Callable[[], object]) -> bool:

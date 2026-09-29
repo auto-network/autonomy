@@ -1347,10 +1347,6 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             "unlock: this process is warm but NO ramfs snapshot was written — "
             "nothing is carried forward unless a later graceful shutdown "
             "writes one")
-    # An unlock clears a "vault locked after a reload" attention item
-    # (auto-wb6ok). Best-effort; run_cycle never raises.
-    from tools.dashboard import vault_handoff_attention
-    await asyncio.to_thread(vault_handoff_attention.run_cycle)
     return JSONResponse({
         "ok": True,
         "generations": loaded,

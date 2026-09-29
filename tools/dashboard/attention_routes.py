@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import json
 import logging
 import threading
-import unicodedata
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
@@ -34,28 +33,11 @@ from tools.dashboard.approval_http_bridge import (
     ApprovalHttpRegistry,
     ApprovalWaitHub,
 )
-from tools.dashboard.attention_index_service import (
-    AttentionIndexError,
-    AttentionIndexService,
-    AttentionQueryItem,
-    AttentionQueryResult,
-    canonical_attention_event_id,
-)
-from tools.dashboard.attention_presentation_service import (
-    AttentionPresentationError,
-    AttentionPresentationService,
-)
-from tools.dashboard.attention_registry import (
-    build_production_attention_registry,
-    destination_route,
-)
+from tools.dashboard.attention_registry import APPLICATIONS
 from tools.graph.schemas.central_attention import (
     APPROVAL_REQUEST_SET_ID,
     APPROVAL_RESOLUTION_SET_ID,
     ATTENTION_DELIVERY_SET_ID,
-    ATTENTION_ITEM_SET_ID,
-    ATTENTION_PRESENTATION_SET_ID,
-    CENTRAL_ATTENTION_REVISION,
 )
 
 
@@ -64,17 +46,10 @@ logger = logging.getLogger(__name__)
 PRIVATE_CENTRAL_SET_IDS = frozenset({
     APPROVAL_REQUEST_SET_ID,
     APPROVAL_RESOLUTION_SET_ID,
-    ATTENTION_ITEM_SET_ID,
-    ATTENTION_PRESENTATION_SET_ID,
     ATTENTION_DELIVERY_SET_ID,
 })
-
-_BROWSER_EVENT_SET_IDS = frozenset({
-    ATTENTION_ITEM_SET_ID,
-    ATTENTION_PRESENTATION_SET_ID,
-})
+_APPROVAL_SET_IDS = frozenset({APPROVAL_REQUEST_SET_ID, APPROVAL_RESOLUTION_SET_ID})
 _SSE_CLOSE = object()
-_MAX_PENDING_CHANGES = 1024
 _SUBSCRIBER_QUEUE_SIZE = 32
 _HEARTBEAT_SECONDS = 15.0
 _MAX_MUTATION_BODY_BYTES = 32 * 1024
@@ -84,50 +59,15 @@ def is_private_central_set_id(value: Any) -> bool:
     return isinstance(value, str) and value in PRIVATE_CENTRAL_SET_IDS
 
 
-def _bounded_key(value: Any) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
-        raise ValueError("invalid Settings key")
-    try:
-        size = len(value.encode("utf-8"))
-    except UnicodeEncodeError as exc:
-        raise ValueError("invalid Settings key") from exc
-    if not 1 <= size <= 256 or any(
-        unicodedata.category(character).startswith("C") for character in value
-    ):
-        raise ValueError("invalid Settings key")
-    return value
-
-
-@dataclass(frozen=True, slots=True)
-class _ChangeEnvelope:
-    set_id: str
-    key: str
-    operation: str
-
-
 class PrivateAttentionHub:
-    """One loop-owned bounded fanout with thread-safe synchronous ingress."""
+    """Tells every open inbox page to refetch when an approval row changes."""
 
-    def __init__(
-        self,
-        *,
-        item_resolver,
-        max_pending: int = _MAX_PENDING_CHANGES,
-        subscriber_queue_size: int = _SUBSCRIBER_QUEUE_SIZE,
-    ) -> None:
-        if not callable(item_resolver):
-            raise ValueError("attention item resolver is required")
-        if max_pending < 1 or subscriber_queue_size < 1:
+    def __init__(self, *, subscriber_queue_size: int = _SUBSCRIBER_QUEUE_SIZE) -> None:
+        if subscriber_queue_size < 1:
             raise ValueError("attention hub bounds must be positive")
-        self._item_resolver = item_resolver
-        self._max_pending = max_pending
         self._subscriber_queue_size = subscriber_queue_size
         self._thread_lock = threading.Lock()
-        self._pending: dict[tuple[str, str], _ChangeEnvelope] = {}
-        self._gap_pending = False
-        self._drain_scheduled = False
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._drain_task: asyncio.Task | None = None
         self._subscribers: set[asyncio.Queue] = set()
 
     async def start(self) -> None:
@@ -138,156 +78,27 @@ class PrivateAttentionHub:
             self._loop = loop
 
     async def stop(self) -> None:
-        loop = asyncio.get_running_loop()
         with self._thread_lock:
-            owner = self._loop
             self._loop = None
-            self._pending.clear()
-            self._gap_pending = False
-            self._drain_scheduled = False
-        if owner is not None and owner is not loop:
-            return
-        task = self._drain_task
-        self._drain_task = None
-        if task is not None and task is not asyncio.current_task() and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
         for queue in tuple(self._subscribers):
             self._close_queue(queue)
         self._subscribers.clear()
 
-    def emit_setting_change(
-        self,
-        *,
-        operation: Any,
-        snapshot: Any,
-        org: Any,
-    ) -> None:
-        """Accept one trusted post-commit hint from any thread, best-effort."""
-        try:
-            if not isinstance(snapshot, Mapping):
-                return
-            set_id = snapshot.get("set_id")
-            if not is_private_central_set_id(set_id):
-                return
-            if org is not None:
-                return
-            revision = snapshot.get("schema_revision")
-            if (
-                isinstance(revision, bool)
-                or revision != CENTRAL_ATTENTION_REVISION
-            ):
-                return
-            key = _bounded_key(snapshot.get("key"))
-            if not isinstance(operation, str) or not operation:
-                return
-            envelope = _ChangeEnvelope(set_id=set_id, key=key, operation=operation)
-        except Exception:
-            return
+    def emit_setting_change(self, *, operation: Any, snapshot: Any, org: Any) -> None:
+        """A committed Settings write, from any thread."""
+        if org is None and isinstance(snapshot, Mapping) and snapshot.get("set_id") in _APPROVAL_SET_IDS:
+            self.emit_refresh()
 
+    def emit_refresh(self) -> None:
+        """Ask every open page to refetch, from any thread."""
         with self._thread_lock:
             loop = self._loop
-            if loop is None or loop.is_closed():
-                return
-            if not self._gap_pending:
-                change_key = (envelope.set_id, envelope.key)
-                if change_key not in self._pending and len(self._pending) >= self._max_pending:
-                    self._pending.clear()
-                    self._gap_pending = True
-                else:
-                    self._pending[change_key] = envelope
-            if self._drain_scheduled:
-                return
-            self._drain_scheduled = True
-            try:
-                loop.call_soon_threadsafe(self._begin_drain)
-            except Exception:
-                self._drain_scheduled = False
-                self._pending.clear()
-                self._gap_pending = False
-
-    def emit_refresh(self, _attention_id: str | None = None) -> None:
-        """Schedule one payload-free full refetch from any thread.
-
-        Organization-owned Link result rows never enter browser frames.  Their
-        reconciler uses this method only after exact personal/org correlation.
-        Coalescing to the existing gap frame keeps the hint bounded and avoids
-        disclosing the organization set address or result key.
-        """
-        with self._thread_lock:
-            loop = self._loop
-            if loop is None or loop.is_closed():
-                return
-            self._pending.clear()
-            self._gap_pending = True
-            if self._drain_scheduled:
-                return
-            self._drain_scheduled = True
-            try:
-                loop.call_soon_threadsafe(self._begin_drain)
-            except Exception:
-                self._drain_scheduled = False
-                self._gap_pending = False
-
-    def _begin_drain(self) -> None:
-        if self._drain_task is None or self._drain_task.done():
-            self._drain_task = asyncio.create_task(self._drain())
-
-    async def _drain(self) -> None:
-        try:
-            while True:
-                with self._thread_lock:
-                    gap = self._gap_pending
-                    batch = tuple(self._pending.values())
-                    self._gap_pending = False
-                    self._pending.clear()
-                    if not gap and not batch:
-                        self._drain_scheduled = False
-                        return
-                if gap:
-                    self._fanout("attention:refresh", {"attention_id": None})
-                    continue
-                for envelope in batch:
-                    if envelope.set_id not in _BROWSER_EVENT_SET_IDS:
-                        continue
-                    await self._emit_browser_change(envelope)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("private attention hub drain failed")
-            self._fanout("attention:refresh", {"attention_id": None})
-        finally:
-            with self._thread_lock:
-                if self._loop is None:
-                    self._pending.clear()
-                    self._gap_pending = False
-                    self._drain_scheduled = False
-                elif self._pending or self._gap_pending:
-                    asyncio.get_running_loop().call_soon(self._begin_drain)
-                else:
-                    self._drain_scheduled = False
-
-    async def _emit_browser_change(self, envelope: _ChangeEnvelope) -> None:
-        try:
-            item = await asyncio.to_thread(self._item_resolver, envelope.key)
-        except AttentionIndexError as exc:
-            if exc.code == "invalid_request":
-                return
-            item = None
-        except Exception:
-            item = None
-        if item is None:
-            self._fanout("attention:refresh", {"attention_id": envelope.key})
+        if loop is None or loop.is_closed():
             return
-        if envelope.set_id == ATTENTION_PRESENTATION_SET_ID:
-            self._fanout("attention:presentation", {"attention_id": envelope.key})
+        try:
+            loop.call_soon_threadsafe(self._fanout, "attention:refresh", {})
+        except RuntimeError:
             return
-        source_version = item.payload["source_version"]
-        self._fanout("attention:changed", {
-            "event_id": canonical_attention_event_id(envelope.key, source_version),
-            "attention_id": envelope.key,
-            "source_version": source_version,
-        })
 
     def subscribe(self) -> asyncio.Queue:
         if self._loop is not asyncio.get_running_loop():
@@ -297,8 +108,6 @@ class PrivateAttentionHub:
         return queue
 
     def unsubscribe(self, queue: asyncio.Queue) -> None:
-        if self._loop is not None and self._loop is not asyncio.get_running_loop():
-            raise RuntimeError("attention hub unsubscribe must run on its owner loop")
         self._subscribers.discard(queue)
 
     @staticmethod
@@ -322,10 +131,9 @@ class PrivateAttentionHub:
 
 @dataclass(slots=True)
 class AttentionRouteRuntime:
-    index: AttentionIndexService
-    presentation: AttentionPresentationService
     approvals: ApprovalService
     hub: PrivateAttentionHub
+    inbox_texts: Mapping[str, Any]
     approval_http: ApprovalHttpBridge | None = None
     approval_reconciler: Any | None = None
     operator_result_projectors: Mapping[str, Any] | None = None
@@ -348,15 +156,11 @@ class AttentionRouteRuntime:
         if self.approval_http is None:
             self.approval_http = ApprovalHttpBridge(
                 approvals=self.approvals,
-                registry=ApprovalHttpRegistry(
-                    approvals=self.approvals.registry,
-                    attention=self.index.registry,
-                ),
+                registry=ApprovalHttpRegistry(approvals=self.approvals.registry),
             )
         elif (
             self.approval_http.approvals is not self.approvals
             or self.approval_http.registry.approvals is not self.approvals.registry
-            or self.approval_http.registry.attention is not self.index.registry
         ):
             raise ValueError("Central route runtime must share one exact composition")
 
@@ -430,27 +234,18 @@ def pending_session_approval(session: Mapping[str, Any], actor: HumanApprovalAct
     if org:
         principals.append(api_auth.ApiPrincipal(api_auth.ApiPrincipalKind.ORG_SESSION, subject=subject, org=org))
     identities = {canonical_session_requester_id(p) for p in principals}
-    cursor = None
     found = []
-    while True:
-        page = _runtime.index.query(surface_category="approvals", attention_state="needs_attention",
-                                    participant_role="recipient", limit=100, cursor=cursor)
-        for item in page.items:
-            context = _approval_context(item)
-            if context is None:
-                continue
-            status = context[2]
-            payload = status.request.payload
-            requester = payload.get("requester_ref", {})
-            if (status.resolution is None and requester.get("kind") == "session"
-                    and requester.get("id") in identities
-                    and payload.get("decider") == {"kind": "person", "id": actor.decider_ref}):
-                found.append((item.payload["occurred_at"], item.attention_id,
-                              {"id": status.request.approval_id, "kind": payload["kind"],
-                               "attention_id": item.attention_id}))
-        cursor = page.next_cursor
-        if cursor is None:
-            return min(found, key=lambda row: row[:2])[2] if found else None
+    for item in _inbox_items():
+        status = item.status
+        payload = status.request.payload
+        requester = payload.get("requester_ref", {})
+        if (status.resolution is None and requester.get("kind") == "session"
+                and requester.get("id") in identities
+                and payload.get("decider") == {"kind": "person", "id": actor.decider_ref}):
+            approval_id = status.request.approval_id
+            found.append((item.occurred_at, approval_id,
+                          {"id": approval_id, "kind": payload["kind"], "attention_id": approval_id}))
+    return min(found, key=lambda row: row[:2])[2] if found else None
 
 
 def build_production_runtime() -> AttentionRouteRuntime:
@@ -490,176 +285,67 @@ def build_production_runtime() -> AttentionRouteRuntime:
         session_label_resolver=session_requester_label,
         registered_service_label_resolver=crosstalk.service_label,
     )
-    dashboard_attention_runtime = dashboard_access_central.build_attention_runtime(
-        approvals,
-    )
-    runtimes = {
-        (fleet.KIND, fleet.APPLICATION_SCOPE): fleet.build_attention_runtime(approvals),
-        (
-            dashboard_access_central.KIND,
-            dashboard_access_central.APPLICATION_SCOPE,
-        ): dashboard_attention_runtime,
-        (mailbox_central.KIND, mailbox_central.APPLICATION_SCOPE):
-            mailbox_central.build_attention_runtime(approvals),
-        (vault_open_central.KIND, vault_open_central.APPLICATION_SCOPE):
-            vault_open_central.build_attention_runtime(approvals),
-        **{(external.KIND, scope): external.build_attention_runtime(approvals)
-           for scope in external.APPLICATIONS},
-        (crosstalk.KIND, crosstalk.APPLICATION_SCOPE): crosstalk.build_attention_runtime(approvals),
-        (visitor.KIND, visitor.APPLICATION_SCOPE): visitor.build_attention_runtime(approvals),
-        (jira_central.KIND, jira_central.APPLICATION_SCOPE):
-            jira_central.build_attention_runtime(approvals),
-        **{(kind, link_approval_central.APPLICATION_SCOPE):
-           link_approval_central.build_attention_runtime(approvals, kind) for kind in link_approval_central.KINDS},
-    }
-    # The backup plugin's non-approval publication runtimes (auto-fnydv).
-    # The registry rows are closed substrate code; the plugin supplies
-    # only projection/evidence translation. Import failure degrades to
-    # class_disabled for the backup classes, never a boot failure.
-    try:
-        from tools.dashboard.plugins.backup.attention import (
-            publication_runtimes as backup_publication_runtimes,
-        )
-        runtimes.update(backup_publication_runtimes())
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "backup attention runtimes unavailable; backup classes stay "
-            "disabled")
-    try:
-        from tools.dashboard.certificate_attention import (
-            publication_runtimes as certificate_publication_runtimes,
-        )
-        runtimes.update(certificate_publication_runtimes())
-        from tools.dashboard.vault_handoff_attention import (
-            publication_runtimes as vault_handoff_publication_runtimes,
-        )
-        runtimes.update(vault_handoff_publication_runtimes())
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "machine attention runtimes unavailable; machine classes stay disabled")
-    attention_registry = build_production_attention_registry(
-        approval_registry=approval_registry,
-        runtimes=runtimes,
-    )
-    index = AttentionIndexService(registry=attention_registry)
     consumer = dashboard_access_central.DashboardAccessResultConsumer()
-    producer = attention_registry.producer(
-        dashboard_access_central.KIND,
-        dashboard_access_central.APPLICATION_SCOPE,
-    )
     coordinator = dashboard_access_central.DashboardAccessCoordinator(
-        approvals=approvals,
-        index=index,
-        producer=producer,
-        consumer=consumer,
+        approvals=approvals, consumer=consumer,
     )
     email_consumer = mailbox_central.EmailSendConsumer()
     email_coordinator = mailbox_central.EmailSendCoordinator(
-        approvals=approvals,
-        index=index,
-        producer=attention_registry.producer(
-            mailbox_central.KIND, mailbox_central.APPLICATION_SCOPE,
-        ),
-        consumer=email_consumer,
+        approvals=approvals, consumer=email_consumer,
     )
-    vault_delivery = vault_open_central.VaultOpenDelivery(approvals=approvals, index=index)
+    vault_delivery = vault_open_central.VaultOpenDelivery(approvals=approvals)
     vault_coordinator = vault_open_central.VaultOpenCoordinator(
-        delivery=vault_delivery,
-        approvals=approvals,
-        index=index,
-        producer=attention_registry.producer(
-            vault_open_central.KIND, vault_open_central.APPLICATION_SCOPE,
-        ),
+        delivery=vault_delivery, approvals=approvals,
     )
     enrollment_desk = external.EnrollmentDesk(approvals=approvals)
-    enrollment_coordinator = external.EnrollmentCoordinator(
-        desk=enrollment_desk,
-        approvals=approvals,
-        index=index,
-        producer=attention_registry.producer(
-            external.KIND, "dropbox", external.DROPBOX_PRODUCER.producer_id,
-        ),
-    )
     crosstalk_desk = crosstalk.CrosstalkDesk(approvals=approvals)
-    crosstalk_coordinator = crosstalk.CrosstalkCoordinator(
-        desk=crosstalk_desk,
-        approvals=approvals,
-        index=index,
-        producer=attention_registry.producer(crosstalk.KIND, crosstalk.APPLICATION_SCOPE),
-    )
+    crosstalk_coordinator = crosstalk.CrosstalkCoordinator(desk=crosstalk_desk, approvals=approvals)
     visitor_desk = visitor.VisitorDesk(approvals=approvals)
-    visitor_coordinator = visitor.VisitorCoordinator(
-        approvals=approvals,
-        index=index,
-        producer=attention_registry.producer(visitor.KIND, visitor.APPLICATION_SCOPE),
-    )
-    jira_desk = jira_central.JiraWriteDesk(approvals=approvals, index=index)
-    jira_coordinator = jira_central.JiraWriteCoordinator(
-        desk=jira_desk,
-        approvals=approvals,
-        index=index,
-        producer=attention_registry.producer(jira_central.KIND, jira_central.APPLICATION_SCOPE),
-    )
-    link_desk = link_approval_central.LinkApprovalDesk(approvals=approvals, index=index)
-    link_coordinators = [
-        link_approval_central.LinkApprovalCoordinator(
-            kind=kind, approvals=approvals, index=index,
-            producer=attention_registry.producer(kind, link_approval_central.APPLICATION_SCOPE),
-        )
-        for kind in link_approval_central.KINDS
-    ]
-    # One reconciler slot, one coordinator per migrated kind; each ignores
-    # other kinds' approval ids.
+    jira_desk = jira_central.JiraWriteDesk(approvals=approvals)
+    jira_coordinator = jira_central.JiraWriteCoordinator(desk=jira_desk, approvals=approvals)
+    link_desk = link_approval_central.LinkApprovalDesk(approvals=approvals)
+    # The kinds that act when a decision arrives; each ignores other kinds' ids.
     reconcilers = mailbox_central.ReconcilerGroup(
-        coordinator, email_coordinator, vault_coordinator, enrollment_coordinator,
-        crosstalk_coordinator, visitor_coordinator, jira_coordinator, *link_coordinators,
+        coordinator, email_coordinator, vault_coordinator, crosstalk_coordinator, jira_coordinator,
     )
     approval_http = ApprovalHttpBridge(
         approvals=approvals,
         registry=ApprovalHttpRegistry(
             approvals=approval_registry,
-            attention=attention_registry,
             adapters={
-                dashboard_access_central.KIND:
-                    dashboard_access_central.build_http_adapter(
-                        consumer,
-                        reconcile=coordinator.reconcile_exact,
-                    ),
-                mailbox_central.KIND:
-                    mailbox_central.build_http_adapter(
-                        email_consumer,
-                        reconcile=email_coordinator.reconcile_exact,
-                    ),
-                jira_central.KIND:
-                    jira_central.build_http_adapter(
-                        jira_desk,
-                        reconcile=jira_coordinator.reconcile_exact,
-                    ),
-                visitor.KIND:
-                    visitor.build_http_adapter(
-                        visitor_desk,
-                        reconcile=visitor_coordinator.reconcile_exact,
-                    ),
-                vault_open_central.KIND:
-                    vault_open_central.build_http_adapter(
-                        vault_delivery,
-                        reconcile=vault_coordinator.reconcile_exact,
-                    ),
-                **{
-                    c.kind: link_approval_central.build_http_adapter(
-                        c.kind, link_desk, reconcile=c.reconcile_exact,
-                    )
-                    for c in link_coordinators
-                },
+                dashboard_access_central.KIND: dashboard_access_central.build_http_adapter(
+                    consumer, reconcile=coordinator.reconcile_exact,
+                ),
+                mailbox_central.KIND: mailbox_central.build_http_adapter(
+                    email_consumer, reconcile=email_coordinator.reconcile_exact,
+                ),
+                jira_central.KIND: jira_central.build_http_adapter(
+                    jira_desk, reconcile=jira_coordinator.reconcile_exact,
+                ),
+                visitor.KIND: visitor.build_http_adapter(visitor_desk),
+                vault_open_central.KIND: vault_open_central.build_http_adapter(
+                    vault_delivery, reconcile=vault_coordinator.reconcile_exact,
+                ),
+                **{kind: link_approval_central.build_http_adapter(kind, link_desk)
+                   for kind in link_approval_central.KINDS},
             },
         ),
         wait_hub=approval_waiters,
     )
     return AttentionRouteRuntime(
-        index=index,
-        presentation=AttentionPresentationService(),
         approvals=approvals,
-        hub=PrivateAttentionHub(item_resolver=index.get_query_item),
+        hub=PrivateAttentionHub(),
+        inbox_texts={
+            dashboard_access_central.KIND: dashboard_access_central.inbox_text,
+            fleet.KIND: fleet.inbox_text,
+            mailbox_central.KIND: mailbox_central.inbox_text,
+            vault_open_central.KIND: vault_open_central.inbox_text,
+            external.KIND: external.inbox_text,
+            crosstalk.KIND: crosstalk.inbox_text,
+            visitor.KIND: visitor.inbox_text,
+            jira_central.KIND: jira_central.inbox_text,
+            **{kind: link_approval_central.inbox_text for kind in link_approval_central.KINDS},
+        },
         approval_http=approval_http,
         approval_reconciler=reconcilers,
         operator_result_projectors={dashboard_access_central.KIND: consumer.project,
@@ -712,10 +398,6 @@ def approval_runtime() -> AttentionRouteRuntime:
     return _runtime
 
 
-def sync_registrations() -> int:
-    return _runtime.index.sync_registrations()
-
-
 def emit_setting_change(*, operation: str, snapshot: Mapping[str, Any], org: str | None) -> None:
     try:
         if _runtime.approval_reconciler is not None:
@@ -734,8 +416,11 @@ def emit_setting_change(*, operation: str, snapshot: Mapping[str, Any], org: str
 def emit_personal_sync_change(*, addresses=()) -> None:
     """Accept one payload-free post-materialization hint from Fleet sync."""
     try:
+        addresses = tuple(addresses or ())
         if _runtime.approval_reconciler is not None:
             _runtime.approval_reconciler.offer_synced(addresses=addresses)
+        if any(getattr(a, "set_id", None) in _APPROVAL_SET_IDS for a in addresses):
+            _runtime.hub.emit_refresh()
     except Exception:
         logger.warning("personal-sync approval hint failed", exc_info=True)
 
@@ -835,37 +520,67 @@ async def _strict_json_object(request: Request, *, allow_empty: bool = False) ->
     return value
 
 
-def _presentation(payload: Mapping[str, Any] | None) -> dict[str, Any]:
-    source = {} if payload is None else payload
-    return {
-        "seen_at": source.get("seen_at"),
-        "last_opened_at": source.get("last_opened_at"),
-        "snoozed_until": source.get("snoozed_until"),
-    }
+@dataclass(frozen=True, slots=True)
+class InboxItem:
+    """One approval as the inbox shows it, read from its request and decision."""
+
+    status: ApprovalStatus
+    registration: Any
+    title: str
+    summary: str | None
+
+    @property
+    def approval_id(self) -> str:
+        return self.status.request.approval_id
+
+    @property
+    def occurred_at(self) -> float:
+        resolution = self.status.resolution
+        if resolution is not None:
+            return float(resolution.payload["resolved_at"])
+        return float(self.status.request.payload["created_at"])
 
 
-def _safe_item(item: AttentionQueryItem) -> dict[str, Any]:
-    payload = item.payload
+def _inbox_item(status: ApprovalStatus) -> InboxItem | None:
+    kind = status.request.payload.get("kind")
+    text = _runtime.inbox_texts.get(kind)
+    registration = _runtime.approvals.registry.kinds.get(kind)
+    if text is None or registration is None or registration.runtime is None:
+        return None
+    title, summary = text(status)
+    return InboxItem(status, registration, title, summary)
+
+
+def _inbox_items() -> list[InboxItem]:
+    items = [item for item in map(_inbox_item, _runtime.approvals.list_statuses()) if item]
+    items.sort(key=lambda item: (-item.occurred_at, item.approval_id))
+    return items
+
+
+def _exact_item(approval_id: str) -> InboxItem | None:
+    try:
+        status = _runtime.approvals.status(approval_id)
+    except ApprovalServiceError as exc:
+        if exc.code == "not_found":
+            return None
+        raise
+    return _inbox_item(status)
+
+
+def _safe_item(item: InboxItem) -> dict[str, Any]:
+    scope = item.status.request.payload["application_scope"]
+    label, icon_ref = APPLICATIONS.get(scope, (scope, ""))
     return {
-        "attention_id": item.attention_id,
-        "application": {
-            "scope": payload["application_scope"],
-            "label": item.application_label,
-            "icon_ref": item.icon_ref,
-        },
-        "category": item.surface_category,
-        "participant_role": payload["participant_role"],
-        "attention_state": payload["attention_state"],
-        "title": payload["safe_title"],
-        "summary": payload.get("safe_summary"),
-        "counterparty_ref": payload.get("counterparty_ref"),
-        "occurred_at": payload["occurred_at"],
-        "source_version": payload["source_version"],
-        "presentation": _presentation(item.presentation),
-        "open": {
-            "mode": "registered_renderer",
-            "renderer_id": item.review_renderer_id,
-        },
+        "attention_id": item.approval_id,
+        "application": {"scope": scope, "label": label, "icon_ref": icon_ref},
+        "category": "approvals",
+        "participant_role": "recipient",
+        "attention_state": "resolved" if item.status.resolution is not None else "needs_attention",
+        "title": item.title,
+        "summary": item.summary,
+        "counterparty_ref": None,
+        "occurred_at": item.occurred_at,
+        "open": {"mode": "registered_renderer", "renderer_id": item.registration.renderer_id},
     }
 
 
@@ -876,156 +591,32 @@ def _safe_resolution(record: Any) -> dict[str, Any] | None:
     return {"outcome": payload["outcome"], "resolved_at": payload["resolved_at"]}
 
 
-def _serialize_query(result: AttentionQueryResult) -> dict[str, Any]:
-    counts = result.counts
-    return {
-        "items": [_safe_item(item) for item in result.items],
-        "counts": {
-            "total_needs_attention": counts.total_needs_attention,
-            "categories": dict(counts.categories),
-            "states": dict(counts.states),
-            "applications": {
-                key: dict(value) for key, value in counts.applications.items()
-            },
-        },
-        "next_cursor": result.next_cursor,
-        "snapshot_version": result.snapshot_version,
-    }
-
-
-def _review_unavailable(item: AttentionQueryItem) -> JSONResponse:
-    return _no_store(
-        {"error": "review_unavailable", "item": _safe_item(item)},
-        status_code=409,
-    )
-
-
-def _application_registration(item: AttentionQueryItem):
-    """The registry row behind a NON-approval item, or None for an
-    approval class (which the approval review path serves)."""
-    payload = item.payload
-    try:
-        registration = _runtime.index.registry.require_class(
-            payload["application_scope"], payload["notification_class"],
-        )
-    except Exception as exc:
-        raise AttentionIndexError("unavailable") from exc
-    if registration.surface_category == "approvals":
-        return None
-    return registration
-
-
-def _application_review(item: AttentionQueryItem, registration) -> dict[str, Any]:
-    """The review for an application item (backup and the other
-    non-approval scopes): no decision, one destination. The href comes
-    from the class policy's closed route builder — the same builder the
-    Web Push payload uses — so the inbox's open button and a phone alert
-    land on the same page. Raises ValueError for an unregistered
-    builder, which the caller reports as review_unavailable."""
-    policy = registration.policy
-    href = destination_route(
-        policy.route_builder_id, policy.destination_id,
-        item.payload["object_ref"],
-    )
-    return {
-        "type": "application",
-        "renderer_id": item.review_renderer_id,
-        "kind": registration.kind,
-        "destination": {"href": href},
-        "actions": [],
-    }
-
-
-def _approval_context(
-    item: AttentionQueryItem,
-) -> tuple[Any, Any, ApprovalStatus] | None:
-    payload = item.payload
-    try:
-        attention_registration = _runtime.index.registry.require_class(
-            payload["application_scope"], payload["notification_class"],
-        )
-        approval_registration = _runtime.approvals.registry.require(
-            attention_registration.kind, enabled=False,
-        )
-        if (
-            attention_registration.runtime is None
-            or approval_registration.runtime is None
-            or approval_registration.renderer_id != item.review_renderer_id
-            or approval_registration.notification_class != payload["notification_class"]
-            or payload["application_scope"]
-            not in approval_registration.application_scope_policy.applications
-        ):
-            return None
-        status = _runtime.approvals.status(payload["object_ref"])
-        request_payload = status.request.payload
-        if (
-            request_payload.get("source_version") != 1
-            or request_payload.get("application_scope") != payload["application_scope"]
-            or request_payload.get("kind") != attention_registration.kind
-        ):
-            return None
-        role = payload["participant_role"]
-        state = payload["attention_state"]
-        version = payload["source_version"]
-        resolution = status.resolution
-        valid = (
-            version == 1
-            and ((role == "recipient" and state == "needs_attention")
-                 or (role == "sender" and state == "waiting"))
-        ) or (
-            version == 2
-            and state == "resolved"
-            and role in {"recipient", "sender"}
-            and resolution is not None
-        )
-        if not valid or (version == 2 and resolution is None):
-            return None
-        return attention_registration, approval_registration, status
-    except ApprovalServiceError:
-        raise
-    except Exception as exc:
-        raise AttentionIndexError("unavailable") from exc
-
-
 async def api_attention_items(request: Request):
     denied = _operator_guard(request)
     if denied is not None:
         return denied
-    allowed = {"application", "category", "state", "role", "limit", "cursor"}
-    if any(key not in allowed for key in request.query_params):
+    if request.query_params:
         return _no_store({"error": "invalid_request"}, status_code=400)
-    if any(len(request.query_params.getlist(key)) != 1 for key in request.query_params):
-        return _no_store({"error": "invalid_request"}, status_code=400)
-    limit_raw = request.query_params.get("limit")
-    if limit_raw is None:
-        limit = 50
-    elif not limit_raw.isascii() or not limit_raw.isdecimal():
-        return _no_store({"error": "invalid_request"}, status_code=400)
-    else:
-        try:
-            limit = int(limit_raw)
-        except Exception:
-            return _no_store({"error": "invalid_request"}, status_code=400)
     try:
-        result = await asyncio.to_thread(
-            _runtime.index.query,
-            application_scope=request.query_params.get("application"),
-            surface_category=request.query_params.get("category"),
-            attention_state=request.query_params.get("state"),
-            participant_role=request.query_params.get("role"),
-            limit=limit,
-            cursor=request.query_params.get("cursor"),
-        )
-    except AttentionIndexError as exc:
-        status = 409 if exc.code == "refresh_required" else (
-            503 if exc.code == "unavailable" else 400
-        )
-        return _no_store({"error": exc.code}, status_code=status)
-    return _no_store(_serialize_query(result))
-
-
-async def _exact_item(attention_id: Any) -> AttentionQueryItem | None:
-    return await asyncio.to_thread(_runtime.index.get_query_item, attention_id)
+        items = await asyncio.to_thread(_inbox_items)
+    except ApprovalServiceError:
+        return _no_store({"error": "unavailable"}, status_code=503)
+    applications: dict[str, dict[str, int]] = {}
+    waiting = 0
+    for item in items:
+        scope = item.status.request.payload["application_scope"]
+        counts = applications.setdefault(scope, {"needs_attention": 0, "waiting": 0})
+        if item.status.resolution is None:
+            counts["needs_attention"] += 1
+            waiting += 1
+    return _no_store({
+        "items": [_safe_item(item) for item in items],
+        "counts": {
+            "total_needs_attention": waiting,
+            "categories": {"apps": 0, "comms": 0, "approvals": waiting},
+            "applications": applications,
+        },
+    })
 
 
 async def api_attention_item(request: Request):
@@ -1033,50 +624,18 @@ async def api_attention_item(request: Request):
     if denied is not None:
         return denied
     try:
-        item = await _exact_item(request.path_params["attention_id"])
-    except AttentionIndexError as exc:
-        status = 503 if exc.code == "unavailable" else 400
-        return _no_store({"error": exc.code}, status_code=status)
+        item = await asyncio.to_thread(_exact_item, request.path_params["attention_id"])
+    except ApprovalServiceError:
+        return _no_store({"error": "unavailable"}, status_code=503)
     if item is None:
         return _no_store({"error": "not_found"}, status_code=404)
-    try:
-        registration = _application_registration(item)
-    except AttentionIndexError:
-        return _no_store({"error": "unavailable"}, status_code=503)
-    if registration is not None:
-        try:
-            review = _application_review(item, registration)
-        except ValueError:
-            return _review_unavailable(item)
-        return _no_store({"item": _safe_item(item), "review": review})
-    try:
-        context = await asyncio.to_thread(_approval_context, item)
-    except ApprovalServiceError as exc:
-        if exc.code == "storage_unavailable":
-            return _no_store({"error": "unavailable"}, status_code=503)
-        return _review_unavailable(item)
-    except AttentionIndexError:
-        return _no_store({"error": "unavailable"}, status_code=503)
-    if context is None:
-        return _review_unavailable(item)
-    _attention_registration, approval_registration, status = context
+    status = item.status
     request_payload = status.request.payload
-    resolution = _safe_resolution(status.resolution)
     actions: list[str] = []
-    if (
-        item.payload["participant_role"] == "recipient"
-        and item.payload["attention_state"] == "needs_attention"
-        and item.payload["source_version"] == 1
-        and status.resolution is None
-    ):
+    if status.resolution is None:
         try:
             actor = resolve_human_approval_actor(request)
-            expected = request_payload.get("decider")
-            if (
-                isinstance(expected, Mapping)
-                and expected.get("kind") == "person"
-                and expected.get("id") == actor.decider_ref
-            ):
+            if request_payload.get("decider") == {"kind": "person", "id": actor.decider_ref}:
                 actions = ["granted", "declined"]
         except ApprovalServiceError:
             pass
@@ -1088,37 +647,26 @@ async def api_attention_item(request: Request):
         safe_requester.update(await asyncio.to_thread(session_requester_view, requester))
     except Exception:
         pass  # Unavailable metadata must never invent a destination.
-    application_result = None
-    has_application_result = False
-    assert _runtime.operator_result_projectors is not None
-    projector = _runtime.operator_result_projectors.get(approval_registration.kind)
-    if projector is not None:
-        has_application_result = True
-        try:
-            projected = await asyncio.to_thread(projector, status)
-            if projected is not None:
-                application_result = ApprovalHttpBridge._json_mapping(
-                    projected,
-                    code="unavailable",
-                )
-        except Exception:
-            return _no_store({"error": "unavailable"}, status_code=503)
     review = {
         "type": "approval",
-        "renderer_id": item.review_renderer_id,
-        "kind": approval_registration.kind,
-        "authority_requirement": approval_registration.authority_requirement.value,
+        "renderer_id": item.registration.renderer_id,
+        "kind": item.registration.kind,
+        "authority_requirement": item.registration.authority_requirement.value,
         "safe_review": dict(request_payload["safe_review"]),
         "requester": safe_requester,
-        "resolution": resolution,
+        "resolution": _safe_resolution(status.resolution),
         "actions": actions,
     }
-    if has_application_result:
-        review["application_result"] = application_result
-    return _no_store({
-        "item": _safe_item(item),
-        "review": review,
-    })
+    assert _runtime.operator_result_projectors is not None
+    projector = _runtime.operator_result_projectors.get(item.registration.kind)
+    if projector is not None:
+        try:
+            projected = await asyncio.to_thread(projector, status)
+            review["application_result"] = None if projected is None else (
+                ApprovalHttpBridge._json_mapping(projected, code="unavailable"))
+        except Exception:
+            return _no_store({"error": "unavailable"}, status_code=503)
+    return _no_store({"item": _safe_item(item), "review": review})
 
 
 async def api_attention_decision(request: Request):
@@ -1134,10 +682,9 @@ async def api_attention_decision(request: Request):
     } or not isinstance(body.get("decision"), dict):
         return _no_store({"error": "invalid_decision"}, status_code=422)
     try:
-        item = await _exact_item(request.path_params["attention_id"])
-    except AttentionIndexError as exc:
-        status_code = 503 if exc.code == "unavailable" else 422
-        return _no_store({"error": exc.code}, status_code=status_code)
+        item = await asyncio.to_thread(_exact_item, request.path_params["attention_id"])
+    except ApprovalServiceError:
+        return _no_store({"error": "unavailable"}, status_code=503)
     if item is None:
         return _no_store({"error": "not_found"}, status_code=404)
     try:
@@ -1146,30 +693,9 @@ async def api_attention_decision(request: Request):
         status_code = 503 if exc.code == "not_configured" else 401
         return _no_store({"error": exc.code}, status_code=status_code)
     try:
-        context = await asyncio.to_thread(_approval_context, item)
-    except ApprovalServiceError as exc:
-        status_code = 503 if exc.code == "storage_unavailable" else 409
-        return _no_store({"error": "review_unavailable"}, status_code=status_code)
-    except AttentionIndexError:
-        return _no_store({"error": "unavailable"}, status_code=503)
-    if context is None:
-        return _no_store({"error": "review_unavailable"}, status_code=409)
-    _attention_registration, _approval_registration, status = context
-    if item.payload["participant_role"] != "recipient":
-        return _no_store({"error": "not_actionable"}, status_code=409)
-    if not (
-        item.payload["source_version"] == 1
-        and item.payload["attention_state"] == "needs_attention"
-    ) and not (
-        item.payload["source_version"] == 2
-        and item.payload["attention_state"] == "resolved"
-        and status.resolution is not None
-    ):
-        return _no_store({"error": "review_unavailable"}, status_code=409)
-    try:
         resolution = await asyncio.to_thread(
             _runtime.approvals.decide,
-            item.payload["object_ref"],
+            item.approval_id,
             actor,
             outcome=body["outcome"],
             decision=body["decision"],
@@ -1337,54 +863,6 @@ async def api_attention_link_operation(request: Request):
     return _no_store(dict(result))
 
 
-async def _presentation_mutation(request: Request, operation: str):
-    denied = operator_mutation_guard(request)
-    if denied is not None:
-        return denied
-    try:
-        if operation == "snooze":
-            body = await _strict_json_object(request)
-            if set(body) != {"duration_seconds"}:
-                raise ValueError
-            call = _runtime.presentation.snooze
-            args = (request.path_params["attention_id"], body["duration_seconds"])
-        else:
-            body = await _strict_json_object(request, allow_empty=True)
-            if body:
-                raise ValueError
-            call = {
-                "seen": _runtime.presentation.mark_seen,
-                "opened": _runtime.presentation.mark_opened,
-                "clear_snooze": _runtime.presentation.clear_snooze,
-            }[operation]
-            args = (request.path_params["attention_id"],)
-        result = await asyncio.to_thread(call, *args)
-    except ValueError:
-        return _no_store({"error": "invalid_request"}, status_code=422)
-    except AttentionPresentationError as exc:
-        status = 404 if exc.code == "not_found" else (
-            503 if exc.code == "unavailable" else 422
-        )
-        return _no_store({"error": exc.code}, status_code=status)
-    return _no_store({"presentation": _presentation(result.payload)})
-
-
-async def api_attention_seen(request: Request):
-    return await _presentation_mutation(request, "seen")
-
-
-async def api_attention_opened(request: Request):
-    return await _presentation_mutation(request, "opened")
-
-
-async def api_attention_snooze(request: Request):
-    return await _presentation_mutation(request, "snooze")
-
-
-async def api_attention_clear_snooze(request: Request):
-    return await _presentation_mutation(request, "clear_snooze")
-
-
 def _sse_frame(event: str, data: Mapping[str, Any]) -> bytes:
     payload = json.dumps(dict(data), sort_keys=True, separators=(",", ":"))
     return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
@@ -1459,26 +937,6 @@ routes = [
         "/api/attention/items/{attention_id:path}/link-operation",
         api_attention_link_operation,
         methods=["POST"],
-    ),
-    Route(
-        "/api/attention/items/{attention_id:path}/seen",
-        api_attention_seen,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/attention/items/{attention_id:path}/opened",
-        api_attention_opened,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/attention/items/{attention_id:path}/snooze",
-        api_attention_snooze,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/attention/items/{attention_id:path}/snooze",
-        api_attention_clear_snooze,
-        methods=["DELETE"],
     ),
     # The approved opaque-ID rule permits slash characters. Action routes must
     # precede this greedy exact-item route so every valid encoded ID remains

@@ -20,29 +20,15 @@ from tools.dashboard.approval_service import (
     ApprovalService, HumanApprovalActor, InMemoryApprovalStore,
     resolve_human_approval_actor,
 )
-from tools.dashboard.attention_index_service import (
-    AttentionIndexError, AttentionIndexService, AttentionQueryItem,
-    InMemoryAttentionIndexStore,
-)
-from tools.dashboard.attention_presentation_service import (
-    AttentionItemRecord as PresentationItemRecord,
-    AttentionPresentationRecord as PresentationRecord,
-    AttentionPresentationService,
-)
-from tools.dashboard.attention_registry import (
-    AttentionApplicationRegistration, AttentionClassPolicy,
-    AttentionClassRegistration, AttentionProjectionPlan,
-    AttentionPublicationRuntime, AttentionRegistry, AttentionSourceEvidence,
-)
 from tools.dashboard.event_bus import EventBus
 from tools.graph.schemas.central_attention import (
     APPROVAL_REQUEST_SET_ID, APPROVAL_RESOLUTION_SET_ID,
-    ATTENTION_DELIVERY_SET_ID, ATTENTION_ITEM_SET_ID,
-    ATTENTION_PRESENTATION_SET_ID,
+    ATTENTION_DELIVERY_SET_ID,
 )
 
 ROOT = "a" * 64
 APPROVAL_ID = "approval-1234567890"
+OTHER_ID = "approval-0987654321"
 
 
 def test_requesting_session_link_is_resolved_from_verified_identity_not_grant_id(monkeypatch):
@@ -87,22 +73,7 @@ def test_production_dashboard_access_review_projects_the_existing_application_re
     assert result == expected
 
 
-class _PresentationStore:
-    def __init__(self, index_store):
-        self.index_store = index_store
-
-    def get(self, attention_id):
-        payload = self.index_store.presentations.get(attention_id)
-        return None if payload is None else PresentationRecord(
-            attention_id, dict(payload),
-        )
-
-    def upsert(self, attention_id, payload):
-        self.index_store.presentations[attention_id] = dict(payload)
-        return PresentationRecord(attention_id, dict(payload))
-
-
-def _route_runtime():
+def _route_runtime(*, expiry=None, clock=None):
     approval_runtime = ApprovalKindRuntime(
         request_planner=lambda _context, body: {
             "subject_ref": "machine-1",
@@ -122,7 +93,7 @@ def _route_runtime():
         requester_policy=RequesterPolicy.SESSION_PRINCIPAL,
         decider_policy=DeciderPolicy.PERSONAL_OPERATOR,
         authority_requirement=AuthorityRequirement.OPERATOR_SESSION,
-        request_expiry_policy=ApprovalExpiryPolicy(ExpiryMode.NEVER),
+        request_expiry_policy=expiry or ApprovalExpiryPolicy(ExpiryMode.NEVER),
         runtime=approval_runtime,
     )
     registry = ApprovalKindRegistry(
@@ -133,11 +104,12 @@ def _route_runtime():
         )]),
         consumer_ids={"test.consumer"},
     )
+    ids = iter([APPROVAL_ID, OTHER_ID])
     approvals = ApprovalService(
         registry=registry, store=InMemoryApprovalStore(),
         personal_root_resolver=lambda: ROOT,
         session_label_resolver=lambda _subject: "Requester session",
-        id_factory=lambda: APPROVAL_ID, clock=lambda: 100.0,
+        id_factory=lambda: next(ids), clock=clock or (lambda: 100.0),
     )
     approvals.create_from_principal(
         "test_kind",
@@ -146,90 +118,14 @@ def _route_runtime():
         ),
         {},
     )
-
-    def projection(source):
-        return AttentionProjectionPlan(
-            attention_id=source["attention_id"], object_ref=APPROVAL_ID,
-            participant_role=source["role"], attention_state=source["state"],
-            safe_title="Approval requested", safe_summary="Review the request",
-            counterparty_ref=None,
-            occurred_at=source.get("occurred_at", 100.0),
-            source_version=source["version"],
-        )
-
-    attention_runtime = AttentionPublicationRuntime(
-        projection_planner=projection,
-        source_evidence_builder=lambda ref, version: AttentionSourceEvidence(
-            {"kind": "approval", "ref": ref, "version": version},
-        ),
-    )
-    attention_class = AttentionClassRegistration(
-        kind="test_kind", application_scope="test_app", producer_id=None,
-        notification_class="approval.test_kind.requested",
-        surface_category="approvals",
-        review_renderer_id="approval.test_kind.review",
-        policy=AttentionClassPolicy.approval_phase_one(),
-        approval_runtime_enabled=True, runtime=attention_runtime,
-    )
-    attention_registry = AttentionRegistry([AttentionApplicationRegistration(
-        application_scope="test_app", label="Test app",
-        icon_ref="attention.application.test", open_mode="registered_renderer",
-        classes=(attention_class,),
-    )])
-    index_store = InMemoryAttentionIndexStore()
-    index = AttentionIndexService(registry=attention_registry, store=index_store)
-    index.sync_registrations()
-    producer = attention_registry.producer("test_kind", "test_app")
-    index.publish(producer, {
-        "attention_id": "recipient-item", "role": "recipient",
-        "state": "needs_attention", "version": 1,
-    })
-    index.publish(producer, {
-        "attention_id": "sender-item", "role": "sender",
-        "state": "waiting", "version": 1, "occurred_at": 99.0,
-    })
-
-    def resolve_item(attention_id):
-        payload = index_store.items.get(attention_id)
-        return None if payload is None else PresentationItemRecord(
-            attention_id, dict(payload),
-        )
-
-    presentation = AttentionPresentationService(
-        reference_resolver=resolve_item, store=_PresentationStore(index_store),
-        clock=lambda: 110.0,
-    )
     return attention_routes.AttentionRouteRuntime(
-        index=index, presentation=presentation, approvals=approvals,
-        hub=attention_routes.PrivateAttentionHub(
-            item_resolver=index.get_query_item,
-        ),
-    ), producer
+        approvals=approvals,
+        hub=attention_routes.PrivateAttentionHub(),
+        inbox_texts={"test_kind": lambda status: ("Approval requested", "Review the request")},
+    )
 
 
-def test_session_pending_central_matches_requester_decider_and_unresolved_state(monkeypatch):
-    from tools.dashboard import org_identity
-    runtime, _ = _route_runtime()
-    previous = attention_routes.configure_runtime(runtime)
-    monkeypatch.setattr(org_identity, "resolve_session_org", lambda row: {"slug": "autonomy"})
-    try:
-        session = {"tmux_name": "session-1", "project": "workspace"}
-        actor = HumanApprovalActor._verified(ROOT)
-        assert attention_routes.pending_session_approval(session, actor) == {
-            "id": APPROVAL_ID, "kind": "test_kind", "attention_id": "recipient-item",
-        }
-        assert attention_routes.pending_session_approval({**session, "tmux_name": "other"}, actor) is None
-        assert attention_routes.pending_session_approval(session, HumanApprovalActor._verified("b" * 64)) is None
-        runtime.approvals.decide(APPROVAL_ID, actor, outcome="declined", decision={})
-        assert attention_routes.pending_session_approval(session, actor) is None
-    finally:
-        attention_routes.configure_runtime(previous)
-
-
-@pytest.fixture
-def route_client(monkeypatch):
-    runtime, producer = _route_runtime()
-    previous = attention_routes.configure_runtime(runtime)
+def _operator(monkeypatch):
     monkeypatch.setattr(
         api_auth, "principal_from_request",
         lambda _request: api_auth.ApiPrincipal(
@@ -243,77 +139,107 @@ def route_client(monkeypatch):
         attention_routes, "resolve_human_approval_actor",
         lambda _request: HumanApprovalActor._verified(ROOT),
     )
+
+
+def test_session_pending_central_matches_requester_decider_and_unresolved_state(monkeypatch):
+    from tools.dashboard import org_identity
+    runtime = _route_runtime()
+    previous = attention_routes.configure_runtime(runtime)
+    monkeypatch.setattr(org_identity, "resolve_session_org", lambda row: {"slug": "autonomy"})
+    try:
+        session = {"tmux_name": "session-1", "project": "workspace"}
+        actor = HumanApprovalActor._verified(ROOT)
+        assert attention_routes.pending_session_approval(session, actor) == {
+            "id": APPROVAL_ID, "kind": "test_kind", "attention_id": APPROVAL_ID,
+        }
+        assert attention_routes.pending_session_approval({**session, "tmux_name": "other"}, actor) is None
+        assert attention_routes.pending_session_approval(session, HumanApprovalActor._verified("b" * 64)) is None
+        runtime.approvals.decide(APPROVAL_ID, actor, outcome="declined", decision={})
+        assert attention_routes.pending_session_approval(session, actor) is None
+    finally:
+        attention_routes.configure_runtime(previous)
+
+
+@pytest.fixture
+def route_client(monkeypatch):
+    runtime = _route_runtime()
+    previous = attention_routes.configure_runtime(runtime)
+    _operator(monkeypatch)
     try:
         with TestClient(
             Starlette(routes=attention_routes.routes),
             base_url="https://dashboard.test",
         ) as client:
-            yield client, runtime, producer
+            yield client, runtime
     finally:
         attention_routes.configure_runtime(previous)
 
 
+ORIGIN = {"Origin": "https://dashboard.test"}
+
+
+def _decide(client, outcome="granted", decision=None, approval_id=APPROVAL_ID):
+    return client.post(
+        f"/api/attention/items/{approval_id}/approval-decision",
+        headers=ORIGIN, json={"outcome": outcome, "decision": decision or {}},
+    )
+
+
 class TestAttentionOperatorAPI:
-    def test_safe_list_detail_sender_and_presentation(self, route_client):
-        client, runtime, producer = route_client
+    def test_safe_list_and_detail(self, route_client):
+        client, runtime = route_client
         response = client.get("/api/attention/items")
         assert response.status_code == 200
-        assert response.json()["counts"]["total_needs_attention"] == 1
-        assert {row["attention_id"] for row in response.json()["items"]} == {
-            "recipient-item", "sender-item",
-        }
-        for forbidden in (
-            '"object_ref"', '"request":', '"staged"', '"result_ref"',
-            ROOT, APPROVAL_ID,
-        ):
+        assert response.headers["cache-control"] == "no-store"
+        body = response.json()
+        assert body["counts"]["total_needs_attention"] == 1
+        assert body["items"] == [{
+            "attention_id": APPROVAL_ID,
+            "application": {"scope": "test_app", "label": "test_app", "icon_ref": ""},
+            "category": "approvals",
+            "participant_role": "recipient",
+            "attention_state": "needs_attention",
+            "title": "Approval requested",
+            "summary": "Review the request",
+            "counterparty_ref": None,
+            "occurred_at": 100.0,
+            "open": {"mode": "registered_renderer", "renderer_id": "approval.test_kind.review"},
+        }]
+        for forbidden in ('"object_ref"', '"request":', '"staged"', '"result_ref"', ROOT):
             assert forbidden not in response.text
-        detail = client.get("/api/attention/items/recipient-item")
+        detail = client.get(f"/api/attention/items/{APPROVAL_ID}")
         assert detail.status_code == 200
-        assert detail.json()["review"]["safe_review"] == {
-            "summary": "Review machine",
-        }
-        assert detail.json()["review"]["requester"] == {
-            "kind": "session", "label": "Requester session",
-        }
-        assert detail.json()["review"]["actions"] == ["granted", "declined"]
-        assert client.get(
-            "/api/attention/items/sender-item",
-        ).json()["review"]["actions"] == []
-        original_decide = runtime.approvals.decide
-        runtime.approvals.decide = lambda *_a, **_k: (_ for _ in ()).throw(
-            AssertionError("sender invoked decision service")
+        review = detail.json()["review"]
+        assert review["safe_review"] == {"summary": "Review machine"}
+        assert review["requester"] == {"kind": "session", "label": "Requester session"}
+        assert review["actions"] == ["granted", "declined"]
+        assert review["resolution"] is None
+        assert client.get("/api/attention/items/central-unknown-0001").status_code == 404
+
+    def test_list_and_counts_read_the_approval_rows(self, route_client):
+        client, runtime = route_client
+        runtime.approvals.create_from_principal(
+            "test_kind",
+            api_auth.ApiPrincipal(api_auth.ApiPrincipalKind.LOCAL_SESSION, "session-2"),
+            {},
         )
-        try:
-            refused = client.post(
-                "/api/attention/items/sender-item/approval-decision",
-                headers={"Origin": "https://dashboard.test"},
-                json={"outcome": "granted", "decision": {}},
-            )
-        finally:
-            runtime.approvals.decide = original_decide
-        assert refused.status_code == 409
-        assert runtime.approvals.status(APPROVAL_ID).state == "open"
-        seen = client.post(
-            "/api/attention/items/recipient-item/seen",
-            headers={"Origin": "https://dashboard.test"}, json={},
-        )
-        assert seen.status_code == 200
-        assert seen.json()["presentation"]["seen_at"] == 110.0
-        assert runtime.approvals.status(APPROVAL_ID).state == "open"
-        runtime.index.publish(producer, {
-            "attention_id": "opaque/item", "role": "recipient",
-            "state": "needs_attention", "version": 1,
-        })
-        assert client.get(
-            "/api/attention/items/opaque%2Fitem",
-        ).status_code == 200
-        assert client.post(
-            "/api/attention/items/opaque%2Fitem/opened",
-            headers={"Origin": "https://dashboard.test"}, json={},
-        ).status_code == 200
+        body = client.get("/api/attention/items").json()
+        # Newest first; equal times fall back to the approval id.
+        assert [item["attention_id"] for item in body["items"]] == [OTHER_ID, APPROVAL_ID]
+        assert body["counts"] == {
+            "total_needs_attention": 2,
+            "categories": {"apps": 0, "comms": 0, "approvals": 2},
+            "applications": {"test_app": {"needs_attention": 2, "waiting": 0}},
+        }
+        assert _decide(client, "declined", approval_id=OTHER_ID).status_code == 200
+        body = client.get("/api/attention/items").json()
+        states = {item["attention_id"]: item["attention_state"] for item in body["items"]}
+        assert states == {APPROVAL_ID: "needs_attention", OTHER_ID: "resolved"}
+        assert body["counts"]["total_needs_attention"] == 1
+        assert body["counts"]["applications"] == {"test_app": {"needs_attention": 1, "waiting": 0}}
 
     def test_operator_application_result_is_joined_and_bounded(self, route_client):
-        client, runtime, _producer = route_client
+        client, runtime = route_client
         runtime.operator_result_projectors = {
             "test_kind": lambda status: {
                 "approved": status.resolution is not None,
@@ -321,7 +247,7 @@ class TestAttentionOperatorAPI:
                 "url": "https://registry.example/l/" + "5" * 32,
             },
         }
-        detail = client.get("/api/attention/items/recipient-item")
+        detail = client.get(f"/api/attention/items/{APPROVAL_ID}")
         assert detail.status_code == 200
         assert detail.headers["cache-control"] == "no-store"
         assert detail.json()["review"]["application_result"] == {
@@ -333,57 +259,15 @@ class TestAttentionOperatorAPI:
         runtime.operator_result_projectors = {
             "test_kind": lambda _status: {"oversized": "x" * (64 * 1024)},
         }
-        refused = client.get("/api/attention/items/recipient-item")
+        refused = client.get(f"/api/attention/items/{APPROVAL_ID}")
         assert refused.status_code == 503
         assert refused.headers["cache-control"] == "no-store"
         assert refused.json() == {"error": "unavailable"}
 
-    def test_query_cursor_filters_refresh_and_partial_read(self, route_client):
-        client, runtime, producer = route_client
-        runtime.index.publish(producer, {
-            "attention_id": "recipient-item-2", "role": "recipient",
-            "state": "needs_attention", "version": 1, "occurred_at": 98.0,
-        })
-        first = client.get("/api/attention/items?limit=1")
-        cursor = first.json()["next_cursor"]
-        assert first.status_code == 200 and isinstance(cursor, str)
-        second = client.get(
-            "/api/attention/items", params={"limit": "1", "cursor": cursor},
-        )
-        assert second.status_code == 200
-        assert second.json()["items"][0]["attention_id"] == "sender-item"
-        # Flip a character in the middle: the last base64url character of the
-        # signature carries padding bits, so changing only it can decode to
-        # the same bytes (a 1-in-32 flake when the cursor ended in "B").
-        mid = len(cursor) // 2
-        tampered = cursor[:mid] + ("A" if cursor[mid] != "A" else "B") + cursor[mid + 1:]
-        assert client.get(
-            "/api/attention/items", params={"limit": "1", "cursor": tampered},
-        ).status_code == 400
-        assert client.get(
-            "/api/attention/items",
-            params={"limit": "1", "role": "recipient", "cursor": cursor},
-        ).status_code == 400
-        runtime.index.store.items["recipient-item-2"]["safe_summary"] = "Changed"
-        assert client.get(
-            "/api/attention/items", params={"limit": "1", "cursor": cursor},
-        ).status_code == 409
-        original_secret = runtime.index._cursor_secret
-        runtime.index._cursor_secret = b"restarted-process-secret-32byte!"[:32]
-        try:
-            assert client.get(
-                "/api/attention/items",
-                params={"limit": "1", "cursor": cursor},
-            ).status_code == 400
-        finally:
-            runtime.index._cursor_secret = original_secret
-        runtime.index.store.fail_items = True
-        assert client.get("/api/attention/items").status_code == 503
-
     def test_human_methods_selectors_and_principal_matrix(
         self, route_client, monkeypatch,
     ):
-        client, runtime, _producer = route_client
+        client, runtime = route_client
 
         def actor_for(method, root=ROOT):
             monkeypatch.setattr(
@@ -400,28 +284,19 @@ class TestAttentionOperatorAPI:
         for method in ("bootstrap", "passkey", "password"):
             actor_for(method)
             assert client.get(
-                "/api/attention/items/recipient-item",
+                f"/api/attention/items/{APPROVAL_ID}",
             ).json()["review"]["actions"] == ["granted", "declined"]
         actor_for("approval")
-        assert client.post(
-            "/api/attention/items/recipient-item/approval-decision",
-            headers={"Origin": "https://dashboard.test"},
-            json={"outcome": "granted", "decision": {}},
-        ).status_code == 401
+        assert _decide(client).status_code == 401
         actor_for("password", "b" * 64)
-        assert client.post(
-            "/api/attention/items/recipient-item/approval-decision",
-            headers={"Origin": "https://dashboard.test"},
-            json={"outcome": "granted", "decision": {}},
-        ).status_code == 404
+        assert _decide(client).status_code == 404
         actor_for("password")
         assert client.post(
-            "/api/attention/items/recipient-item/approval-decision",
-            headers={"Origin": "https://dashboard.test"},
+            f"/api/attention/items/{APPROVAL_ID}/approval-decision",
+            headers=ORIGIN,
             json={"outcome": "granted", "decision": {}, "org": "forged"},
         ).status_code == 422
         assert runtime.approvals.status(APPROVAL_ID).state == "open"
-        assert client.get(f"/api/attention/items/{APPROVAL_ID}").status_code == 404
         for kind in (
             api_auth.ApiPrincipalKind.LOCAL_SESSION,
             api_auth.ApiPrincipalKind.ORG_SESSION,
@@ -434,84 +309,47 @@ class TestAttentionOperatorAPI:
             )
             assert client.get("/api/attention/items").status_code == 403
 
-    def test_lifecycle_binding_mismatch_disabled_and_storage_failure(
-        self, route_client,
-    ):
-        client, runtime, producer = route_client
+    def test_decided_disabled_and_storage_failure(self, route_client):
+        client, runtime = route_client
         runtime.approvals.decide(
             APPROVAL_ID, HumanApprovalActor._verified(ROOT),
             outcome="granted", decision={},
         )
-        for item_id in ("recipient-item", "sender-item"):
-            stale = client.get(f"/api/attention/items/{item_id}")
-            assert stale.status_code == 200
-            assert stale.json()["review"]["resolution"]["outcome"] == "granted"
-            assert stale.json()["review"]["actions"] == []
-        for item_id, role in (
-            ("recipient-item", "recipient"), ("sender-item", "sender"),
-        ):
-            runtime.index.publish(producer, {
-                "attention_id": item_id, "role": role, "state": "resolved",
-                "version": 2, "occurred_at": 111.0,
-            })
-            assert client.get(
-                f"/api/attention/items/{item_id}",
-            ).json()["review"]["actions"] == []
-        payload = runtime.index.store.items["recipient-item"]
-        for version, state in (
-            (1, "resolved"), (2, "needs_attention"), (3, "resolved"),
-        ):
-            payload["source_version"], payload["attention_state"] = version, state
-            assert client.get(
-                "/api/attention/items/recipient-item",
-            ).status_code == 409
+        decided = client.get(f"/api/attention/items/{APPROVAL_ID}")
+        assert decided.status_code == 200
+        assert decided.json()["review"]["resolution"]["outcome"] == "granted"
+        assert decided.json()["review"]["actions"] == []
+        assert decided.json()["item"]["attention_state"] == "resolved"
 
-        fresh, _ = _route_runtime()
+        runtime.inbox_texts = {}
+        assert client.get(f"/api/attention/items/{APPROVAL_ID}").status_code == 404
+        assert client.get("/api/attention/items").json()["items"] == []
+
+        fresh = _route_runtime()
         old = attention_routes.configure_runtime(fresh)
         try:
-            fresh.index.store.items["recipient-item"]["object_ref"] = (
-                "approval-missing-1234"
-            )
-            assert client.get(
-                "/api/attention/items/recipient-item",
-            ).status_code == 409
-            fresh.index.store.items["recipient-item"]["object_ref"] = APPROVAL_ID
-            registration = fresh.index.registry.require_class(
-                "test_app", "approval.test_kind.requested",
-            )
-            saved = registration.runtime
-            object.__setattr__(registration, "runtime", None)
-            assert client.get(
-                "/api/attention/items/recipient-item",
-            ).status_code == 409
-            object.__setattr__(registration, "runtime", saved)
             fresh.approvals.store.get_request = lambda _id: (_ for _ in ()).throw(
                 RuntimeError("unavailable")
             )
-            assert client.get(
-                "/api/attention/items/recipient-item",
-            ).status_code == 503
+            fresh.approvals.store.list_requests = lambda: (_ for _ in ()).throw(
+                RuntimeError("unavailable")
+            )
+            assert client.get(f"/api/attention/items/{APPROVAL_ID}").status_code == 503
+            assert client.get("/api/attention/items").status_code == 503
         finally:
             attention_routes.configure_runtime(old)
 
     def test_deadline_retry_concurrency_and_bounded_bodies(self, route_client):
-        client, runtime, _producer = route_client
+        client, runtime = route_client
         runtime.approvals.store._requests[APPROVAL_ID].payload["expires_at"] = 100.0
-        request = {
-            "headers": {"Origin": "https://dashboard.test"},
-            "json": {"outcome": "granted", "decision": {}},
-        }
-        first = client.post(
-            "/api/attention/items/recipient-item/approval-decision", **request,
-        )
-        second = client.post(
-            "/api/attention/items/recipient-item/approval-decision", **request,
-        )
+        first = _decide(client)
+        second = _decide(client)
         assert first.status_code == second.status_code == 409
         assert first.json() == second.json()
-        assert first.json()["resolution"]["outcome"] == "expired"
+        assert first.json()["resolution"] == {"outcome": "expired", "resolved_at": 100.0}
+        assert runtime.approvals.store.get_resolution(APPROVAL_ID) is None
 
-        runtime, _producer = _route_runtime()
+        runtime = _route_runtime()
         previous = attention_routes.configure_runtime(runtime)
         entered, release = threading.Event(), threading.Event()
         original_append = runtime.approvals.store.append_resolution
@@ -523,18 +361,11 @@ class TestAttentionOperatorAPI:
 
         runtime.approvals.store.append_resolution = blocked_append
 
-        def decide(outcome):
-            return client.post(
-                "/api/attention/items/recipient-item/approval-decision",
-                headers={"Origin": "https://dashboard.test"},
-                json={"outcome": outcome, "decision": {}},
-            )
-
         try:
             with ThreadPoolExecutor(max_workers=2) as pool:
-                winning = pool.submit(decide, "granted")
+                winning = pool.submit(_decide, client, "granted")
                 assert entered.wait(timeout=3)
-                losing = pool.submit(decide, "declined")
+                losing = pool.submit(_decide, client, "declined")
                 release.set()
                 responses = (
                     winning.result(timeout=5), losing.result(timeout=5),
@@ -545,37 +376,27 @@ class TestAttentionOperatorAPI:
         finally:
             attention_routes.configure_runtime(previous)
 
-        client, runtime, _producer = route_client
-        headers = {
-            "Origin": "https://dashboard.test",
-            "Content-Type": "application/json",
-        }
+        headers = {**ORIGIN, "Content-Type": "application/json"}
+        path = f"/api/attention/items/{APPROVAL_ID}/approval-decision"
         assert client.post(
-            "/api/attention/items/recipient-item/snooze", headers=headers,
-            content='{"duration_seconds":60,"duration_seconds":120}',
-        ).status_code == 422
-        assert client.post(
-            "/api/attention/items/recipient-item/approval-decision",
-            headers=headers,
+            path, headers=headers,
             content='{"outcome":"granted","decision":{"value":NaN}}',
         ).status_code == 422
         assert client.post(
-            "/api/attention/items/recipient-item/seen", headers=headers,
-            content='{"padding":"' + ("x" * 33_000) + '"}',
+            path, headers=headers,
+            content='{"outcome":"granted","decision":{"padding":"' + ("x" * 33_000) + '"}}',
         ).status_code == 422
-        assert runtime.index.store.presentations == {}
 
-    def test_query_validation_compatibility_and_production_registry(
+    def test_query_validation_origin_and_compatibility(
         self, route_client, monkeypatch,
     ):
-        client, _runtime, _producer = route_client
-        for query in (
-            "limit=+1", "limit=1&limit=2", "unknown=x", "org=autonomy",
-        ):
+        client, _runtime = route_client
+        for query in ("limit=1", "cursor=x", "unknown=x", "org=autonomy"):
             assert client.get(f"/api/attention/items?{query}").status_code == 400
         assert client.post(
-            "/api/attention/items/recipient-item/seen",
-            headers={"Origin": "https://foreign.test"}, json={},
+            f"/api/attention/items/{APPROVAL_ID}/approval-decision",
+            headers={"Origin": "https://foreign.test"},
+            json={"outcome": "granted", "decision": {}},
         ).status_code == 403
         monkeypatch.setattr(
             api_auth, "principal_from_request",
@@ -586,37 +407,10 @@ class TestAttentionOperatorAPI:
             attention_routes.unlock_routes, "gate_enforced", lambda: False,
         )
         assert client.get("/api/attention/items").status_code == 200
-        production = attention_routes.build_production_runtime()
-        applications = tuple(production.index.registry.applications)
-        assert len(applications) == 12
-        assert sum(len(app.classes) for app in applications) == 19
-        assert [app.application_scope for app in applications if app.enabled] == [
-            "jira", "mailbox", "links", "sessions", "mission_control", "vault", "relay", "fleet",
-            "dropbox", "backup", "machine"
-        ]
-        assert [
-            cls.kind
-            for app in applications
-            for cls in app.classes
-            if cls.publication_enabled
-        ] == ["jira_write", "email_send", "link_publish", "link_revoke", "dashboard_access", "visitor_token",
-              "vault_open",
-              "mcp_crosstalk", "fleet_machine_admission", "external_service_access",
-              "backup.failed",
-              "backup.stale", "backup.drill_failed", "backup.offsite_unreachable",
-              "machine.tls_certificate_expiring", "machine.vault_handoff_failed"]
-        store = InMemoryAttentionIndexStore()
-        index = AttentionIndexService(
-            registry=production.index.registry, store=store,
-        )
-        assert index.sync_registrations() == 12
-        assert index.sync_registrations() == 0
-        assert len(store.applications) == 12
-        assert store.items == {}
 
     @pytest.mark.asyncio
     async def test_private_sse_frames_auth_and_legacy_route(self, monkeypatch):
-        runtime, _producer = _route_runtime()
+        runtime = _route_runtime()
         previous = attention_routes.configure_runtime(runtime)
         monkeypatch.setattr(
             api_auth, "principal_from_request",
@@ -636,13 +430,9 @@ class TestAttentionOperatorAPI:
             response = await attention_routes.api_attention_events(request)
             iterator = response.body_iterator
             assert await anext(iterator) == b"event: attention:ready\ndata: {}\n\n"
-            runtime.hub._fanout("attention:changed", {
-                "event_id": "event-1", "attention_id": "recipient-item",
-                "source_version": 1,
-            })
+            runtime.hub.emit_refresh()
             frame = await asyncio.wait_for(anext(iterator), timeout=1)
-            assert frame.startswith(b"event: attention:changed\n")
-            assert b"object_ref" not in frame and APPROVAL_ID.encode() not in frame
+            assert frame == b"event: attention:refresh\ndata: {}\n\n"
             await iterator.aclose()
             assert runtime.hub._subscribers == set()
             monkeypatch.setattr(
@@ -666,135 +456,123 @@ class TestAttentionOperatorAPI:
         assert legacy[0].methods == {"GET", "HEAD"}
 
 
-def test_decision_retry_after_resolved_projection(route_client):
-    client, runtime, producer = route_client
-    base = {
-        "headers": {"Origin": "https://dashboard.test"},
-        "json": {"outcome": "granted", "decision": {"name": "SJC"}},
-    }
-    first = client.post(
-        "/api/attention/items/recipient-item/approval-decision", **base,
+def test_an_undecided_approval_past_its_deadline_lists_as_resolved_without_a_row(monkeypatch):
+    now = [100.0]
+    runtime = _route_runtime(
+        expiry=ApprovalExpiryPolicy(mode=ExpiryMode.FIXED, fixed_seconds=10),
+        clock=lambda: now[0],
     )
+    previous = attention_routes.configure_runtime(runtime)
+    _operator(monkeypatch)
+    try:
+        with TestClient(
+            Starlette(routes=attention_routes.routes), base_url="https://dashboard.test",
+        ) as client:
+            assert client.get("/api/attention/items").json()["counts"]["total_needs_attention"] == 1
+            now[0] = 110.0
+            body = client.get("/api/attention/items").json()
+            assert body["counts"]["total_needs_attention"] == 0
+            assert body["items"][0]["attention_state"] == "resolved"
+            assert body["items"][0]["occurred_at"] == 110.0
+            review = client.get(f"/api/attention/items/{APPROVAL_ID}").json()["review"]
+            assert review["resolution"] == {"outcome": "expired", "resolved_at": 110.0}
+            assert review["actions"] == []
+            assert runtime.approvals.store.get_resolution(APPROVAL_ID) is None
+    finally:
+        attention_routes.configure_runtime(previous)
+
+
+def test_production_runtime_has_inbox_text_for_every_live_kind():
+    production = attention_routes.build_production_runtime()
+    live = {kind for kind, row in production.approvals.registry.kinds.items() if row.runtime is not None}
+    assert set(production.inbox_texts) == live
+
+
+def test_decision_retry_after_resolution(route_client):
+    client, runtime = route_client
+    first = _decide(client, decision={"name": "SJC"})
     canonical = first.json()
     assert first.status_code == 200 and set(canonical) == {"resolution"}
-    assert client.post(
-        "/api/attention/items/recipient-item/approval-decision",
-        headers=base["headers"],
-        json={"outcome": "declined", "decision": {}},
-    ).json() == canonical
-    runtime.index.publish(producer, {
-        "attention_id": "recipient-item", "role": "recipient",
-        "state": "resolved", "version": 2, "occurred_at": 111.0,
-    })
-    resolved = client.post(
-        "/api/attention/items/recipient-item/approval-decision",
-        headers=base["headers"],
-        json={"outcome": "declined", "decision": {}},
-    )
-    assert resolved.status_code == 200 and resolved.json() == canonical
-
-
-def test_exact_item_uses_same_join_and_fails_closed():
-    runtime, _producer = _route_runtime()
-    queried = runtime.index.query().items[0]
-    assert runtime.index.get_query_item(queried.attention_id) == queried
-    runtime.index.store.items[queried.attention_id]["participant_role"] = "intruder"
-    with pytest.raises(AttentionIndexError, match="unavailable"):
-        runtime.index.get_query_item(queried.attention_id)
+    assert _decide(client, "declined").json() == canonical
+    assert runtime.approvals.store.resolution_count(APPROVAL_ID) == 1
 
 
 @pytest.mark.asyncio
-async def test_private_hub_thread_coalescing_delete_and_shutdown():
-    item = AttentionQueryItem(
-        attention_id="item-1", payload={"source_version": 1},
-        presentation=None, application_label="Test",
-        icon_ref="attention.application.test", surface_category="approvals",
-        review_renderer_id="approval.test.review",
-    )
-    hub = attention_routes.PrivateAttentionHub(
-        item_resolver=lambda key: item if key == "item-1" else None,
-        max_pending=1, subscriber_queue_size=4,
-    )
+async def test_hub_refreshes_pages_on_approval_row_changes_from_any_thread():
+    hub = attention_routes.PrivateAttentionHub(subscriber_queue_size=4)
     await hub.start()
-    queue, errors = hub.subscribe(), []
+    queue = hub.subscribe()
+    errors = []
 
-    def emit_many():
+    def emit():
         try:
-            for key in ("item-1", "item-2", "item-3"):
-                hub.emit_setting_change(
-                    operation="upsert",
-                    snapshot={
-                        "set_id": ATTENTION_ITEM_SET_ID,
-                        "schema_revision": 1, "key": key,
-                    },
-                    org=None,
-                )
+            hub.emit_setting_change(
+                operation="upsert",
+                snapshot={"set_id": APPROVAL_REQUEST_SET_ID, "schema_revision": 1, "key": "k"},
+                org=None,
+            )
         except Exception as exc:  # pragma: no cover
             errors.append(exc)
 
-    thread = threading.Thread(target=emit_many)
+    thread = threading.Thread(target=emit)
     thread.start()
     thread.join()
-    assert await asyncio.wait_for(queue.get(), timeout=1) == (
-        "attention:refresh", {"attention_id": None},
-    )
-    assert errors == []
-    hub.emit_setting_change(
-        operation="delete",
-        snapshot={
-            "set_id": ATTENTION_ITEM_SET_ID,
-            "schema_revision": 1, "key": "deleted-item",
-        },
-        org=None,
-    )
-    assert await asyncio.wait_for(queue.get(), timeout=1) == (
-        "attention:refresh", {"attention_id": "deleted-item"},
-    )
-    thread = threading.Thread(target=hub.emit_refresh, args=("private-link",))
-    thread.start()
-    thread.join()
-    assert await asyncio.wait_for(queue.get(), timeout=1) == (
-        "attention:refresh", {"attention_id": None},
-    )
-    await hub.stop()
+    assert await asyncio.wait_for(queue.get(), timeout=1) == ("attention:refresh", {})
     hub.emit_setting_change(
         operation="upsert",
-        snapshot={
-            "set_id": ATTENTION_ITEM_SET_ID,
-            "schema_revision": 1, "key": "after-stop",
-        },
+        snapshot={"set_id": APPROVAL_RESOLUTION_SET_ID, "schema_revision": 1, "key": "k"},
         org=None,
     )
-
-
-@pytest.mark.asyncio
-async def test_private_hub_scope_filter_and_slow_subscriber_close():
-    item = AttentionQueryItem(
-        attention_id="item-1", payload={"source_version": 1},
-        presentation=None, application_label="Test",
-        icon_ref="attention.application.test", surface_category="approvals",
-        review_renderer_id="approval.test.review",
-    )
-    hub = attention_routes.PrivateAttentionHub(
-        item_resolver=lambda _key: item, subscriber_queue_size=1,
-    )
-    await hub.start()
-    queue = hub.subscribe()
+    assert await asyncio.wait_for(queue.get(), timeout=1) == ("attention:refresh", {})
     for snapshot, org in (
-        ({"set_id": ATTENTION_ITEM_SET_ID, "schema_revision": 1, "key": "item-1"}, "other"),
-        ({"set_id": ATTENTION_ITEM_SET_ID, "schema_revision": 2, "key": "item-1"}, None),
-        ({"set_id": ATTENTION_ITEM_SET_ID, "schema_revision": 1, "key": " bad"}, None),
+        ({"set_id": APPROVAL_REQUEST_SET_ID, "schema_revision": 1, "key": "k"}, "other"),
+        ({"set_id": ATTENTION_DELIVERY_SET_ID, "schema_revision": 1, "key": "k"}, None),
+        ({"set_id": "dashboard.feature_flags", "schema_revision": 1, "key": "k"}, None),
     ):
         hub.emit_setting_change(operation="upsert", snapshot=snapshot, org=org)
     with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(queue.get(), timeout=0.02)
-    hub._fanout("attention:presentation", {"attention_id": "item-1"})
-    hub._fanout("attention:changed", {
-        "event_id": "event", "attention_id": "item-1", "source_version": 1,
-    })
+        await asyncio.wait_for(queue.get(), timeout=0.05)
+    assert errors == []
+    await hub.stop()
+    assert queue.get_nowait() is attention_routes._SSE_CLOSE
+    hub.emit_refresh()  # after stop: nothing, and no error
+
+
+@pytest.mark.asyncio
+async def test_hub_closes_a_slow_subscriber():
+    hub = attention_routes.PrivateAttentionHub(subscriber_queue_size=1)
+    await hub.start()
+    queue = hub.subscribe()
+    hub._fanout("attention:refresh", {})
+    hub._fanout("attention:refresh", {})
     assert await asyncio.wait_for(queue.get(), timeout=1) is attention_routes._SSE_CLOSE
     assert queue not in hub._subscribers
     await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_synced_approval_rows_refresh_pages(monkeypatch):
+    runtime = _route_runtime()
+    offered = []
+    runtime.approval_reconciler = type("Reconciler", (), {
+        "offer_synced": lambda self, *, addresses: offered.append(addresses),
+    })()
+    previous = attention_routes.configure_runtime(runtime)
+    try:
+        await runtime.hub.start()
+        queue = runtime.hub.subscribe()
+        address = type("Address", (), {"set_id": APPROVAL_RESOLUTION_SET_ID})()
+        attention_routes.emit_personal_sync_change(addresses=[address])
+        assert await asyncio.wait_for(queue.get(), timeout=1) == ("attention:refresh", {})
+        assert offered == [(address,)]
+        attention_routes.emit_personal_sync_change(
+            addresses=[type("Address", (), {"set_id": "dashboard.feature_flags"})()],
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(queue.get(), timeout=0.05)
+    finally:
+        await runtime.hub.stop()
+        attention_routes.configure_runtime(previous)
 
 
 def test_server_hook_diverts_all_private_sets(monkeypatch):
@@ -809,7 +587,6 @@ def test_server_hook_diverts_all_private_sets(monkeypatch):
     )
     for set_id in (
         APPROVAL_REQUEST_SET_ID, APPROVAL_RESOLUTION_SET_ID,
-        ATTENTION_ITEM_SET_ID, ATTENTION_PRESENTATION_SET_ID,
         ATTENTION_DELIVERY_SET_ID,
     ):
         private = {
@@ -819,7 +596,7 @@ def test_server_hook_diverts_all_private_sets(monkeypatch):
         server._settings_emit_hook(
             operation="upsert", snapshot=private, org="wrong-org",
         )
-    assert len(delivered) == 5 and bus.all_cached_topics() == []
+    assert len(delivered) == 3 and bus.all_cached_topics() == []
     public = dict(private, set_id="dashboard.feature_flags", schema_revision=1)
     server._settings_emit_hook(operation="upsert", snapshot=public, org=None)
     assert bus.all_cached_topics() == ["setting.changed"]
@@ -867,83 +644,3 @@ def test_production_runtime_resolves_requester_labels_through_the_session_regist
     production = attention_routes.build_production_runtime()
     label = production.approvals._session_label("auto-0910-155648")
     assert label == "auto-0910-155648 · Voice capsule"
-
-
-def test_application_item_review_names_its_destination(monkeypatch):
-    """A non-approval item (the backup scope's restore_drill_failed) is
-    not an approval: its detail carries no decision, just the page its
-    class policy routes to. Before this, the detail route answered 409
-    review_unavailable for every backup item, the inbox rendered "The
-    destination application is temporarily unavailable", and Open
-    Backup went nowhere."""
-    from tools.dashboard.attention_registry import build_production_attention_registry
-    from tools.dashboard.plugins.backup.attention import publication_runtimes
-    base, _producer = _route_runtime()
-    registry = build_production_attention_registry(runtimes=publication_runtimes())
-    index_store = InMemoryAttentionIndexStore()
-    index = AttentionIndexService(registry=registry, store=index_store)
-    index.sync_registrations()
-    index.publish(registry.producer("backup.drill_failed", "backup"), {
-        "attention_id": "backup:drill", "object_ref": "backup:drill",
-        "attention_state": "needs_attention",
-        "safe_title": "Restore drill failed",
-        "safe_summary": "Drill 20260913-064414: verdict fail",
-        "occurred_at": 100.0, "source_version": 20260913064414,
-    })
-
-    def resolve_item(attention_id):
-        payload = index_store.items.get(attention_id)
-        return None if payload is None else PresentationItemRecord(
-            attention_id, dict(payload),
-        )
-
-    runtime = attention_routes.AttentionRouteRuntime(
-        index=index, approvals=base.approvals,
-        presentation=AttentionPresentationService(
-            reference_resolver=resolve_item,
-            store=_PresentationStore(index_store), clock=lambda: 110.0,
-        ),
-        hub=attention_routes.PrivateAttentionHub(item_resolver=index.get_query_item),
-    )
-    previous = attention_routes.configure_runtime(runtime)
-    monkeypatch.setattr(
-        api_auth, "principal_from_request",
-        lambda _request: api_auth.ApiPrincipal(
-            api_auth.ApiPrincipalKind.OPERATOR_COOKIE, "cookie-1",
-        ),
-    )
-    monkeypatch.setattr(attention_routes.unlock_routes, "gate_enforced", lambda: True)
-    monkeypatch.setattr(
-        attention_routes, "resolve_human_approval_actor",
-        lambda _request: HumanApprovalActor._verified(ROOT),
-    )
-    try:
-        with TestClient(
-            Starlette(routes=attention_routes.routes), base_url="https://dashboard.test",
-        ) as client:
-            detail = client.get("/api/attention/items/backup%3Adrill")
-            assert detail.status_code == 200, detail.text
-            assert detail.headers["cache-control"] == "no-store"
-            assert detail.json()["review"] == {
-                "type": "application",
-                "renderer_id": "backup.item.v1",
-                "kind": "backup.drill_failed",
-                "destination": {"href": "/backup"},
-                "actions": [],
-            }
-            assert detail.json()["item"]["title"] == "Restore drill failed"
-            assert '"object_ref"' not in detail.text
-            opened = client.post(
-                "/api/attention/items/backup%3Adrill/opened",
-                headers={"Origin": "https://dashboard.test"}, json={},
-            )
-            assert opened.status_code == 200
-            assert opened.json()["presentation"]["last_opened_at"] == 110.0
-            refused = client.post(
-                "/api/attention/items/backup%3Adrill/approval-decision",
-                headers={"Origin": "https://dashboard.test"},
-                json={"outcome": "granted", "decision": {}},
-            )
-            assert refused.status_code in {409, 503}
-    finally:
-        attention_routes.configure_runtime(previous)

@@ -23,9 +23,6 @@ from .registry import (
 )
 
 
-ATTENTION_APPLICATION_SET_ID = "dashboard.attention.application"
-ATTENTION_ITEM_SET_ID = "dashboard.attention.item"
-ATTENTION_PRESENTATION_SET_ID = "dashboard.attention.presentation"
 ATTENTION_DELIVERY_SET_ID = "dashboard.attention.delivery"
 APPROVAL_REQUEST_SET_ID = "dashboard.approval.request"
 APPROVAL_RESOLUTION_SET_ID = "dashboard.approval.resolution"
@@ -34,18 +31,14 @@ CENTRAL_ATTENTION_REVISION = 1
 
 SYNOPSIS = {
     "summary": (
-        "Personal Settings records for registered attention applications, "
-        "recipient projections, presentation state, foreground/Web Push "
-        "delivery latches, and central approval requests and resolutions."
+        "Personal Settings records for foreground/Web Push delivery latches "
+        "and central approval requests and resolutions."
     ),
     "nouns": [
         "central attention",
         "approval request",
         "approval resolution",
-        "attention inbox",
         "notification delivery latch",
-        "presentation seen",
-        "snooze",
     ],
     "related_set_ids": [],
 }
@@ -53,20 +46,6 @@ SYNOPSIS = {
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _ASCII_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
-_CLASS_POLICY_FIELDS = {
-    "notification_class",
-    "class_policy_revision",
-    "eligible_transition",
-    "push_policy",
-    "delivery_class",
-    "budget_class",
-    "coalesce_scope",
-    "ttl_seconds",
-    "urgency",
-    "privacy_renderer_id",
-    "route_builder_id",
-    "destination_id",
-}
 _SOURCE_GUARD_FIELDS = {"kind", "ref", "version"}
 _REQUESTER_FIELDS = {"kind", "id", "label"}
 _DECIDER_FIELDS = {"kind", "id"}
@@ -235,188 +214,6 @@ def _bounded_json(
             _fail(cls, f"{name!r} contains non-JSON data")
 
     walk(value, 0)
-
-
-@home("personal")
-@publication_band(min="raw", max="raw")
-@keyed_per_entity(key_strategy="application_scope")
-class AttentionApplicationV1(SettingSchema):
-    """One code-registered application and its closed notification classes."""
-
-    set_id = ATTENTION_APPLICATION_SET_ID
-    schema_revision = CENTRAL_ATTENTION_REVISION
-
-    label: str = field(required=True, description="Safe operator-facing application name.")
-    icon_ref: str = field(required=True, description="Code-owned icon identifier.")
-    open_mode: str = field(
-        required=True,
-        enum=["application", "registered_renderer"],
-        description="Whether opening uses the application or a registered renderer.",
-    )
-    notification_classes: list = field(
-        required=True,
-        element=dict,
-        description="Closed notification-class policies registered by application code.",
-    )
-    enabled: bool = field(
-        required=True,
-        description="Whether this registered application may currently publish attention.",
-    )
-
-    @classmethod
-    def validate(cls, payload: Any) -> None:
-        super().validate(payload)
-        if not isinstance(payload, dict):
-            return
-        _text(cls, payload, "label", maximum=80)
-        _slug(cls, payload, "icon_ref")
-        classes = payload.get("notification_classes")
-        if not isinstance(classes, list) or not (1 <= len(classes) <= 64):
-            _fail(cls, "'notification_classes' must contain 1..64 policies")
-        seen: set[str] = set()
-        for index, policy in enumerate(classes):
-            policy = _closed_object(
-                cls,
-                policy,
-                f"notification_classes[{index}]",
-                allowed=_CLASS_POLICY_FIELDS,
-                required=_CLASS_POLICY_FIELDS,
-            )
-            for name in (
-                "notification_class",
-                "delivery_class",
-                "budget_class",
-                "privacy_renderer_id",
-                "route_builder_id",
-                "destination_id",
-            ):
-                _slug(cls, policy, name)
-            notification_class = policy["notification_class"]
-            if notification_class in seen:
-                _fail(cls, f"duplicate notification class {notification_class!r}")
-            seen.add(notification_class)
-            _integer(cls, policy, "class_policy_revision", minimum=1)
-            if policy.get("eligible_transition") != "needs_attention":
-                _fail(cls, "eligible_transition must be 'needs_attention' in revision 1")
-            if policy.get("push_policy") not in ("in_app_only", "fallback"):
-                _fail(cls, "push_policy must be 'in_app_only' or 'fallback'")
-            if policy.get("coalesce_scope") not in ("event", "object", "application"):
-                _fail(cls, "coalesce_scope must be event, object, or application")
-            ttl = _integer(cls, policy, "ttl_seconds", minimum=1)
-            if ttl > 2_592_000:
-                _fail(cls, "ttl_seconds must not exceed 30 days")
-            if policy.get("urgency") not in ("very-low", "low", "normal", "high"):
-                _fail(cls, "urgency must be very-low, low, normal, or high")
-
-
-@home("personal")
-@publication_band(min="raw", max="raw")
-@keyed_per_entity(key_strategy="attention_id")
-class AttentionItemV1(SettingSchema):
-    """One participant-local projection of an application-owned object."""
-
-    set_id = ATTENTION_ITEM_SET_ID
-    schema_revision = CENTRAL_ATTENTION_REVISION
-
-    application_scope: str = field(
-        required=True,
-        description="Registered application that owns the source object.",
-    )
-    notification_class: str = field(
-        required=True,
-        description="Registered class whose policy produced this projection.",
-    )
-    object_ref: str = field(
-        required=True,
-        description="Opaque application-owned source object reference.",
-    )
-    participant_role: str = field(
-        required=True,
-        enum=["recipient", "sender"],
-        description="This personal projection's role in the source exchange.",
-    )
-    attention_state: str = field(
-        required=True,
-        enum=["needs_attention", "waiting", "resolved"],
-        description="Small cross-application attention state shown by the inbox.",
-    )
-    safe_title: str = field(
-        required=True,
-        description="Bounded privacy-safe title for the central surface.",
-    )
-    safe_summary: str | None = field(
-        required=False,
-        default=None,
-        description="Optional bounded privacy-safe supporting text.",
-    )
-    counterparty_ref: str | None = field(
-        required=False,
-        default=None,
-        description="Optional opaque reference to the other participant.",
-    )
-    occurred_at: float = field(
-        required=True,
-        description="Timestamp of the source transition represented here.",
-    )
-    source_version: int = field(
-        required=True,
-        description="Monotonic version supplied by the registered source.",
-    )
-
-    @classmethod
-    def validate(cls, payload: Any) -> None:
-        super().validate(payload)
-        if not isinstance(payload, dict):
-            return
-        _slug(cls, payload, "application_scope")
-        _slug(cls, payload, "notification_class")
-        _text(cls, payload, "object_ref", maximum=256)
-        _text(cls, payload, "safe_title", maximum=160)
-        _optional_text(cls, payload, "safe_summary", maximum=600)
-        _optional_text(cls, payload, "counterparty_ref", maximum=256)
-        _timestamp(cls, payload, "occurred_at")
-        _integer(cls, payload, "source_version")
-
-
-@home("personal")
-@publication_band(min="raw", max="raw")
-@keyed_per_entity(key_strategy="attention_id")
-class AttentionPresentationV1(SettingSchema):
-    """Operator-local display state with no lifecycle or delivery authority."""
-
-    set_id = ATTENTION_PRESENTATION_SET_ID
-    schema_revision = CENTRAL_ATTENTION_REVISION
-
-    seen_at: float = field(
-        required=False,
-        default=None,
-        description="When the operator last marked this presentation seen.",
-    )
-    snoozed_until: float = field(
-        required=False,
-        default=None,
-        description="Optional time before which this presentation stays quiet.",
-    )
-    last_opened_at: float = field(
-        required=False,
-        default=None,
-        description="When the operator last opened this presentation.",
-    )
-
-    @classmethod
-    def validate(cls, payload: Any) -> None:
-        super().validate(payload)
-        if not isinstance(payload, dict):
-            return
-        present = [
-            name
-            for name in ("seen_at", "snoozed_until", "last_opened_at")
-            if payload.get(name) is not None
-        ]
-        if not present:
-            _fail(cls, "at least one presentation timestamp is required")
-        for name in present:
-            _timestamp(cls, payload, name)
 
 
 @home("personal")

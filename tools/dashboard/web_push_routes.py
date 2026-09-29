@@ -18,7 +18,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.dashboard import api_auth
-from tools.dashboard.attention_registry import build_production_attention_registry
+from tools.dashboard.attention_registry import APPLICATIONS
 from tools.dashboard.dao import web_push as web_push_dao
 from tools.dashboard.identity_routes import (
     StablePersonalIdentityUnavailable,
@@ -116,12 +116,15 @@ async def _json_body(request: Request) -> dict:
 
 
 def _applications() -> tuple[dict, ...]:
-    registry = build_production_attention_registry()
-    return tuple({
-        "application": item.application_scope,
-        "label": item.label,
-        "enabled": item.enabled,
-    } for item in registry.applications)
+    from tools.dashboard.attention_routes import approval_runtime
+    live = {
+        scope
+        for registration in approval_runtime().approvals.registry.kinds.values()
+        if registration.runtime is not None
+        for scope in registration.application_scope_policy.applications
+    }
+    return tuple({"application": scope, "label": label, "enabled": scope in live}
+                 for scope, (label, _icon) in APPLICATIONS.items())
 
 
 def _registered_application(name: str) -> bool:

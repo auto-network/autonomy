@@ -71,23 +71,6 @@ class MemoryJournal:
         cls.rows[key] = dict(payload)
 
 
-class Index:
-    def __init__(self):
-        self.items = {}
-
-    def track(self, approval_id):
-        aid = central.link_attention_id(approval_id)
-        self.items[aid] = approval_id
-        return aid
-
-    def get_query_item(self, attention_id):
-        if not isinstance(attention_id, str) or not attention_id.startswith("attention-"):
-            raise ValueError("bad id")
-        approval_id = self.items.get(attention_id)
-        return None if approval_id is None else SimpleNamespace(
-            attention_id=attention_id, payload={"object_ref": approval_id})
-
-
 def _planner(op, request):
     if request.get("target_type") == "refuse":
         raise ops.LinkOperationError("invalid_request", "that target does not exist")
@@ -113,7 +96,6 @@ def env():
         session_label_resolver=lambda subject: f"{subject} · Publishing",
         clock=clock, id_factory=lambda: next(ids),
     )
-    index = Index()
     calls = []
 
     def verify(op, request, staged, body, *, not_before):
@@ -136,12 +118,12 @@ def env():
                           "persona_pub": persona})
         return execution
 
-    desk = central.LinkApprovalDesk(approvals=approvals, index=index,
+    desk = central.LinkApprovalDesk(approvals=approvals,
                                     destination_resolver=lambda: HERE, journal=MemoryJournal,
                                     verify=verify, execute=execute,
                                     signing_view=lambda request, staged: {"registry_request": staged},
                                     clock=clock)
-    return SimpleNamespace(approvals=approvals, index=index, desk=desk, clock=clock, calls=calls)
+    return SimpleNamespace(approvals=approvals, desk=desk, clock=clock, calls=calls)
 
 
 def _agent(org="acme"):
@@ -158,7 +140,7 @@ def _central_body(request):
 
 def _create(env, kind="link_publish", request=REQUEST):
     record = env.approvals.create_from_principal(kind, _agent(), _central_body(request))
-    return record.approval_id, env.index.track(record.approval_id)
+    return record.approval_id
 
 
 def _grant(env, approval_id):
@@ -166,8 +148,8 @@ def _grant(env, approval_id):
                          outcome="granted", decision={})
 
 
-def _operate(env, aid, body):
-    return asyncio.run(env.desk.operate(aid, body))
+def _operate(env, approval_id, body):
+    return asyncio.run(env.desk.operate(approval_id, body))
 
 
 def _code(fn, *args):
@@ -177,7 +159,7 @@ def _code(fn, *args):
 
 
 def test_the_request_is_frozen_at_creation_and_carries_no_token_key(env):
-    approval_id, _ = _create(env)
+    approval_id = _create(env)
     payload = env.approvals.status(approval_id).request.payload
     ApprovalRequestV1.validate(payload)
     assert payload["staged"]["payload"] == STAGED["payload"]
@@ -195,7 +177,7 @@ def test_a_refused_plan_raises_no_approval(env):
 def test_org_is_named_as_org_slug_because_central_reserves_org(env):
     with pytest.raises(ApprovalServiceError):
         env.approvals.create_from_principal("link_publish", _agent(), dict(REQUEST))
-    approval_id, _ = _create(env)
+    approval_id = _create(env)
     assert env.approvals.status(approval_id).request.payload["request"]["org"] == "acme"
 
 
@@ -218,18 +200,18 @@ def test_a_host_terminal_names_any_org(env):
 
 
 def test_a_decision_carrying_the_envelope_is_refused(env):
-    approval_id, _ = _create(env)
+    approval_id = _create(env)
     with pytest.raises(ApprovalServiceError):
         env.approvals.decide(approval_id, HumanApprovalActor._verified(ROOT.public_hex),
                              outcome="granted", decision={"envelope": {"ts": 1}})
 
 
 def test_a_granted_publish_runs_once_after_the_grant(env):
-    approval_id, aid = _create(env)
+    approval_id = _create(env)
     status = env.approvals.status(approval_id)
     assert env.desk.state(status) == central.PENDING
-    assert env.desk.bootstrap(aid) == {"registry_request": status.request.payload["staged"]}
-    assert _code(_operate, env, aid, {"envelope": {"ts": int(NOW)}}) == "not_actionable"
+    assert env.desk.bootstrap(approval_id) == {"registry_request": status.request.payload["staged"]}
+    assert _code(_operate, env, approval_id, {"envelope": {"ts": int(NOW)}}) == "not_actionable"
     _grant(env, approval_id)
     status = env.approvals.status(approval_id)
     assert status.resolution.payload["decision"] == {}
@@ -237,15 +219,15 @@ def test_a_granted_publish_runs_once_after_the_grant(env):
     assert env.desk.requester_result(status) is None
 
     # Signed before the Grant: refused.
-    assert _code(_operate, env, aid, {"envelope": {"ts": int(NOW) - 1}}) == "stale_envelope"
+    assert _code(_operate, env, approval_id, {"envelope": {"ts": int(NOW) - 1}}) == "stale_envelope"
     # The verifier's own words for a refused authority, nothing executed.
     with pytest.raises(ops.LinkOperationError) as refused:
-        _operate(env, aid, {"envelope": {"ts": int(NOW), "bad": True}})
+        _operate(env, approval_id, {"envelope": {"ts": int(NOW), "bad": True}})
     assert refused.value.code == "authority_refused"
     assert "link:publish" in refused.value.detail
     assert env.calls == []
 
-    done = _operate(env, aid, {"envelope": {"ts": int(NOW)}, "ttl": 3600})
+    done = _operate(env, approval_id, {"envelope": {"ts": int(NOW)}, "ttl": 3600})
     assert done["execution"]["ok"] is True
     assert env.calls == [(approval_id, "publish", 3600)]
     status = env.approvals.status(approval_id)
@@ -253,7 +235,7 @@ def test_a_granted_publish_runs_once_after_the_grant(env):
     assert env.desk.requester_result(status) == {"approved": True, "execution": done["execution"]}
     assert env.desk.operator_result(status)["execution"] == done["execution"]
     # A replay returns the recorded execution and runs nothing again.
-    assert _operate(env, aid, {"envelope": {"ts": int(NOW)}}) == done
+    assert _operate(env, approval_id, {"envelope": {"ts": int(NOW)}}) == done
     assert len(env.calls) == 1
     entry = MemoryJournal.get(approval_id)
     assert entry["initiator"] == f"approval:{approval_id}"
@@ -261,42 +243,42 @@ def test_a_granted_publish_runs_once_after_the_grant(env):
 
 
 def test_the_window_closes_thirty_minutes_after_the_grant(env):
-    approval_id, aid = _create(env)
+    approval_id = _create(env)
     _grant(env, approval_id)
     env.clock.t = NOW + central.OPERATION_WINDOW_SECONDS
     status = env.approvals.status(approval_id)
     assert env.desk.state(status) == central.EXPIRED
     assert env.desk.requester_result(status)["execution"]["ok"] is False
-    assert _code(_operate, env, aid, {"envelope": {"ts": int(env.clock.t)}}) == "window_closed"
+    assert _code(_operate, env, approval_id, {"envelope": {"ts": int(env.clock.t)}}) == "window_closed"
     assert env.calls == []
 
 
 def test_another_machine_neither_bootstraps_nor_operates(env):
-    approval_id, aid = _create(env)
+    approval_id = _create(env)
     _grant(env, approval_id)
-    other = central.LinkApprovalDesk(approvals=env.approvals, index=env.index,
+    other = central.LinkApprovalDesk(approvals=env.approvals,
                                      destination_resolver=lambda: ELSEWHERE,
                                      journal=MemoryJournal, clock=env.clock)
     assert other.state(env.approvals.status(approval_id)) == central.ELSEWHERE
-    assert _code(other.bootstrap, aid) == "elsewhere"
-    assert _code(lambda: asyncio.run(other.operate(aid, {"envelope": {"ts": int(NOW)}}))) == "elsewhere"
+    assert _code(other.bootstrap, approval_id) == "elsewhere"
+    assert _code(lambda: asyncio.run(other.operate(approval_id, {"envelope": {"ts": int(NOW)}}))) == "elsewhere"
 
 
 def test_a_decline_operates_nothing(env):
-    approval_id, aid = _create(env)
+    approval_id = _create(env)
     env.approvals.decide(approval_id, HumanApprovalActor._verified(ROOT.public_hex),
                          outcome="declined", decision={})
-    assert _code(_operate, env, aid, {"envelope": {"ts": int(NOW)}}) == "not_actionable"
+    assert _code(_operate, env, approval_id, {"envelope": {"ts": int(NOW)}}) == "not_actionable"
     assert env.desk.requester_result(env.approvals.status(approval_id)) is None
     assert env.calls == []
 
 
 def test_a_revoke_is_its_own_kind(env):
-    approval_id, aid = _create(env, "link_revoke", {"org": "acme", "token": TOKEN})
+    approval_id = _create(env, "link_revoke", {"org": "acme", "token": TOKEN})
     payload = env.approvals.status(approval_id).request.payload
     assert payload["safe_review"]["title"] == "Revoke a share link"
     _grant(env, approval_id)
-    _operate(env, aid, {"envelope": {"ts": int(NOW)}})
+    _operate(env, approval_id, {"envelope": {"ts": int(NOW)}})
     assert env.calls == [(approval_id, "revoke", None)]
 
 

@@ -112,21 +112,6 @@ class FakeJira:
         return [{"name": "Start Progress", "to_status": "In Progress"}]
 
 
-class Index:
-    def __init__(self):
-        self.items = {}
-
-    def track(self, approval_id):
-        aid = jc.jira_write_attention_id(approval_id)
-        self.items[aid] = approval_id
-        return aid
-
-    def get_query_item(self, attention_id):
-        approval_id = self.items.get(attention_id)
-        return None if approval_id is None else SimpleNamespace(
-            attention_id=attention_id, payload={"object_ref": approval_id})
-
-
 @pytest.fixture
 def env(tmp_path):
     clock, machine = Clock(), Machine()
@@ -138,12 +123,11 @@ def env(tmp_path):
                                 session_label_resolver=lambda s: f"{s} · Jira", clock=clock)
     journal: dict = {}
     jira = FakeJira()
-    index = Index()
-    desk = jc.JiraWriteDesk(approvals=approvals, index=index, destination_resolver=machine,
+    desk = jc.JiraWriteDesk(approvals=approvals, destination_resolver=machine,
                             staging=staging, jira=jira, config=lambda org: f"cfg:{org}",
                             journal=journal.get, record=journal.__setitem__, clock=clock)
     return SimpleNamespace(approvals=approvals, desk=desk, jira=jira, journal=journal,
-                           clock=clock, machine=machine, staging=staging, index=index,
+                           clock=clock, machine=machine, staging=staging,
                            tmp=tmp_path)
 
 
@@ -218,25 +202,23 @@ def test_a_write_that_could_never_run_is_refused_at_creation(env, request_body):
 def test_a_long_body_reviews_as_a_prefix_and_is_fetched_whole_here_only(env):
     body = "\n".join(f"line {n} " + "x" * 80 for n in range(200))
     rid = _create(env, {"op": "comment", "key": "ENT-1", "body_markdown": body})
-    aid = env.index.track(rid)
     review = env.approvals.status(rid).request.payload["safe_review"]
     assert review["content"]["complete"] is False
     assert 0 < len(review["content"]["lines"]) < 200
-    form, fetched, headers = env.desk.content(aid)
+    form, fetched, headers = env.desk.content(rid)
     assert form == "json" and fetched["lines"] == body.split("\n")
     assert headers["X-Content-Type-Options"] == "nosniff"
     env.machine.destination = ELSEWHERE
     with pytest.raises(jc.JiraWriteError) as exc:
-        env.desk.content(aid)
+        env.desk.content(rid)
     assert exc.value.code == "elsewhere"
 
 
 def test_staged_content_is_checked_on_every_read(env):
     rid = _create(env, COMMENT)
-    aid = env.index.track(rid)
     (env.tmp / "jira-staging" / f"{rid}.bin").write_bytes(b"swapped after review")
     with pytest.raises(jc.JiraWriteError) as exc:
-        env.desk.content(aid)
+        env.desk.content(rid)
     assert exc.value.code == "content_mismatch"
     result = _run(env, rid)
     assert result["execution"]["ok"] is False and "content_mismatch" in result["execution"]["error"]
@@ -253,7 +235,7 @@ def test_staged_content_is_checked_on_every_read(env):
 def test_an_attachment_is_inline_only_as_a_verified_raster_image(env, media, data, inline):
     rid = _create(env, {"op": "attach", "key": "ENT-1", "filename": "x.png", "mime_type": media,
                         "content_b64": base64.b64encode(data).decode()})
-    form, body, headers = env.desk.content(env.index.track(rid))
+    form, body, headers = env.desk.content(rid)
     assert form == "bytes" and body == data
     assert headers["X-Content-Type-Options"] == "nosniff"
     assert headers["Content-Security-Policy"] == "sandbox; default-src 'none'"

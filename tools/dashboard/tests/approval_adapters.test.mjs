@@ -85,7 +85,7 @@ test('Central exact-ID opener ignores a session switch during either review read
     let current = true, reads = 0, finish, opened = 0;
     instance.openDashboardApproval = async () => {opened++};
     const payload={item:{attention_id:'recipient-1',category:'approvals',application:{scope:'dashboard'},
-      source_version:1,attention_state:'needs_attention',open:{renderer_id:'approval.dashboard_access.review'}},
+      attention_state:'needs_attention',open:{renderer_id:'approval.dashboard_access.review'}},
       review:{safe_review:{},actions:['granted']}};
     global.fetch=async url=>{
       assert.equal(url,'/api/attention/items/recipient-1');

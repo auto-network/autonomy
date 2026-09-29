@@ -116,6 +116,8 @@ class ApprovalStore(Protocol):
     def get_resolution(self, approval_id: str) -> ApprovalRecord | None: ...
     def append_request(self, approval_id: str, payload: Mapping[str, Any]) -> ApprovalRecord: ...
     def append_resolution(self, approval_id: str, payload: Mapping[str, Any]) -> ApprovalRecord: ...
+    def list_requests(self) -> list[ApprovalRecord]: ...
+    def list_resolutions(self) -> dict[str, ApprovalRecord]: ...
 
 
 class InMemoryApprovalStore:
@@ -154,6 +156,13 @@ class InMemoryApprovalStore:
         self._resolutions.setdefault(approval_id, []).append(stored)
         return ApprovalRecord(approval_id, self._copy(stored.payload))
 
+    def list_requests(self) -> list[ApprovalRecord]:
+        return [ApprovalRecord(key, self._copy(row.payload)) for key, row in self._requests.items()]
+
+    def list_resolutions(self) -> dict[str, ApprovalRecord]:
+        return {key: ApprovalRecord(key, self._copy(rows[0].payload))
+                for key, rows in self._resolutions.items() if rows}
+
     def resolution_count(self, approval_id: str) -> int:
         return len(self._resolutions.get(approval_id, ()))
 
@@ -178,6 +187,22 @@ class SettingsApprovalStore:
         except Exception as exc:
             raise RuntimeError("stored approval row is invalid") from exc
         return ApprovalRecord(approval_id=approval_id, payload=dict(row.payload))
+
+    @staticmethod
+    def _list(set_id: str) -> dict[str, ApprovalRecord]:
+        rows = settings_ops.read_set(set_id, org=None, peers=[]).to_dict()
+        records = {}
+        for key, row in rows.items():
+            if not isinstance(row.payload, dict):
+                raise RuntimeError("stored approval row is invalid")
+            records[key] = ApprovalRecord(key, dict(row.payload))
+        return records
+
+    def list_requests(self) -> list[ApprovalRecord]:
+        return list(self._list(APPROVAL_REQUEST_SET_ID).values())
+
+    def list_resolutions(self) -> dict[str, ApprovalRecord]:
+        return self._list(APPROVAL_RESOLUTION_SET_ID)
 
     def get_request(self, approval_id: str) -> ApprovalRecord | None:
         return self._read(APPROVAL_REQUEST_SET_ID, approval_id)
@@ -718,6 +743,21 @@ class ApprovalService:
                 resolution=resolution,
             )
 
+    def list_statuses(self, *, now: float | None = None) -> list[ApprovalStatus]:
+        """Every approval with its current state, from one read of each set."""
+        requests = self._store_call(self.store.list_requests)
+        resolutions = self._store_call(self.store.list_resolutions)
+        at = self._now(now)
+        statuses = []
+        for request in requests:
+            resolution = resolutions.get(request.approval_id) or self._derived_expiry(request, at)
+            statuses.append(ApprovalStatus(
+                state="resolved" if resolution is not None else "open",
+                request=request,
+                resolution=resolution,
+            ))
+        return statuses
+
     def status_for_principal(
         self,
         approval_id: str,
@@ -923,15 +963,17 @@ class ApprovalService:
     def _expiry_locked(
         self, request: ApprovalRecord, now: float,
     ) -> ApprovalRecord | None:
+        existing = self._store_call(self.store.get_resolution, request.approval_id)
+        return existing or self._derived_expiry(request, now)
+
+    @staticmethod
+    def _derived_expiry(request: ApprovalRecord, now: float) -> ApprovalRecord | None:
         # Expiry is read from the request's own deadline and never written: a
         # machine that has not yet received a decision by sync must not record
         # one of its own, or its row would replace the real decision (auto-vrw8h).
         deadline = request.payload.get("expires_at")
         if deadline is None or now < float(deadline):
             return None
-        existing = self._store_call(self.store.get_resolution, request.approval_id)
-        if existing is not None:
-            return existing
         return ApprovalRecord(request.approval_id, {
             "outcome": "expired",
             "resolved_at": float(deadline),

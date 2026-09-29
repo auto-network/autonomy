@@ -85,13 +85,11 @@ class TestDrillVocabulary:
             validate_payload(S.DRILL_SET_ID, S.SCHEMA_REVISION, _drill(
                 checks=[{"name": "integrity", "status": "fail"}]))
 
-    def test_running_has_no_finish(self):
-        with pytest.raises(SchemaValidationError, match="no finish time"):
-            validate_payload(S.DRILL_SET_ID, S.SCHEMA_REVISION, _drill(
-                verdict="running", checks=[],
-                finished_at="2026-09-06T00:30:00+00:00"))
-        validate_payload(S.DRILL_SET_ID, S.SCHEMA_REVISION,
-                         _drill(verdict="running", checks=[]))
+    def test_running_is_not_a_stored_verdict(self):
+        # A drill in flight lives only in the process running it.
+        with pytest.raises(SchemaValidationError):
+            validate_payload(S.DRILL_SET_ID, S.SCHEMA_REVISION,
+                             _drill(verdict="running", checks=[]))
 
 
 class TestConfigBounds:
@@ -113,11 +111,6 @@ class TestConfigBounds:
             validate_payload(S.CONFIG_SET_ID, S.SCHEMA_REVISION,
                              {"run_retention": 0})
 
-    def test_schedule_owner_enum(self):
-        with pytest.raises(SchemaValidationError):
-            validate_payload(S.CONFIG_SET_ID, S.SCHEMA_REVISION,
-                             {"schedule_owner": "systemd"})
-
 
 def test_manifest_loads_dormant():
     """The plugin discovers, resolves every entrypoint, and stays off
@@ -132,4 +125,4 @@ def test_manifest_loads_dormant():
     assert {r.path for r in loaded[0].routes} == {
         "/api/backup/summary", "/api/backup/runs",
         "/api/backup/drills", "/api/backup/config",
-        "/api/backup/reconcile", "/api/backup/drill"}
+        "/api/backup/drill"}

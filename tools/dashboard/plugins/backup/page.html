@@ -87,7 +87,7 @@
                :class="statusClass(summary.overall === 'ok' ? 'ok' : summary.overall)"
                data-testid="backup-overall"
                x-text="overallLabel()"></div>
-          <button class="bk-btn" @click="refreshFromDisk()">refresh</button>
+          <button class="bk-btn" @click="refresh()">refresh</button>
         </div>
         <div class="bk-sub mt-1" data-testid="backup-overall-why"
              x-text="overallExplanation()"></div>

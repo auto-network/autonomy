@@ -38,7 +38,6 @@ from tools.dashboard.approval_service import (
     HumanApprovalActor,
     InMemoryApprovalStore,
 )
-from tools.dashboard.attention_registry import build_production_attention_registry
 from tools.dashboard.dao import mission_control_db as db
 from tools.graph.schemas.central_attention import ApprovalRequestV1
 from tools.network.idkit.keys import KeyPair
@@ -84,12 +83,9 @@ def env(tmp_path, monkeypatch):
         after_commit=hub.notify,
     )
     desk = va.VisitorDesk(approvals=approvals, destination_resolver=machine)
-    attention = build_production_attention_registry(
-        approval_registry=registry,
-        runtimes={(va.KIND, va.APPLICATION_SCOPE): va.build_attention_runtime(approvals)})
     bridge = ApprovalHttpBridge(
         approvals=approvals,
-        registry=ApprovalHttpRegistry(approvals=registry, attention=attention,
+        registry=ApprovalHttpRegistry(approvals=registry,
                                       adapters={va.KIND: va.build_http_adapter(desk)}),
         wait_hub=hub,
     )

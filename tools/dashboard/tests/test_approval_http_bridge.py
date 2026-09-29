@@ -47,13 +47,6 @@ from tools.dashboard.approval_service import (
     HumanApprovalActor,
     InMemoryApprovalStore,
 )
-from tools.dashboard.attention_registry import (
-    AttentionApplicationRegistration,
-    AttentionClassPolicy,
-    AttentionClassRegistration,
-    AttentionPublicationRuntime,
-    AttentionRegistry,
-)
 
 
 KIND = "test_kind"
@@ -88,7 +81,7 @@ def _adapter(results):
 
 
 def _build(
-    *, approval_active=True, attention_active=True, expiry=None,
+    *, approval_active=True, expiry=None,
     http_active=True, clock=None, store=None,
     requester_policy=RequesterPolicy.SESSION_PRINCIPAL,
 ):
@@ -120,35 +113,9 @@ def _build(
     approval_registry = ApprovalKindRegistry(
         [registration], catalog, consumer_ids={"test.consumer"},
     )
-    publication = AttentionPublicationRuntime(
-        projection_planner=lambda _source: None,
-        source_evidence_builder=lambda _id, _version: None,
-        publication_enabled=True,
-    ) if attention_active else None
-    attention_registration = AttentionClassRegistration(
-        kind=KIND,
-        application_scope="test_app",
-        producer_id=None,
-        notification_class="approval.test_kind.requested",
-        surface_category="approvals",
-        review_renderer_id="approval.test_kind.review",
-        policy=AttentionClassPolicy.approval_phase_one(),
-        approval_runtime_enabled=approval_active,
-        runtime=publication,
-    )
-    attention_registry = AttentionRegistry([
-        AttentionApplicationRegistration(
-            application_scope="test_app",
-            label="Test",
-            icon_ref="attention.application.test",
-            open_mode="registered_renderer",
-            classes=(attention_registration,),
-        ),
-    ])
     results = {}
     http_registry = ApprovalHttpRegistry(
         approvals=approval_registry,
-        attention=attention_registry,
         adapters={KIND: _adapter(results)} if http_active else {},
     )
     wait_hub = ApprovalWaitHub()
@@ -188,7 +155,6 @@ def _bridge_with_adapter(bridge, service, adapter):
         approvals=service,
         registry=ApprovalHttpRegistry(
             approvals=bridge.registry.approvals,
-            attention=bridge.registry.attention,
             adapters={KIND: adapter},
         ),
     )
@@ -255,7 +221,6 @@ def test_production_composition_shares_one_service_and_activates_dashboard_acces
     assert runtime.approval_http is not None
     assert runtime.approval_http.approvals is runtime.approvals
     assert runtime.approval_http.registry.approvals is runtime.approvals.registry
-    assert runtime.approval_http.registry.attention is runtime.index.registry
     assert set(runtime.approval_http.registry.adapters) == {
         "dashboard_access", "email_send", "vault_open", "link_publish", "link_revoke",
         "visitor_token", "jira_write"}
@@ -291,17 +256,8 @@ def test_exact_kind_inventory_freezes_requester_result_and_owner():
     assert exceptions == ["link_publish"]
 
 
-@pytest.mark.parametrize("approval_active,attention_active", [
-    (False, True),
-    (True, False),
-])
-def test_claimed_partial_runtime_fails_closed_instead_of_falling_back(
-    approval_active, attention_active,
-):
-    bridge, _service, _results = _build(
-        approval_active=approval_active,
-        attention_active=attention_active,
-    )
+def test_claimed_partial_runtime_fails_closed_instead_of_falling_back():
+    bridge, _service, _results = _build(approval_active=False)
     assert bridge.claims_kind(KIND)
     assert not bridge.migrated_kind(KIND)
     with pytest.raises(ApprovalHttpBridgeError, match="kind_disabled"):
@@ -679,7 +635,6 @@ def test_adapter_failures_are_bounded_without_disclosing_or_inventing_results():
         approvals=service,
         registry=ApprovalHttpRegistry(
             approvals=bridge.registry.approvals,
-            attention=bridge.registry.attention,
             adapters={KIND: ApprovalHttpKindAdapter(
                 kind=KIND,
                 request_projector=broken_request,
@@ -700,7 +655,6 @@ def test_adapter_failures_are_bounded_without_disclosing_or_inventing_results():
         approvals=service,
         registry=ApprovalHttpRegistry(
             approvals=bridge.registry.approvals,
-            attention=bridge.registry.attention,
             adapters={KIND: ApprovalHttpKindAdapter(
                 kind=KIND,
                 request_projector=lambda payload: payload["request"],
@@ -716,7 +670,6 @@ def test_adapter_failures_are_bounded_without_disclosing_or_inventing_results():
         approvals=service,
         registry=ApprovalHttpRegistry(
             approvals=bridge.registry.approvals,
-            attention=bridge.registry.attention,
             adapters={KIND: ApprovalHttpKindAdapter(
                 kind=KIND,
                 request_projector=lambda payload: payload["request"],

@@ -44,16 +44,8 @@ from tools.dashboard.approval_kind_registry import (
     ApprovalRequestPlan,
 )
 from tools.dashboard.approval_service import ApprovalService, ApprovalServiceError, ApprovalStatus
-from tools.dashboard.attention_index_service import AttentionIndexError
-from tools.dashboard.attention_registry import (
-    AttentionProjectionPlan,
-    AttentionPublicationRuntime,
-    AttentionSourceEvidence,
-)
 from tools.dashboard.dashboard_access_central import (
-    DashboardAccessCoordinator,
     _bounded_approval_id,
-    _opaque_digest,
 )
 from tools.dashboard.vault_open_central import this_machine_label
 
@@ -64,7 +56,6 @@ APPLICATION_SCOPE = "links"
 CONSUMER_ID = "link.tunnel_operation.v1"
 OPERATION_WINDOW_SECONDS = 1800
 _DESTINATION_DOMAIN = b"dashboard.links.operation-destination.v1"
-_ATTENTION_DOMAIN = "dashboard.attention.link-recipient"
 
 PENDING = "pending"
 AWAITING = "awaiting_operation"
@@ -84,11 +75,6 @@ def result_destination_id(secret: bytes | None = None) -> str:
         raise ValueError("Dashboard session secret is unavailable")
     digest = hmac.new(secret, _DESTINATION_DOMAIN, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def link_attention_id(approval_id: str) -> str:
-    _bounded_approval_id(approval_id)
-    return "attention-" + _opaque_digest([_ATTENTION_DOMAIN, 1, approval_id])
 
 
 def build_request_planner(
@@ -170,39 +156,10 @@ def build_approval_runtime(kind: str, **planner_options) -> ApprovalKindRuntime:
     )
 
 
-def build_attention_runtime(approvals: ApprovalService, kind: str) -> AttentionPublicationRuntime:
-    def plan(source: Any) -> AttentionProjectionPlan:
-        if not isinstance(source, ApprovalStatus):
-            raise ValueError("link projection requires approval status")
-        request = source.request.payload
-        if request.get("kind") != kind:
-            raise ValueError("link projection kind mismatch")
-        resolution = source.resolution
-        review = request.get("safe_review") or {}
-        return AttentionProjectionPlan(
-            attention_id=link_attention_id(source.request.approval_id),
-            object_ref=source.request.approval_id,
-            participant_role="recipient",
-            attention_state="resolved" if resolution is not None else "needs_attention",
-            safe_title=review.get("title") or "Share link",
-            safe_summary=(review.get("detail") or "")[:240] or None,
-            counterparty_ref=None,
-            occurred_at=(float(resolution.payload["resolved_at"]) if resolution is not None
-                         else float(request["created_at"])),
-            source_version=2 if resolution is not None else 1,
-        )
-
-    def evidence(object_ref: str, source_version: int) -> AttentionSourceEvidence:
-        status = approvals.status(_bounded_approval_id(object_ref))
-        actual = 2 if status.resolution is not None else 1
-        if actual != source_version or status.request.payload.get("kind") != kind:
-            raise AttentionIndexError("stale_source")
-        return AttentionSourceEvidence(
-            source_guard={"kind": "approval", "ref": object_ref, "version": source_version},
-            source_expires_at=status.request.payload.get("expires_at"),
-        )
-
-    return AttentionPublicationRuntime(projection_planner=plan, source_evidence_builder=evidence)
+def inbox_text(status: ApprovalStatus) -> tuple[str, str | None]:
+    """The inbox's title and summary for one approval of this kind."""
+    review = status.request.payload.get("safe_review") or {}
+    return review.get("title") or "Share link", review.get("detail") or None
 
 
 class LinkApprovalDesk:
@@ -212,7 +169,6 @@ class LinkApprovalDesk:
         self,
         *,
         approvals: ApprovalService,
-        index: Any = None,
         destination_resolver: Callable[[], str] = result_destination_id,
         journal: type = ops.Journal,
         verify: Callable[..., tuple[dict, str]] = ops.verify,
@@ -221,7 +177,6 @@ class LinkApprovalDesk:
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.approvals = approvals
-        self.index = index
         self._destination_resolver = destination_resolver
         self._journal = journal
         self._verify = verify
@@ -284,28 +239,17 @@ class LinkApprovalDesk:
                 "ok": False, "error": "approved but not carried out in time; ask again"}}
         return None
 
-    def _approval_for_item(self, attention_id: Any) -> ApprovalStatus:
-        if self.index is None:
-            raise ops.LinkOperationError("not_found")
+    def _approval(self, approval_id: Any) -> ApprovalStatus:
         try:
-            item = self.index.get_query_item(attention_id)
-        except ValueError:
-            raise ops.LinkOperationError("not_found") from None
-        except Exception:
-            raise ops.LinkOperationError("unavailable") from None
-        if item is None:
-            raise ops.LinkOperationError("not_found")
-        try:
-            status = self.approvals.status(_bounded_approval_id(item.payload.get("object_ref")))
+            status = self.approvals.status(_bounded_approval_id(approval_id))
         except (ApprovalServiceError, ValueError):
             raise ops.LinkOperationError("not_found") from None
-        if status.request.payload.get("kind") not in KINDS or \
-                item.attention_id != link_attention_id(status.request.approval_id):
+        if status.request.payload.get("kind") not in KINDS:
             raise ops.LinkOperationError("not_found")
         return status
 
-    def bootstrap(self, attention_id: Any) -> dict:
-        status = self._approval_for_item(attention_id)
+    def bootstrap(self, approval_id: Any) -> dict:
+        status = self._approval(approval_id)
         state = self.state(status)
         if state == ELSEWHERE:
             raise ops.LinkOperationError("elsewhere")
@@ -314,8 +258,8 @@ class LinkApprovalDesk:
         payload = status.request.payload
         return self._signing_view(payload["request"], payload["staged"])
 
-    async def operate(self, attention_id: Any, body: Any) -> dict:
-        status = self._approval_for_item(attention_id)
+    async def operate(self, approval_id: Any, body: Any) -> dict:
+        status = self._approval(approval_id)
         payload = status.request.payload
         approval_id = status.request.approval_id
         state = self.state(status)
@@ -344,12 +288,7 @@ class LinkApprovalDesk:
         return {"execution": execution}
 
 
-def build_http_adapter(
-    kind: str,
-    desk: LinkApprovalDesk,
-    *,
-    reconcile: Callable[[str], ApprovalStatus | None] | None = None,
-) -> ApprovalHttpKindAdapter:
+def build_http_adapter(kind: str, desk: LinkApprovalDesk) -> ApprovalHttpKindAdapter:
     def project_request(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         request = payload.get("request")
         if not isinstance(request, Mapping):
@@ -364,10 +303,6 @@ def build_http_adapter(
         raise ApprovalHttpBridgeError("invalid_decision")
 
     def project_result(status: ApprovalStatus) -> Mapping[str, Any] | None:
-        if reconcile is not None:
-            refreshed = reconcile(status.request.approval_id)
-            if refreshed is not None:
-                status = refreshed
         return desk.requester_result(status)
 
     return ApprovalHttpKindAdapter(kind=kind, request_projector=project_request,
@@ -375,30 +310,8 @@ def build_http_adapter(
                                    legacy_decision_mapper=map_decision)
 
 
-class LinkApprovalCoordinator(DashboardAccessCoordinator):
-    """The dashboard-access wake coordinator, reconciling one link kind. It
-    publishes the attention item; it never operates (that needs the
-    operator's signature)."""
-
-    def __init__(self, *, kind: str, **kwargs) -> None:
-        super().__init__(consumer=None, **kwargs)
-        self.kind = kind
-
-    def reconcile_exact(self, approval_id: str) -> ApprovalStatus | None:
-        try:
-            status = self.approvals.status(_bounded_approval_id(approval_id))
-        except ApprovalServiceError as exc:
-            if exc.code == "not_found":
-                return None
-            raise
-        if status.request.payload.get("kind") != self.kind:
-            return None
-        self.index.publish(self.producer, status)
-        return status
-
-
 __all__ = [
-    "APPLICATION_SCOPE", "KINDS", "LinkApprovalCoordinator", "LinkApprovalDesk",
+    "APPLICATION_SCOPE", "KINDS", "LinkApprovalDesk",
     "OPERATION_WINDOW_SECONDS", "PUBLISH_KIND", "REVOKE_KIND", "build_approval_runtime",
-    "build_attention_runtime", "build_http_adapter", "link_attention_id", "result_destination_id",
+    "inbox_text", "build_http_adapter", "result_destination_id",
 ]

@@ -9,8 +9,8 @@
 //
 // Reads: GET /api/backup/summary (now incl. destinations),
 //        /api/backup/runs, /api/backup/drills, /api/backup/config
-// Writes (operator authority): POST /api/backup/reconcile,
-//        POST /api/backup/drill, PUT /api/backup/config
+// Writes (operator authority): POST /api/backup/drill,
+//        PUT /api/backup/config
 
 function backupRelativeAge(seconds) {
   if (seconds === null || seconds === undefined) return 'never';
@@ -44,17 +44,23 @@ function backupPage() {
     configDraft: {},
     configMessage: '',
     drillMessage: '',
-    _timer: null,
+    _unsubscribe: [],
 
     async init() {
       document.title = 'Backup — Autonomy';
       const header = document.querySelector('header');
       if (header) header.classList.add('app-topbar-active');
       await this.refresh();
-      this._timer = setInterval(() => this.refresh(), 60_000);
+      // Re-read when a backup Setting changes; no polling.
+      const events = window.dashboardEvents;
+      if (events && events.onSettingChanged) {
+        this._unsubscribe = ['backup.run', 'backup.drill', 'backup.config']
+          .map((setId) => events.onSettingChanged(setId, () => this.refresh()));
+      }
     },
     destroy() {
-      if (this._timer) clearInterval(this._timer);
+      this._unsubscribe.forEach((stop) => stop());
+      this._unsubscribe = [];
     },
 
     async refresh() {
@@ -78,14 +84,6 @@ function backupPage() {
       } finally {
         this.loading = false;
       }
-    },
-
-    // Ingest the newest on-disk reports first, then re-read.
-    async refreshFromDisk() {
-      try {
-        await fetch('/api/backup/reconcile', { method: 'POST' });
-      } catch (e) { /* stored state still renders */ }
-      await this.refresh();
     },
 
     async runDrill() {

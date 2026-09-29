@@ -7,7 +7,6 @@ from tools.dashboard import identity_routes
 from tools.dashboard.approval_http_bridge import central_stable_approval_id
 from tools.dashboard.approval_kind_registry import ApprovalKindRuntime, ApprovalRequestPlan, RegisteredApprovalProducer
 from tools.dashboard.approval_service import ApprovalServiceError, normalize_unix_milliseconds_deadline
-from tools.dashboard.attention_registry import AttentionProjectionPlan, AttentionPublicationRuntime, AttentionSourceEvidence
 from tools.network import fleet_enroll, fleet_machine_profile, fleet_roster, machine_boot
 
 KIND = "fleet_machine_admission"
@@ -104,25 +103,9 @@ def build_approval_runtime():
     )
 
 
-def build_attention_runtime(approvals):
-    def plan(status):
-        payload, resolution = status.request.payload, status.resolution
-        return AttentionProjectionPlan(
-            attention_id=status.request.approval_id, object_ref=status.request.approval_id,
-            participant_role="recipient", attention_state="resolved" if resolution else "needs_attention",
-            safe_title="Add this machine?", safe_summary=payload["safe_review"]["detail"],
-            counterparty_ref=None, occurred_at=resolution.payload["resolved_at"] if resolution else payload["created_at"],
-            source_version=2 if resolution else 1,
-        )
-    def evidence(ref, version):
-        status = approvals.status(ref)
-        if status.request.payload["kind"] != KIND or version != (2 if status.resolution else 1):
-            raise ValueError("Fleet attention source mismatch")
-        return AttentionSourceEvidence(
-            source_guard={"kind": "approval", "ref": ref, "version": version},
-            source_expires_at=status.request.payload.get("expires_at"),
-        )
-    return AttentionPublicationRuntime(projection_planner=plan, source_evidence_builder=evidence)
+def inbox_text(status):
+    """The inbox's title and summary for one machine admission."""
+    return "Add this machine?", status.request.payload["safe_review"]["detail"]
 
 
 def ensure_approval(pending, *, store):
@@ -158,7 +141,6 @@ def reconcile(approval_id):
     status = runtime.approvals.status(approval_id)
     if status.request.payload["kind"] != KIND:
         return
-    runtime.index.publish(runtime.index.registry.producer(KIND, APPLICATION_SCOPE), status)
     if status.resolution and status.resolution.payload["outcome"] == "granted":
         pending = _store().get_request(status.request.payload["staged"]["source_request_id"])
         if pending and pending.source_approval_id == approval_id and pending.status in {"pending", "approving"}:

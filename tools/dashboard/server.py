@@ -22414,7 +22414,6 @@ _event_loop_watchdog_task: asyncio.Task | None = None
 _vault_release_sweeper_task: asyncio.Task | None = None
 #: Reads the served TLS certificate every six hours and keeps the
 #: machine.tls_certificate_expiring attention item honest (auto-1ei8m).
-_certificate_attention_task: asyncio.Task | None = None
 _plugin_background_supervisor = None  # PluginBackgroundSupervisor | None
 _settings_mediator_started: bool = False
 # Zero-downtime hand-off (tools/dashboard/worker_handoff.py): under the reload
@@ -22634,7 +22633,6 @@ _design_lifecycle_task: asyncio.Task | None = None
 
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
-    global _certificate_attention_task
     global _tokens_rollup_poller_task
     global _claude_credentials_refresh_task, _codex_credentials_refresh_task
     global _event_loop_watchdog_task
@@ -22957,11 +22955,6 @@ async def _on_startup():
         )
     _mark("warm_personal_settings_store")
     try:
-        await asyncio.to_thread(attention_routes.sync_registrations)
-    except Exception:
-        logger.exception("Central Attention registration sync failed; continuing startup")
-    _mark("attention_routes.sync_registrations")
-    try:
         from tools.graph.commit_policy import seed_default_workspace_policies
         seed_default_workspace_policies(workspace_settings.load_workspaces())
         workspace_settings.invalidate_caches()
@@ -23054,13 +23047,6 @@ async def _on_startup():
             "sweeper will still run and catch outstanding releases",
         )
     _vault_release_sweeper_task = asyncio.create_task(_vault_release_sweeper())
-    try:
-        from tools.dashboard import certificate_attention as _certificate_attention
-
-        _certificate_attention_task = asyncio.create_task(
-            _certificate_attention.loop(), name="certificate-attention")
-    except Exception:
-        logger.exception("certificate attention loop not started")
     _mark("vault_release_sweeper.reconcile_on_startup")
     # Plugin background tasks (auto-jjqct): the supervisor reconciles
     # lifespan-owned tasks against the LIVE enable map, so a plugin
@@ -23322,7 +23308,6 @@ async def _on_startup():
 
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
-    global _certificate_attention_task
     global _harness_usage_poller_task, _claude_credentials_refresh_task
     global _tokens_rollup_poller_task
     global _codex_credentials_refresh_task
@@ -23465,7 +23450,6 @@ async def _on_shutdown():
             _codex_credentials_refresh_task,
             _event_loop_watchdog_task,
             _vault_release_sweeper_task,
-            _certificate_attention_task,
         )
         if t and not t.done()
     ]
@@ -23483,7 +23467,6 @@ async def _on_shutdown():
     _claude_credentials_refresh_task = None
     _codex_credentials_refresh_task = None
     _vault_release_sweeper_task = None
-    _certificate_attention_task = None
     global _plugin_background_supervisor
     if _plugin_background_supervisor is not None:
         try:
@@ -23561,12 +23544,6 @@ async def _activate_worker(reason: str) -> None:
         # the startup replay could not open yet (graph://67d0aa5f-885 D3).
         with contextlib.suppress(Exception):
             await asyncio.to_thread(fleet_enrollment_routes.rearm_local_runtime_from_vault)
-        # A hand-off that left the vault locked, or whose notice failed, is a
-        # Central attention item, not a silent wait for a human (auto-wb6ok).
-        from tools.dashboard import vault_handoff_attention
-        await asyncio.to_thread(
-            vault_handoff_attention.run_cycle,
-            notice_failure=worker_handoff.notice_failure())
 
     # A reload or restart kills the previous process's sign-in delivery
     # threads; finish any delivery a still-waiting container needs

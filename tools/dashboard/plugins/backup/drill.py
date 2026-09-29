@@ -1,18 +1,16 @@
-"""Restore drills: run, record, alert (auto-mu7qf).
+"""Restore drills: run and record (auto-mu7qf).
 
 The checks themselves live in tools/graph/backup-restore.sh (drill
 subcommand) — restic restore to scratch, marker requirement, integrity
 through the app's SQL-function registration, sources sanity, beads
 count. This module runs that script as a subprocess, parses its
-``@``-event lines into a BackupDrillV1 row, and feeds the outcome to
-Central attention (restore_drill_failed raised on fail/timeout,
-resolved by the next pass).
+``@``-event lines into a BackupDrillV1 row written once, when it ends.
 
-Exactly one drill runs at a time: the row is upserted ``running`` when
-the subprocess starts, so an in-flight drill is visible on /backup and
-diagnosable if the process dies. Timeouts kill the subprocess group and
-record ``timeout`` — a drill that cannot finish is a failed drill, not
-a silent absence.
+Exactly one drill runs at a time. The drill in flight is known only to
+this process (:func:`running`); nothing about it is stored until it
+finishes, so a restart cannot leave a record claiming a drill is still
+running. Timeouts kill the subprocess group and record ``timeout`` — a
+drill that cannot finish is a failed drill, not a silent absence.
 """
 from __future__ import annotations
 
@@ -41,7 +39,8 @@ DRILL_SCRIPT = _REPO / "tools" / "graph" / "backup-restore.sh"
 EVIDENCE_LIMIT = 4000
 
 _lock = threading.Lock()
-_running_stamp: str | None = None
+#: The drill in flight in this process: {"key", "trigger", "started_at"}.
+_running: dict | None = None
 
 
 class DrillAlreadyRunning(RuntimeError):
@@ -51,7 +50,11 @@ class DrillAlreadyRunning(RuntimeError):
 
 
 def running_stamp() -> str | None:
-    return _running_stamp
+    return _running["key"] if _running else None
+
+
+def running() -> dict | None:
+    return dict(_running) if _running else None
 
 
 def parse_events(output: str) -> tuple[list[dict], str, str]:
@@ -107,84 +110,6 @@ def _prune() -> None:
             logger.warning("drill prune failed for %s: %s", member.key, exc)
 
 
-def _publish_outcome(verdict: str, stamp: str, checks: list[dict]) -> None:
-    """restore_drill_failed raised on fail/timeout, resolved on pass."""
-    from tools.dashboard import attention_routes
-    from tools.dashboard.plugins.backup.deriver import publish_conditions
-    failed_names = [c["name"] for c in checks if c.get("status") == "fail"]
-    if verdict == "pass":
-        state, title = "resolved", "Restore drill passed"
-        summary = f"Drill {stamp}: {len(checks)} checks ok"
-    else:
-        state, title = "needs_attention", "Restore drill failed"
-        summary = (f"Drill {stamp}: "
-                   + (f"failed checks: {', '.join(failed_names)}"
-                      if failed_names else f"verdict {verdict}"))
-    try:
-        publish_conditions(attention_routes._runtime.index, [{
-            "kind": "backup.drill_failed",
-            "attention_id": "backup:drill",
-            "object_ref": "backup:drill",
-            "attention_state": state,
-            "safe_title": title,
-            "safe_summary": summary,
-            "occurred_at": datetime.now(timezone.utc).timestamp(),
-            "source_version": int("".join(ch for ch in stamp if ch.isdigit())),
-        }])
-    except Exception:
-        logger.exception("drill attention publish failed")
-
-
-def finalize_abandoned(now=None) -> list[str]:
-    """Close out ``running`` rows whose process died under them.
-
-    A drill runs inside the dashboard process; a hot-reload or crash
-    mid-drill leaves its row ``running`` forever — which reads as an
-    eternal in-flight drill and pins the run button disabled (found
-    live 2026-09-06: a row said "running" 75 minutes after its process
-    was restarted). Any running row older than twice the configured
-    timeout, and not this process's own in-flight drill, finalizes as
-    ``fail`` with the honest reason. Called by the deriver cycle."""
-    from datetime import datetime, timezone
-
-    from tools.graph import settings_ops
-    from tools.dashboard.plugins.backup.entrypoints.api import (
-        _read_config,
-        _rows,
-    )
-    now = now or datetime.now(timezone.utc)
-    limit_s = float(_read_config().get("drill_timeout_minutes", 30)) * 60 * 2
-    finalized = []
-    for row in _rows(DRILL_SET_ID):
-        if row.get("verdict") != "running":
-            continue
-        stamp = row.get("key", "")
-        if stamp == _running_stamp:
-            continue  # genuinely in flight in this process
-        try:
-            started = datetime.fromisoformat(row.get("started_at", ""))
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=timezone.utc)
-        except ValueError:
-            started = None
-        if started is not None and (now - started).total_seconds() < limit_s:
-            continue
-        settings_ops.write_by_key(
-            DRILL_SET_ID, SCHEMA_REVISION, stamp, {
-                "verdict": "fail",
-                "trigger": row.get("trigger", "manual"),
-                "started_at": row.get("started_at", ""),
-                "finished_at": now.isoformat(),
-                "checks": [{"name": "runtime", "status": "fail",
-                            "detail": "abandoned — the dashboard process "
-                                      "restarted mid-drill"}],
-                "evidence": "",
-            }, org="machine")
-        finalized.append(stamp)
-        logger.warning("finalized abandoned drill %s", stamp)
-    return finalized
-
-
 def run_drill(trigger: str = "manual", *, timeout_s: float | None = None,
               script: Path | None = None, env: dict | None = None) -> dict:
     """Run one drill to completion and return its recorded row payload.
@@ -192,23 +117,19 @@ def run_drill(trigger: str = "manual", *, timeout_s: float | None = None,
     Raises DrillAlreadyRunning instead of queueing — a second concurrent
     drill would fight the first for the restic repo and scratch space.
     """
-    global _running_stamp
+    global _running
     from tools.dashboard.plugins.backup.entrypoints.api import _read_config
     config = _read_config()
     if timeout_s is None:
         timeout_s = float(config.get("drill_timeout_minutes", 30)) * 60
-    with _lock:
-        if _running_stamp is not None:
-            raise DrillAlreadyRunning(_running_stamp)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        _running_stamp = stamp
     started = datetime.now(timezone.utc)
+    with _lock:
+        if _running is not None:
+            raise DrillAlreadyRunning(_running["key"])
+        stamp = started.strftime("%Y%m%d-%H%M%S")
+        _running = {"key": stamp, "trigger": trigger,
+                    "started_at": started.isoformat()}
     try:
-        _upsert(stamp, {
-            "verdict": "running",
-            "trigger": trigger,
-            "started_at": started.isoformat(),
-        })
         run_env = {**os.environ, **(env or {})}
         if env is None:
             # Vault-released offsite credentials (auto-uy896): injected
@@ -263,8 +184,7 @@ def run_drill(trigger: str = "manual", *, timeout_s: float | None = None,
         }
         _upsert(stamp, payload)
         _prune()
-        _publish_outcome(verdict, stamp, checks)
         return {"stamp": stamp, **payload}
     finally:
         with _lock:
-            _running_stamp = None
+            _running = None

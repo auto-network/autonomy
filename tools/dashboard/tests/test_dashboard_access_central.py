@@ -24,11 +24,6 @@ from tools.dashboard.approval_service import (
     HumanApprovalActor,
     InMemoryApprovalStore,
 )
-from tools.dashboard.attention_index_service import (
-    AttentionIndexService,
-    InMemoryAttentionIndexStore,
-)
-from tools.dashboard.attention_registry import build_production_attention_registry
 from tools.dashboard import dashboard_access_central as central
 from tools.network.idkit.canonical import canonical_json
 from tools.network.idkit.keys import KeyPair
@@ -66,17 +61,7 @@ def _composition(*, clock=lambda: 1000.75, destination=DESTINATION):
         clock=clock,
         id_factory=lambda: APPROVAL_ID,
     )
-    attention_runtime = central.build_attention_runtime(approvals)
-    attention_registry = build_production_attention_registry(
-        approval_registry=registry,
-        runtimes={(central.KIND, central.APPLICATION_SCOPE): attention_runtime},
-    )
-    index = AttentionIndexService(
-        registry=attention_registry,
-        store=InMemoryAttentionIndexStore(),
-    )
-    producer = attention_registry.producer(central.KIND, central.APPLICATION_SCOPE)
-    return approvals, index, producer, registry, attention_registry
+    return approvals, registry
 
 
 def _create(approvals):
@@ -98,24 +83,17 @@ def _grant_decision(request):
 
 
 def test_only_dashboard_access_is_activated_in_production_composition():
-    approvals, _index, _producer, registry, attention = _composition()
+    approvals, registry = _composition()
     assert approvals.registry is registry
     assert [kind for kind, row in registry.kinds.items() if row.runtime is not None] == [
         central.KIND
     ]
-    enabled = [
-        row.kind
-        for application in attention.applications
-        for row in application.classes
-        if row.publication_enabled
-    ]
-    assert enabled == [central.KIND]
     with pytest.raises(ValueError):
         build_production_registry(runtimes={"invented": registry.kinds[central.KIND].runtime})
 
 
 def test_request_freezes_opaque_requester_destination_and_public_grant():
-    approvals, _index, _producer, _registry, _attention = _composition()
+    approvals, registry = _composition()
     request = _create(approvals)
     payload = request.payload
     grant = payload["staged"]["grant"]
@@ -150,14 +128,14 @@ def test_request_freezes_opaque_requester_destination_and_public_grant():
     ],
 )
 def test_request_rejects_forged_or_malformed_input(body):
-    approvals, _index, _producer, _registry, _attention = _composition()
+    approvals, registry = _composition()
     with pytest.raises(ApprovalServiceError, match="invalid_request"):
         approvals.create_from_principal(central.KIND, _principal(), body)
     assert approvals.store.get_request(APPROVAL_ID) is None
 
 
 def test_signed_grant_uses_exact_service_decision_time_and_first_winner():
-    approvals, _index, _producer, _registry, _attention = _composition()
+    approvals, registry = _composition()
     request = _create(approvals)
     decision = _grant_decision(request)
     answer = approvals.decide(
@@ -179,7 +157,7 @@ def test_signed_grant_uses_exact_service_decision_time_and_first_winner():
 
 
 def test_grant_subsecond_tail_is_invalid_without_resolution():
-    approvals, _index, _producer, _registry, _attention = _composition()
+    approvals, registry = _composition()
     request = _create(approvals)
     with pytest.raises(ApprovalServiceError, match="invalid_decision"):
         approvals.decide(
@@ -192,28 +170,17 @@ def test_grant_subsecond_tail_is_invalid_without_resolution():
     assert approvals.store.get_resolution(request.approval_id) is None
 
 
-def test_attention_projection_advances_same_identity_from_v1_to_v2():
-    approvals, index, producer, _registry, _attention = _composition()
+def test_inbox_text_names_the_requesting_session():
+    approvals, registry = _composition()
     request = _create(approvals)
-    pending = index.publish(producer, approvals.status(request.approval_id))
-    assert pending.attention_id == central.dashboard_access_attention_id(APPROVAL_ID)
-    assert pending.payload["attention_state"] == "needs_attention"
-    assert pending.payload["source_version"] == 1
-    approvals.decide(
-        request.approval_id,
-        HumanApprovalActor._verified(ROOT.public_hex),
-        outcome="declined",
-        decision={},
-        now=1002.0,
+    assert central.inbox_text(approvals.status(request.approval_id)) == (
+        "Dashboard access requested",
+        "Session auto-requester wants temporary Dashboard access.",
     )
-    resolved = index.publish(producer, approvals.status(request.approval_id))
-    assert resolved.attention_id == pending.attention_id
-    assert resolved.payload["attention_state"] == "resolved"
-    assert resolved.payload["source_version"] == 2
 
 
 def test_destination_bound_consumer_writes_only_matching_local_grant(monkeypatch):
-    approvals, _index, _producer, _registry, _attention = _composition()
+    approvals, registry = _composition()
     request = _create(approvals)
     approvals.decide(
         request.approval_id,
@@ -270,7 +237,7 @@ def test_matching_application_result_survives_local_store_reopen(
     central.identity_sessions.reset_for_tests()
     secret = b"s" * 32
     destination = central.dashboard_access_result_destination_id(secret)
-    approvals, _index, _producer, _registry, _attention = _composition(
+    approvals, registry = _composition(
         destination=destination,
     )
     request = _create(approvals)
@@ -300,7 +267,7 @@ def test_matching_application_result_survives_local_store_reopen(
 
 
 def test_application_store_failure_keeps_central_grant_retryable(monkeypatch):
-    approvals, _index, _producer, _registry, _attention = _composition()
+    approvals, registry = _composition()
     request = _create(approvals)
     resolution = approvals.decide(
         request.approval_id,
@@ -347,7 +314,7 @@ def test_application_store_failure_keeps_central_grant_retryable(monkeypatch):
 
 
 def test_missing_application_result_is_not_created_after_grant_expiry(monkeypatch):
-    approvals, _index, _producer, _registry, _attention = _composition()
+    approvals, registry = _composition()
     request = _create(approvals)
     approvals.decide(
         request.approval_id,
@@ -381,7 +348,7 @@ def test_missing_application_result_is_not_created_after_grant_expiry(monkeypatc
 def test_timely_existing_application_result_remains_idempotent_after_expiry(
     monkeypatch,
 ):
-    approvals, _index, _producer, _registry, _attention = _composition()
+    approvals, registry = _composition()
     request = _create(approvals)
     approvals.decide(
         request.approval_id,
@@ -423,19 +390,22 @@ def test_timely_existing_application_result_remains_idempotent_after_expiry(
     assert writes == []
 
 
-def test_coordinator_reconciles_a_synced_approval_on_its_event():
-    approvals, index, producer, _registry, _attention = _composition()
-    request = _create(approvals)
-    consumer = central.DashboardAccessResultConsumer(
-        root_resolver=lambda: ROOT.public_hex,
-        destination_resolver=lambda: "x" * 43,
-    )
-    coordinator = central.DashboardAccessCoordinator(
+def _coordinator(approvals):
+    return central.DashboardAccessCoordinator(
         approvals=approvals,
-        index=index,
-        producer=producer,
-        consumer=consumer,
+        consumer=central.DashboardAccessResultConsumer(
+            root_resolver=lambda: ROOT.public_hex,
+            destination_resolver=lambda: "x" * 43,
+        ),
     )
+
+
+def test_coordinator_reconciles_a_synced_approval_on_its_event(monkeypatch):
+    approvals, registry = _composition()
+    request = _create(approvals)
+    coordinator = _coordinator(approvals)
+    calls = []
+    monkeypatch.setattr(coordinator, "reconcile_exact", calls.append)
 
     async def exercise():
         await coordinator.start()
@@ -445,42 +415,32 @@ def test_coordinator_reconciles_a_synced_approval_on_its_event():
             key=request.approval_id,
         )])
         for _ in range(50):
-            item = index.get_query_item(central.dashboard_access_attention_id(APPROVAL_ID))
-            if item is not None:
+            if calls:
                 break
             await asyncio.sleep(0.01)
         await coordinator.stop()
-        return item
 
-    item = asyncio.run(exercise())
-    assert item is not None
-    assert item.payload["source_version"] == 1
+    asyncio.run(exercise())
+    assert calls == [request.approval_id]
 
 
 def test_coordinator_neither_scans_nor_retries(monkeypatch):
-    approvals, index, producer, _registry, _attention = _composition()
+    approvals, registry = _composition()
     request = _create(approvals)
-    coordinator = central.DashboardAccessCoordinator(
-        approvals=approvals,
-        index=index,
-        producer=producer,
-        consumer=central.DashboardAccessResultConsumer(
-            root_resolver=lambda: ROOT.public_hex,
-            destination_resolver=lambda: "x" * 43,
-        ),
-    )
+    coordinator = _coordinator(approvals)
     calls = []
 
     def failing(approval_id):
         calls.append(approval_id)
         raise RuntimeError("store unavailable")
 
+    monkeypatch.setattr(coordinator, "reconcile_exact", failing)
+
     async def exercise():
         await coordinator.start()
         await asyncio.sleep(0.05)
-        # Starting reads nothing: no startup scan publishes the open request.
-        assert index.get_query_item(central.dashboard_access_attention_id(APPROVAL_ID)) is None
-        monkeypatch.setattr(coordinator, "reconcile_exact", failing)
+        # Starting reads nothing: no startup scan.
+        assert calls == []
         coordinator.offer(request.approval_id)
         await asyncio.sleep(0.2)
         await coordinator.stop()
@@ -558,7 +518,7 @@ def test_graph_session_auth_completes_central_create_wait_materialize_and_redeem
     tmp_path, monkeypatch, capsys,
 ):
     now = 2_000_000_000.25
-    approvals, index, producer, _registry, attention_registry = _composition(
+    approvals, registry = _composition(
         clock=lambda: now,
     )
     consumer = central.DashboardAccessResultConsumer(
@@ -568,15 +528,12 @@ def test_graph_session_auth_completes_central_create_wait_materialize_and_redeem
     )
     coordinator = central.DashboardAccessCoordinator(
         approvals=approvals,
-        index=index,
-        producer=producer,
         consumer=consumer,
     )
     bridge = ApprovalHttpBridge(
         approvals=approvals,
         registry=ApprovalHttpRegistry(
             approvals=approvals.registry,
-            attention=attention_registry,
             adapters={
                 central.KIND: central.build_http_adapter(
                     consumer,
@@ -586,12 +543,9 @@ def test_graph_session_auth_completes_central_create_wait_materialize_and_redeem
         ),
     )
     runtime = attention_routes.AttentionRouteRuntime(
-        index=index,
-        presentation=SimpleNamespace(),
         approvals=approvals,
-        hub=attention_routes.PrivateAttentionHub(
-            item_resolver=index.get_query_item,
-        ),
+        hub=attention_routes.PrivateAttentionHub(),
+        inbox_texts={central.KIND: central.inbox_text},
         approval_http=bridge,
         approval_reconciler=coordinator,
     )
@@ -668,12 +622,7 @@ def test_graph_session_auth_completes_central_create_wait_materialize_and_redeem
         captured = capsys.readouterr()
         assert cookie_value and cookie_value not in captured.out + captured.err
         assert "dashboard session granted" in captured.out
-        attention = index.get_query_item(
-            central.dashboard_access_attention_id(APPROVAL_ID)
-        )
-        assert attention is not None
-        assert attention.payload["attention_state"] == "resolved"
-        assert attention.payload["source_version"] == 2
+        assert approvals.status(APPROVAL_ID).resolution.payload["outcome"] == "granted"
     finally:
         attention_routes.configure_runtime(previous)
         bridge.close()

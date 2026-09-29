@@ -1,8 +1,8 @@
 """Compatibility bridge from the canonical requester HTTP API to Settings.
 
 The bridge contains no production kind adapters by default.  A migration must
-activate the approval runtime, the matching attention publisher, and one
-complete HTTP adapter before a kind can leave the legacy rendezvous.
+activate the approval runtime and one complete HTTP adapter before a kind can
+leave the legacy rendezvous.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from tools.dashboard.approval_service import (
     ApprovalStatus,
     HumanApprovalActor,
 )
-from tools.dashboard.attention_registry import AttentionRegistry
 
 
 CENTRAL_APPROVAL_ID_PREFIX = "central-"
@@ -123,19 +122,16 @@ def central_stable_approval_id(namespace: str, source_id: str) -> str:
 
 
 class ApprovalHttpRegistry:
-    """Closed adapter map joined to the exact approval/attention runtimes."""
+    """Closed adapter map joined to the exact approval runtimes."""
 
     def __init__(
         self,
         *,
         approvals: ApprovalKindRegistry,
-        attention: AttentionRegistry,
         adapters: Mapping[str, ApprovalHttpKindAdapter] | None = None,
     ):
         if not isinstance(approvals, ApprovalKindRegistry):
             raise ValueError("approval HTTP registry requires approval catalog")
-        if not isinstance(attention, AttentionRegistry):
-            raise ValueError("approval HTTP registry requires attention catalog")
         supplied = {} if adapters is None else dict(adapters)
         for kind, adapter in supplied.items():
             if not isinstance(adapter, ApprovalHttpKindAdapter) or adapter.kind != kind:
@@ -149,10 +145,7 @@ class ApprovalHttpRegistry:
             applications = registration.application_scope_policy.applications
             if len(applications) != 1:
                 raise ValueError("generic requester HTTP requires one fixed application")
-            application = next(iter(applications))
-            attention.require_class(application, registration.notification_class)
         self.approvals = approvals
-        self.attention = attention
         self._adapters = MappingProxyType(supplied)
 
     @property
@@ -172,33 +165,16 @@ class ApprovalHttpRegistry:
         registration = self.approvals.kinds.get(kind)
         if registration is None:
             return False
-        if registration.runtime is not None:
-            return True
-        applications = registration.application_scope_policy.applications
-        if len(applications) != 1:
-            return False
-        try:
-            attention = self.attention.require_class(
-                next(iter(applications)), registration.notification_class,
-            )
-        except (KeyError, StopIteration):
-            return False
-        return attention.runtime is not None or attention.approval_runtime_enabled
+        return registration.runtime is not None
 
     def adapter_for_create(self, kind: str) -> ApprovalHttpKindAdapter | None:
         adapter = self._adapters.get(kind)
         if adapter is None:
             return None
         try:
-            registration = self.approvals.require(kind)
-            application = next(iter(registration.application_scope_policy.applications))
-            attention = self.attention.require_class(
-                application, registration.notification_class,
-            )
-        except (KeyError, RuntimeError, StopIteration) as exc:
+            self.approvals.require(kind)
+        except (KeyError, RuntimeError) as exc:
             raise ApprovalHttpBridgeError("kind_disabled") from exc
-        if not attention.publication_enabled:
-            raise ApprovalHttpBridgeError("kind_disabled")
         return adapter
 
     def require_for_status(self, kind: str) -> ApprovalHttpKindAdapter:

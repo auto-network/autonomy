@@ -14,7 +14,7 @@ request sends (its frozen ``result_destination_id``), and the machine-homed
 replay or a restart never sends twice; a claim without an outcome becomes
 ``unknown`` and is not retried.
 
-Mirrors dashboard_access_central.py (planner, attention projection, HTTP
+Mirrors dashboard_access_central.py (planner, inbox text, HTTP
 adapter, coordinator); the differences are the operator-session decision
 (``{}`` for grant and decline) and the send journal.
 """
@@ -43,21 +43,13 @@ from tools.dashboard.approval_kind_registry import (
     ApprovalRequestPlan,
 )
 from tools.dashboard.approval_service import (
-    ApprovalService,
     ApprovalServiceError,
     ApprovalStatus,
     canonical_session_requester_id,
 )
-from tools.dashboard.attention_index_service import AttentionIndexError
-from tools.dashboard.attention_registry import (
-    AttentionProjectionPlan,
-    AttentionPublicationRuntime,
-    AttentionSourceEvidence,
-)
 from tools.dashboard.dashboard_access_central import (
     DashboardAccessCoordinator,
     _bounded_approval_id,
-    _opaque_digest,
 )
 from tools.graph import settings_ops
 from tools.graph.schemas.mailbox_send import MAILBOX_SEND_REVISION, MAILBOX_SEND_SET_ID
@@ -69,7 +61,6 @@ APPLICATION_SCOPE = "mailbox"
 RENDERER_ID = "approval.email_send.review"
 CONSUMER_ID = "email_send.local_send.v1"
 _DESTINATION_DOMAIN = b"dashboard.mailbox.email-send-destination.v1"
-_ATTENTION_DOMAIN = "dashboard.attention.email-send-recipient"
 _REQUEST_FIELDS = {"to", "cc", "subject", "body"}
 
 
@@ -82,11 +73,6 @@ def result_destination_id(secret: bytes | None = None) -> str:
         raise ValueError("Dashboard session secret is unavailable")
     digest = hmac.new(secret, _DESTINATION_DOMAIN, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def email_send_attention_id(approval_id: str) -> str:
-    _bounded_approval_id(approval_id)
-    return "attention-" + _opaque_digest([_ATTENTION_DOMAIN, 1, approval_id])
 
 
 def _requesting_session(context: ApprovalPlanningContext) -> str:
@@ -198,41 +184,10 @@ def build_approval_runtime(**planner_options) -> ApprovalKindRuntime:
     )
 
 
-def build_attention_runtime(approvals: ApprovalService) -> AttentionPublicationRuntime:
-    def plan(source: Any) -> AttentionProjectionPlan:
-        if not isinstance(source, ApprovalStatus):
-            raise ValueError("email_send projection requires approval status")
-        request = source.request.payload
-        if request.get("kind") != KIND:
-            raise ValueError("email_send projection kind mismatch")
-        resolution = source.resolution
-        review = request.get("safe_review") or {}
-        label = review.get("requester_label") or "A session"
-        subject = review.get("subject") or "(no subject)"
-        return AttentionProjectionPlan(
-            attention_id=email_send_attention_id(source.request.approval_id),
-            object_ref=source.request.approval_id,
-            participant_role="recipient",
-            attention_state="resolved" if resolution is not None else "needs_attention",
-            safe_title="Send email",
-            safe_summary=f"{label} wants to email {review.get('to') or '?'}: {subject}"[:240],
-            counterparty_ref=None,
-            occurred_at=(float(resolution.payload["resolved_at"]) if resolution is not None
-                         else float(request["created_at"])),
-            source_version=2 if resolution is not None else 1,
-        )
-
-    def evidence(object_ref: str, source_version: int) -> AttentionSourceEvidence:
-        status = approvals.status(_bounded_approval_id(object_ref))
-        actual = 2 if status.resolution is not None else 1
-        if actual != source_version or status.request.payload.get("kind") != KIND:
-            raise AttentionIndexError("stale_source")
-        return AttentionSourceEvidence(
-            source_guard={"kind": "approval", "ref": object_ref, "version": source_version},
-            source_expires_at=status.request.payload.get("expires_at"),
-        )
-
-    return AttentionPublicationRuntime(projection_planner=plan, source_evidence_builder=evidence)
+def inbox_text(status: ApprovalStatus) -> tuple[str, str | None]:
+    """The inbox's title and summary for one approval of this kind."""
+    review = status.request.payload.get("safe_review") or {}
+    return "Send email", f"{review.get('requester_label') or 'A session'} wants to email {review.get('to') or '?'}: {review.get('subject') or '(no subject)'}"
 
 
 class EmailSendConsumer:
@@ -391,7 +346,6 @@ class EmailSendCoordinator(DashboardAccessCoordinator):
             raise
         if status.request.payload.get("kind") != KIND:
             return None
-        self.index.publish(self.producer, status)
         if status.resolution is not None:
             self.consumer.materialize(status)
         return status
@@ -435,6 +389,5 @@ class ReconcilerGroup:
 __all__ = [
     "APPLICATION_SCOPE", "CONSUMER_ID", "EmailSendConsumer", "EmailSendCoordinator",
     "KIND", "RENDERER_ID", "ReconcilerGroup", "build_approval_runtime",
-    "build_attention_runtime", "build_http_adapter", "email_send_attention_id",
-    "result_destination_id",
+    "inbox_text", "build_http_adapter", "result_destination_id",
 ]

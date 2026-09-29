@@ -48,17 +48,10 @@ from tools.dashboard.approval_service import (
     ApprovalStatus,
     _ApprovalLocks,
 )
-from tools.dashboard.attention_index_service import AttentionIndexError
-from tools.dashboard.attention_registry import (
-    AttentionProjectionPlan,
-    AttentionPublicationRuntime,
-    AttentionSourceEvidence,
-)
 from tools.dashboard.dao import mcp_relay_db as db
 from tools.dashboard.dashboard_access_central import (
     DashboardAccessCoordinator,
     _bounded_approval_id,
-    _opaque_digest,
 )
 from tools.dashboard.vault_open_central import this_machine_label
 
@@ -78,7 +71,6 @@ MAX_MESSAGE_LINES = 120
 #: ApprovalRequestV1's own bound on safe_review, measured the same way.
 _SAFE_REVIEW_MAX_BYTES = 8192
 _DESTINATION_DOMAIN = b"dashboard.relay.crosstalk-delivery-destination.v1"
-_ATTENTION_DOMAIN = "dashboard.attention.mcp-crosstalk-recipient"
 _REQUEST_FIELDS = {"handle", "target_session", "target_org", "intent", "message"}
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _TEXT_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -115,11 +107,6 @@ def result_destination_id(secret: bytes | None = None) -> str:
         raise ValueError("Dashboard session secret is unavailable")
     digest = hmac.new(secret, _DESTINATION_DOMAIN, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def crosstalk_attention_id(approval_id: str) -> str:
-    _bounded_approval_id(approval_id)
-    return "attention-" + _opaque_digest([_ATTENTION_DOMAIN, 1, approval_id])
 
 
 def message_lines(message: str) -> list[str]:
@@ -235,40 +222,10 @@ def build_approval_runtime(**planner_options) -> ApprovalKindRuntime:
     )
 
 
-def build_attention_runtime(approvals: ApprovalService) -> AttentionPublicationRuntime:
-    def plan(source: Any) -> AttentionProjectionPlan:
-        if not isinstance(source, ApprovalStatus):
-            raise ValueError("mcp_crosstalk projection requires approval status")
-        request = source.request.payload
-        if request.get("kind") != KIND:
-            raise ValueError("mcp_crosstalk projection kind mismatch")
-        resolution = source.resolution
-        review = request.get("safe_review") or {}
-        return AttentionProjectionPlan(
-            attention_id=crosstalk_attention_id(source.request.approval_id),
-            object_ref=source.request.approval_id,
-            participant_role="recipient",
-            attention_state="resolved" if resolution is not None else "needs_attention",
-            safe_title="Message a session",
-            safe_summary=(f"{review.get('handle') or 'A chat'} → "
-                          f"{review.get('target_label') or review.get('target_session') or '?'}")[:240],
-            counterparty_ref=None,
-            occurred_at=(float(resolution.payload["resolved_at"]) if resolution is not None
-                         else float(request["created_at"])),
-            source_version=2 if resolution is not None else 1,
-        )
-
-    def evidence(object_ref: str, source_version: int) -> AttentionSourceEvidence:
-        status = approvals.status(_bounded_approval_id(object_ref))
-        actual = 2 if status.resolution is not None else 1
-        if actual != source_version or status.request.payload.get("kind") != KIND:
-            raise AttentionIndexError("stale_source")
-        return AttentionSourceEvidence(
-            source_guard={"kind": "approval", "ref": object_ref, "version": source_version},
-            source_expires_at=status.request.payload.get("expires_at"),
-        )
-
-    return AttentionPublicationRuntime(projection_planner=plan, source_evidence_builder=evidence)
+def inbox_text(status: ApprovalStatus) -> tuple[str, str | None]:
+    """The inbox's title and summary for one approval of this kind."""
+    review = status.request.payload.get("safe_review") or {}
+    return "Message a session", f"{review.get('handle') or 'A chat'} → {review.get('target_label') or review.get('target_session') or '?'}"
 
 
 def _owner() -> tuple[int, str | None]:
@@ -423,8 +380,8 @@ class CrosstalkDesk:
 
 
 class CrosstalkCoordinator(DashboardAccessCoordinator):
-    """The dashboard-access wake coordinator for ``mcp_crosstalk``: publishes
-    the attention item and applies a resolution on the accepting machine."""
+    """Applies an ``mcp_crosstalk`` decision on the accepting machine when it
+    arrives."""
 
     def __init__(self, *, desk: CrosstalkDesk, **kwargs) -> None:
         super().__init__(consumer=None, **kwargs)
@@ -439,7 +396,6 @@ class CrosstalkCoordinator(DashboardAccessCoordinator):
             raise
         if status.request.payload.get("kind") != KIND:
             return None
-        self.index.publish(self.producer, status)
         if status.resolution is not None:
             self.desk.apply(approval_id)
         return status
@@ -448,6 +404,6 @@ class CrosstalkCoordinator(DashboardAccessCoordinator):
 __all__ = [
     "APPLICATION_SCOPE", "APPLY_WINDOW_SECONDS", "CONSUMER_ID", "KIND", "RENDERER_ID",
     "CrosstalkCoordinator", "CrosstalkDesk", "CrosstalkRefused", "build_approval_runtime",
-    "build_attention_runtime", "crosstalk_attention_id", "crosstalk_review", "message_lines",
+    "inbox_text", "crosstalk_review", "message_lines",
     "relay_principal", "result_destination_id", "service_label",
 ]

@@ -77,9 +77,9 @@ ROWS_TSV="$(mktemp)"
 FAILS_TXT="$(mktemp)"
 trap 'rm -f "$ROWS_TSV" "$FAILS_TXT"' EXIT
 
-# One row per store outcome — the run-report.json the dashboard's
-# reconciler ingests (auto-yj2wa) is assembled from the SAME accounting
-# the log lines come from, never re-derived.
+# One row per store outcome — the run-report.json (auto-yj2wa) is
+# assembled from the SAME accounting the log lines come from, never
+# re-derived.
 row() {  # $1 name  $2 action  $3 status  $4 bytes  $5 reason
     printf 'store\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> "$ROWS_TSV"
 }
@@ -91,10 +91,17 @@ fail() {
 }
 
 # The tier-level report copy lives on the DATA VOLUME, not the backup
-# root: the dashboard (possibly a container that cannot see the NAS
-# mount at all — the /app/data volume is the one filesystem host and
-# node share) ingests from here, so its probe never touches NFS.
+# root: the /app/data volume is the one filesystem host and node share.
 REPORT_DIR="${DATA_ROOT}/backup-reports"
+
+# The run records its own result: the tier report becomes its backup.run
+# Setting the moment it is written. A failure to record never fails the
+# backup itself.
+record_run() {
+    ( cd "$ROOT" && AUTONOMY_DATA_ROOT="$DATA_ROOT" \
+        "$PYTHON" -m tools.dashboard.plugins.backup.record "$TIER" >/dev/null ) \
+        || echo "$(date -Iseconds) WARN: ${TIER} run not recorded in backup.run" >&2
+}
 
 write_report() {  # $1 verdict  $2 exit_code  $3 offsite  $4 dir
     mkdir -p "$REPORT_DIR"
@@ -108,7 +115,8 @@ write_report() {  # $1 verdict  $2 exit_code  $3 offsite  $4 dir
     REPORT_FAILURES_FILE="$FAILS_TXT" \
         "$PYTHON" "$STORES_HELPER" report < "$ROWS_TSV" \
         > "$4/run-report.json" \
-        && cp "$4/run-report.json" "${REPORT_DIR}/${TIER}-latest.json"
+        && cp "$4/run-report.json" "${REPORT_DIR}/${TIER}-latest.json" \
+        && record_run
 }
 
 backup_sqlite() {
@@ -290,12 +298,12 @@ if "${SCRIPT_DIR}/backup-offsite.sh" "$TIER" 2>&1 | tee "$OFFSITE_LOG"; then
     "$PYTHON" "$STORES_HELPER" report-offsite "$OFFSITE_VERDICT" 0 \
         ${REPO_BYTES:+--repo-bytes=$REPO_BYTES} \
         "${DEST}/run-report.json" \
-        "${REPORT_DIR}/${TIER}-latest.json" || true
+        "${REPORT_DIR}/${TIER}-latest.json" && record_run
 else
     rm -f "$OFFSITE_LOG"
     "$PYTHON" "$STORES_HELPER" report-offsite failed 2 \
         "${DEST}/run-report.json" \
-        "${REPORT_DIR}/${TIER}-latest.json" || true
+        "${REPORT_DIR}/${TIER}-latest.json" && record_run
     echo "$(date -Iseconds) WARN: ${TIER} offsite push failed (local backup is intact)" >&2
     exit 2
 fi

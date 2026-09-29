@@ -3,9 +3,8 @@
 Every read serves persisted Settings rows (machine-homed: backup state
 is a fact about THIS machine's volume). Nothing here touches the
 backup destination — the NAS is an NFS hard mount that has hung this
-host before, so filesystem probes belong to the background reconciler
-(bead auto-yj2wa), never a request handler (drivers S3/S7,
-graph://7c45a180-345).
+host before. Run rows are written by the backup run itself when it
+finishes (record.py, called from tools/graph/backup-all.sh).
 
 Authentication is the substrate's default-deny wrapper. Backup state
 is machine-operational data every authenticated principal may read;
@@ -156,19 +155,41 @@ def destinations(runs: list[dict], config: dict,
     }
 
 
+def is_backup_source(runs: list[dict], config: dict,
+                     reports_exist: bool | None = None) -> bool:
+    """Does this machine show any evidence of being a backup SOURCE?
+
+    Any one of these means it is: it has captured at least once, an
+    offsite provider is configured here, or the capture engine's report
+    directory exists. A machine with none of them has no backup
+    configuration, so its silence is a true statement.
+    """
+    if runs:
+        return True
+    if (config.get("offsite_provider") or "").strip():
+        return True
+    if reports_exist is None:
+        from tools.dashboard.plugins.backup import record
+        try:
+            reports_exist = record.default_report_root().is_dir()
+        except Exception:
+            reports_exist = False
+    return bool(reports_exist)
+
+
 def summarize(runs: list[dict], drills: list[dict], config: dict,
               now: datetime | None = None) -> dict:
     """The whole page's answer, in the page's order: am I safe now,
     when was the last good copy, does restore actually work."""
-    from tools.dashboard.plugins.backup.deriver import is_backup_source
     source = is_backup_source(runs, config)
     tiers = [tier_health(runs, config, tier, now=now) for tier in TIERS]
+    # A drill in flight is known only to this process; stored rows are
+    # finished drills ("running" rows from before this change are dead).
+    from tools.dashboard.plugins.backup import drill as drill_mod
     finished = [d for d in drills if d.get("verdict") != "running"]
     finished.sort(key=lambda d: d.get("key", ""), reverse=True)
     last_drill = finished[0] if finished else None
-    running = next((d for d in sorted(drills, key=lambda d: d.get("key", ""),
-                                      reverse=True)
-                    if d.get("verdict") == "running"), None)
+    running = drill_mod.running()
     worst = "ok"
     for health in tiers:
         if health["status"] == "failing":
@@ -193,19 +214,24 @@ def summarize(runs: list[dict], drills: list[dict], config: dict,
     }
 
 
-async def get_summary(request: Request) -> JSONResponse:
+def _summary() -> dict:
     runs = _rows(RUN_SET_ID)
     config = _read_config()
     summary = summarize(runs, _rows(DRILL_SET_ID), config)
     try:
         from tools.dashboard.plugins.backup import credentials
-        # cached_status only: offsite_env decrypts (seconds of crypto)
-        # and belongs to the background cycle, never the request path.
-        cred_status = credentials.cached_status()
+        # The status reads the vault (decryption), so this whole summary
+        # runs off the event loop.
+        cred_status = credentials.status(config)
     except Exception:
         cred_status = None
     summary["destinations"] = destinations(runs, config, cred_status)
-    return JSONResponse(summary)
+    return summary
+
+
+async def get_summary(request: Request) -> JSONResponse:
+    import asyncio
+    return JSONResponse(await asyncio.to_thread(_summary))
 
 
 async def get_runs(request: Request) -> JSONResponse:
@@ -282,30 +308,6 @@ async def put_config(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "config": merged})
 
 
-async def post_reconcile(request: Request) -> JSONResponse:
-    """Explicit refresh: ingest the per-tier report files (on the data
-    volume) into run rows — bounded worker-thread reads, and the only
-    route that touches the filesystem at all. Operator authority."""
-    principal = principal_from_request(request)
-    if not principal.global_authority:
-        return JSONResponse(
-            {"error": "backup reconcile requires operator authority"},
-            status_code=403)
-    from tools.dashboard.plugins.backup import reconcile as reconcile_mod
-    try:
-        result = reconcile_mod.reconcile()
-    except Exception as exc:
-        import logging
-        logging.getLogger(__name__).exception("backup reconcile failed")
-        # The caller is already operator-authority; the class+message is
-        # diagnosis, not a secret (a swallowed bare 500 cost a live
-        # debugging loop on 2026-09-06).
-        return JSONResponse(
-            {"error": f"reconcile failed: {type(exc).__name__}: {exc}"},
-            status_code=500)
-    return JSONResponse(result)
-
-
 _drill_task = None  # keeps the fire-and-forget drill task referenced
 
 
@@ -342,7 +344,6 @@ async def post_drill(request: Request) -> JSONResponse:
 
 routes: list = [
     Route("/api/backup/summary", get_summary, methods=["GET"]),
-    Route("/api/backup/reconcile", post_reconcile, methods=["POST"]),
     Route("/api/backup/drill", post_drill, methods=["POST"]),
     Route("/api/backup/runs", get_runs, methods=["GET"]),
     Route("/api/backup/drills", get_drills, methods=["GET"]),

@@ -7,7 +7,6 @@ trusted-service behavior covered by later beads, not by these validators.
 
 from __future__ import annotations
 
-import copy
 import json
 
 import pytest
@@ -24,59 +23,10 @@ from tools.graph.schemas.registry import (
 
 
 SCHEMAS = {
-    ca.ATTENTION_APPLICATION_SET_ID: "keyed_per_entity",
-    ca.ATTENTION_ITEM_SET_ID: "keyed_per_entity",
-    ca.ATTENTION_PRESENTATION_SET_ID: "keyed_per_entity",
     ca.ATTENTION_DELIVERY_SET_ID: "keyed_per_entity",
     ca.APPROVAL_REQUEST_SET_ID: "append_only_log",
     ca.APPROVAL_RESOLUTION_SET_ID: "append_only_log",
 }
-
-
-def application_payload() -> dict:
-    return {
-        "label": "Fleet",
-        "icon_ref": "machine",
-        "open_mode": "registered_renderer",
-        "notification_classes": [
-            {
-                "notification_class": "machine_admission",
-                "class_policy_revision": 1,
-                "eligible_transition": "needs_attention",
-                "push_policy": "fallback",
-                "delivery_class": "approval",
-                "budget_class": "operator_attention",
-                "coalesce_scope": "event",
-                "ttl_seconds": 3600,
-                "urgency": "high",
-                "privacy_renderer_id": "generic_attention",
-                "route_builder_id": "central_approval",
-                "destination_id": "activity",
-            }
-        ],
-        "enabled": True,
-    }
-
-
-def item_payload() -> dict:
-    return {
-        "application_scope": "fleet",
-        "notification_class": "machine_admission",
-        "object_ref": "approval:appr_01j8v7ng5h6ya",
-        "participant_role": "recipient",
-        "attention_state": "needs_attention",
-        "safe_title": "Fleet approval requested",
-        "safe_summary": "A new machine wants to join.",
-        "counterparty_ref": "machine:pending-01",
-        "occurred_at": 1_777_000_000.0,
-        "source_version": 1,
-    }
-
-
-def presentation_payload() -> dict:
-    return {
-        "seen_at": 1_777_000_005.0,
-    }
 
 
 def delivery_payload(*, state: str = "foreground_wait") -> dict:
@@ -147,9 +97,6 @@ def resolution_payload() -> dict:
 
 
 CANONICAL = {
-    ca.ATTENTION_APPLICATION_SET_ID: application_payload,
-    ca.ATTENTION_ITEM_SET_ID: item_payload,
-    ca.ATTENTION_PRESENTATION_SET_ID: presentation_payload,
     ca.ATTENTION_DELIVERY_SET_ID: delivery_payload,
     ca.APPROVAL_REQUEST_SET_ID: request_payload,
     ca.APPROVAL_RESOLUTION_SET_ID: resolution_payload,
@@ -165,7 +112,7 @@ class TestRegistration:
         assert declared_home(set_id) == "personal"
         assert declared_band(set_id, 1) == ("raw", "raw")
 
-    def test_all_six_are_visible_to_package_consumers(self):
+    def test_all_are_visible_to_package_consumers(self):
         assert set(SCHEMAS) <= set(list_registered_set_ids())
 
     def test_no_machine_execution_lease_schema_exists(self):
@@ -174,9 +121,6 @@ class TestRegistration:
     @pytest.mark.parametrize(
         "set_id, key_strategy, absent_payload_field",
         [
-            (ca.ATTENTION_APPLICATION_SET_ID, "application_scope", "application_scope"),
-            (ca.ATTENTION_ITEM_SET_ID, "attention_id", "attention_id"),
-            (ca.ATTENTION_PRESENTATION_SET_ID, "attention_id", "attention_id"),
             (ca.ATTENTION_DELIVERY_SET_ID, "delivery_id", "delivery_id"),
             (ca.APPROVAL_REQUEST_SET_ID, "approval_id", "approval_id"),
             (ca.APPROVAL_RESOLUTION_SET_ID, "approval_id", "approval_id"),
@@ -259,59 +203,6 @@ def _mutate(base, mutation):
     payload = base()
     mutation(payload)
     return payload
-
-
-class TestApplicationValidation:
-    @pytest.mark.parametrize(
-        "mutation",
-        [
-            lambda p: p.update(default_push_policy="fallback"),
-            lambda p: p.update(application_scope="Fleet!"),
-            lambda p: p.update(notification_classes=[]),
-            lambda p: p["notification_classes"].append(
-                copy.deepcopy(p["notification_classes"][0])
-            ),
-            lambda p: p["notification_classes"][0].update(
-                class_policy_revision=0
-            ),
-            lambda p: p["notification_classes"][0].update(
-                eligible_transition="resolved"
-            ),
-            lambda p: p["notification_classes"][0].update(push_policy="always"),
-            lambda p: p["notification_classes"][0].update(coalesce_scope="person"),
-            lambda p: p["notification_classes"][0].update(ttl_seconds=float("inf")),
-            lambda p: p["notification_classes"][0].pop("route_builder_id"),
-            lambda p: p["notification_classes"][0].update(route="/fleet"),
-        ],
-    )
-    def test_invalid_or_broadening_policy_shapes_are_rejected(self, mutation):
-        with pytest.raises(SchemaValidationError):
-            validate_payload(
-                ca.ATTENTION_APPLICATION_SET_ID,
-                1,
-                _mutate(application_payload, mutation),
-            )
-
-
-class TestItemAndPresentationValidation:
-    @pytest.mark.parametrize(
-        "base, set_id, mutation",
-        [
-            (item_payload, ca.ATTENTION_ITEM_SET_ID, lambda p: p.update(route="/fleet")),
-            (item_payload, ca.ATTENTION_ITEM_SET_ID, lambda p: p.update(recipient="me")),
-            (item_payload, ca.ATTENTION_ITEM_SET_ID, lambda p: p.update(source_version=-1)),
-            (item_payload, ca.ATTENTION_ITEM_SET_ID, lambda p: p.update(occurred_at=float("nan"))),
-            (presentation_payload, ca.ATTENTION_PRESENTATION_SET_ID, lambda p: p.update(decision="granted")),
-            (presentation_payload, ca.ATTENTION_PRESENTATION_SET_ID, lambda p: p.update(attention_state="resolved")),
-            (presentation_payload, ca.ATTENTION_PRESENTATION_SET_ID, lambda p: p.update(seen_at=float("inf"))),
-            (presentation_payload, ca.ATTENTION_PRESENTATION_SET_ID, lambda p: p.pop("seen_at")),
-        ],
-    )
-    def test_semantic_smuggling_and_invalid_values_are_rejected(
-        self, base, set_id, mutation
-    ):
-        with pytest.raises(SchemaValidationError):
-            validate_payload(set_id, 1, _mutate(base, mutation))
 
 
 class TestDeliveryValidation:

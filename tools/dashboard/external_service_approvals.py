@@ -49,17 +49,9 @@ from tools.dashboard.approval_service import (
     ApprovalStatus,
     _ApprovalLocks,
 )
-from tools.dashboard.attention_index_service import AttentionIndexError
-from tools.dashboard.attention_registry import (
-    AttentionProjectionPlan,
-    AttentionPublicationRuntime,
-    AttentionSourceEvidence,
-)
 from tools.dashboard.dao import auth_db
 from tools.dashboard.dashboard_access_central import (
-    DashboardAccessCoordinator,
     _bounded_approval_id,
-    _opaque_digest,
 )
 from tools.dashboard.vault_open_central import this_machine_label
 
@@ -72,7 +64,6 @@ MAX_TTL_SECONDS = 10 * 365 * 24 * 60 * 60
 #: How long after the Grant the device may collect (and rotate) its bearer.
 DELIVERY_WINDOW_SECONDS = 1800
 _DESTINATION_DOMAIN = b"dashboard.external-service.collect-destination.v1"
-_ATTENTION_DOMAIN = "dashboard.attention.external-service-recipient"
 
 DROPBOX_PRODUCER = RegisteredApprovalProducer(
     "external_service.dropbox_enrollment", "Autonomy Capture", frozenset({KIND}),
@@ -120,11 +111,6 @@ def result_destination_id(secret: bytes | None = None) -> str:
         raise ValueError("Dashboard session secret is unavailable")
     digest = hmac.new(secret, _DESTINATION_DOMAIN, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def external_service_attention_id(approval_id: str) -> str:
-    _bounded_approval_id(approval_id)
-    return "attention-" + _opaque_digest([_ATTENTION_DOMAIN, 1, approval_id])
 
 
 def poll_hash(poll_secret: str) -> str:
@@ -202,40 +188,10 @@ def build_approval_runtime(**planner_options) -> ApprovalKindRuntime:
     )
 
 
-def build_attention_runtime(approvals: ApprovalService) -> AttentionPublicationRuntime:
-    def plan(source: Any) -> AttentionProjectionPlan:
-        if not isinstance(source, ApprovalStatus):
-            raise ValueError("external_service_access projection requires approval status")
-        request = source.request.payload
-        if request.get("kind") != KIND:
-            raise ValueError("external_service_access projection kind mismatch")
-        resolution = source.resolution
-        review = request.get("safe_review") or {}
-        return AttentionProjectionPlan(
-            attention_id=external_service_attention_id(source.request.approval_id),
-            object_ref=source.request.approval_id,
-            participant_role="recipient",
-            attention_state="resolved" if resolution is not None else "needs_attention",
-            safe_title="Allow service access",
-            safe_summary=(f"{review.get('requester_label') or 'A device'} · "
-                          f"{review.get('application') or 'External service'}")[:240],
-            counterparty_ref=None,
-            occurred_at=(float(resolution.payload["resolved_at"]) if resolution is not None
-                         else float(request["created_at"])),
-            source_version=2 if resolution is not None else 1,
-        )
-
-    def evidence(object_ref: str, source_version: int) -> AttentionSourceEvidence:
-        status = approvals.status(_bounded_approval_id(object_ref))
-        actual = 2 if status.resolution is not None else 1
-        if actual != source_version or status.request.payload.get("kind") != KIND:
-            raise AttentionIndexError("stale_source")
-        return AttentionSourceEvidence(
-            source_guard={"kind": "approval", "ref": object_ref, "version": source_version},
-            source_expires_at=status.request.payload.get("expires_at"),
-        )
-
-    return AttentionPublicationRuntime(projection_planner=plan, source_evidence_builder=evidence)
+def inbox_text(status: ApprovalStatus) -> tuple[str, str | None]:
+    """The inbox's title and summary for one approval of this kind."""
+    review = status.request.payload.get("safe_review") or {}
+    return "Allow service access", f"{review.get('requester_label') or 'A device'} · {review.get('application') or 'External service'}"
 
 
 class EnrollmentDesk:
@@ -392,30 +348,8 @@ class EnrollmentDesk:
             }
 
 
-class EnrollmentCoordinator(DashboardAccessCoordinator):
-    """The dashboard-access wake coordinator, publishing the attention item.
-    It never mints: only the device's poll does."""
-
-    def __init__(self, *, desk: EnrollmentDesk, **kwargs) -> None:
-        super().__init__(consumer=None, **kwargs)
-        self.desk = desk
-
-    def reconcile_exact(self, approval_id: str) -> ApprovalStatus | None:
-        try:
-            status = self.approvals.status(_bounded_approval_id(approval_id))
-        except ApprovalServiceError as exc:
-            if exc.code == "not_found":
-                return None
-            raise
-        if status.request.payload.get("kind") != KIND:
-            return None
-        self.index.publish(self.producer, status)
-        return status
-
-
 __all__ = [
     "APPLICATIONS", "CONSUMER_ID", "DELIVERY_WINDOW_SECONDS", "DROPBOX_PRODUCER", "KIND",
-    "RENDERER_ID", "EnrollmentCoordinator", "EnrollmentDesk", "bearer_name",
-    "build_approval_runtime", "build_attention_runtime", "external_service_attention_id",
-    "poll_hash", "result_destination_id",
+    "RENDERER_ID", "EnrollmentDesk", "bearer_name",
+    "build_approval_runtime", "inbox_text", "poll_hash", "result_destination_id",
 ]

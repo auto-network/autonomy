@@ -40,16 +40,6 @@ from tools.dashboard.approval_service import (
     ApprovalStatus,
     resolve_personal_root_public_key,
 )
-from tools.dashboard.attention_index_service import (
-    AttentionIndexError,
-    AttentionIndexService,
-)
-from tools.dashboard.attention_registry import (
-    AttentionProjectionPlan,
-    AttentionPublicationRuntime,
-    AttentionSourceEvidence,
-    RegisteredAttentionProducer,
-)
 from tools.dashboard.dao import identity_sessions
 from tools.graph.schemas.central_attention import (
     APPROVAL_REQUEST_SET_ID,
@@ -72,24 +62,7 @@ GRANT_SCOPE = ["dashboard:ui"]
 GRANT_TTL_SECONDS = 2 * 60 * 60
 GRANT_SIGNING_DOMAIN = b"autonomy.identity.dashboard-access-grant.v1\n"
 _DESTINATION_DOMAIN = b"dashboard.identity.access-result-destination.v1"
-_ATTENTION_DOMAIN = "dashboard.attention.approval-recipient"
 _CENTRAL_ID_PREFIX = "central-"
-
-
-def _opaque_digest(value: Any) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return base64.urlsafe_b64encode(hashlib.sha256(encoded).digest()).decode(
-        "ascii"
-    ).rstrip("=")
-
-
-def dashboard_access_attention_id(approval_id: str) -> str:
-    _bounded_approval_id(approval_id)
-    return "attention-" + _opaque_digest([_ATTENTION_DOMAIN, 1, approval_id])
 
 
 def dashboard_access_result_destination_id(
@@ -290,57 +263,15 @@ def build_approval_runtime(
     )
 
 
-def build_attention_runtime(
-    approvals: ApprovalService,
-) -> AttentionPublicationRuntime:
-    def plan(source: Any) -> AttentionProjectionPlan:
-        if not isinstance(source, ApprovalStatus):
-            raise ValueError("dashboard access projection requires approval status")
-        request = source.request.payload
-        if request.get("kind") != KIND:
-            raise ValueError("dashboard access projection kind mismatch")
-        resolution = source.resolution
-        version = 2 if resolution is not None else 1
-        requester = request.get("requester_ref")
-        label = (
-            requester.get("label")
-            if isinstance(requester, Mapping) and isinstance(requester.get("label"), str)
-            else "Authenticated session"
-        )
-        return AttentionProjectionPlan(
-            attention_id=dashboard_access_attention_id(source.request.approval_id),
-            object_ref=source.request.approval_id,
-            participant_role="recipient",
-            attention_state="resolved" if resolution is not None else "needs_attention",
-            safe_title="Dashboard access requested",
-            safe_summary=f"{label} wants temporary Dashboard access.",
-            counterparty_ref=None,
-            occurred_at=(
-                float(resolution.payload["resolved_at"])
-                if resolution is not None
-                else float(request["created_at"])
-            ),
-            source_version=version,
-        )
-
-    def evidence(object_ref: str, source_version: int) -> AttentionSourceEvidence:
-        status = approvals.status(_bounded_approval_id(object_ref))
-        actual = 2 if status.resolution is not None else 1
-        if actual != source_version or status.request.payload.get("kind") != KIND:
-            raise AttentionIndexError("stale_source")
-        return AttentionSourceEvidence(
-            source_guard={
-                "kind": "approval",
-                "ref": object_ref,
-                "version": source_version,
-            },
-            source_expires_at=status.request.payload.get("expires_at"),
-        )
-
-    return AttentionPublicationRuntime(
-        projection_planner=plan,
-        source_evidence_builder=evidence,
+def inbox_text(status: ApprovalStatus) -> tuple[str, str]:
+    """The inbox's title and summary for one dashboard access approval."""
+    requester = status.request.payload.get("requester_ref")
+    label = (
+        requester.get("label")
+        if isinstance(requester, Mapping) and isinstance(requester.get("label"), str)
+        else "Authenticated session"
     )
+    return "Dashboard access requested", f"{label} wants temporary Dashboard access."
 
 
 class DashboardAccessResultConsumer:
@@ -523,13 +454,9 @@ class DashboardAccessCoordinator:
         self,
         *,
         approvals: ApprovalService,
-        index: AttentionIndexService,
-        producer: RegisteredAttentionProducer,
         consumer: DashboardAccessResultConsumer,
     ) -> None:
         self.approvals = approvals
-        self.index = index
-        self.producer = producer
         self.consumer = consumer
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -565,8 +492,6 @@ class DashboardAccessCoordinator:
     def _reconcile_once(self, approval_id: str) -> None:
         try:
             self.reconcile_exact(approval_id)
-        except AttentionIndexError as exc:
-            logger.warning("approval %s: attention not published (%s)", approval_id, exc.code)
         except Exception:
             logger.exception("approval reconciliation failed for %s", approval_id)
 
@@ -625,7 +550,6 @@ class DashboardAccessCoordinator:
             raise
         if status.request.payload.get("kind") != KIND:
             return None
-        self.index.publish(self.producer, status)
         if status.resolution is not None:
             self.consumer.materialize(status)
         return status
@@ -640,8 +564,7 @@ __all__ = [
     "NOTIFICATION_CLASS",
     "RENDERER_ID",
     "build_approval_runtime",
-    "build_attention_runtime",
     "build_http_adapter",
-    "dashboard_access_attention_id",
     "dashboard_access_result_destination_id",
+    "inbox_text",
 ]

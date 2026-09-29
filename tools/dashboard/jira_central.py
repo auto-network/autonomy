@@ -25,7 +25,7 @@ checkpoint 2026-09-28).
   property it was tagged with, and an attachment becomes ``unknown``.
 - Decline, cancel and expiry never touch Jira.
 
-Mirrors mailbox_central.py (planner, attention projection, HTTP adapter,
+Mirrors mailbox_central.py (planner, inbox text, HTTP adapter,
 coordinator).
 """
 
@@ -58,16 +58,9 @@ from tools.dashboard.approval_kind_registry import (
 )
 from tools.dashboard.approval_org import settle_org
 from tools.dashboard.approval_service import ApprovalService, ApprovalServiceError, ApprovalStatus
-from tools.dashboard.attention_index_service import AttentionIndexError
-from tools.dashboard.attention_registry import (
-    AttentionProjectionPlan,
-    AttentionPublicationRuntime,
-    AttentionSourceEvidence,
-)
 from tools.dashboard.dashboard_access_central import (
     DashboardAccessCoordinator,
     _bounded_approval_id,
-    _opaque_digest,
 )
 from tools.dashboard.mailbox_central import _requesting_session
 from tools.dashboard.vault_open_central import this_machine_label
@@ -91,7 +84,6 @@ _SAFE_REVIEW_MAX_BYTES = 8192
 #: The Jira property a comment or created issue is tagged with.
 TAG_PROPERTY = "autonomy.approval"
 _DESTINATION_DOMAIN = b"dashboard.jira.write-destination.v1"
-_ATTENTION_DOMAIN = "dashboard.attention.jira-write-recipient"
 _TEXT_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]+-[0-9]+$")
 _IMAGE_MAGIC = {
@@ -140,11 +132,6 @@ def result_destination_id(secret: bytes | None = None) -> str:
         raise ValueError("Dashboard session secret is unavailable")
     digest = hmac.new(secret, _DESTINATION_DOMAIN, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def jira_write_attention_id(approval_id: str) -> str:
-    _bounded_approval_id(approval_id)
-    return "attention-" + _opaque_digest([_ATTENTION_DOMAIN, 1, approval_id])
 
 
 # ── staging ──────────────────────────────────────────────────────────
@@ -453,40 +440,10 @@ def build_approval_runtime(**planner_options) -> ApprovalKindRuntime:
     )
 
 
-def build_attention_runtime(approvals: ApprovalService) -> AttentionPublicationRuntime:
-    def plan(source: Any) -> AttentionProjectionPlan:
-        if not isinstance(source, ApprovalStatus):
-            raise ValueError("jira_write projection requires approval status")
-        request = source.request.payload
-        if request.get("kind") != KIND:
-            raise ValueError("jira_write projection kind mismatch")
-        resolution = source.resolution
-        review = request.get("safe_review") or {}
-        return AttentionProjectionPlan(
-            attention_id=jira_write_attention_id(source.request.approval_id),
-            object_ref=source.request.approval_id,
-            participant_role="recipient",
-            attention_state="resolved" if resolution is not None else "needs_attention",
-            safe_title=str(review.get("title") or "Jira write")[:120],
-            safe_summary=(f"{review.get('requester_label') or 'A session'}: "
-                          f"{review.get('action_label') or '?'} ({review.get('target') or '?'})")[:240],
-            counterparty_ref=None,
-            occurred_at=(float(resolution.payload["resolved_at"]) if resolution is not None
-                         else float(request["created_at"])),
-            source_version=2 if resolution is not None else 1,
-        )
-
-    def evidence(object_ref: str, source_version: int) -> AttentionSourceEvidence:
-        status = approvals.status(_bounded_approval_id(object_ref))
-        actual = 2 if status.resolution is not None else 1
-        if actual != source_version or status.request.payload.get("kind") != KIND:
-            raise AttentionIndexError("stale_source")
-        return AttentionSourceEvidence(
-            source_guard={"kind": "approval", "ref": object_ref, "version": source_version},
-            source_expires_at=status.request.payload.get("expires_at"),
-        )
-
-    return AttentionPublicationRuntime(projection_planner=plan, source_evidence_builder=evidence)
+def inbox_text(status: ApprovalStatus) -> tuple[str, str | None]:
+    """The inbox's title and summary for one approval of this kind."""
+    review = status.request.payload.get("safe_review") or {}
+    return str(review.get("title") or "Jira write"), f"{review.get('requester_label') or 'A session'}: {review.get('action_label') or '?'} ({review.get('target') or '?'})"
 
 
 # ── execution ────────────────────────────────────────────────────────
@@ -516,7 +473,6 @@ class JiraWriteDesk:
         self,
         *,
         approvals: ApprovalService,
-        index: Any = None,
         destination_resolver: Callable[[], str] = result_destination_id,
         staging: Staging | None = None,
         jira: Any = api,
@@ -531,7 +487,6 @@ class JiraWriteDesk:
         self._owner = owner or liveness._owner
         self._owner_alive = owner_alive or liveness._owner_alive
         self.approvals = approvals
-        self.index = index
         self._destination_resolver = destination_resolver
         self.staging = staging or Staging()
         self._jira = jira
@@ -764,25 +719,16 @@ class JiraWriteDesk:
 
     # ── the operator's content route ──
 
-    def content(self, attention_id: Any) -> tuple[str, Any, dict]:
+    def content(self, approval_id: Any) -> tuple[str, Any, dict]:
         """``("json", {"lines": [...]}, headers)`` for text or ``("bytes", data,
         headers)`` for an attachment, served only by the accepting machine and
         only when the staged bytes still match the frozen sha256."""
-        if self.index is None:
-            raise JiraWriteError("not_found")
         try:
-            item = self.index.get_query_item(attention_id)
-        except ValueError:
-            raise JiraWriteError("not_found") from None
-        if item is None:
-            raise JiraWriteError("not_found")
-        try:
-            status = self.approvals.status(_bounded_approval_id(item.payload.get("object_ref")))
+            status = self.approvals.status(_bounded_approval_id(approval_id))
         except (ApprovalServiceError, ValueError):
             raise JiraWriteError("not_found") from None
         payload = status.request.payload
-        if payload.get("kind") != KIND or \
-                item.attention_id != jira_write_attention_id(status.request.approval_id):
+        if payload.get("kind") != KIND:
             raise JiraWriteError("not_found")
         if not self._here(payload):
             raise JiraWriteError("elsewhere")
@@ -839,8 +785,8 @@ def build_http_adapter(
 
 
 class JiraWriteCoordinator(DashboardAccessCoordinator):
-    """The dashboard-access wake coordinator for ``jira_write``: publishes the
-    attention item and executes a Grant on the accepting machine."""
+    """Executes a granted ``jira_write`` on the accepting machine when its
+    decision arrives."""
 
     def __init__(self, *, desk: JiraWriteDesk, **kwargs) -> None:
         super().__init__(consumer=None, **kwargs)
@@ -855,7 +801,6 @@ class JiraWriteCoordinator(DashboardAccessCoordinator):
             raise
         if status.request.payload.get("kind") != KIND:
             return None
-        self.index.publish(self.producer, status)
         if status.resolution is not None:
             self.desk.materialize(status)
         return status
@@ -864,6 +809,6 @@ class JiraWriteCoordinator(DashboardAccessCoordinator):
 __all__ = [
     "APPLICATION_SCOPE", "CONSUMER_ID", "EXECUTE_WINDOW_SECONDS", "KIND", "RENDERER_ID",
     "JiraWriteCoordinator", "JiraWriteDesk", "JiraWriteError", "Staging",
-    "build_approval_runtime", "build_attention_runtime", "build_http_adapter",
-    "jira_write_attention_id", "plan_write", "result_destination_id",
+    "build_approval_runtime", "inbox_text", "build_http_adapter",
+    "plan_write", "result_destination_id",
 ]

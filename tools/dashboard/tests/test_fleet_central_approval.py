@@ -1,4 +1,4 @@
-"""Exercise Fleet's Central producer, signed decisions and attention projection."""
+"""Exercise Fleet's Central producer, signed decisions and inbox text."""
 from dataclasses import replace
 from types import SimpleNamespace
 import time
@@ -9,8 +9,6 @@ import pytest
 from tools.dashboard import fleet_enrollment_approvals as fleet
 from tools.dashboard.approval_kind_registry import build_production_registry
 from tools.dashboard.approval_service import ApprovalService, ApprovalServiceError, HumanApprovalActor, InMemoryApprovalStore
-from tools.dashboard.attention_index_service import AttentionIndexService, InMemoryAttentionIndexStore
-from tools.dashboard.attention_registry import build_production_attention_registry
 from tools.dashboard.fleet_enrollment_service import FleetEnrollmentStore
 from tools.network import fleet_enroll, fleet_invite, fleet_roster
 from tools.network.idkit import KeyPair
@@ -39,12 +37,7 @@ def ceremony(tmp_path, monkeypatch):
     registry = build_production_registry(runtimes={fleet.KIND: fleet.build_approval_runtime()})
     approvals = ApprovalService(registry=registry, store=InMemoryApprovalStore(),
                                 personal_root_resolver=lambda: root.public_hex)
-    attention_registry = build_production_attention_registry(
-        approval_registry=registry,
-        runtimes={(fleet.KIND, 'fleet'): fleet.build_attention_runtime(approvals)},
-    )
-    index = AttentionIndexService(registry=attention_registry, store=InMemoryAttentionIndexStore())
-    monkeypatch.setattr(fleet, '_runtime', lambda: SimpleNamespace(approvals=approvals, index=index))
+    monkeypatch.setattr(fleet, '_runtime', lambda: SimpleNamespace(approvals=approvals))
     aid = fleet.ensure_approval(pending, store=store)
     entry = fleet_roster.enroll(root, machine_id=fleet_enroll.assigned_machine_id(request),
                                machine_pub=KeyPair.generate().public_hex, issued_at=now)
@@ -53,15 +46,16 @@ def ceremony(tmp_path, monkeypatch):
     approval = replace(draft, signature=root.sign_hex(draft.signing_input()))
     decision = {'machine_name': 'Studio Mac', 'approval': approval.to_dict(), 'roster_entry': entry.to_dict()}
     return SimpleNamespace(root=root, pending=pending, store=store, approvals=approvals,
-                           index=index, aid=aid, decision=decision)
+                           aid=aid, decision=decision)
 
 
-def test_request_reuses_one_central_record_and_publishes_review(ceremony):
+def test_request_reuses_one_central_record_and_writes_inbox_text(ceremony):
     c = ceremony
     assert fleet.ensure_approval(c.pending, store=c.store) == c.aid
     assert c.store.get_request(c.pending.request_id).source_approval_id == c.aid
-    item = c.index.store.get_item(c.aid)
-    assert item.payload['attention_state'] == 'needs_attention'
+    status = c.approvals.status(c.aid)
+    assert status.resolution is None
+    assert fleet.inbox_text(status) == ('Add this machine?', status.request.payload['safe_review']['detail'])
     assert c.approvals.status(c.aid).request.payload['safe_review']['verification_code'] == c.pending.verification_code
 
 
@@ -71,7 +65,7 @@ def test_decline_is_only_a_central_decision(ceremony):
     fleet.reconcile(c.aid)
     assert fleet.decision_status(c.aid) == 'declined'
     assert c.store.get_request(c.pending.request_id).status == 'pending'
-    assert c.index.store.get_item(c.aid).payload['attention_state'] == 'resolved'
+    assert c.approvals.status(c.aid).resolution.payload['outcome'] == 'declined'
 
 
 def test_public_signature_is_accepted_and_first_answer_wins(ceremony):

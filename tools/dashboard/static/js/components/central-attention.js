@@ -1,8 +1,6 @@
 (function () {
   'use strict';
 
-  const MAX_PAGES = 20;
-  const PAGE_SIZE = 100;
   const REFRESH_DELAY_MS = 80;
   const APP_META = {
     worktrees: { label: 'Worktrees', glyph: 'W', tone: 'violet' },
@@ -65,13 +63,6 @@
     return days < 14 ? days + 'd' : new Date(Number(value) * 1000).toLocaleDateString();
   }
 
-  // Same-origin path or nothing: a destination is a dashboard page the
-  // server named from its closed route builder, never a free-form URL.
-  function localHref(value) {
-    return typeof value === 'string' && /^\/(?!\/)/.test(value)
-      && !/[\\\x00-\x20]/.test(value) ? value : null;
-  }
-
   function statusLabel(item) {
     if (item.attention_state === 'needs_attention') {
       return item.category === 'approvals' ? 'Approval requested' : 'Needs you';
@@ -110,11 +101,8 @@
       sourceLabel: scope,
       timeLabel: relativeTime(source.occurred_at),
       occurredAt: source.occurred_at,
-      sourceVersion: source.source_version,
       counterpartyRef: source.counterparty_ref || null,
-      presentation: source.presentation || {},
       rendererId: source.open && source.open.renderer_id,
-      destinationHref: null,
       unavailable: false,
       decisionBusy: false,
       decisionError: '',
@@ -128,7 +116,7 @@
 
   function sameItem(left, right) {
     return left && right && left.id === right.id &&
-      left.sourceVersion === right.sourceVersion;
+      left.attentionState === right.attentionState;
   }
 
   function canonicalCategory(item) {
@@ -199,53 +187,31 @@
 
       async refresh() {
         this.loading = true;
-        let restarted = false;
-        while (true) {
-          try {
-            const collected = [];
-            let cursor = null;
-            let first = null;
-            for (let page = 0; page < MAX_PAGES; page += 1) {
-              const url = new URL('/api/attention/items', window.location.origin);
-              url.searchParams.set('limit', String(PAGE_SIZE));
-              if (cursor) url.searchParams.set('cursor', cursor);
-              const payload = await jsonRequest(url.toString());
-              if (!first) first = payload;
-              collected.push.apply(collected, payload.items || []);
-              cursor = payload.next_cursor;
-              if (!cursor) break;
-              if (page === MAX_PAGES - 1) throw new Error('Attention list is too large to render safely.');
-            }
-            this.items = collected.map(normalizeItem);
-            window.dispatchEvent(new window.CustomEvent('central:refreshed'));
-            this.counts = (first && first.counts) || emptyCounts();
-            this.badgeCount = Number(this.counts.total_needs_attention || 0);
-            if (this._sharedApprovalItem && !sameItem(this._sharedApprovalItem,
-              this.items.find(item => item.id === this._sharedApprovalItem.id))) {
-              this._sharedApprovalDialog?.close();
-            }
-            if (this.selectedItem) {
-              const current = this.items.find(item => item.id === this.selectedItem.id);
-              if (!sameItem(this.selectedItem, current)) {
-                this.selectedItem = null;
-                this.declineConfirm = false;
-              }
-            }
-            this.syncApplications();
-            this.unavailable = false;
-            this.message = '';
-            this.loading = false;
-            return;
-          } catch (error) {
-            if (!restarted && error && error.payload && error.payload.error === 'refresh_required') {
-              restarted = true;
-              continue;
-            }
-            this.loading = false;
-            this.unavailable = true;
-            this.message = 'Attention is temporarily unavailable. Your items remain synchronized.';
-            return;
+        try {
+          const payload = await jsonRequest('/api/attention/items');
+          this.items = (payload.items || []).map(normalizeItem);
+          window.dispatchEvent(new window.CustomEvent('central:refreshed'));
+          this.counts = payload.counts || emptyCounts();
+          this.badgeCount = Number(this.counts.total_needs_attention || 0);
+          if (this._sharedApprovalItem && !sameItem(this._sharedApprovalItem,
+            this.items.find(item => item.id === this._sharedApprovalItem.id))) {
+            this._sharedApprovalDialog?.close();
           }
+          if (this.selectedItem) {
+            const current = this.items.find(item => item.id === this.selectedItem.id);
+            if (!sameItem(this.selectedItem, current)) {
+              this.selectedItem = null;
+              this.declineConfirm = false;
+            }
+          }
+          this.syncApplications();
+          this.unavailable = false;
+          this.message = '';
+        } catch (error) {
+          this.unavailable = true;
+          this.message = 'Attention is temporarily unavailable. Your items remain synchronized.';
+        } finally {
+          this.loading = false;
         }
       },
 
@@ -280,8 +246,6 @@
         const source = new EventSource('/api/attention/events', { withCredentials: true });
         this._events = source;
         const refresh = () => this.scheduleRefresh();
-        source.addEventListener('attention:changed', refresh);
-        source.addEventListener('attention:presentation', refresh);
         source.addEventListener('attention:refresh', refresh);
         source.onerror = () => {
           if (source.readyState === EventSource.CLOSED) this._events = null;
@@ -402,16 +366,9 @@
           item.actions = Array.isArray(review.actions) ? review.actions.slice() : [];
           item.resolution = review.resolution || null;
           item.requester = review.requester || null;
-          item.destinationHref = localHref(review.destination && review.destination.href);
           item.detail = item.safeReview.detail || item.safeReview.summary || item.summary;
           item.sourceLabel = [item.applicationScope, review.kind].filter(Boolean).join(' · ');
           item.unavailable = false;
-          // The opened receipt is presentation state (last_opened_at),
-          // posted once the review is in hand; a lost receipt never
-          // blocks the review.
-          jsonRequest('/api/attention/items/' + encodeURIComponent(item.id) + '/opened', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-          }).catch(() => {});
           if (shared) {
             if (item.rendererId === 'approval.jira_write.review') {
               const { openJiraCentralApproval } = await import('./jira-central-approval.js');
@@ -579,12 +536,8 @@
         }
       },
 
-      openDestination(item) {
-        // The server named the page (backup items open /backup); an
-        // item without a reachable destination just closes the sheet.
-        const href = item && localHref(item.destinationHref);
+      closeItem() {
         this.selectedItem = null;
-        if (href) window.location.assign(href);
       },
 
       async refreshPush() {
