@@ -1247,10 +1247,8 @@ window.ensureSessionMessages = function() {
     var text = String(id || '');
     var at = text.lastIndexOf('@');
     if (at === -1) return text;
-    var name = text.slice(0, at);
-    var pub = text.slice(at + 1);
     var entry = Alpine.store('sessions') && Alpine.store('sessions')[text];
-    return name + '@' + (machine || (entry && entry.machine) || pub.slice(0, 12));
+    return text.slice(0, at) + '@' + (machine || (entry && entry.machine));
   };
 
   // Another machine's forwarded registry rows (remote_sessions.Subscriptions): each
