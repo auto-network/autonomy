@@ -208,3 +208,75 @@ def test_announce_restart_includes_attribution_in_countdown(tmp_path, monkeypatc
     assert broadcast["attribution"] == attribution
     # Persisted so the post-restart completion can repeat it.
     assert server._read_restart_notice()["attribution"] == attribution
+
+
+# ── connector hand-over on shutdown (auto-2am2l) ──────────────────────
+
+class _RecordingSupervisor:
+    def __init__(self):
+        self.calls = []
+
+    def detach_all(self):
+        self.calls.append("detach")
+
+    def stop_all(self):
+        self.calls.append("stop")
+
+
+def _post_reload_notice(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "RESTART_NOTICE_STATE_PATH", tmp_path / "restart_notice.state")
+    monkeypatch.setattr(server, "event_bus", EventBus())
+    monkeypatch.setattr(server, "_restart_notice_payload", None)
+    monkeypatch.setattr(server, "_restart_notice_lock", asyncio.Lock())
+    monkeypatch.setattr(server, "_restart_attribution", lambda changed_files: {})
+    monkeypatch.setenv("DASHBOARD_RESTART_TOKEN", "test-restart-token")
+    app = Starlette(routes=[
+        Route("/api/internal/restart-notice", server.api_internal_restart_notice, methods=["POST"]),
+    ])
+    with TestClient(app) as client:
+        assert client.post(
+            "/api/internal/restart-notice",
+            headers={"X-Dashboard-Restart-Token": "test-restart-token"},
+        ).status_code == 200
+
+
+def test_reload_notice_hands_connectors_over_once(tmp_path, monkeypatch):
+    """(i) The shutdown that follows a reload notice hands the connectors to
+    the successor, and consumes the notice: a later shutdown stops them."""
+    monkeypatch.setattr(server, "_reload_notice_at", None)
+    _post_reload_notice(monkeypatch, tmp_path)
+    supervisor = _RecordingSupervisor()
+    assert server._release_serving_connectors(supervisor) == "detach"
+    assert server._release_serving_connectors(supervisor) == "stop"
+    assert supervisor.calls == ["detach", "stop"]
+
+
+def test_stale_reload_notice_stops_connectors(tmp_path, monkeypatch):
+    """(ii) A notice older than any real hand-over (the reload was abandoned:
+    its replacement died or timed out) is not honoured."""
+    monkeypatch.setattr(server, "_reload_notice_at", None)
+    _post_reload_notice(monkeypatch, tmp_path)
+    noticed = server._reload_notice_at
+    bound = server._reload_notice_bound_seconds()
+    monkeypatch.setattr(server.time, "monotonic", lambda: noticed + bound + 1)
+    supervisor = _RecordingSupervisor()
+    assert server._release_serving_connectors(supervisor) == "stop"
+    assert supervisor.calls == ["stop"]
+
+
+def test_plain_shutdown_stops_connectors(monkeypatch):
+    """(iii) No reload notice: a real stop takes the connectors with it."""
+    monkeypatch.setattr(server, "_reload_notice_at", None)
+    supervisor = _RecordingSupervisor()
+    assert server._release_serving_connectors(supervisor) == "stop"
+    assert supervisor.calls == ["stop"]
+
+
+def test_reload_notice_bound_covers_a_slow_real_hand_over(monkeypatch):
+    """The bound is the reloader's own worst case, not a guess: a replacement
+    that takes its full ready timeout still hands the connectors over."""
+    from tools.dashboard import reload_with_notice
+    monkeypatch.delenv(reload_with_notice.READY_TIMEOUT_ENV, raising=False)
+    assert server._reload_notice_bound_seconds() == (
+        reload_with_notice._DEFAULT_READY_TIMEOUT_SECONDS
+        + reload_with_notice._STOP_GRACE_SECONDS)
