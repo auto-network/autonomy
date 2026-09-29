@@ -1614,10 +1614,16 @@ class MutationCatalog:
         advanced = False
         while True:
             nxt = self.conn.execute(
+                # A row-value comparison on the index's own columns: one
+                # index seek per step. The OR form it replaces made SQLite
+                # scan the origin's index from its first row on EVERY step
+                # (22.8 ms at row 300k of 400k; SJC-2's apply thread sat
+                # in this walk for its whole catch-up, inside the write
+                # lock -- auto-fkqz6, 2026-09-29).
                 "SELECT timestamp_ns, transaction_id, complete FROM fleet_sync_transactions "
-                "WHERE origin_id=? AND (timestamp_ns>? OR (timestamp_ns=? AND transaction_id>?)) "
+                "WHERE origin_id=? AND (timestamp_ns, transaction_id) > (?, ?) "
                 "ORDER BY timestamp_ns, transaction_id LIMIT 1",
-                (origin_id, ts, ts, txid),
+                (origin_id, ts, txid),
             ).fetchone()
             if nxt is None or not int(nxt[2]):
                 break
@@ -1684,9 +1690,9 @@ class MutationCatalog:
             return False
         unresolved = self.conn.execute(
             "SELECT 1 FROM fleet_sync_transactions WHERE origin_id=? "
-            "AND (timestamp_ns>? OR (timestamp_ns=? AND transaction_id>?)) "
+            "AND (timestamp_ns, transaction_id) > (?, ?) "
             "AND timestamp_ns<=? LIMIT 1",
-            (origin_id, ts, ts, txid, int(write_floor_ns)),
+            (origin_id, ts, txid, int(write_floor_ns)),
         ).fetchone()
         if unresolved is not None:
             return False
@@ -2363,9 +2369,10 @@ class MutationCatalog:
             where = "t.timestamp_ns>?"
             params: tuple = (incarnation, int(after_timestamp_ns))
         else:
-            where = "(t.timestamp_ns>? OR (t.timestamp_ns=? AND t.transaction_id>?))"
-            params = (incarnation, int(after_timestamp_ns), int(after_timestamp_ns),
-                      after_transaction_id)
+            # Row value on the index columns: one seek per page, wherever
+            # the position is in the origin (auto-fkqz6 part 5).
+            where = "(t.timestamp_ns, t.transaction_id) > (?, ?)"
+            params = (incarnation, int(after_timestamp_ns), after_transaction_id)
         if through_ns is not None:
             # A server serves nothing about an origin past its own cursor
             # for it: a row applied beyond a quarantined gap is never served,
@@ -2433,9 +2440,8 @@ class MutationCatalog:
             where = "t.timestamp_ns>?"
             params: tuple = (incarnation, int(after_timestamp_ns), int(limit))
         else:
-            where = "(t.timestamp_ns>? OR (t.timestamp_ns=? AND t.transaction_id>?))"
-            params = (incarnation, int(after_timestamp_ns), int(after_timestamp_ns),
-                      after_transaction_id, int(limit))
+            where = "(t.timestamp_ns, t.transaction_id) > (?, ?)"
+            params = (incarnation, int(after_timestamp_ns), after_transaction_id, int(limit))
         heads = self.conn.execute(
             "SELECT t.id,t.timestamp_ns,t.transaction_id "
             "FROM fleet_sync_transactions t "
@@ -2639,8 +2645,8 @@ class MutationCatalog:
             where = "t.timestamp_ns>?"
             params: tuple = (int(after_timestamp_ns),)
         else:
-            where = "(t.timestamp_ns>? OR (t.timestamp_ns=? AND t.transaction_id>?))"
-            params = (int(after_timestamp_ns), int(after_timestamp_ns), after_transaction_id)
+            where = "(t.timestamp_ns, t.transaction_id) > (?, ?)"
+            params = (int(after_timestamp_ns), after_transaction_id)
         params = (*params, int(through_ns), int(limit))
         return [
             (int(r[0]), int(r[1]), str(r[2]), str(r[3]))
