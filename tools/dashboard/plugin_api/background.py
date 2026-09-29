@@ -78,14 +78,32 @@ class PluginBackgroundSupervisor:
         self._tasks: dict[str, list[asyncio.Task]] = {}
         self._reconcile_task: asyncio.Task | None = None
 
-    def reconcile_once(self) -> None:
-        """Align running tasks with the live enabled map."""
+    def reconcile_once(self, enabled_map: dict | None = None) -> None:
+        """Align running tasks with the live enabled map (read here unless
+        the caller already read it off the event loop)."""
+        if enabled_map is None:
+            enabled_map = self._read_enabled()
+            if enabled_map is None:
+                return
+        self._apply(enabled_map)
+
+    def _read_enabled(self) -> dict | None:
         try:
-            enabled_map = self._enabled() or {}
+            return self._enabled() or {}
         except Exception:
             logger.exception("[plugin_background] enable-map read failed; "
                              "keeping current task set")
-            return
+            return None
+
+    async def _reconcile(self) -> None:
+        # The enable map is a Settings read that opens org databases; that
+        # open can wait seconds behind a sync apply's WAL checkpoint, so it
+        # never runs on the event loop (auto-kd6tl: a 7.3 s startup stall).
+        enabled_map = await asyncio.to_thread(self._read_enabled)
+        if enabled_map is not None:
+            self._apply(enabled_map)
+
+    def _apply(self, enabled_map: dict) -> None:
         for plugin_id, plugin in self._plugins.items():
             want = bool(enabled_map.get(plugin_id))
             have = plugin_id in self._tasks
@@ -132,12 +150,12 @@ class PluginBackgroundSupervisor:
                     plugin_id)
 
     async def start(self) -> None:
-        self.reconcile_once()
+        await self._reconcile()
 
         async def loop() -> None:
             while True:
                 await asyncio.sleep(RECONCILE_INTERVAL_S)
-                self.reconcile_once()
+                await self._reconcile()
 
         if self._plugins:
             self._reconcile_task = asyncio.create_task(

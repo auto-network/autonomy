@@ -484,3 +484,42 @@ def test_record_peer_persists_the_peer_build_timestamp(tmp_path: Path) -> None:
             "SELECT peer_built_at FROM fleet_sync_peer_state "
             "WHERE machine_public_key=?", (peer,)).fetchone()[0]
     assert built == "2026-09-03T12:00:00+00:00"
+
+
+def test_dashboard_service_configured_from_a_worker_thread_starts_promptly(monkeypatch) -> None:
+    """auto-kd6tl: runtime activation calls configure() from a worker thread.
+    asyncio.Event.set() there would not wake an idle loop; the scheduler must
+    still start promptly."""
+    import threading
+    import time
+
+    import tools.network.fleet_sync_scheduler as module
+
+    started: list[float] = []
+
+    class FakeScheduler:
+        def __init__(self, config):
+            self.config = config
+
+        async def start(self):
+            started.append(time.monotonic())
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(module, "FleetSyncScheduler", FakeScheduler)
+
+    async def run() -> float:
+        service = DashboardFleetSyncService()
+        await service.start()
+        await asyncio.sleep(0)
+        # Configure 0.3 s later, from another thread, while the loop sits idle
+        # in one long sleep that nothing else wakes.
+        began = time.monotonic() + 0.3
+        threading.Timer(0.3, service.configure, args=(object(),)).start()
+        await asyncio.sleep(2.0)
+        await service.stop()
+        assert started, "the scheduler never started"
+        return started[0] - began
+
+    assert asyncio.run(run()) < 1.0

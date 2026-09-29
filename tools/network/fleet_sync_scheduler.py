@@ -5415,18 +5415,32 @@ class DashboardFleetSyncService:
         self._changed = asyncio.Event()
         self._stopping = False
         self._transition = asyncio.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def scheduler(self) -> FleetSyncScheduler | None:
         return self._scheduler
 
     def configure(self, config: FleetSyncRuntimeConfig | None) -> None:
+        """Install *config*. Callable from a worker thread: runtime activation
+        runs off the event loop (auto-kd6tl), and asyncio.Event.set() from
+        another thread would not wake the loop, so the set is handed to the
+        service's own loop."""
         self._config = config
-        self._changed.set()
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        loop = self._loop
+        if loop is not None and running is not loop and not loop.is_closed():
+            loop.call_soon_threadsafe(self._changed.set)
+        else:
+            self._changed.set()
 
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
+        self._loop = asyncio.get_running_loop()
         self._stopping = False
         self._task = asyncio.create_task(
             self._run(), name="dashboard-fleet-sync-service"

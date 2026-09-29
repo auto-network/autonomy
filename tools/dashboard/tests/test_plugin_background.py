@@ -225,3 +225,28 @@ def test_stubborn_task_is_abandoned_within_grace(monkeypatch):
         await asyncio.wait_for(supervisor.stop(), 5)  # bounded, not wedged
 
     _run(scenario())
+
+
+def test_the_enable_map_is_read_off_the_event_loop():
+    """auto-kd6tl: the enable map is a Settings read that opens org databases
+    and stalled startup 7.3 s on SJC-2 behind a sync apply's checkpoint."""
+    import threading
+
+    readers: list[int] = []
+
+    def enabled():
+        readers.append(threading.get_ident())
+        return {"p": False}
+
+    async def work():  # pragma: no cover — never enabled here
+        await asyncio.sleep(3600)
+
+    async def scenario():
+        loop_thread = threading.get_ident()
+        supervisor = bg.PluginBackgroundSupervisor([_plugin("p", [work])], enabled=enabled)
+        await supervisor.start()
+        await supervisor.stop()
+        return loop_thread
+
+    loop_thread = _run(scenario())
+    assert readers and loop_thread not in readers
