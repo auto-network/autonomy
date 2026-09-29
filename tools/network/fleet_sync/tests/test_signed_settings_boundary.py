@@ -419,3 +419,74 @@ def test_signing_an_existing_row_in_place_moves_it_to_its_signer_slot(pair):
     assert _rows(b_db) == [(member.public_hex, "plain")]
     assert b_db.conn.execute("SELECT COUNT(*) FROM settings WHERE id=?", (row_id,)).fetchone()[0] == 1
     assert _quarantine(b_db) == []
+
+
+def test_an_envelope_this_code_cannot_read_is_parked_forwarded_and_lands_after_the_update(pair, monkeypatch):
+    """Live 2026-09-29 18:59-19:06Z: SJC-2, on the pre-float encoder, could
+    not rebuild envelopes Home had signed with float payloads and filed
+    14,362 valid rows under the final reason. An envelope THIS code cannot
+    read is its own, drainable reason."""
+    from tools.network.settingskit import envelope as envelope_module
+    from tools.network.settingskit.envelope import EnvelopeFormatError
+
+    a_db, a, b_db, b = pair
+    sim = Sim()
+    member = _member(sim, "member")
+    _write_ledger(a_db, a, 10, sim)
+    _write_ledger(b_db, b, 11, sim)
+    _write_signed(a_db, a, 100, _signed_row(sim.genesis_id, member, member.public_hex, {"v": "float-ish"}, 1_000))
+    real = envelope_module.record_from_row
+
+    def behind_encoder(row, org):
+        raise EnvelopeFormatError("floats are not allowed in canonical idkit JSON")
+
+    monkeypatch.setattr(materialize_module, "_verify_settings_row", materialize_module._verify_settings_row)
+    monkeypatch.setattr(envelope_module, "record_from_row", behind_encoder)
+    _exchange(a, "a" * 64, b)
+    assert _rows(b_db) == []
+    assert _quarantine(b_db) == [("settings_envelope_unreadable", 0)]
+    assert _forwarded(b_db, b, "a" * 64, "signed-100") == 1   # travels on: the receiver is behind, not the row
+    assert b.drain_pending_signatures() == 0
+    assert _quarantine(b_db) == [("settings_envelope_unreadable", 1)]
+    # The code update: the envelope reads again, the next drain lands it.
+    monkeypatch.setattr(envelope_module, "record_from_row", real)
+    assert b.drain_pending_signatures() == 1
+    assert _rows(b_db) == [(member.public_hex, "float-ish")]
+    assert _quarantine(b_db) == []
+
+
+def test_an_already_parked_invalid_row_is_re_judged_exactly_once(pair, monkeypatch):
+    """Rows parked as settings_signature_invalid before the unreadable
+    reason existed: a valid one lands on the first drain of the new code;
+    a tampered one stays invalid, counts its one retry, and is never
+    re-judged again."""
+    from tools.network.settingskit import envelope as envelope_module
+    from tools.network.settingskit.envelope import EnvelopeFormatError
+
+    a_db, a, b_db, b = pair
+    sim = Sim()
+    member = _member(sim, "member")
+    _write_ledger(a_db, a, 10, sim)
+    _write_ledger(b_db, b, 11, sim)
+    honest = _signed_row(sim.genesis_id, member, member.public_hex, {"v": "honest"}, 1_000)
+    forged = _signed_row(sim.genesis_id, member, member.public_hex, {"v": "forged"}, 1_000, key="other-key")
+    _write_signed(a_db, a, 100, honest)
+    _write_signed(a_db, a, 101, forged)
+    with a.transaction(150, "tamper"):
+        a_db.conn.execute("UPDATE settings SET payload=? WHERE id=?", (json.dumps({"v": "tampered"}), forged[0]))
+    # The receiver is behind the writer's encoder when both arrive ...
+    real = envelope_module.record_from_row
+    monkeypatch.setattr(envelope_module, "record_from_row",
+                        lambda row, org: (_ for _ in ()).throw(EnvelopeFormatError("floats are not allowed")))
+    _exchange(a, "a" * 64, b)
+    assert _rows(b_db) == []
+    assert _quarantine(b_db) == [("settings_envelope_unreadable", 0), ("settings_envelope_unreadable", 0)]
+    # ... and the code of the day filed both under the FINAL reason.
+    with b_db.conn:
+        b_db.conn.execute("UPDATE fleet_sync_quarantine SET reason='settings_signature_invalid'")
+    monkeypatch.setattr(envelope_module, "record_from_row", real)
+    assert b.drain_pending_signatures() == 1          # the honest one lands ...
+    assert _rows(b_db) == [(member.public_hex, "honest")]
+    assert _quarantine(b_db) == [("settings_signature_invalid", 1)]   # ... the forgery counted its one retry
+    assert b.drain_pending_signatures() == 0          # and is never re-judged again
+    assert _quarantine(b_db) == [("settings_signature_invalid", 1)]

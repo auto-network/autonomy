@@ -2468,18 +2468,27 @@ class MutationCatalog:
         scope, or not the row persona). Each goes back through ordinary
         apply: it lands, or it is inert against a newer winner, or it is
         re-parked with its current reason and one more retry. Returns the
-        entries cleared. ``settings_signature_invalid`` and
-        ``settings_signer_stale`` are final and never retried."""
-        from tools.network.fleet_sync.materialize import SIGNER_PENDING_PREFIX
+        entries cleared. ``settings_envelope_unreadable`` (this code could
+        not rebuild the envelope) is re-judged each round; an already
+        parked ``settings_signature_invalid`` is re-judged once (retries=0);
+        ``settings_signer_stale`` is final."""
+        from tools.network.fleet_sync.materialize import (
+            ENVELOPE_UNREADABLE_REASON, SIGNER_PENDING_PREFIX,
+        )
 
         ensure_quarantine_table(self.conn)
+        # settings_signature_invalid rows with retries=0 are re-judged ONCE by
+        # this code: before the envelope-unreadable reason existed, a receiver
+        # behind the writer's encoder filed valid rows under the final reason
+        # (SJC-2, 2026-09-29). A row still invalid after that is final.
         rows = self.conn.execute(
             "SELECT address,frame,origin,transaction_id,operation_index "
             "FROM fleet_sync_quarantine WHERE (reason='settings_signature_pending' "
+            "OR reason=? OR (reason='settings_signature_invalid' AND retries=0) "
             "OR (reason LIKE ? AND reason!='settings_signer_stale')) "
             "AND frame IS NOT NULL AND origin IS NOT NULL "
             "AND transaction_id IS NOT NULL AND operation_index IS NOT NULL",
-            (SIGNER_PENDING_PREFIX + "%",),
+            (ENVELOPE_UNREADABLE_REASON, SIGNER_PENDING_PREFIX + "%"),
         ).fetchall()
         cleared = 0
         for address, frame, origin, transaction_id, operation_index in rows:

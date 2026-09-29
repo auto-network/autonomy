@@ -637,6 +637,13 @@ def _payload_is_genesis(payload: object) -> bool:
 SIGNATURE_FINAL_REASONS = ("settings_signature_invalid", "settings_signer_stale")
 SIGNER_PENDING_PREFIX = "settings_signer_"
 UNSIGNED_REASON = "settings_unsigned"
+#: THIS code could not rebuild the envelope (EnvelopeFormatError): a
+#: receiver whose encoder is behind the writer's, not a bad signature.
+#: Drainable: a code update turns it into a landing. Live 2026-09-29
+#: 18:59-19:06Z: SJC-2, still on the pre-float encoder, parked 14,362
+#: valid rows Home had signed with float payloads under the FINAL reason
+#: and could never take them back.
+ENVELOPE_UNREADABLE_REASON = "settings_envelope_unreadable"
 
 #: S3 flag: refuse an UNSIGNED settings row arriving for a founded
 #: organization store. Off until the one-time signing pass (S4) has
@@ -659,8 +666,14 @@ def _verify_settings_row(row: dict[str, object], genesis: str | None) -> str | N
     )
 
     try:
-        verify_record(record_from_row(row, genesis), str(row["signature"]))
-    except (SignatureError, EnvelopeFormatError, ValueError, TypeError, KeyError):
+        record = record_from_row(row, genesis)
+    except (EnvelopeFormatError, ValueError, TypeError, KeyError):
+        return ENVELOPE_UNREADABLE_REASON
+    try:
+        verify_record(record, str(row["signature"]))
+    except EnvelopeFormatError:
+        return ENVELOPE_UNREADABLE_REASON
+    except (SignatureError, ValueError, TypeError, KeyError):
         return "settings_signature_invalid"
     return None
 
