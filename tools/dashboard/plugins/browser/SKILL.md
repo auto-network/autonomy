@@ -18,7 +18,9 @@ DELETE /api/browser/leases/{lease}               release it when done
 ```
 
 Operations: `goto snapshot screenshot click fill type press wait url title
-text download`. Target elements with a `{"ref"}` from `snapshot`, or
+text download`, each as `{"op": ..., "args": {...}}`: for example `goto {url}`,
+`click {target}`, `fill {target, value}`, `type {target, text}`, `press {key}`,
+`wait {text}`. `screenshot` returns `result.png_base64`. Target elements with a `{"ref"}` from `snapshot`, or
 `{"role","name"}`, `{"label"}`, `{"text"}`, `{"css"}`. No operation runs
 your own script.
 
