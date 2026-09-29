@@ -29,81 +29,6 @@ def test_rewrite_identity_names_the_home_address():
     assert "session" not in out["entries"][1]
 
 
-def test_forward_cursor_prefers_the_cursor_then_the_chain_end():
-    assert remote_view.forward_cursor({"cursor": {"file": "b", "off": 7}}) == {"file": "b", "off": 7}
-    assert remote_view.forward_cursor({"chain": ["a", "b"], "offset": 99}) == {"file": "b", "off": 99}
-    assert remote_view.forward_cursor({}) is None
-
-
-class Bus:
-    def __init__(self):
-        self.events = []
-
-    async def broadcast(self, topic, data, dedup=True):
-        self.events.append((topic, data))
-
-
-def _watcher(replies, bus):
-    asked = []
-
-    async def fetch(machine, name, project, query, *, timeout=20.0):
-        asked.append((machine, name, project, query))
-        return replies.pop(0)
-
-    return remote_view.RemoteWatcher(bus, fetch=fetch, interval=0.01, ttl=5), asked
-
-
-def test_a_poll_republishes_new_entries_under_the_address_and_advances():
-    bus = Bus()
-    watcher, asked = _watcher([{"v": 1, "ok": True, "tail": {
-        "session_id": "auto-9", "is_live": True,
-        "entries": [{"type": "assistant", "text": "hi"}],
-        "cursor": {"file": "s1", "off": 200}}}], bus)
-    watch = remote_view._Watch(ADDRESS, "sjc-2", "auto-9", "p",
-                               {"file": "s1", "off": 100}, until=1e18)
-    assert asyncio.run(watcher.poll_once(watch)) is True
-    assert asked == [("sjc-2", "auto-9", "p", {"after_file": "s1", "after": "100"})]
-    ((topic, data),) = bus.events
-    assert topic == "session:messages" and data["session_id"] == ADDRESS
-    assert data["entries"] == [{"type": "assistant", "text": "hi"}]
-    assert watch.cursor == {"file": "s1", "off": 200}
-
-
-def test_an_ended_session_with_nothing_new_stops_the_watch():
-    bus = Bus()
-    watcher, _ = _watcher([{"v": 1, "ok": True, "tail": {
-        "is_live": False, "entries": [], "cursor": {"file": "s1", "off": 5}}}], bus)
-    watch = remote_view._Watch(ADDRESS, "sjc-2", "auto-9", "p",
-                               {"file": "s1", "off": 5}, until=1e18)
-    assert asyncio.run(watcher.poll_once(watch)) is False
-    assert bus.events == []
-
-
-def test_an_unreachable_machine_keeps_the_watch_and_its_cursor():
-    bus = Bus()
-    watcher, _ = _watcher([{"v": 1, "ok": False, "refusal": "destination-slot-absent"}], bus)
-    watch = remote_view._Watch(ADDRESS, "sjc-2", "auto-9", "p",
-                               {"file": "s1", "off": 5}, until=1e18)
-    assert asyncio.run(watcher.poll_once(watch)) is True
-    assert watch.cursor == {"file": "s1", "off": 5}
-
-
-def test_a_second_tail_keeps_one_watch_alive_instead_of_starting_another():
-    async def run():
-        bus = Bus()
-        replies = [{"v": 1, "ok": True, "tail": {"is_live": True, "entries": []}}] * 50
-        watcher, _ = _watcher(list(replies), bus)
-        watcher.watch(ADDRESS, "sjc-2", "auto-9", "p", {"file": "s1", "off": 0})
-        watcher.watch(ADDRESS, "sjc-2", "auto-9", "p", {"file": "s1", "off": 0})
-        assert watcher.watching() == [ADDRESS]
-        await watcher.stop()
-
-    asyncio.run(run())
-
-
-# ── the far side: the tail op ───────────────────────────────────────────────
-
-
 def test_the_tail_op_runs_the_local_tail_with_the_viewers_query(monkeypatch):
     seen = {}
 
@@ -158,29 +83,27 @@ class _Req:
         self.query_params = query or {}
 
 
-def test_the_viewers_tail_is_proxied_rewritten_and_watched(monkeypatch):
-    watched = []
-
+def test_the_viewers_tail_is_proxied_and_rewritten(monkeypatch):
     async def fake_fetch(machine, name, project, query, *, timeout=20.0):
         assert (machine, name, project, query) == ("sjc-2", "auto-9", "p",
                                                    {"tail_entries": "100"})
         return {"v": 1, "ok": True, "tail": {"session_id": "auto-9", "entries": [],
                                              "chain": ["s1"], "offset": 42}}
 
-    class W:
-        def watch(self, *args):
-            watched.append(args)
-            return True
+    class Mirror:
+        def connected(self, label):
+            return label == "sjc-2"
 
     monkeypatch.setattr(api_auth, "require_global_api_authority", lambda r: None)
     monkeypatch.setattr(remote_view, "fetch_tail", fake_fetch)
-    monkeypatch.setattr(server, "_get_remote_watcher", lambda: W())
+    monkeypatch.setattr(server, "_remote_mirror", Mirror())
     response = asyncio.run(server.api_session_tail(_Req(
         {"project": "p", "session_id": ADDRESS},
         {"tail_entries": "100", "ignored": "x"})))
     assert response.status_code == 200
-    assert json.loads(response.body)["session_id"] == ADDRESS
-    assert watched == [(ADDRESS, "sjc-2", "auto-9", "p", {"file": "s1", "off": 42})]
+    body = json.loads(response.body)
+    assert body["session_id"] == ADDRESS
+    assert body["live_updates"] is True     # new entries arrive over the subscription
 
 
 def test_the_viewers_tail_needs_global_authority(monkeypatch):
@@ -219,21 +142,3 @@ def test_an_attachment_url_with_the_address_goes_to_the_remote_machine(tmp_path,
         {"tmux_name": ADDRESS, "path": "shot.png"})))
     assert response.status_code == 200
     assert asked == [("sjc-2", "output", {"tmux_name": "auto-9", "path": "shot.png"})]
-
-
-
-def test_watches_are_capped_and_the_tail_says_so():
-    async def run():
-        bus = Bus()
-        replies = [{"v": 1, "ok": True, "tail": {"is_live": True, "entries": []}}] * 50
-        watcher, _ = _watcher(list(replies), bus)
-        watcher._max = 2
-        results = [watcher.watch(f"auto-{i}@sjc-2", "sjc-2", f"auto-{i}", "p",
-                                 {"file": "s", "off": 0}) for i in range(3)]
-        assert results == [True, True, False]
-        assert watcher.watch("auto-0@sjc-2", "sjc-2", "auto-0", "p",
-                             {"file": "s", "off": 0}) is True    # keep-alive still works
-        await watcher.stop()
-        assert watcher.watching() == []
-
-    asyncio.run(run())

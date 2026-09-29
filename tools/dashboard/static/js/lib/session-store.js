@@ -1136,75 +1136,85 @@ window.ensureSessionMessages = function() {
     };
   });
 
+  // One registry row into its session's store: this machine's rows, and the
+  // other machines' rows (session:remote-registry, addressed name@machine).
+  function _applyRegistryRow(s) {
+    var store = window.getSessionStore(s.session_id);
+    if (s.machine) {
+      store.machine = s.machine;
+      store.machinePub = s.machine_pub || null;
+      store.machineReachable = s.machine_reachable !== false;
+    }
+    store.project = s.project || '';
+    store.graphSourceId = s.graph_source_id || '';
+    store.sessionType = s.type || '';
+    store.label = s.label || '';
+    store.role = s.role || '';
+    _applySessionEntryCount(store, s.entry_count);
+    if (s.context_tokens) store.contextTokens = s.context_tokens;
+    if (s.topics) store.topics = s.topics;
+    if (Array.isArray(s.todos)) store.todos = s.todos;
+    store.nagEnabled = !!s.nag_enabled;
+    store.nagInterval = s.nag_interval || 15;
+    store.nagMessage = s.nag_message || '';
+    store.dispatchNagEnabled = !!s.dispatch_nag_enabled;
+    store.isLive = s.is_live;
+    store.startedAt = s.started_at || 0;
+    if (s.last_activity) store.lastActivity = s.last_activity;
+    if (s.last_input_at) store.lastInputAt = s.last_input_at;
+    // An EMPTY last_message never replaces a real one. A completed Codex
+      // turn ends with codex_task_complete (internal, content null), so a
+      // blanket `!== undefined` blanked the card preview every time a turn
+      // finished. Matches the truthiness guards on last_activity /
+      // entry_count / context_tokens directly above.
+      if (s.last_message) store.lastMessage = s.last_message;
+    if (s.activity_state !== undefined) store.activityState = s.activity_state;
+    if (s.org) store.org = s.org;
+    store.resolved = !!s.resolved;
+    // auto-ngis4: SSE registry must plumb harness + model the same way
+    // the HTTP seed path does, otherwise newly-registered sessions paint
+    // an "unknown" badge until a full page reload.
+    if (s.harness) store.harness = s.harness;
+    if (s.model !== undefined) store.model = s.model;
+    if (s.harness_token !== undefined) store.harnessToken = s.harness_token;
+    if (s.harness_token_alias !== undefined) store.harnessTokenAlias = s.harness_token_alias;
+    // auto-yfcoc: startup-phase fields. Additive — the lifecycle
+    // derivation reads these off the row, never the store, so the
+    // partial works against either the raw registry shape or the
+    // populated store entry. Defaults applied at store-creation time
+    // so a missing field never confuses the derivation.
+    // Unified startup FSM. Payload sends ``startup_state`` (string or
+    // null). Store explicitly nulls on absence so cleared sessions
+    // render correctly.
+    store.startupState = s.startup_state || null;
+    // The one lifecycle truth + telemetry sidecar (FSM consolidation).
+    store.state = s.state || s.lifecycle_state || null;
+    store.attention = s.attention || null;
+    if (s.resumable !== undefined) store.resumable = !!s.resumable;
+    if (s.harness_state !== undefined) store.harnessState = s.harness_state;
+    // The resume-bridge flag only needs to survive the gap between the
+    // resume POST's 202 and this row's first registry appearance — the
+    // row is live now, so the bridge is done.
+    store._resuming = false;
+    // auto-ja51w: transient sub-phase progress (e.g.
+    // {repo_index:2, total:3, current_repo:'widgets_ng'}). Surfaced
+    // by SessionMonitor.update_phase(progress=...) — present only while
+    // an active progress is set, omitted from payload otherwise. Store
+    // gets explicit null on omit so the field clears cleanly.
+    store.phaseProgress = s.phase_progress || null;
+    // Session-group membership (Session Board columns, auto-q9y6e.2). The
+    // registry is the one broadcast that carries it, so a board rebuilds
+    // its columns from these three fields on every registry event.
+    store.groupId = s.group_id || null;
+    store.groupTab = s.group_tab || '';
+    store.group = s.group || null;
+  }
+
   window.registerHandler('session:registry', function(registrySessions) {
     var activeIds = {};
     for (var i = 0; i < registrySessions.length; i++) {
-      var s = registrySessions[i];
-      activeIds[s.session_id] = true;
-      var store = window.getSessionStore(s.session_id);
-      store.project = s.project || '';
-      store.graphSourceId = s.graph_source_id || '';
-      store.sessionType = s.type || '';
-      store.label = s.label || '';
-      store.role = s.role || '';
-      _applySessionEntryCount(store, s.entry_count);
-      if (s.context_tokens) store.contextTokens = s.context_tokens;
-      if (s.topics) store.topics = s.topics;
-      if (Array.isArray(s.todos)) store.todos = s.todos;
-      store.nagEnabled = !!s.nag_enabled;
-      store.nagInterval = s.nag_interval || 15;
-      store.nagMessage = s.nag_message || '';
-      store.dispatchNagEnabled = !!s.dispatch_nag_enabled;
-      store.isLive = s.is_live;
-      store.startedAt = s.started_at || 0;
-      if (s.last_activity) store.lastActivity = s.last_activity;
-      if (s.last_input_at) store.lastInputAt = s.last_input_at;
-      // An EMPTY last_message never replaces a real one. A completed Codex
-        // turn ends with codex_task_complete (internal, content null), so a
-        // blanket `!== undefined` blanked the card preview every time a turn
-        // finished. Matches the truthiness guards on last_activity /
-        // entry_count / context_tokens directly above.
-        if (s.last_message) store.lastMessage = s.last_message;
-      if (s.activity_state !== undefined) store.activityState = s.activity_state;
-      if (s.org) store.org = s.org;
-      store.resolved = !!s.resolved;
-      // auto-ngis4: SSE registry must plumb harness + model the same way
-      // the HTTP seed path does, otherwise newly-registered sessions paint
-      // an "unknown" badge until a full page reload.
-      if (s.harness) store.harness = s.harness;
-      if (s.model !== undefined) store.model = s.model;
-      if (s.harness_token !== undefined) store.harnessToken = s.harness_token;
-      if (s.harness_token_alias !== undefined) store.harnessTokenAlias = s.harness_token_alias;
-      // auto-yfcoc: startup-phase fields. Additive — the lifecycle
-      // derivation reads these off the row, never the store, so the
-      // partial works against either the raw registry shape or the
-      // populated store entry. Defaults applied at store-creation time
-      // so a missing field never confuses the derivation.
-      // Unified startup FSM. Payload sends ``startup_state`` (string or
-      // null). Store explicitly nulls on absence so cleared sessions
-      // render correctly.
-      store.startupState = s.startup_state || null;
-      // The one lifecycle truth + telemetry sidecar (FSM consolidation).
-      store.state = s.state || s.lifecycle_state || null;
-      store.attention = s.attention || null;
-      if (s.resumable !== undefined) store.resumable = !!s.resumable;
-      if (s.harness_state !== undefined) store.harnessState = s.harness_state;
-      // The resume-bridge flag only needs to survive the gap between the
-      // resume POST's 202 and this row's first registry appearance — the
-      // row is live now, so the bridge is done.
-      store._resuming = false;
-      // auto-ja51w: transient sub-phase progress (e.g.
-      // {repo_index:2, total:3, current_repo:'widgets_ng'}). Surfaced
-      // by SessionMonitor.update_phase(progress=...) — present only while
-      // an active progress is set, omitted from payload otherwise. Store
-      // gets explicit null on omit so the field clears cleanly.
-      store.phaseProgress = s.phase_progress || null;
-      // Session-group membership (Session Board columns, auto-q9y6e.2). The
-      // registry is the one broadcast that carries it, so a board rebuilds
-      // its columns from these three fields on every registry event.
-      store.groupId = s.group_id || null;
-      store.groupTab = s.group_tab || '';
-      store.group = s.group || null;
+      activeIds[registrySessions[i].session_id] = true;
+      _applyRegistryRow(registrySessions[i]);
     }
     // Mark removed sessions as dead. A session absent from the registry is
     // no longer live — including a resume/create whose launch FAILED (the
@@ -1215,6 +1225,9 @@ window.ensureSessionMessages = function() {
     // its true FAILED state (Setup failed + Retry) from the DAO.
     var allSessions = Alpine.store('sessions');
     for (var id in allSessions) {
+      // name@machine runs on another machine: only its own machine's rows
+      // (session:remote-registry below) say whether it is live.
+      if (id.indexOf('@') !== -1) continue;
       if (!activeIds[id] && allSessions[id].isLive) {
         allSessions[id].isLive = false;
         // Terminal rows are rendered by the explicit session:ended payload.
@@ -1225,6 +1238,26 @@ window.ensureSessionMessages = function() {
     }
     _emitSessionStoreChanged('registry');
     _emitSessionRegistryChanged(Object.keys(activeIds));
+  });
+
+  // The other machines' sessions (remote_sessions.Mirror): {machines: {label:
+  // rows}}. Each machine's rows are that machine's live sessions, so one of
+  // its addresses missing from them is no longer live.
+  window.registerHandler('session:remote-registry', function(data) {
+    var machines = (data && data.machines) || {};
+    var allSessions = Alpine.store('sessions');
+    Object.keys(machines).forEach(function(label) {
+      var rows = machines[label] || [];
+      var present = {};
+      rows.forEach(function(row) { present[row.session_id] = true; _applyRegistryRow(row); });
+      var suffix = '@' + label;
+      for (var id in allSessions) {
+        if (id.slice(-suffix.length) === suffix && !present[id] && allSessions[id].isLive) {
+          allSessions[id].isLive = false;
+        }
+      }
+    });
+    _emitSessionStoreChanged('registry');
   });
 
   // Handle label_update events — update stored session's label field

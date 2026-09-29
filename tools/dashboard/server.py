@@ -7009,16 +7009,8 @@ def _parse_and_enrich_segments(
     return out, spans, trimmed_from
 
 
-_remote_watcher = None
-
-
-def _get_remote_watcher():
-    global _remote_watcher
-    if _remote_watcher is None:
-        from tools.dashboard.remote_view import RemoteWatcher
-
-        _remote_watcher = RemoteWatcher(event_bus)
-    return _remote_watcher
+#: Live session events from the operator's other machines (remote_sessions).
+_remote_mirror = None
 
 
 async def _remote_session_tail(request, project: str, address: str):
@@ -7068,8 +7060,8 @@ async def _remote_session_tail(request, project: str, address: str):
     data = remote_view.rewrite_identity(reply["tail"], address)
     data["machine"] = machine
     data["machine_reachable"] = True
-    data["live_updates"] = _get_remote_watcher().watch(
-        address, machine, name, project, remote_view.forward_cursor(data))
+    # New entries arrive over the machine's subscription (remote_sessions).
+    data["live_updates"] = bool(_remote_mirror and _remote_mirror.connected(machine))
     return JSONResponse(data)
 
 
@@ -14346,17 +14338,6 @@ async def api_fleet_launch_targets(request):
 
     return JSONResponse({"targets": await fleet_machines.launch_targets()})
 
-
-async def api_sessions_remote(request):
-    """GET /api/sessions/remote — Active-list rows for sessions on the
-    operator's other machines, addressed <name>@<machine> (bead
-    auto-mje3g). Global authority."""
-    refused = api_auth.require_global_api_authority(request)
-    if refused is not None:
-        return refused
-    from tools.dashboard import fleet_machines
-
-    return JSONResponse({"sessions": await fleet_machines.remote_sessions()})
 
 
 async def api_remote_machine_status(request):
@@ -22350,7 +22331,6 @@ routes = [
     Route("/api/dao/session_status", api_dao_session_status),
     Route("/api/fleet/remote/{machine}/status", api_remote_machine_status),
     Route("/api/fleet/launch-targets", api_fleet_launch_targets),
-    Route("/api/sessions/remote", api_sessions_remote),
     Route("/api/worktrees", api_worktrees),
     Route("/api/worktrees/orgs", api_worktrees_orgs),
     Route("/api/worktrees/refresh", api_worktrees_refresh, methods=["POST"]),
@@ -23506,13 +23486,13 @@ async def _on_shutdown():
     # warn a browser, but still leave timing state for the next process.
     if _restart_notice_payload is None:
         _write_restart_notice({"started_at_ms": int(time.time() * 1000)})
-    # Remote-session viewer polls (auto-fd68i): cancel them with the other
-    # background work rather than leaving them to the loop's teardown.
-    if _remote_watcher is not None:
+    # Close the subscription channels in both directions: peers reconnect to
+    # the next dashboard, and this one's own subscriptions end with it.
+    if _remote_mirror is not None:
         try:
-            await _remote_watcher.stop()
+            await _remote_mirror.stop()
         except Exception:
-            logger.debug("remote watcher stop failed", exc_info=True)
+            logger.debug("remote sessions stop failed", exc_info=True)
     global _plain_listener
     if _plain_listener is not None:
         listener, _plain_listener = _plain_listener, None
@@ -23792,19 +23772,21 @@ async def _activate_worker(reason: str) -> None:
         # session-control/1 inbound: answer other fleet machines' requests
         # (graph://7eb29bc8-31a §9.1). One pump per machine, at activation.
         try:
-            from tools.dashboard import remote_access_ops, session_control_client
-            global _session_control_pump
+            from tools.dashboard import (
+                remote_access_ops, remote_sessions, session_control_client)
+            global _session_control_pump, _remote_mirror
             _session_control_pump = session_control_client.install(
                 _resolved_dispatch_limits, _create_session_from_body,
                 ops={"send": _inbound_session_send, "stop": _inbound_session_stop,
                      "output": _inbound_session_output,
                      "fetch-branch": _inbound_session_fetch_branch,
                      "tail": _inbound_session_tail,
-                     "sessions": session_control_client.sessions_op(
-                         session_monitor.get_registry),
+                     "subscribe": remote_sessions.subscribe_op(event_bus),
                      # Remote access recovery from another fleet machine
                      # (auto-fnj20): re-open enrollment, revoke a passkey.
                      **remote_access_ops.ops()})
+            _remote_mirror = remote_sessions.Mirror(event_bus)
+            _remote_mirror.start()
         except Exception:
             logger.exception("session-control inbound pump failed to start")
 

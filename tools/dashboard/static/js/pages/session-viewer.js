@@ -1478,11 +1478,9 @@
           //     was ever meant to cover — a brand-new session has no backlog);
           //   • dead (isLive=false) → fetch, and _fetchBacklog's 404 probe
           //     degrades a genuinely-empty/pruned session to the empty state.
-          // A session on another fleet machine (<name>@<machine>) never
-          // passes through this machine's registry, so it is never seeded
-          // resolved; its far machine serves the backlog (auto-fd68i).
+          // A session on another fleet machine (<name>@<machine>): its far
+          // machine serves the backlog (auto-fd68i).
           var remoteAddress = String(sessionId).indexOf('@') !== -1;
-          if (remoteAddress) await this._seedRemoteStore(store, sessionId);
           if (store.resolved || !store.isLive || remoteAddress) try {
             await this._fetchBacklog(store);
             try { console.log('[lc] '+JSON.stringify({event:'cfg-after-fetchBacklog',wallt:Date.now()})); } catch(e){}
@@ -2263,22 +2261,6 @@
           alt: p.alt || '',
           caption: p.caption || '',
         };
-      },
-
-      // Label, role and org of a remote session come from the Sessions
-      // page's remote rows (GET /api/sessions/remote, cached server-side).
-      async _seedRemoteStore(store, sessionId) {
-        try {
-          var res = await fetch('/api/sessions/remote');
-          if (!res.ok) return;
-          var data = await res.json();
-          var row = (data.sessions || []).find(function(r) { return r.session_id === sessionId; });
-          if (!row) return;
-          if (row.label && !store.label) store.label = row.label;
-          if (row.role && !store.role) store.role = row.role;
-          if (row.org && !store.org) store.org = row.org;
-          store.resolved = true;
-        } catch (e) { /* the tail still renders without it */ }
       },
 
       _applyMachine(data) {

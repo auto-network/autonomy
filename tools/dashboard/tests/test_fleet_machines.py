@@ -96,14 +96,15 @@ def test_status_carries_live_sessions_and_resources(monkeypatch):
     assert reply["result"]["resources"] == {"ram_free_gb": 1.5}
 
 
-def test_the_sessions_op_ships_only_allow_listed_card_fields():
-    registry = lambda: [{"session_id": "auto-1", "label": "x", "topics": ["t"],
-                         "harness_token": "org-uuid", "harness_token_alias": "work",
-                         "jsonl_path": "/data/x.jsonl", "lifecycle_detail": "boom",
-                         "brand_new_column": "secret"}]
-    reply = asyncio.run(scc.sessions_op(registry)({}, SJC))
-    assert reply["result"]["sessions"] == [{"session_id": "auto-1", "label": "x",
-                                            "topics": ["t"]}]
+def test_the_subscription_ships_only_allow_listed_card_fields():
+    from tools.dashboard import remote_sessions
+
+    rows = [{"session_id": "auto-1", "label": "x", "topics": ["t"],
+             "harness_token": "org-uuid", "harness_token_alias": "work",
+             "jsonl_path": "/data/x.jsonl", "lifecycle_detail": "boom",
+             "brand_new_column": "secret"}]
+    assert remote_sessions._project("session:registry", rows) == [
+        {"session_id": "auto-1", "label": "x", "topics": ["t"]}]
 
 
 # ── Home: launch targets and remote rows ────────────────────────────────────
@@ -197,34 +198,6 @@ def test_no_other_machine_means_only_this_one(monkeypatch):
     monkeypatch.setattr(machine_resources, "sample", lambda: {})
     targets = asyncio.run(fleet_machines.launch_targets())
     assert [t["label"] for t in targets] == ["home"]
-    assert asyncio.run(fleet_machines.remote_sessions()) == []
-
-
-def test_remote_rows_are_addressed_and_carry_their_machine(home, monkeypatch):
-    monkeypatch.setattr(session_presence, "read_presence", lambda: [])
-    home.replies = {"sessions": {"v": 1, "ok": True, "result": {"sessions": [
-        {"session_id": "auto-9", "label": "Sweep", "project": "p"}]}}}
-    rows = asyncio.run(fleet_machines.remote_sessions())
-    assert rows == [{"session_id": "auto-9@sjc-2", "tmux_session": "auto-9@sjc-2",
-                     "remote_tmux_name": "auto-9", "label": "Sweep", "project": "p",
-                     "machine": "sjc-2", "machine_pub": SJC, "machine_reachable": True,
-                     "machine_state": "reachable", "machine_unreachable_since": None}]
-
-
-def test_an_unreachable_machines_sessions_come_from_presence(home, monkeypatch):
-    monkeypatch.setattr(session_presence, "read_presence", lambda: [
-        {"tmux_name": "auto-9", "machine_pub": SJC, "project": "p", "type": "container",
-         "label": "Sweep", "since": 1_799_000_000, "local": False},
-        {"tmux_name": "auto-1", "machine_pub": HOME.machine_pub, "local": True}])
-    home.replies = {"sessions": {"v": 1, "ok": False, "refusal": "reply-timeout",
-                                 "detail": "no reply within 4s", "at": "local"}}
-    (row,) = asyncio.run(fleet_machines.remote_sessions())
-    assert row["session_id"] == "auto-9@sjc-2" and row["label"] == "Sweep"
-    assert row["machine_reachable"] is False and row["machine_state"] == "unreachable"
-    assert row["machine_not_enabled_reason"] == "reply-timeout"
-    assert (row["machine_refusal_detail"], row["machine_refusal_at"]) == (
-        "no reply within 4s", "local")
-    assert row["machine_unreachable_since"] == 1_800_000_000
 
 
 # ── the viewer's unreachable signal ─────────────────────────────────────────

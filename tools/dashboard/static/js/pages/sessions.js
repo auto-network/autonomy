@@ -365,9 +365,6 @@
       launchTargetsError: '',
       launchPanel: 'workspaces',
       launchWorkspace: null,
-      // Sessions on the operator's other machines, as Active-list rows
-      // addressed <name>@<machine> (GET /api/sessions/remote).
-      remoteSessions: [],
       recent: [],
       recentLoading: true,
       recentError: '',
@@ -1238,8 +1235,6 @@
         });
       },
       init() {
-        this._fetchRemoteSessions();
-        this._remoteSweep = setInterval(() => this._fetchRemoteSessions(), 20000);
         this.$watch('activeSort', (v) => {
           localStorage.setItem('sessionsActiveSort', v);
           this._updateFromStore();
@@ -1457,7 +1452,6 @@
               // A remote launch's real row is addressed <name>@<machine>.
               if (ph) ph._realSession = detail.machineLabel
                 ? created.tmux_name + '@' + detail.machineLabel : created.tmux_name;
-              if (detail.machine) this._fetchRemoteSessions();
             }
           } catch (err) {
             // Create failed — drop the optimistic tile immediately so it
@@ -1615,47 +1609,6 @@
         return true;
       },
 
-      async _fetchRemoteSessions() {
-        try {
-          var res = await fetch('/api/sessions/remote');
-          if (!res.ok) return;
-          var data = await res.json();
-          this.remoteSessions = Array.isArray(data.sessions) ? data.sessions : [];
-        } catch (e) {
-          return;
-        }
-        this._updateFromStore();
-      },
-
-      // A remote Active-list row in the card shape _updateFromStore builds.
-      _remoteCard(r) {
-        return {
-          id: r.session_id, session_id: r.session_id, tmux_session: r.session_id,
-          project: r.project || '', label: r.label || '', role: r.role || '',
-          is_live: r.is_live !== false,
-          created_at: r.started_at || r.created_at || 0,
-          last_activity: r.last_activity || 0, last_input_at: r.last_input_at || 0,
-          latest: (r.last_message || '').slice(0, 150),
-          type: r.type || 'container', session_type: 'interactive',
-          graph_source_id: '', bead_id: '',
-          entry_count: r.entry_count || 0, context_tokens: r.context_tokens || 0,
-          topics: Array.isArray(r.topics) ? r.topics : [],
-          nag_enabled: false, nag_interval: 15, nag_message: '', dispatch_nag_enabled: false,
-          activity_state: r.activity_state || 'idle', org: r.org || null,
-          resumable: false, harness: r.harness || null, model: r.model || null,
-          startup_state: r.startup_state || null, state: r.state || null,
-          attention: r.attention || null, harness_state: {}, resolved: true,
-          phase_progress: r.phase_progress || null, _launching: false, _hasData: true,
-          machine: r.machine, machine_pub: r.machine_pub,
-          machine_reachable: r.machine_reachable !== false,
-          machine_state: r.machine_state || 'reachable',
-          machine_not_enabled_reason: r.machine_not_enabled_reason || null,
-          machine_refusal_detail: r.machine_refusal_detail || null,
-          machine_refusal_at: r.machine_refusal_at || null,
-          machine_unreachable_since: r.machine_unreachable_since || null,
-        };
-      },
-
       machineTitle(s) {
         if (!s || !s.machine) return '';
         if (s.machine_state === 'not_enabled') {
@@ -1726,8 +1679,7 @@
           // LIVE OR DEAD. This is the stuck-tile fix: the fuzzy match below
           // only sees LIVE reals, so a session that died left the tile
           // orphaned as a "starting up" card until a manual refresh.
-          var bound = !!(p._realSession && (allSessions[p._realSession] ||
-            this.remoteSessions.some(function(r) { return r.session_id === p._realSession; })));
+          var bound = !!(p._realSession && allSessions[p._realSession]);
           // A real session created at/after this tile (5s skew tolerance)
           // means the launch resolved — retire the placeholder.
           var matched = bound || (realByKey[pk] !== undefined && realByKey[pk] >= (p.startedAt || 0) - 5);
@@ -1829,10 +1781,12 @@
             // navigation until the real session reconciles in).
             _launching: s._launching === true,
             _hasData: !!hasData,
+            // A session on another fleet machine (session:remote-registry).
+            machine: s.machine || undefined,
+            machine_pub: s.machinePub || undefined,
+            machine_reachable: s.machine ? s.machineReachable !== false : undefined,
+            machine_state: s.machine ? (s.machineReachable === false ? 'unreachable' : 'reachable') : undefined,
           });
-        }
-        for (var ri = 0; ri < this.remoteSessions.length; ri++) {
-          all.push(this._remoteCard(this.remoteSessions[ri]));
         }
         if (all.length > 0 || !this.loading) {
           // Sort by creation time descending — stable across navigations
@@ -2054,7 +2008,6 @@
 
       destroy() {
         if (this._launchSweep) { clearInterval(this._launchSweep); this._launchSweep = null; }
-        if (this._remoteSweep) { clearInterval(this._remoteSweep); this._remoteSweep = null; }
         if (this._onStoreChanged) window.removeEventListener('sessions:store-changed', this._onStoreChanged);
         if (this._onRecentHistoryChanged) window.removeEventListener('recent-sessions:changed', this._onRecentHistoryChanged);
         if (this._onSessionsNavigated) window.removeEventListener('app:navigated', this._onSessionsNavigated);

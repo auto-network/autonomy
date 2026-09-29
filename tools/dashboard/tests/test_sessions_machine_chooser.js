@@ -107,17 +107,10 @@ describe('refusal text', () => {
 });
 
 describe('remote Active cards', () => {
-  it('map a remote registry row to a card that names its machine', () => {
+  it('name the machine a remote session runs on, and say when it is unreachable', () => {
     const p = makeSessionsPage({ CustomEvent });
-    const card = p._remoteCard({ session_id: 'auto-9@sjc-2', label: 'Sweep', role: 'reviewer',
-      topics: ['t'], last_message: 'hi', machine: 'sjc-2', machine_pub: 'b1',
-      machine_reachable: false, machine_state: 'unreachable', machine_unreachable_since: 1800000000 });
-    assert.equal(card.session_id, 'auto-9@sjc-2');
-    assert.equal(card.tmux_session, 'auto-9@sjc-2');
-    assert.equal(card.machine, 'sjc-2');
-    assert.equal(card.machine_reachable, false);
-    assert.equal(card.latest, 'hi');
-    assert.match(p.machineTitle(card), /^sjc-2 unreachable since /);
+    assert.match(p.machineTitle({ machine: 'sjc-2', machine_reachable: false,
+      machine_unreachable_since: 1800000000 }), /^sjc-2 unreachable since /);
     assert.equal(p.machineTitle({ machine: 'sjc-2', machine_reachable: true }), 'Runs on sjc-2');
     assert.equal(p.machineTitle({}), '');
   });

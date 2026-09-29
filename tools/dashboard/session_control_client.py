@@ -190,9 +190,10 @@ def status_op(limits_provider: Callable[[], dict]) -> OpHandler:
     return status
 
 
-#: The ONLY fields of a session:registry row that leave this machine: what
-#: an Active card renders. An allow-list, so a column added to the row later
-#: (a host path, an error text, a credential id) never crosses by default.
+#: The ONLY fields of a session:registry row that leave this machine over its
+#: subscription (remote_sessions): what an Active card renders. An allow-list,
+#: so a column added to the row later (a host path, an error text, a
+#: credential id) never crosses by default.
 SESSIONS_ROW_FIELDS = (
     "session_id", "project", "type", "is_live", "started_at", "label", "role",
     "entry_count", "context_tokens", "last_activity", "last_input_at",
@@ -201,20 +202,6 @@ SESSIONS_ROW_FIELDS = (
     "org",
 )
 
-
-def sessions_op(registry: Callable[[], list]) -> OpHandler:
-    """``sessions``: this machine's live sessions exactly as its own
-    ``session:registry`` payload carries them (*registry* is the session
-    monitor's get_registry), so a remote card shows the same fields as a
-    local one (bead auto-mje3g). Read-only."""
-
-    async def sessions(_body: dict, _peer: str) -> dict:
-        rows = await asyncio.to_thread(registry)
-        clean = [{k: row[k] for k in SESSIONS_ROW_FIELDS if k in row}
-                 for row in rows]
-        return ok({"sessions": clean})
-
-    return sessions
 
 
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")

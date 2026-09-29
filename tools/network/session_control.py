@@ -452,6 +452,8 @@ async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticato
             request = parse_request(message)
         except SessionControlError as exc:
             return encode(refusal(exc.refusal, exc.detail))
+        if request["op"] == "subscribe":
+            return await _accept_subscription(request, client_pub, broker, endpoint)
         reply = await broker.submit(
             request["op"], request["body"], peer_machine_pub=client_pub)
         result = reply.get("result") if reply.get("ok") else None
@@ -609,6 +611,60 @@ class _PeerRefusal(SessionControlError):
     """A refusal the target reported, rather than one decided here."""
 
 
+@contextlib.asynccontextmanager
+async def _open_channel(connector, runtime, machine_pub: str, timeout: float,
+                        resolve_slot=None):
+    """Open a directed stream to *machine_pub* through this connector's relay
+    tunnel and run the session:control handshake on it; yields the
+    authenticated channel and resets the stream on exit. Failures raise
+    SessionControlError (decided here), _PeerRefusal (the target's refusal)
+    or FleetHandshakeRefused (our check of the target's hello)."""
+    adapter = getattr(connector, "session_streams", None)
+    if adapter is None:
+        # The relay did not negotiate session-control/1 on this tunnel,
+        # which is what a relay that predates it looks like.
+        raise SessionControlError(
+            NOT_NEGOTIATED, "the relay did not negotiate session-control/1")
+    authenticator = session_authenticator(runtime)
+    if resolve_slot is None:
+        from tools.network.fleet_relay_carrier import resolve_peer_slot as resolve_slot
+    try:
+        (persona_pub, slot_machine), _source = await resolve_slot(
+            connector, runtime, machine_pub, timeout=timeout)
+    except ConnectionError as exc:
+        # PeerSlotError names its reason; any other ConnectionError is
+        # the relay's slot list failing to load.
+        raise SessionControlError(
+            getattr(exc, "reason", None) or SLOT_LOOKUP_FAILED, str(exc)) from exc
+    try:
+        endpoint = await adapter.open(
+            persona_pub, slot_machine,
+            claimed_machine_pub=authenticator.machine_pub, timeout=timeout)
+    except FleetStreamRefused as exc:
+        # The relay's own admission reason, verbatim; a relay that
+        # predates session-control/1 says "unknown control op".
+        raise SessionControlError(exc.reason) from exc
+    except FleetStreamClosed as exc:
+        # Admitted by the relay, then declined by the peer's connector
+        # without a word: a target that predates typed refusals.
+        raise SessionControlError(PEER_CLOSED_AT_OPEN, str(exc)) from exc
+    try:
+        try:
+            channel = await asyncio.wait_for(authenticate_fleet_transport(
+                _RefusalAwareTransport(endpoint), authenticator=authenticator,
+                expected_machine_pub=machine_pub, session=endpoint.session,
+            ), timeout)
+        except asyncio.TimeoutError:
+            raise SessionControlError(
+                HANDSHAKE_TIMEOUT, f"no handshake within {timeout}s") from None
+        except FleetStreamClosed as exc:
+            raise SessionControlError(PEER_CLOSED_IN_HANDSHAKE, str(exc)) from exc
+        yield channel
+    finally:
+        with contextlib.suppress(Exception):
+            await endpoint.close()
+
+
 async def request(connector, runtime, *, machine_pub: str, op: str,
                   body: dict, timeout: float = 15.0,
                   resolve_slot=None, stream: bool = False) -> dict:
@@ -620,47 +676,8 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
     try:
         record = encode({"v": SESSION_CONTROL_VERSION, "op": op, "body": body},
                         too_large=REQUEST_TOO_LARGE)
-        adapter = getattr(connector, "session_streams", None)
-        if adapter is None:
-            # The relay did not negotiate session-control/1 on this tunnel,
-            # which is what a relay that predates it looks like.
-            raise SessionControlError(
-                NOT_NEGOTIATED, "the relay did not negotiate session-control/1")
-        authenticator = session_authenticator(runtime)
-        if resolve_slot is None:
-            from tools.network.fleet_relay_carrier import resolve_peer_slot
-            resolve_slot = resolve_peer_slot
-        try:
-            (persona_pub, slot_machine), _source = await resolve_slot(
-                connector, runtime, machine_pub, timeout=timeout)
-        except ConnectionError as exc:
-            # PeerSlotError names its reason; any other ConnectionError is
-            # the relay's slot list failing to load.
-            raise SessionControlError(
-                getattr(exc, "reason", None) or SLOT_LOOKUP_FAILED, str(exc)) from exc
-        try:
-            endpoint = await adapter.open(
-                persona_pub, slot_machine,
-                claimed_machine_pub=authenticator.machine_pub, timeout=timeout)
-        except FleetStreamRefused as exc:
-            # The relay's own admission reason, verbatim; a relay that
-            # predates session-control/1 says "unknown control op".
-            raise SessionControlError(exc.reason) from exc
-        except FleetStreamClosed as exc:
-            # Admitted by the relay, then declined by the peer's connector
-            # without a word: a target that predates typed refusals.
-            raise SessionControlError(PEER_CLOSED_AT_OPEN, str(exc)) from exc
-        try:
-            try:
-                channel = await asyncio.wait_for(authenticate_fleet_transport(
-                    _RefusalAwareTransport(endpoint), authenticator=authenticator,
-                    expected_machine_pub=machine_pub, session=endpoint.session,
-                ), timeout)
-            except asyncio.TimeoutError:
-                raise SessionControlError(
-                    HANDSHAKE_TIMEOUT, f"no handshake within {timeout}s") from None
-            except FleetStreamClosed as exc:
-                raise SessionControlError(PEER_CLOSED_IN_HANDSHAKE, str(exc)) from exc
+        async with _open_channel(connector, runtime, machine_pub, timeout,
+                                 resolve_slot) as channel:
             await channel.send_message(record)
             if stream:
                 reply = await _receive_stream(channel, timeout)
@@ -671,9 +688,6 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
                     raise SessionControlError(
                         REPLY_TIMEOUT, f"no reply within {timeout}s") from None
                 reply = _decode_reply(raw)
-        finally:
-            with contextlib.suppress(Exception):
-                await endpoint.close()
         if reply.get("ok") is False and "at" not in reply:
             reply = {**reply, "at": "peer"}
         return reply
@@ -688,9 +702,192 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
         return refusal(FAILED, f"{type(exc).__name__}: {exc}", at="local")
 
 
+# ── subscriptions: one channel that stays open ────────────────────────────────
+#
+# A machine subscribes to another once, with its persona, and the channel
+# stays open: the host's dashboard publishes each live session event on it as
+# it happens (graph bead "Live remote session events"). The channel ends only
+# when the subscriber closes it or it is lost; the subscriber then subscribes
+# again, and stops on a refusal.
+
+#: Events handed over by the host's dashboard for one subscription and not
+#: yet written to its channel. A channel this far behind is ended, and its
+#: subscriber reconnects.
+SUBSCRIPTION_QUEUE_LIMIT = 256
+#: Received events waiting for this machine's dashboard to collect them.
+RECEIVED_QUEUE_LIMIT = 1024
+SUBSCRIPTION_NOT_FOUND = "subscription-not-found"  # publish to an ended subscription
+SUBSCRIPTION_BEHIND = "subscription-behind"        # the channel fell SUBSCRIPTION_QUEUE_LIMIT behind
+SUBSCRIPTION_LOST = "subscription-lost"            # the channel ended under the subscriber
+EVENT_TOO_LARGE = "event-too-large"                # one event exceeds MAX_RECORD_BYTES
+
+#: sub_id -> queue of encoded records, for channels other machines opened here.
+_published: dict[str, asyncio.Queue] = {}
+#: machine_pub -> the task holding this machine's subscription to it.
+_subscribed: dict[str, asyncio.Task] = {}
+_received: asyncio.Queue = asyncio.Queue(maxsize=RECEIVED_QUEUE_LIMIT)
+
+
+class _Live:
+    """A handler response that is a live sequence of messages: relaykit sends
+    each as it is produced instead of holding one back to mark the last."""
+
+    live = True
+
+    def __init__(self, iterator):
+        self._iterator = iterator
+
+    def __aiter__(self):
+        return self._iterator
+
+
+async def _subscription(sub_id: str, queue: asyncio.Queue, first: bytes, endpoint):
+    try:
+        yield first
+        while (record := await queue.get()) is not None:
+            yield record
+    finally:
+        _published.pop(sub_id, None)
+        # The subscription is the whole exchange: ending it ends the stream.
+        with contextlib.suppress(Exception):
+            asyncio.ensure_future(endpoint.close())
+
+
+async def _accept_subscription(request: dict, client_pub: str,
+                               broker: "InboundBroker", endpoint):
+    sub_id = secrets.token_hex(16)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=SUBSCRIPTION_QUEUE_LIMIT)
+    _published[sub_id] = queue
+    # The dashboard learns the sub_id from this connector, never from the peer.
+    reply = await broker.submit("subscribe", {**request["body"], "sub_id": sub_id},
+                                peer_machine_pub=client_pub)
+    if not reply.get("ok"):
+        _published.pop(sub_id, None)
+        return encode(reply)
+    return _Live(_subscription(sub_id, queue, encode(reply), endpoint))
+
+
+def _end_subscription(sub_id: str) -> None:
+    queue = _published.pop(sub_id, None)
+    if queue is None:
+        return
+    while not queue.empty():
+        queue.get_nowait()
+    queue.put_nowait(None)
+
+
+def publish(sub_id: str, record: dict) -> dict:
+    """The host dashboard hands one event to a subscription's channel."""
+    queue = _published.get(sub_id)
+    if queue is None:
+        return {"ok": False, "error_kind": SUBSCRIPTION_NOT_FOUND,
+                "error": "no such subscription"}
+    try:
+        data = encode(record, too_large=EVENT_TOO_LARGE)
+    except SessionControlError as exc:
+        return {"ok": False, "error_kind": exc.refusal, "error": exc.detail}
+    try:
+        queue.put_nowait(data)
+    except asyncio.QueueFull:
+        _end_subscription(sub_id)
+        return {"ok": False, "error_kind": SUBSCRIPTION_BEHIND,
+                "error": f"{SUBSCRIPTION_QUEUE_LIMIT} events behind; ended"}
+    return {"ok": True}
+
+
+def _deliver(item: dict) -> None:
+    try:
+        _received.put_nowait(item)
+    except asyncio.QueueFull:
+        logger.warning("session-control: dropped an event from %s; the dashboard "
+                       "is not collecting", str(item.get("machine_pub"))[:12])
+
+
+async def _hold_subscription(connector, runtime, machine_pub: str, persona: str,
+                             timeout: float) -> None:
+    end = {"machine_pub": machine_pub, "end": SUBSCRIPTION_LOST, "at": "local",
+           "refused": False}
+    try:
+        record = encode({"v": SESSION_CONTROL_VERSION, "op": "subscribe",
+                         "body": {"persona": persona}})
+        async with _open_channel(connector, runtime, machine_pub, timeout) as channel:
+            await channel.send_message(record)
+            stream = channel.recv_message_stream()
+            try:
+                first, _final = await asyncio.wait_for(stream.__anext__(), timeout)
+            except asyncio.TimeoutError:
+                raise SessionControlError(
+                    REPLY_TIMEOUT, f"no reply within {timeout}s") from None
+            ack = _decode_reply(first)
+            if not ack.get("ok"):
+                end.update(end=ack.get("refusal") or PEER_REFUSED, at="peer",
+                           detail=str(ack.get("detail", "")), refused=True)
+                return
+            _deliver({"machine_pub": machine_pub, "subscribed": True})
+            async for message, final in stream:
+                _deliver({"machine_pub": machine_pub, "event": json.loads(message)})
+                if final:
+                    return
+    except asyncio.CancelledError:
+        end = None      # closed from this side: nothing to report
+        raise
+    except _PeerRefusal as exc:
+        end.update(end=exc.refusal, at="peer", detail=exc.detail,
+                   refused=exc.refusal in HANDSHAKE_REFUSALS)
+    except FleetHandshakeRefused as exc:
+        end.update(end=exc.refusal, detail=exc.detail, refused=True)
+    except SessionControlError as exc:
+        end.update(end=exc.refusal, detail=exc.detail)
+    except Exception as exc:
+        end.update(detail=f"{type(exc).__name__}: {exc}"[:300])
+    finally:
+        if end is not None:
+            _deliver(end)
+
+
+def subscribe(connector, runtime, machine_pub: str, persona: str,
+              timeout: float = 15.0) -> None:
+    """Hold one subscription to *machine_pub*, replacing any earlier one."""
+    old = _subscribed.pop(machine_pub, None)
+    if old is not None:
+        old.cancel()
+    task = asyncio.get_running_loop().create_task(
+        _hold_subscription(connector, runtime, machine_pub, persona, timeout))
+    _subscribed[machine_pub] = task
+
+    def forget(done, key=machine_pub):
+        if _subscribed.get(key) is done:
+            _subscribed.pop(key, None)
+
+    task.add_done_callback(forget)
+
+
+def close_subscriptions() -> int:
+    """End every subscription channel this connector holds, both ways."""
+    closed = len(_published) + len(_subscribed)
+    for sub_id in list(_published):
+        _end_subscription(sub_id)
+    for task in list(_subscribed.values()):
+        task.cancel()
+    _subscribed.clear()
+    return closed
+
+
+async def _collect(wait_s: float) -> list:
+    try:
+        items = [await asyncio.wait_for(_received.get(), max(0.0, wait_s))]
+    except asyncio.TimeoutError:
+        return []
+    while not _received.empty() and len(items) < SUBSCRIPTION_QUEUE_LIMIT:
+        items.append(_received.get_nowait())
+    return items
+
+
 def ctl_op(op: str) -> bool:
     return op in ("session-control-request", "session-control-next",
-                  "session-control-reply")
+                  "session-control-reply", "session-control-subscribe",
+                  "session-control-events", "session-control-publish",
+                  "session-control-close-subscriptions")
 
 
 async def handle_ctl(connector, runtime, op: str, args: Any,
@@ -717,4 +914,20 @@ async def handle_ctl(connector, runtime, op: str, args: Any,
         if not isinstance(request_id, str) or not isinstance(reply, dict):
             return {"ok": False, "error": "id and reply are required"}
         return {"ok": True, "delivered": broker.reply(request_id, reply)}
+    if op == "session-control-subscribe":
+        machine_pub, persona = args.get("machine_pub"), args.get("persona")
+        if not isinstance(machine_pub, str) or not isinstance(persona, str):
+            return {"ok": False, "error": "machine_pub and persona are required"}
+        subscribe(connector, runtime, machine_pub, persona,
+                  timeout=float(args.get("timeout") or 15.0))
+        return {"ok": True}
+    if op == "session-control-events":
+        return {"ok": True, "items": await _collect(float(args.get("wait") or 20.0))}
+    if op == "session-control-publish":
+        sub_id, record = args.get("sub_id"), args.get("record")
+        if not isinstance(sub_id, str) or not isinstance(record, dict):
+            return {"ok": False, "error": "sub_id and record are required"}
+        return publish(sub_id, record)
+    if op == "session-control-close-subscriptions":
+        return {"ok": True, "closed": close_subscriptions()}
     return {"ok": False, "error": f"unknown session-control ctl op {op!r}"}

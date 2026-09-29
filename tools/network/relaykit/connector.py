@@ -154,6 +154,18 @@ async def _response_messages(response):
         )
 
     iterator = aiter(response)
+    if getattr(response, "live", False):
+        # A live response (a subscription) has no last message: each one is
+        # sent as it is produced, and the exchange ends with the channel.
+        # Lookahead here would hold every event until the next one arrived.
+        try:
+            async for message in iterator:
+                yield _message_bytes(message), False
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                await close()
+        return
     try:
         try:
             current = _message_bytes(await anext(iterator))
