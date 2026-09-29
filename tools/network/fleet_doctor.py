@@ -54,9 +54,11 @@ _QUIET = False  # set True in main() for --json: report data still collected, no
 #: connector is still up (its pid was just listed), it simply has not logged
 #: lately, so an alarming tail is not evidence of a live fault.
 _CONNECTOR_LOG_FRESH_S = 30 * 60.0
-#: A persona write floor older than this is stale: the scheduler's decline
-#: line (fleet_sync_scheduler.PERSONA_FLOOR_STALE_S) and this report agree.
-PERSONA_FLOOR_STALE_S = 600
+#: A persona write floor this far behind the newest write this store holds
+#: is a fault (fleet_sync_scheduler.PERSONA_FLOOR_BEHIND_S): a difference
+#: of positions, as compare_frontiers measures between machines, never an
+#: age against the clock (an old floor on a quiet scope is correct).
+PERSONA_FLOOR_BEHIND_S = 600
 
 
 def _observe(path) -> "sqlite3.Connection":
@@ -1254,6 +1256,7 @@ def check_sync_frontiers(report: dict) -> None:
                     f"newest write {human} old, {origin['transactions']} txn(s){cursor}",
                     warn=age >= 3600 or behind,
                 )
+            newest_held = max((int(o["newest_ns"]) for o in (origins or [])), default=0)
             for persona in entry.get("personas") or []:
                 floor_age = max(0, (now_ns - persona["write_floor_ns"]) // 1_000_000_000)
                 if persona["behind_on"]:
@@ -1261,19 +1264,25 @@ def check_sync_frontiers(report: dict) -> None:
                     verdict = f"NOT covered: behind on machine(s) {names}"
                 else:
                     verdict = "covered (advertised to the relay)"
-                # A covered floor that stopped moving is the fault Home carried
-                # for five days (auto-mmwgu): a roster machine's cursor is
-                # frozen here, and nothing the persona wrote since the floor
-                # can be claimed by this member (share links close 4431).
-                stale = floor_age > PERSONA_FLOOR_STALE_S
-                if stale:
+                # The floor against the newest write this store holds: the
+                # same comparison compare_frontiers makes between machines.
+                # A floor far behind the writes held here is the fault Home
+                # carried for five days (auto-mmwgu): one roster machine's
+                # position stopped moving while others kept writing, and
+                # nothing the persona wrote since is claimable by this member
+                # (share links close 4431). A quiet scope's floor is old and
+                # behind nothing.
+                behind_s = max(0, (newest_held - persona["write_floor_ns"]) // 1_000_000_000)
+                persona["behind_s"] = behind_s
+                behind = behind_s > PERSONA_FLOOR_BEHIND_S
+                if behind:
                     names = ", ".join(m[:12] for m in persona.get("pinned_by") or []) or "?"
-                    verdict += (f"; STALE: pinned by roster machine(s) {names}, whose position "
-                                "here has not moved since the floor")
+                    verdict += (f"; BEHIND: {behind_s}s behind the newest write held here, pinned by "
+                                f"roster machine(s) {names}")
                 _line(
                     f"  {slug} persona {persona['persona'][:12]}",
                     f"write floor {floor_age}s old over {persona['machines']} machine(s); {verdict}",
-                    warn=bool(persona["behind_on"]) or stale,
+                    warn=bool(persona["behind_on"]) or behind,
                 )
             newest_thought = (entry.get("thoughts") or {}).get("newest")
             if newest_thought:

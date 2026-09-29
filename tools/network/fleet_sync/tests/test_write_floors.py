@@ -373,8 +373,9 @@ def test_the_seal_names_why_it_declined(tmp_path: Path) -> None:
     assert write_floors.seal_persona_write_floor(db.conn, signer=sealer, persona_cert=cert, org=ORG,
                                  roster_machines={m1.public_hex}, positions={m1.public_hex: 100})
     assert write_floors.persona_seal_blocker(
-        db.conn, persona=P, roster_machines={m1.public_hex}, positions={m1.public_hex: 100}, now_ns=100,
-    ) == f"minimum position 100 (0s old, held by roster machine(s) {m1.public_hex[:12]}) is not above the held persona write floor 100"
+        db.conn, persona=P, roster_machines={m1.public_hex}, positions={m1.public_hex: 100},
+    ) == (f"minimum position 100 (held by roster machine(s) {m1.public_hex[:12]}, 0s behind the newest "
+          "position held here) is not above the held persona write floor 100")
     assert write_floors.persona_seal_blocker(
         db.conn, persona=P, roster_machines={m1.public_hex}, positions={m1.public_hex: 150},
     ) is None
@@ -446,7 +447,10 @@ def test_decline_names_an_unbuilt_channel_when_both_parts_are_held(tmp_path: Pat
 
 # ── a decline is a signal, not a heartbeat (auto-mmwgu, reopened 2026-09-28) ──
 
-def test_the_settled_decline_names_the_pinning_machine_and_its_age(tmp_path: Path) -> None:
+def test_the_settled_decline_names_the_pinning_machine_and_how_far_behind_it_is(tmp_path: Path) -> None:
+    """The gap is a difference of positions: the roster minimum against the
+    newest position the store holds for any origin (compare_frontiers'
+    measurement), never the floor's age."""
     persona, sealer, m1, m2 = KeyPair.generate(), KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
     db = GraphDB(tmp_path / "pin.db")
     MutationCatalog(db.conn, sealer.public_hex).install()
@@ -454,27 +458,23 @@ def test_the_settled_decline_names_the_pinning_machine_and_its_age(tmp_path: Pat
     P = persona.public_hex
     roster = {m1.public_hex, m2.public_hex}
     day = 86400 * 1_000_000_000
-    now = 10 * day
     assert write_floors.seal_persona_write_floor(db.conn, signer=sealer, persona_cert=cert, org=ORG,
                                                  roster_machines=roster,
                                                  positions={m1.public_hex: 5 * day, m2.public_hex: 9 * day})
-    reason = write_floors.persona_seal_blocker(
-        db.conn, persona=P, roster_machines=roster,
-        positions={m1.public_hex: 5 * day, m2.public_hex: now}, now_ns=now,
-    )
+    # m2 kept writing (its position moved to day 10); m1's position stayed at day 5.
+    positions = {m1.public_hex: 5 * day, m2.public_hex: 10 * day}
+    reason = write_floors.persona_seal_blocker(db.conn, persona=P, roster_machines=roster, positions=positions)
     assert write_floors.persona_seal_settled(reason)
-    assert reason == (f"minimum position {5 * day} (5d old, held by roster machine(s) {m1.public_hex[:12]}) "
-                      f"is not above the held persona write floor {5 * day}")
+    assert reason == (f"minimum position {5 * day} (held by roster machine(s) {m1.public_hex[:12]}, 5d behind the "
+                      f"newest position held here) is not above the held persona write floor {5 * day}")
+    assert write_floors.persona_seal_gap_ns(roster, positions) == 5 * day
+    # A quiet scope: nothing newer than the floor exists here, whatever the clock says.
+    assert write_floors.persona_seal_gap_ns(roster, {m1.public_hex: 5 * day, m2.public_hex: 5 * day}) == 0
+    # A third origin's newer position counts: it is a position this store holds.
+    assert write_floors.persona_seal_gap_ns(roster, {**positions, "cc" * 32: 12 * day}) == 7 * day
+    assert write_floors.persona_seal_gap_ns(roster, {m1.public_hex: 5 * day}) is None
     assert not write_floors.persona_seal_settled("no position held for roster machine(s) abc")
     db.close()
-
-
-class _DeclineStore:
-    def __init__(self, held):
-        self.held = held
-
-    def persona_frontiers(self):
-        return {"P": self.held} if self.held is not None else {}
 
 
 def _decline_scheduler(monkeypatch):
@@ -485,27 +485,28 @@ def _decline_scheduler(monkeypatch):
     return scheduler, clock
 
 
-def test_a_settled_fleet_declines_at_debug_until_the_held_floor_is_stale(monkeypatch, caplog) -> None:
+def test_a_settled_fleet_declines_at_debug_until_the_floor_falls_behind_the_writes_held(monkeypatch, caplog) -> None:
     import logging
     from tools.network import fleet_sync_scheduler as fss
     scheduler, clock = _decline_scheduler(monkeypatch)
-    fresh = time.time_ns() - 30 * 1_000_000_000
-    reason = "minimum position 5 (30s old, held by roster machine(s) abc) is not above the held persona write floor 5"
+    reason = "minimum position 5 (held by roster machine(s) abc, 0s behind the newest position held here) is not above the held persona write floor 5"
     with caplog.at_level(logging.DEBUG, logger="tools.network.fleet_sync_scheduler"):
         for _ in range(3):
-            scheduler._log_seal_decline("alpha", reason, store=_DeclineStore(fresh), persona="P")
+            scheduler._log_seal_decline("alpha", reason, gap_ns=0)            # quiet scope
+        scheduler._log_seal_decline("alpha", reason, gap_ns=30 * 1_000_000_000)   # a round or two behind
+        scheduler._log_seal_decline("alpha", reason, gap_ns=None)             # nothing to compare
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert sum("settled" in r.getMessage() for r in caplog.records) == 3
+    assert sum("settled" in r.getMessage() for r in caplog.records) == 5
     caplog.clear()
-    stale = time.time_ns() - (fss.PERSONA_FLOOR_STALE_S + 60) * 1_000_000_000
-    reason = "minimum position 1 (5d old, held by roster machine(s) sjc2) is not above the held persona write floor 1"
+    reason = "minimum position 1 (held by roster machine(s) sjc2, 5d behind the newest position held here) is not above the held persona write floor 1"
+    gap = (fss.PERSONA_FLOOR_BEHIND_S + 60) * 1_000_000_000
     with caplog.at_level(logging.DEBUG, logger="tools.network.fleet_sync_scheduler"):
         for _ in range(3):
-            scheduler._log_seal_decline("alpha", reason, store=_DeclineStore(stale), persona="P")
+            scheduler._log_seal_decline("alpha", reason, gap_ns=gap)
         clock["mono"] += fss.SEAL_DECLINE_REPEAT_S + 1
-        scheduler._log_seal_decline("alpha", reason, store=_DeclineStore(stale), persona="P")
+        scheduler._log_seal_decline("alpha", reason, gap_ns=gap)
     warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert len(warned) == 2 and all("(held floor is stale)" in w and "sjc2" in w for w in warned)
+    assert len(warned) == 2 and all("(held floor is behind the newest position here)" in w and "sjc2" in w for w in warned)
 
 
 def test_other_decline_reasons_warn_when_they_appear_or_change_then_repeat_slowly(monkeypatch, caplog) -> None:

@@ -347,15 +347,15 @@ def seal_persona_write_floor(
 
 def persona_seal_blocker(
     conn: sqlite3.Connection, *, persona: str, roster_machines: set[str],
-    positions: Mapping[str, int], now_ns: int | None = None,
+    positions: Mapping[str, int],
 ) -> str | None:
     """Why seal_persona_write_floor would decline right now, in words, or None when
     it would seal: an empty roster, a roster machine with no position in
     this store, or a minimum not above the persona write floor already held.
     The last case names the roster machine(s) whose position IS the minimum
-    and how old that position is: the persona write floor is the minimum, so
-    one machine whose cursor stopped moving here pins it (Home, 2026-09-24
-    to 09-29: SJC-2's frozen cursor held the floor five days)."""
+    and how far that minimum is behind the newest position this store holds
+    (fleet_sync_report.compare_frontiers: a frontier is measured only by
+    comparison with another position, never by its age)."""
     if not roster_machines:
         return "the persona's roster lists no machines"
     missing = sorted(m for m in roster_machines if m not in positions)
@@ -365,18 +365,33 @@ def persona_seal_blocker(
     held = persona_write_floors(conn).get(persona)
     if held is not None and int(held.get("write_floor_ns", 0)) >= minimum:
         pinned = ", ".join(m[:12] for m in sorted(roster_machines) if int(positions[m]) == minimum)
-        now = time.time_ns() if now_ns is None else int(now_ns)
+        gap = persona_seal_gap_ns(roster_machines, positions) or 0
         return (
-            f"minimum position {minimum} ({_age_words(now - minimum)} old, held by roster "
-            f"machine(s) {pinned}) is not above the held persona write floor {int(held['write_floor_ns'])}"
+            f"minimum position {minimum} (held by roster machine(s) {pinned}, {_age_words(gap)} behind "
+            f"the newest position held here) is not above the held persona write floor {int(held['write_floor_ns'])}"
         )
     return None
+
+
+def persona_seal_gap_ns(roster_machines: set[str], positions: Mapping[str, int]) -> int | None:
+    """How far the persona floor's minimum is behind the newest position this
+    store holds for any origin: a difference of two positions in the write
+    stream, the same measurement fleet_sync_report.compare_frontiers makes
+    between machines. Zero on a quiet scope (nothing newer than the floor
+    exists here); large when one roster machine's position stopped moving
+    while others kept writing (Home, 2026-09-24 to 09-29). None while a
+    roster machine has no position, or nothing is held."""
+    if not roster_machines or not positions or any(m not in positions for m in roster_machines):
+        return None
+    minimum = min(int(positions[m]) for m in roster_machines)
+    newest = max(int(v) for v in positions.values())
+    return max(0, newest - minimum)
 
 
 def persona_seal_settled(reason: str | None) -> bool:
     """Whether a decline reason is the settled case: every roster machine has
     a position and none moved since the last seal. Not a fault by itself;
-    it becomes one only when the held floor grows old."""
+    it becomes one when the floor falls behind the newest position held."""
     return bool(reason) and reason.startswith("minimum position ")
 
 

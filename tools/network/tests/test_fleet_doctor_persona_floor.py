@@ -35,14 +35,18 @@ def _store_with_persona_floor(path: Path, floor_ns: int, positions: dict) -> Non
     conn.close()
 
 
-def _report(tmp_path, monkeypatch, capsys, *, floor_age_s: int) -> tuple[str, dict]:
+def _report(tmp_path, monkeypatch, capsys, *, floor_age_s: int, home_behind_floor_s: int | None = None) -> tuple[str, dict]:
+    """A store whose persona floor is ``floor_age_s`` old by the clock. HOME's
+    own position is ``home_behind_floor_s`` after the floor (default: now,
+    i.e. HOME kept writing); SJC's position IS the floor."""
     from tools.graph import db as graph_db
 
     orgs = tmp_path / "orgs"
     orgs.mkdir()
     now = time.time_ns()
     floor = now - floor_age_s * 1_000_000_000
-    _store_with_persona_floor(orgs / "autonomy.db", floor, {HOME: now, SJC: floor})
+    home = now if home_behind_floor_s is None else floor + home_behind_floor_s * 1_000_000_000
+    _store_with_persona_floor(orgs / "autonomy.db", floor, {HOME: home, SJC: floor})
     monkeypatch.setattr(graph_db, "_orgs_dir", lambda root=None: orgs)
     monkeypatch.setattr(graph_db, "_org_db_path", lambda slug, root=None: tmp_path / "missing-personal.db")
     monkeypatch.setattr(fleet_doctor, "_QUIET", False)
@@ -54,14 +58,30 @@ def _report(tmp_path, monkeypatch, capsys, *, floor_age_s: int) -> tuple[str, di
 def test_a_fresh_covered_floor_is_reported_ok(tmp_path, monkeypatch, capsys):
     out, report = _report(tmp_path, monkeypatch, capsys, floor_age_s=90)
     [line] = [l for l in out.splitlines() if "autonomy persona" in l]
-    assert line.startswith("  [ok  ]") and "covered (advertised to the relay)" in line and "STALE" not in line
+    assert line.startswith("  [ok  ]") and "covered (advertised to the relay)" in line and "BEHIND" not in line
     [persona] = report["sync_frontiers"]["autonomy"]["personas"]
-    assert persona["pinned_by"] == [SJC] and persona["behind_on"] == []
+    assert persona["pinned_by"] == [SJC] and persona["behind_on"] == [] and persona["behind_s"] == 90
 
 
-def test_a_covered_floor_that_stopped_moving_warns_and_names_the_pinning_machine(tmp_path, monkeypatch, capsys):
-    out, _report_ = _report(tmp_path, monkeypatch, capsys, floor_age_s=5 * 86400)
+def test_an_old_floor_on_a_quiet_scope_is_correct_not_behind(tmp_path, monkeypatch, capsys):
+    """anchore and dynbench on Home and SJC-2, 2026-09-29 15:41Z: floors 15 min
+    old because nothing was written since, both cursors at MAX. The floor is
+    behind nothing; the clock is not the measure."""
+    out, report = _report(tmp_path, monkeypatch, capsys, floor_age_s=15 * 60, home_behind_floor_s=0)
+    [line] = [l for l in out.splitlines() if "autonomy persona" in l]
+    assert line.startswith("  [ok  ]") and "BEHIND" not in line and "write floor 9" in line
+    [persona] = report["sync_frontiers"]["autonomy"]["personas"]
+    assert persona["behind_s"] == 0
+
+
+def test_a_floor_far_behind_the_writes_held_warns_and_names_the_pinning_machine(tmp_path, monkeypatch, capsys):
+    """Home, 2026-09-24 to 09-29: Home kept writing while SJC-2's position
+    stayed at the floor for five days."""
+    out, report = _report(tmp_path, monkeypatch, capsys, floor_age_s=5 * 86400)
     [line] = [l for l in out.splitlines() if "autonomy persona" in l]
     assert line.startswith("  [WARN]")
-    assert "covered (advertised to the relay); STALE: pinned by roster machine(s) " + SJC[:12] in line
-    assert HOME[:12] not in line.split("STALE", 1)[1]
+    assert "covered (advertised to the relay); BEHIND: " in line
+    assert "behind the newest write held here, pinned by roster machine(s) " + SJC[:12] in line
+    assert HOME[:12] not in line.split("BEHIND", 1)[1]
+    [persona] = report["sync_frontiers"]["autonomy"]["personas"]
+    assert 5 * 86400 - 5 <= persona["behind_s"] <= 5 * 86400

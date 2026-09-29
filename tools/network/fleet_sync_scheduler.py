@@ -127,10 +127,13 @@ _REFUSAL_MAGIC = b"FSR1"
 #: reply, which otherwise opens straight with its first transaction header,
 #: opens with this record instead.
 PULL_BEGIN_KIND = "pull.begin"
-#: A persona write floor older than this while the seal declines is a fault
-#: worth a WARNING: a roster machine's cursor has stopped moving here, so
-#: this member cannot claim anything the persona wrote since (auto-mmwgu).
-PERSONA_FLOOR_STALE_S = 600
+#: A persona write floor this far BEHIND the newest position this store
+#: holds, while the seal declines, is a fault worth a WARNING: a roster
+#: machine's position stopped moving here while others kept writing, so this
+#: member cannot claim anything the persona wrote since (auto-mmwgu). A
+#: difference of positions, never an age: a quiet scope's floor ages with
+#: the clock and is correct.
+PERSONA_FLOOR_BEHIND_S = 600
 #: An unchanged decline reason repeats at WARNING at most this often.
 SEAL_DECLINE_REPEAT_S = 600
 #: The typed refusal a follow pull receives when its watermark predates the
@@ -1890,6 +1893,17 @@ class SQLiteFleetSyncStore:
                 conn, persona=persona, roster_machines=set(roster_machines),
                 positions=catalog.origin_watermarks(),
             )
+        finally:
+            conn.close()
+
+    def persona_seal_gap_ns(self, roster_machines) -> int | None:
+        """How far the persona floor's minimum is behind the newest position
+        this store holds (write_floors.persona_seal_gap_ns)."""
+        from tools.network.fleet_sync import write_floors
+
+        conn, catalog = self._open()
+        try:
+            return write_floors.persona_seal_gap_ns(set(roster_machines), catalog.origin_watermarks())
         finally:
             conn.close()
 
@@ -4039,22 +4053,27 @@ class FleetSyncScheduler:
                 persona=str(channel.persona_cert.subject.id),
                 roster_machines=roster_machines,
             )
-            self._log_seal_decline(scope, reason or "unknown", store=store,
-                                   persona=str(channel.persona_cert.subject.id))
+            gap_ns = store.persona_seal_gap_ns(roster_machines) if reason else None
+            self._log_seal_decline(scope, reason or "unknown", gap_ns=gap_ns)
 
-    def _log_seal_decline(self, scope: str, reason: str, *, store=None, persona: str | None = None) -> None:
+    def _log_seal_decline(self, scope: str, reason: str, *, gap_ns: int | None = None) -> None:
         """One persona write floor decline line per scope at WARNING when it
         means something, DEBUG otherwise (auto-mmwgu, reopened 2026-09-28:
         4,569 identical WARNING lines a day on Home said nothing).
 
         The settled case (every roster machine has a position, none moved
         since the last seal) is the normal state of a quiet fleet and logs
-        at DEBUG, until the held floor is older than PERSONA_FLOOR_STALE_S:
-        then a roster machine's cursor has stopped moving here, share links
-        published after the floor are unservable from this member, and the
-        line (naming that machine) is a WARNING. Any other reason is a
-        WARNING when it first appears or changes, and again at most every
-        SEAL_DECLINE_REPEAT_S; in between it is DEBUG."""
+        at DEBUG. It is a fault when the floor has fallen more than
+        PERSONA_FLOOR_BEHIND_S behind the newest position this store holds
+        (``gap_ns``, a difference of two positions in the write stream, as
+        fleet_sync_report.compare_frontiers measures between machines; never
+        the floor's age against a clock, which on a quiet scope grows while
+        nothing is wrong): then a roster machine's position stopped moving
+        here while others kept writing, nothing the persona wrote since is
+        claimable by this member, and the line (naming that machine) is a
+        WARNING. Any other reason is a WARNING when it first appears or
+        changes, and again at most every SEAL_DECLINE_REPEAT_S; in between it
+        is DEBUG."""
         from tools.network.fleet_sync import write_floors
 
         log = getattr(self, "_seal_decline_log", None)
@@ -4062,18 +4081,13 @@ class FleetSyncScheduler:
             log = self._seal_decline_log = {}
         now = time.monotonic()
         kind = re.sub(r"\d+", "#", reason)
-        stale = False
-        if write_floors.persona_seal_settled(reason) and store is not None and persona:
-            try:
-                held = store.persona_frontiers().get(persona)
-            except Exception:
-                held = None
-            if held is not None:
-                stale = (time.time_ns() - int(held)) / 1e9 > PERSONA_FLOOR_STALE_S
-            if not stale:
+        behind = False
+        if write_floors.persona_seal_settled(reason):
+            behind = gap_ns is not None and gap_ns / 1e9 > PERSONA_FLOOR_BEHIND_S
+            if not behind:
                 logger.debug("fleet sync scope %r: persona write floor settled: %s", scope, reason)
                 return
-            kind = "stale:" + kind
+            kind = "behind:" + kind
         last = log.get(scope)
         if last is not None and last[0] == kind and now - last[1] < SEAL_DECLINE_REPEAT_S:
             logger.debug("fleet sync scope %r: persona write floor NOT sealed (repeat): %s", scope, reason)
@@ -4081,7 +4095,7 @@ class FleetSyncScheduler:
         log[scope] = (kind, now)
         logger.warning(
             "fleet sync scope %r: persona write floor NOT sealed%s: %s",
-            scope, " (held floor is stale)" if stale else "", reason,
+            scope, " (held floor is behind the newest position here)" if behind else "", reason,
         )
 
     def _frontier_changed(self, scope: str) -> None:
