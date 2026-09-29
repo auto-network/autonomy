@@ -176,3 +176,38 @@ def test_signed_row_waits_for_the_genesis_then_verifies_on_drain(tmp_path: Path)
     finally:
         a_db.close()
         b_db.close()
+
+
+def test_a_promotion_replicates_to_a_puller_holding_the_old_address(tmp_path: Path) -> None:
+    """auto-pmw2v, end to end: Home promotes a row raw -> curated in one
+    transaction (a new address, the same id). The puller already holds the
+    row at raw. Before the fix its apply inserted the curated row first and
+    aborted on UNIQUE(settings.id), every round; now it moves the row."""
+    home_db, home = _open(tmp_path / "home.db", "home")
+    sjc_db, sjc = _open(tmp_path / "sjc.db", "sjc")
+    try:
+        row_id = str(uuid.uuid4())
+        with home.transaction(10, "create"):
+            home_db.conn.execute(
+                "INSERT INTO settings (id,set_id,schema_revision,key,payload,publication_state)"
+                " VALUES (?,?,?,?,?,?)",
+                (row_id, SET_ID, 1, KEY, json.dumps({"v": 1}), "raw"),
+            )
+        _exchange(home, "home", sjc)
+        with home.transaction(20, "promote"):
+            home_db.conn.execute(
+                "UPDATE settings SET publication_state='curated' WHERE id=?", (row_id,))
+        (promote,) = [
+            items for _r, _t, tid, items in home.next_transactions_for_origin(
+                "home", 10, "create", limit=5) if tid == "promote"]
+        # The shape that broke SJC-2: two operations, same id, two addresses.
+        assert {(m.mutation.address[3], m.mutation.tombstone) for m in promote} == {
+            ("curated", False), ("raw", True)}
+        _exchange(home, "home", sjc)
+        assert [tuple(r) for r in sjc_db.conn.execute(
+            "SELECT id, publication_state FROM settings WHERE set_id=?", (SET_ID,)
+        )] == [(row_id, "curated")]
+        assert sjc.origin_watermarks().get("home") == 20
+    finally:
+        home_db.close()
+        sjc_db.close()

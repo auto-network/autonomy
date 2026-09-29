@@ -2288,7 +2288,9 @@
                                 since: data.machine_unreachable.since || null};
         } else if (data.machine_not_enabled) {
           this.remoteMachine = {name: data.machine, state: 'not_enabled',
-                                reason: data.machine_not_enabled.reason || null};
+                                reason: data.machine_not_enabled.reason || null,
+                                at: data.machine_not_enabled.at || null,
+                                detail: data.machine_not_enabled.detail || null};
         } else {
           this.remoteMachine = {name: data.machine, state: 'reachable'};
         }
@@ -2313,10 +2315,10 @@
             : '');
         }
         if (m.state === 'not_enabled') {
-          // Raised on this machine before the request left it.
-          return m.reason === 'session-control-not-negotiated'
-            ? "This machine's relay does not offer remote sessions yet"
-            : 'This machine is not armed for remote sessions';
+          // The code names the failed check and ``at`` which machine decided.
+          return typeof window.describeRefusal === 'function'
+            ? window.describeRefusal({reason: m.reason, at: m.at}, {there: m.name})
+            : String(m.reason || 'remote sessions refused');
         }
         return 'Runs on ' + m.name;
       },

@@ -1720,8 +1720,8 @@ def _make_ice_serving_connector(
         if graph_org in (None, "personal"):
             # session-control/1 (graph://7eb29bc8-31a §9.1): remote session
             # control between the operator's own machines rides the PERSONAL
-            # tunnel only, the one connector that holds the session:control
-            # delegation.
+            # tunnel only. Every connector's process delegation carries the
+            # session:control scope; this is the one that serves it.
             from tools.network.session_control import session_control_offer_handler
 
             stream_kwargs["caps"] = caps + ("session-control/1",)

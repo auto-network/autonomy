@@ -461,3 +461,104 @@ def test_reverse_arrival_materializes_the_same_full_graph(tmp_path: Path) -> Non
         origin.close()
         forward.close()
         reverse.close()
+
+
+def _settings_row(state: str, row_id: str) -> tuple:
+    return tuple(sorted((
+        ("created_at", "2026-09-24T15:00:00Z"), ("deprecated", 0),
+        ("id", row_id), ("key", "e08f2e0e"), ("payload", {"name": "deck"}),
+        ("publication_state", state), ("schema_revision", 1),
+        ("set_id", "dashboard.presentation.deck"),
+        ("updated_at", "2026-09-24T15:00:00Z"),
+    )))
+
+
+def test_a_settings_address_move_applies_in_one_transaction(tmp_path: Path) -> None:
+    """auto-pmw2v: a raw -> curated promotion replicates as ONE transaction,
+    operation 0 = insert at the curated address, operation 1 = tombstone at
+    the raw address, same row id. Applied in operation order the insert hit
+    UNIQUE(settings.id) and aborted every pull of the scope; the store must
+    end with the row at the new address only."""
+    db = GraphDB(tmp_path / "puller.db")
+    try:
+        old = ("dashboard.presentation.deck", 1, "e08f2e0e", "raw", "base")
+        new = ("dashboard.presentation.deck", 1, "e08f2e0e", "curated", "base")
+        materialize(db.conn, [Mutation("settings", old, 1, False,
+                                       _settings_row("raw", "d05fdf0d"))])
+        report = materialize(db.conn, [
+            Mutation("settings", new, 2, False, _settings_row("curated", "d05fdf0d")),
+            Mutation("settings", old, 2, True),
+        ])
+        assert (report.applied, report.deleted, report.rejected_signatures) == (1, 1, ())
+        assert [tuple(r) for r in db.conn.execute(
+            "SELECT id, publication_state FROM settings"
+        ).fetchall()] == [("d05fdf0d", "curated")]
+    finally:
+        db.close()
+
+
+def test_an_address_keeps_its_own_operation_order(tmp_path: Path) -> None:
+    """Tombstones move ahead only for addresses the batch does not also
+    write, so a write followed by its own tombstone still ends deleted."""
+    db = GraphDB(tmp_path / "puller.db")
+    try:
+        addr = ("dashboard.presentation.deck", 1, "e08f2e0e", "raw", "base")
+        materialize(db.conn, [
+            Mutation("settings", addr, 1, False, _settings_row("raw", "d05fdf0d")),
+            Mutation("settings", addr, 2, True),
+        ])
+        assert db.conn.execute("SELECT count(*) FROM settings").fetchone()[0] == 0
+    finally:
+        db.close()
+
+
+def test_an_id_still_held_at_a_winning_old_address_is_quarantined(tmp_path: Path) -> None:
+    """If the old address's tombstone lost last-writer-wins, only the insert
+    arrives while the id is held locally: quarantine that row, never abort
+    the batch (which would replay forever)."""
+    db = GraphDB(tmp_path / "puller.db")
+    try:
+        old = ("dashboard.presentation.deck", 1, "e08f2e0e", "raw", "base")
+        new = ("dashboard.presentation.deck", 1, "e08f2e0e", "curated", "base")
+        other = ("dashboard.presentation.deck", 1, "other", "raw", "base")
+        materialize(db.conn, [Mutation("settings", old, 1, False,
+                                       _settings_row("raw", "d05fdf0d"))])
+        report = materialize(db.conn, [
+            Mutation("settings", new, 2, False, _settings_row("curated", "d05fdf0d")),
+            Mutation("settings", other, 2, False,
+                     tuple(sorted(dict(_settings_row("raw", "o1"), key="other").items()))),
+        ])
+        assert report.rejected_signatures == (
+            ("settings", new, "secondary_identity_conflict"),)
+        assert report.applied == 1
+        assert sorted(r[0] for r in db.conn.execute("SELECT id FROM settings")) == [
+            "d05fdf0d", "o1"]
+    finally:
+        db.close()
+
+
+def test_a_quarantined_arrival_leaves_the_local_row_at_its_address(tmp_path: Path) -> None:
+    """Review of auto-pmw2v: the settings slot delete and the insert are one
+    unit. The puller holds row A at address X and row I at address Y; a batch
+    writes address X carrying id I. The arrival is quarantined AND row A
+    still stands at X (the slot delete is rolled back with the insert)."""
+    db = GraphDB(tmp_path / "puller.db")
+    try:
+        x = ("dashboard.presentation.deck", 1, "e08f2e0e", "raw", "base")
+        y = ("dashboard.presentation.deck", 1, "other", "raw", "base")
+        materialize(db.conn, [
+            Mutation("settings", x, 1, False, _settings_row("raw", "row-a")),
+            Mutation("settings", y, 1, False, tuple(sorted(
+                dict(_settings_row("raw", "row-i"), key="other").items()))),
+        ])
+        report = materialize(db.conn, [
+            Mutation("settings", x, 2, False, _settings_row("raw", "row-i")),
+        ])
+        assert report.rejected_signatures == (
+            ("settings", x, "secondary_identity_conflict"),)
+        assert sorted(tuple(r) for r in db.conn.execute(
+            'SELECT id, "key" FROM settings')) == [
+            ("row-a", "e08f2e0e"), ("row-i", "other")]
+        assert not db.conn.in_transaction
+    finally:
+        db.close()

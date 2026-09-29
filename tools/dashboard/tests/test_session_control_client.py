@@ -47,7 +47,14 @@ def test_a_connector_that_cannot_be_reached_is_a_typed_refusal(monkeypatch):
 
     monkeypatch.setattr(scc, "_control", unreachable)
     reply = asyncio.run(scc.request("sjc-2", "status"))
-    assert reply["refusal"] == scc.CONNECTOR_UNAVAILABLE
+    assert (reply["refusal"], reply["at"]) == (scc.CONNECTOR_CALL_FAILED, "local")
+
+
+def test_a_connector_that_answers_without_running_the_request_is_its_own_code(monkeypatch):
+    monkeypatch.setattr(scc, "resolve_machine", lambda name: B)
+    monkeypatch.setattr(scc, "_control", lambda *_a, **_k: {"ok": False, "error": "busy"})
+    reply = asyncio.run(scc.request("sjc-2", "status"))
+    assert (reply["refusal"], reply["detail"]) == (scc.CONNECTOR_REFUSED, "busy")
 
 
 def test_the_connector_reply_record_is_returned_as_is(monkeypatch):

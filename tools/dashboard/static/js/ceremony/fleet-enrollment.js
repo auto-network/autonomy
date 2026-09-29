@@ -152,34 +152,30 @@ async function mintRuntimeCredential({
   try {
     const processPub = await ed25519PublicHex(processSeed);
     const now = Math.floor(Date.now() / 1000);
-    // One single-scope delegation per purpose, from the machine key to the
-    // same process key: fleet:sync for sync, and a SEPARATE session:control
-    // for driving sessions on other fleet machines (graph://7eb29bc8-31a
-    // §6.3), so neither check ever widens.
-    const processCert = async (scope) => {
-      const certPayload = {
-        v: 1,
-        child_pub: processPub,
-        scope: [scope],
-        org: `personal:${personalRootPub}`,
-        subject: { kind: 'machine', id: machineId },
-        not_before: Math.max(0, now - 30),
-        not_after: now + FLEET_RUNTIME_TTL_SECONDS,
-      };
-      return {
-        ...certPayload,
-        sig: await signHex(
-          machineSigningKey,
-          domainBytes(IDKIT_CERT_DOMAIN, canonicalJson(certPayload)),
-        ),
-      };
+    // ONE delegation, from the machine key to the process key, carrying one
+    // scope per purpose: fleet:sync for sync and session:control for driving
+    // sessions on other fleet machines (graph://7eb29bc8-31a §6.3). idkit
+    // requires the scope list sorted and duplicate-free.
+    const certPayload = {
+      v: 1,
+      child_pub: processPub,
+      scope: [FLEET_SYNC_SCOPE, SESSION_CONTROL_SCOPE].sort(),
+      org: `personal:${personalRootPub}`,
+      subject: { kind: 'machine', id: machineId },
+      not_before: Math.max(0, now - 30),
+      not_after: now + FLEET_RUNTIME_TTL_SECONDS,
     };
     return {
       machine_id: machineId,
       machine_pub: machinePub,
       process_private_seed: bytesToHex(processSeed),
-      delegation_cert: await processCert(FLEET_SYNC_SCOPE),
-      session_control_cert: await processCert(SESSION_CONTROL_SCOPE),
+      delegation_cert: {
+        ...certPayload,
+        sig: await signHex(
+          machineSigningKey,
+          domainBytes(IDKIT_CERT_DOMAIN, canonicalJson(certPayload)),
+        ),
+      },
     };
   } finally {
     processSeed.fill(0);

@@ -34,7 +34,7 @@ def db(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _creator(calls, *, status=202, error=None):
+def _creator(calls, *, status=202, error=None, code=None):
     async def create(body, provenance=None):
         calls.append(body)
         name = f"auto-remote-{len(calls)}"
@@ -43,7 +43,7 @@ def _creator(calls, *, status=202, error=None):
             if provenance:
                 dashboard_db.set_launch_provenance(name, **provenance)
             return Response(202, {"tmux_name": name, "pending": True})
-        return Response(status, {"error": error})
+        return Response(status, {"error": error, **({"code": code} if code else {})})
 
     return create
 
@@ -86,10 +86,23 @@ def test_a_retried_operation_returns_the_session_it_already_started(db):
 
 
 def test_an_unknown_workspace_is_refused_by_name(db):
-    reply = _launch(_creator([], status=400, error="Unknown project 'nope'"),
-                    {"project": "nope"})
+    reply = _launch(_creator([], status=400, error="Unknown project 'nope'",
+                             code="unknown-project"), {"project": "nope"})
     assert reply["refusal"] == scc.WORKSPACE_UNAVAILABLE
     assert "nope" in reply["detail"]
+
+
+def test_a_workspace_config_error_is_its_own_code(db):
+    reply = _launch(_creator([], status=500, error="Project config error: bad",
+                             code="workspace-config-error"))
+    assert reply["refusal"] == scc.WORKSPACE_CONFIG_ERROR
+
+
+def test_the_error_text_alone_never_decides_the_code(db):
+    # The code comes from the create response's ``code`` field, not from
+    # matching its prose.
+    reply = _launch(_creator([], status=400, error="Unknown project 'nope'"))
+    assert reply["refusal"] == scc.LAUNCH_REFUSED
 
 
 def test_a_create_failure_is_a_typed_refusal_with_its_reason(db):
@@ -98,15 +111,15 @@ def test_a_create_failure_is_a_typed_refusal_with_its_reason(db):
     assert "queue is full" in reply["detail"]
 
 
-@pytest.mark.parametrize("body,peer", [
-    ({"operation_id": "short"}, PEER),
-    ({"project": ""}, PEER),
-    ({}, ""),
+@pytest.mark.parametrize("body,peer,code", [
+    ({"operation_id": "short"}, PEER, "bad-operation-id"),
+    ({"project": ""}, PEER, "missing-project"),
+    ({}, "", "no-authenticated-peer"),
 ])
-def test_malformed_launches_are_refused_before_any_create(db, body, peer):
+def test_malformed_launches_are_refused_before_any_create(db, body, peer, code):
     calls = []
     reply = _launch(_creator(calls), body, peer)
-    assert reply["refusal"] == "bad-request"
+    assert reply["refusal"] == code
     assert calls == []
 
 
@@ -170,11 +183,13 @@ def test_a_remote_create_needs_a_workspace_project(remote):
 
 def test_a_refused_launch_is_a_409_carrying_the_refusal(remote):
     server, _, fake = remote
-    fake.reply = {"v": 1, "ok": False, "refusal": "destination-slot-absent"}
+    fake.reply = {"v": 1, "ok": False, "refusal": "peer-scope-missing", "at": "peer"}
     status, data = _post(server, {"machine": "sjc-2", "project": "p"})
-    assert status == 409 and data["refusal"] == "destination-slot-absent"
-    fake.reply = {"v": 1, "ok": False, "refusal": "session-control-timeout"}
-    assert _post(server, {"machine": "sjc-2", "project": "p"})[0] == 502
+    assert (status, data["refusal"], data["at"]) == (409, "peer-scope-missing", "peer")
+    # A machine that cannot be reached is a 502, whichever path found that.
+    for refusal in ("destination-slot-absent", "handshake-timeout", "connector-call-failed"):
+        fake.reply = {"v": 1, "ok": False, "refusal": refusal, "at": "local"}
+        assert _post(server, {"machine": "sjc-2", "project": "p"})[0] == 502, refusal
 
 
 def test_naming_this_machine_creates_locally(remote, monkeypatch):
@@ -226,7 +241,7 @@ def test_a_lost_reply_is_retried_with_the_same_id_and_starts_one_session(
         ids.append(body["operation_id"])
         reply = await far(body, PEER)
         if len(ids) == 1:
-            return {"v": 1, "ok": False, "refusal": "session-control-timeout"}
+            return {"v": 1, "ok": False, "refusal": "reply-timeout", "at": "local"}
         return reply
 
     monkeypatch.setattr(scc, "request", lossy)
@@ -251,6 +266,6 @@ def test_a_retry_of_a_launch_whose_session_died_is_refused_not_repeated(db, stat
     conn.execute("UPDATE tmux_sessions SET state = ? WHERE tmux_name = ?", (state, name))
     conn.commit()
     retry = asyncio.run(launch(body, PEER))
-    assert retry["ok"] is False and retry["refusal"] == scc.LAUNCH_REFUSED
+    assert retry["ok"] is False and retry["refusal"] == scc.LAUNCH_OP_SPENT
     assert name in retry["detail"] and state in retry["detail"]
     assert len(calls) == 1

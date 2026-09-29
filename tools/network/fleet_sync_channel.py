@@ -29,12 +29,26 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from tools.network.fleet_roster import RosterEntry, resolve
 from tools.network.clock import FLEET_RUNTIME_DELEGATION_TTL_SECONDS
+from tools.network.fleet_process_scope import (
+    FLEET_SYNC_SCOPE,
+    SCOPE_EXCESS,
+    scope_problem,
+)
 from tools.network.idkit import (
     DelegationCert,
     IdkitError,
     KeyPair,
     canonical_json,
     verify_chain,
+)
+from tools.network.idkit.errors import (
+    ExpiredError,
+    MalformedError,
+    NotYetValidError,
+    RevokedError,
+    ScopeError,
+    SignatureError,
+    WrongOrgError,
 )
 from tools.network.idkit.keys import verify_signature
 from tools.network.relaykit.channel import ChannelCrypto, HandshakeError
@@ -159,18 +173,70 @@ def _transcript_hash(
     ).digest()
 
 
-#: Typed refusal for a peer that presents no valid ``session:control``
-#: delegation to an authenticator verifying that scope (graph://7eb29bc8-31a).
-SESSION_CAP_MISSING = "session-cap-missing"
+class FleetHandshakeRefused(HandshakeError):
+    """A handshake check that failed, named by a typed ``refusal`` code.
+
+    Codes are stated from the machine RUNNING the check: ``own-*`` is about
+    its own runtime material (roster entry, process delegation), ``peer-*``
+    about the hello the other machine sent. Every raise site has its own
+    code, so a refusal says which check failed and on whose material; the
+    message keeps the human detail. Being a HandshakeError, it fails the
+    handshake exactly as before for every existing caller.
+    """
+
+    def __init__(self, refusal: str, detail: str):
+        super().__init__(f"{refusal}: {detail}")
+        self.refusal = refusal
+        self.detail = detail
+
+
+#: Every code FleetHandshakeRefused can carry. A refusal a peer reports
+#: before the handshake is unauthenticated, so a receiver accepts only these
+#: (plus its own protocol's) and maps anything else to one generic code.
+_SIDED_REFUSALS = (
+    "not-in-roster", "scope-undelegated", "scope-missing", "scope-excess",
+    "delegation-required", "delegation-expired", "delegation-not-yet-valid",
+    "delegation-revoked", "delegation-bad-signature", "delegation-wrong-org",
+    "delegation-malformed", "delegation-invalid", "delegation-not-machine-direct",
+    "delegation-ttl-exceeded", "delegation-target-types",
+    "delegation-wrong-machine",
+)
+HANDSHAKE_REFUSALS = frozenset(
+    [f"{side}-{suffix}" for side in ("own", "peer") for suffix in _SIDED_REFUSALS]
+    + ["own-signer-not-roster-key", "own-key-not-delegated",
+       "peer-hello-malformed", "peer-client-proof-failed",
+       "peer-server-proof-failed", "peer-server-wrong-client",
+       "peer-server-unexpected-machine"]
+)
+
+#: idkit chain failures, by type, as the ``<side>-delegation-*`` suffix.
+_CHAIN_REFUSALS = (
+    (ExpiredError, "expired"),
+    (NotYetValidError, "not-yet-valid"),
+    (RevokedError, "revoked"),
+    (SignatureError, "bad-signature"),
+    (WrongOrgError, "wrong-org"),
+    (MalformedError, "malformed"),
+)
+
+
+def _chain_refusal(side: str, exc: Exception) -> FleetHandshakeRefused:
+    for kind, suffix in _CHAIN_REFUSALS:
+        if isinstance(exc, kind):
+            return FleetHandshakeRefused(
+                f"{side}-delegation-{suffix}", f"fleet runtime delegation failed: {exc}")
+    return FleetHandshakeRefused(
+        f"{side}-delegation-invalid", f"fleet runtime delegation failed: {exc}")
 
 
 class FleetAuthenticator:
     """Machine-key possession and live-roster authorization for one endpoint.
 
-    ``scope`` is the single scope every process delegation this endpoint sends
-    or accepts must carry: ``fleet:sync`` for sync, ``session:control`` for
-    remote session control. The two never cross: a hello carrying one scope's
-    delegation is refused by an authenticator verifying the other.
+    ``scope`` is the scope every process delegation this endpoint sends or
+    accepts must INCLUDE: ``fleet:sync`` for sync, ``session:control`` for
+    remote session control. Both ride one delegation
+    (fleet_process_scope); a delegation carrying anything outside that set
+    is refused, as is one without the scope this endpoint verifies.
     """
 
     def __init__(
@@ -182,7 +248,7 @@ class FleetAuthenticator:
         roster_machine_pub: str | None = None,
         delegation_cert: DelegationCert | None = None,
         require_delegation: bool = False,
-        scope: str = "fleet:sync",
+        scope: str = FLEET_SYNC_SCOPE,
     ):
         # ``machine_key`` is the live signer. In production it is a
         # process-ephemeral child; ``roster_machine_pub`` is the durable,
@@ -208,7 +274,7 @@ class FleetAuthenticator:
         within clock.AUTHORIZE_CACHE_TTL_S."""
         self._active_cache = None
 
-    def authorize(self, machine_pub: str) -> None:
+    def authorize(self, machine_pub: str, *, side: str = "peer") -> None:
         # Called per served transaction AND per operation so a kick lands on
         # an already-open stream. The resolved roster is a few hundred bytes
         # and changes only on a human enroll/kick, yet re-deriving it means a
@@ -226,7 +292,9 @@ class FleetAuthenticator:
         else:
             active = cached[1]
         if machine_pub not in active:
-            raise HandshakeError("machine key is not active in this fleet roster")
+            raise FleetHandshakeRefused(
+                f"{side}-not-in-roster",
+                "machine key is not active in this fleet roster")
 
     def _delegate_dict(self):
         return (
@@ -237,41 +305,45 @@ class FleetAuthenticator:
 
     def _authorize_local_signer(self, delegate) -> None:
         if delegate is None:
-            self.authorize(self.machine_pub)
-            if self.scope != "fleet:sync":
-                raise HandshakeError(
-                    f"{SESSION_CAP_MISSING}: this runtime holds no "
-                    f"{self.scope} delegation"
-                )
+            self.authorize(self.machine_pub, side="own")
+            if self.scope != FLEET_SYNC_SCOPE:
+                raise FleetHandshakeRefused(
+                    "own-scope-undelegated",
+                    f"this runtime holds no process delegation, so no {self.scope}")
             if self.require_delegation:
-                raise HandshakeError("fleet runtime delegation is required")
+                raise FleetHandshakeRefused(
+                    "own-delegation-required", "fleet runtime delegation is required")
             if self.machine_key.public_hex != self.machine_pub:
-                raise HandshakeError("direct fleet signer does not match roster")
+                raise FleetHandshakeRefused(
+                    "own-signer-not-roster-key", "direct fleet signer does not match roster")
             return
-        signer_pub = self._signing_pub(self.machine_pub, delegate)
+        signer_pub = self._signing_pub(self.machine_pub, delegate, side="own")
         if signer_pub != self.machine_key.public_hex:
-            raise HandshakeError(
-                "fleet runtime key does not match its delegation"
-            )
+            raise FleetHandshakeRefused(
+                "own-key-not-delegated",
+                "fleet runtime key does not match its delegation")
 
-    def _signing_pub(self, machine_pub: str, delegate_data) -> str:
-        """Resolve one hello signer from current root-signed roster state."""
-        self.authorize(machine_pub)
+    def _signing_pub(self, machine_pub: str, delegate_data, *, side: str = "peer") -> str:
+        """Resolve one hello signer from current root-signed roster state.
+
+        *side* says whose material this is (``own`` for this endpoint's
+        delegation, ``peer`` for the other machine's hello) and prefixes
+        every refusal code."""
+        self.authorize(machine_pub, side=side)
         if delegate_data is None:
-            if self.scope != "fleet:sync":
-                raise HandshakeError(
-                    f"{SESSION_CAP_MISSING}: no {self.scope} delegation"
-                )
+            if self.scope != FLEET_SYNC_SCOPE:
+                raise FleetHandshakeRefused(
+                    f"{side}-scope-undelegated",
+                    f"hello carries no process delegation, so no {self.scope}")
             if self.require_delegation:
-                raise HandshakeError("fleet runtime delegation is required")
+                raise FleetHandshakeRefused(
+                    f"{side}-delegation-required", "fleet runtime delegation is required")
             return machine_pub
         try:
             cert = DelegationCert.from_dict(delegate_data)
-            if self.scope != "fleet:sync" and cert.scope != (self.scope,):
-                raise HandshakeError(
-                    f"{SESSION_CAP_MISSING}: delegation scope "
-                    f"{list(cert.scope)} is not [{self.scope!r}]"
-                )
+        except (IdkitError, KeyError, ValueError, TypeError) as exc:
+            raise _chain_refusal(side, exc) from exc
+        try:
             active = resolve(
                 self._roster_entries(), anchor_root_pub=self.root_pub
             )
@@ -284,39 +356,41 @@ class FleetAuthenticator:
                 now=int(time.time()),
                 required_scope=self.scope,
             )
-            if cert.parent_cert is not None:
-                raise HandshakeError(
-                    "fleet runtime delegation must be machine-direct"
-                )
-            if cert.scope != (self.scope,):
-                raise HandshakeError(
-                    "fleet runtime delegation has excess scope"
-                )
-            if (
-                cert.not_after - cert.not_before
-                > FLEET_RUNTIME_DELEGATION_TTL_SECONDS + 60
-            ):
-                raise HandshakeError(
-                    "fleet runtime delegation exceeds its TTL bound"
-                )
-            if cert.target_types is not None:
-                raise HandshakeError(
-                    "fleet runtime delegation must not carry target_types"
-                )
-            if (
-                verified.subject_kind != "machine"
-                or verified.subject_id != entry.machine_id
-            ):
-                raise HandshakeError(
-                    "fleet runtime delegation names another machine"
-                )
-            return verified.leaf_pub
-        except HandshakeError:
-            raise
-        except (IdkitError, KeyError, ValueError, TypeError) as exc:
-            raise HandshakeError(
-                f"fleet runtime delegation failed: {exc}"
+        except ScopeError as exc:
+            raise FleetHandshakeRefused(
+                f"{side}-scope-missing",
+                f"delegation scope {list(cert.scope)} does not include {self.scope!r}",
             ) from exc
+        except (IdkitError, KeyError, ValueError, TypeError) as exc:
+            raise _chain_refusal(side, exc) from exc
+        if scope_problem(cert.scope, self.scope) == SCOPE_EXCESS:
+            raise FleetHandshakeRefused(
+                f"{side}-scope-excess",
+                f"delegation scope {list(cert.scope)} carries authority outside "
+                "the process scopes")
+        if cert.parent_cert is not None:
+            raise FleetHandshakeRefused(
+                f"{side}-delegation-not-machine-direct",
+                "fleet runtime delegation must be machine-direct")
+        if (
+            cert.not_after - cert.not_before
+            > FLEET_RUNTIME_DELEGATION_TTL_SECONDS + 60
+        ):
+            raise FleetHandshakeRefused(
+                f"{side}-delegation-ttl-exceeded",
+                "fleet runtime delegation exceeds its TTL bound")
+        if cert.target_types is not None:
+            raise FleetHandshakeRefused(
+                f"{side}-delegation-target-types",
+                "fleet runtime delegation must not carry target_types")
+        if (
+            verified.subject_kind != "machine"
+            or verified.subject_id != entry.machine_id
+        ):
+            raise FleetHandshakeRefused(
+                f"{side}-delegation-wrong-machine",
+                "fleet runtime delegation names another machine")
+        return verified.leaf_pub
 
     def build_client_hello(
         self, session: str, *, peer: str | None = None,
@@ -347,7 +421,10 @@ class FleetAuthenticator:
     def accept_client(
         self, raw: object, *, session: str
     ) -> tuple[str, X25519PrivateKey, bytes, bytes]:
-        data = _parse(raw, _CLIENT_FIELDS, "FLEET_CLIENT_HELLO")
+        try:
+            data = _parse(raw, _CLIENT_FIELDS, "FLEET_CLIENT_HELLO")
+        except HandshakeError as exc:
+            raise FleetHandshakeRefused("peer-hello-malformed", str(exc)) from exc
         client_pub = data["machine_pub"]
         self._authorize_local_signer(self._delegate_dict())
         signer_pub = self._signing_pub(client_pub, data["delegate_cert"])
@@ -364,7 +441,8 @@ class FleetAuthenticator:
                 ),
             )
         except IdkitError as exc:
-            raise HandshakeError(f"client machine proof failed: {exc}") from exc
+            raise FleetHandshakeRefused(
+                "peer-client-proof-failed", f"client machine proof failed: {exc}") from exc
 
         private_key = X25519PrivateKey.generate()
         server_eph = _eph_pub(private_key)
@@ -404,15 +482,20 @@ class FleetAuthenticator:
         client_eph: str,
         expected_machine_pub: str,
     ) -> tuple[str, bytes]:
-        data = _parse(raw, _SERVER_FIELDS, "FLEET_SERVER_HELLO")
+        try:
+            data = _parse(raw, _SERVER_FIELDS, "FLEET_SERVER_HELLO")
+        except HandshakeError as exc:
+            raise FleetHandshakeRefused("peer-hello-malformed", str(exc)) from exc
         if data["client_machine_pub"] != self.machine_pub:
-            raise HandshakeError("server hello names another client machine")
+            raise FleetHandshakeRefused(
+                "peer-server-wrong-client", "server hello names another client machine")
         if data["machine_pub"] != expected_machine_pub:
             # Name both keys: the bare message cannot distinguish "dialed the
             # wrong machine's route" from "this machine serves under a
             # different key than the roster entry names", and those have
             # opposite fixes.
-            raise HandshakeError(
+            raise FleetHandshakeRefused(
+                "peer-server-unexpected-machine",
                 "server hello is from an unexpected machine: expected "
                 f"{str(expected_machine_pub)[:16]}, got "
                 f"{str(data['machine_pub'])[:16]}"
@@ -435,7 +518,8 @@ class FleetAuthenticator:
                 ),
             )
         except IdkitError as exc:
-            raise HandshakeError(f"server machine proof failed: {exc}") from exc
+            raise FleetHandshakeRefused(
+                "peer-server-proof-failed", f"server machine proof failed: {exc}") from exc
         return data["eph_pub"], _transcript_hash(
             root_pub=self.root_pub,
             session=session,

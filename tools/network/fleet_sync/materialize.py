@@ -397,8 +397,36 @@ def _upsert(conn: sqlite3.Connection, mutation: Mutation, row: dict[str, object]
             params.append(row["id"])
         else:
             raise MaterializationError(f"unknown settings row role: {role}")
-        conn.execute("DELETE FROM settings WHERE " + " AND ".join(clauses), params)
-        _insert(conn, mutation.table, row)
+        # One unit: the slot delete must not survive a refused insert, or a
+        # quarantined arrival would leave its address empty. A SAVEPOINT
+        # outside a transaction would open one that RELEASE then commits,
+        # splitting the batch, so make sure the batch's transaction is open.
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
+        conn.execute("SAVEPOINT settings_upsert")
+        try:
+            conn.execute("DELETE FROM settings WHERE " + " AND ".join(clauses), params)
+            _insert(conn, mutation.table, row)
+        except sqlite3.IntegrityError as exc:
+            conn.execute("ROLLBACK TO settings_upsert")
+            conn.execute("RELEASE settings_upsert")
+            if "UNIQUE constraint failed" not in str(exc):
+                raise
+            # The row's id is still held at another address here. An address
+            # move replicates as insert-new + tombstone-old in ONE transaction
+            # and materialize() applies the tombstone first, so reaching this
+            # means the old address did not lose: a local row there won
+            # last-writer-wins. Quarantine the arriving row rather than abort
+            # the batch, which would replay forever (auto-pmw2v).
+            raise SecondaryIdentityConflict(
+                f"settings row at {mutation.address!r} reuses id {row.get('id')!r} "
+                f"held at another local address: {exc}"
+            ) from exc
+        except BaseException:
+            conn.execute("ROLLBACK TO settings_upsert")
+            conn.execute("RELEASE settings_upsert")
+            raise
+        conn.execute("RELEASE settings_upsert")
         return
 
     where, params = _where(key_columns, row)
@@ -632,7 +660,20 @@ def materialize(
                 applied += _apply_note_versions(conn, table_mutations)
                 deleted += sum(m.tombstone for m in table_mutations)
                 continue
-            for mutation in table_mutations:
+            # Tombstones first. An address move (a settings row promoted
+            # raw -> curated, say) replicates as an insert at the new address
+            # and a tombstone at the old one under ONE row id; applying them
+            # in operation order inserts the id while the old row still holds
+            # it, and UNIQUE(settings.id) aborts the whole pull, every round
+            # (auto-pmw2v). A tombstone moves ahead only when no write in the
+            # batch targets its own address, so an address's own operations
+            # keep their order and its final state is unchanged.
+            written = {tuple(m.address) for m in table_mutations if not m.tombstone}
+            ordered = sorted(
+                table_mutations,
+                key=lambda m: not (m.tombstone and tuple(m.address) not in written),
+            )
+            for mutation in ordered:
                 if mutation.tombstone:
                     _delete(conn, mutation)
                     deleted += 1

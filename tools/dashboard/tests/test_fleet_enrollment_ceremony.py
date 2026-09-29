@@ -102,18 +102,17 @@ def test_browser_minted_roster_and_transient_approval_verify_in_python(tmp_path)
     )
     assert local_runtime.machine_id == local_entry.machine_id
     assert local_runtime.machine_pub == local_entry.machine_pub
-    # The browser mints session:control beside fleet:sync, to the same process
-    # key, and Python verifies it (graph://7eb29bc8-31a §6.3).
-    assert local_runtime.session_control_cert is not None
-    assert local_runtime.session_control_cert.scope == (
-        fleet_runtime.SESSION_CONTROL_SCOPE,
+    # The browser mints ONE process delegation carrying session:control beside
+    # fleet:sync, and Python verifies it (graph://7eb29bc8-31a §6.3).
+    assert local_runtime.delegation_cert.scope == (
+        fleet_runtime.FLEET_SYNC_SCOPE, fleet_runtime.SESSION_CONTROL_SCOPE,
     )
-    assert local_runtime.session_control_cert.child_pub == (
-        local_runtime.process_key.public_hex
-    )
-    assert [d["scope"] for d in local_runtime.delegations()] == [
-        [fleet_runtime.FLEET_SYNC_SCOPE], [fleet_runtime.SESSION_CONTROL_SCOPE],
-    ]
+    assert local_runtime.has_session_control
+    assert "session_control_cert" not in minted["localRuntime"]
+    assert local_runtime.delegations() == [{
+        "scope": [fleet_runtime.FLEET_SYNC_SCOPE, fleet_runtime.SESSION_CONTROL_SCOPE],
+        "not_after": local_runtime.delegation_cert.not_after,
+    }]
 
 
 def test_fleet_domains_are_distinct_and_versioned():

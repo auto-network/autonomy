@@ -34,6 +34,7 @@ import sqlite3
 import time
 from typing import Mapping
 
+from tools.network.fleet_process_scope import FLEET_SYNC_SCOPE, scope_problem
 from tools.network.idkit import DelegationCert, IdkitError, canonical_json
 from tools.network.idkit.keys import KeyPair, verify_signature
 from tools.network.idkit.verify import verify_chain
@@ -50,12 +51,13 @@ class WriteFloorError(ValueError):
 
 
 #: The delegation a machine key issues to the process that runs its fleet
-#: sync (fleet_sync_channel: machine-direct, this one scope, no target
-#: types). A write floor signed by that process carries the certificate so a
-#: receiver can walk from the origin, which IS the machine key, to the
-#: signer. The hello's TTL bound is not re-checked here: a write floor is a fact
-#: about the past, and the chain's own validity window still applies.
-PROCESS_DELEGATION_SCOPE = ("fleet:sync",)
+#: sync (fleet_sync_channel: machine-direct, scope including fleet:sync and
+#: nothing outside fleet_process_scope.PROCESS_SCOPES, no target types). A
+#: write floor signed by that process carries the certificate so a receiver
+#: can walk from the origin, which IS the machine key, to the signer. The
+#: hello's TTL bound is not re-checked here: a write floor is a fact about the
+#: past, and the chain's own validity window still applies.
+PROCESS_DELEGATION_SCOPE = FLEET_SYNC_SCOPE
 
 
 def ensure_write_floor_schema(conn: sqlite3.Connection) -> None:
@@ -190,17 +192,20 @@ def verify_machine_write_floor(record: Mapping, *, now: int | None = None) -> di
             verified = verify_chain(
                 cert, origin, org=str(cert.org),
                 now=int(time.time()) if now is None else now,
-                required_scope=PROCESS_DELEGATION_SCOPE[0],
+                required_scope=PROCESS_DELEGATION_SCOPE,
             )
         except (IdkitError, ValueError, TypeError, KeyError) as exc:
             raise WriteFloorError(f"machine.write_floor delegation failed: {exc}") from exc
-        if (
-            cert.parent_cert is not None
-            or tuple(cert.scope) != PROCESS_DELEGATION_SCOPE
-            or cert.target_types is not None
-            or verified.leaf_pub != signer
-        ):
-            raise WriteFloorError("machine.write_floor delegation does not name the signer machine-direct")
+        if cert.parent_cert is not None:
+            raise WriteFloorError("machine.write_floor delegation is not machine-direct")
+        problem = scope_problem(cert.scope, PROCESS_DELEGATION_SCOPE)
+        if problem is not None:
+            raise WriteFloorError(
+                f"machine.write_floor delegation scope {list(cert.scope)}: {problem}")
+        if cert.target_types is not None:
+            raise WriteFloorError("machine.write_floor delegation carries target_types")
+        if verified.leaf_pub != signer:
+            raise WriteFloorError("machine.write_floor delegation does not name the signer")
     try:
         verify_signature(signer, sig, machine_write_floor_body(origin, write_floor_ns, signer))
     except (IdkitError, ValueError) as exc:

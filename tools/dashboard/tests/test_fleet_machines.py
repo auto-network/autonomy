@@ -153,11 +153,30 @@ def test_an_unanswering_machine_is_unreachable_since_its_last_pull(home):
     assert targets[1]["refusal"] == "destination-slot-absent"
 
 
-@pytest.mark.parametrize("refusal", ["session-control-not-negotiated", "session-cap-missing"])
-def test_a_missing_capability_or_grant_is_not_enabled_not_unreachable(home, refusal):
+@pytest.mark.parametrize("refusal, at", [
+    ("session-control-not-negotiated", "local"),
+    ("session-control-not-granted", "local"),
+    ("session-control-not-granted", "peer"),
+    ("peer-scope-missing", "peer"),
+    ("own-delegation-expired", "local"),
+])
+def test_a_missing_capability_or_grant_is_not_enabled_not_unreachable(home, refusal, at):
+    home.replies = {"status": {"v": 1, "ok": False, "refusal": refusal,
+                               "detail": "why", "at": at}}
+    targets = asyncio.run(fleet_machines.launch_targets())
+    # The code, its detail and where it was decided all reach the chooser.
+    assert (targets[1]["state"], targets[1]["reason"], targets[1]["detail"],
+            targets[1]["at"]) == ("not_enabled", refusal, "why", at)
+
+
+@pytest.mark.parametrize("refusal", [
+    "destination-slot-absent", "slot-lookup-failed", "handshake-timeout",
+    "reply-timeout", "peer-closed-in-handshake", "connector-call-failed",
+])
+def test_a_machine_that_cannot_be_reached_is_unreachable(home, refusal):
     home.replies = {"status": {"v": 1, "ok": False, "refusal": refusal}}
     targets = asyncio.run(fleet_machines.launch_targets())
-    assert targets[1]["state"] == "not_enabled" and targets[1]["reason"] == refusal
+    assert (targets[1]["state"], targets[1]["reason"]) == ("unreachable", refusal)
 
 
 def test_concurrent_and_repeated_asks_share_one_request(home):
@@ -197,11 +216,14 @@ def test_an_unreachable_machines_sessions_come_from_presence(home, monkeypatch):
         {"tmux_name": "auto-9", "machine_pub": SJC, "project": "p", "type": "container",
          "label": "Sweep", "since": 1_799_000_000, "local": False},
         {"tmux_name": "auto-1", "machine_pub": HOME.machine_pub, "local": True}])
-    home.replies = {"sessions": {"v": 1, "ok": False, "refusal": "session-control-timeout"}}
+    home.replies = {"sessions": {"v": 1, "ok": False, "refusal": "reply-timeout",
+                                 "detail": "no reply within 4s", "at": "local"}}
     (row,) = asyncio.run(fleet_machines.remote_sessions())
     assert row["session_id"] == "auto-9@sjc-2" and row["label"] == "Sweep"
     assert row["machine_reachable"] is False and row["machine_state"] == "unreachable"
-    assert row["machine_not_enabled_reason"] == "session-control-timeout"
+    assert row["machine_not_enabled_reason"] == "reply-timeout"
+    assert (row["machine_refusal_detail"], row["machine_refusal_at"]) == (
+        "no reply within 4s", "local")
     assert row["machine_unreachable_since"] == 1_800_000_000
 
 
@@ -249,11 +271,14 @@ def test_a_machine_without_remote_sessions_enabled_says_so_in_the_viewer(monkeyp
     from tools.dashboard import api_auth
 
     async def not_enabled(machine, name, project, query, *, timeout=20.0):
-        return {"v": 1, "ok": False, "refusal": "session-cap-missing"}
+        return {"v": 1, "ok": False, "refusal": "session-control-not-granted",
+                "detail": "scope", "at": "peer"}
 
     monkeypatch.setattr(api_auth, "require_global_api_authority", lambda r: None)
     monkeypatch.setattr(remote_view, "fetch_tail", not_enabled)
     data = json.loads(asyncio.run(server.api_session_tail(_Req(
         {"project": "p", "session_id": "auto-9@sjc-2"}))).body)
-    assert data["machine_not_enabled"] == {"machine": "sjc-2", "reason": "session-cap-missing"}
+    assert data["machine_not_enabled"] == {
+        "machine": "sjc-2", "reason": "session-control-not-granted",
+        "detail": "scope", "at": "peer"}
     assert "machine_unreachable" not in data

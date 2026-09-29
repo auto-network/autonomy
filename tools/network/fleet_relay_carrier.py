@@ -251,6 +251,17 @@ def _reap_relay_pulls(now: float) -> None:
             _RELAY_PULLS.pop(operation_id, None)
 
 
+class PeerSlotError(ConnectionError):
+    """Why :func:`resolve_peer_slot` found no slot, as a typed ``reason``:
+    ``unarmed`` (this process holds no fleet runtime), ``peer-not-in-roster``
+    or ``destination-slot-absent`` (the relay lists no slot for the peer).
+    A ConnectionError still, so every existing caller reads it unchanged."""
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+
+
 async def resolve_peer_slot(connector, runtime, peer_machine_pub: str, *,
                             locator: Optional[Mapping] = None,
                             timeout: float = 10.0) -> tuple:
@@ -283,14 +294,15 @@ async def resolve_peer_slot(connector, runtime, peer_machine_pub: str, *,
     """
     scheduler = getattr(runtime, "scheduler", None)
     if scheduler is None:
-        raise ConnectionError("this process is not armed for fleet sync")
+        raise PeerSlotError("unarmed", "this process is not armed for fleet sync")
     authenticator = scheduler.authenticator
     active = resolve_roster(
         authenticator._roster_entries(), anchor_root_pub=authenticator.root_pub)
     if peer_machine_pub not in active:
         # The roster says who is a peer (contract §1). A slot for a machine
         # the roster does not carry is not a peer's slot.
-        raise ConnectionError(
+        raise PeerSlotError(
+            "peer-not-in-roster",
             f"peer {peer_machine_pub[:12]} is not in the active roster")
     slots = await list_org_slots(connector, timeout=timeout)
     own = (getattr(connector, "serving_slot", None) or {}).get("machine")
@@ -321,7 +333,8 @@ async def resolve_peer_slot(connector, runtime, peer_machine_pub: str, *,
     # A peer whose slot the relay does not report is not reachable by relay
     # right now. Say which peer, rather than returning an empty slot that
     # would fail later as a confusing handshake mismatch.
-    raise ConnectionError(
+    raise PeerSlotError(
+        "destination-slot-absent",
         f"the relay reports no serving slot for peer {peer_machine_pub[:12]}")
 
 

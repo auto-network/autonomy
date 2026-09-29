@@ -33,7 +33,10 @@ POLL_WAIT_S = 20.0
 #: Backoff while the personal connector is not reachable.
 UNAVAILABLE_BACKOFF_S = 5.0
 
-CONNECTOR_UNAVAILABLE = "personal-connector-unavailable"
+#: The dashboard could not reach its personal connector's control socket.
+CONNECTOR_CALL_FAILED = "connector-call-failed"
+#: The personal connector answered but did not run the request.
+CONNECTOR_REFUSED = "connector-refused-request"
 NO_SUCH_SESSION = "no-such-session"
 OP_TOO_LARGE = "op-too-large"
 #: Largest text a remote send may paste (graph://7eb29bc8-31a §9.2).
@@ -43,10 +46,12 @@ UNKNOWN_OP = "unknown-op"
 OP_FAILED = "op-failed"
 
 
-def refusal(reason: str, detail: str = "") -> dict:
+def refusal(reason: str, detail: str = "", *, at: str | None = None) -> dict:
     out = {"v": VERSION, "ok": False, "refusal": reason}
     if detail:
         out["detail"] = detail[:300]
+    if at is not None:
+        out["at"] = at
     return out
 
 
@@ -105,7 +110,7 @@ async def request(machine: str, op: str, body: dict | None = None, *,
     machine_pub = await asyncio.to_thread(resolve_machine, machine)
     if machine_pub is None:
         return refusal(UNKNOWN_MACHINE,
-                       f"{machine!r} is not an active machine of this fleet")
+                       f"{machine!r} is not an active machine of this fleet", at="local")
     args = {"machine_pub": machine_pub, "op": op, "body": body or {},
             "timeout": timeout}
     if stream:
@@ -115,11 +120,11 @@ async def request(machine: str, op: str, body: dict | None = None, *,
             _control, "session-control-request", args,
             timeout=timeout + (120.0 if stream else 10.0))
     except Exception as exc:
-        return refusal(CONNECTOR_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
+        return refusal(CONNECTOR_CALL_FAILED, f"{type(exc).__name__}: {exc}", at="local")
     if not (isinstance(reply, dict) and reply.get("ok") is True
             and isinstance(reply.get("reply"), dict)):
         detail = reply.get("error") if isinstance(reply, dict) else repr(reply)
-        return refusal(CONNECTOR_UNAVAILABLE, str(detail))
+        return refusal(CONNECTOR_REFUSED, str(detail), at="local")
     return reply["reply"]
 
 
@@ -214,7 +219,10 @@ def sessions_op(registry: Callable[[], list]) -> OpHandler:
 
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
 LAUNCH_REFUSED = "launch-refused"
+#: The operation id already launched a session that has since ended.
+LAUNCH_OP_SPENT = "launch-op-spent"
 WORKSPACE_UNAVAILABLE = "workspace-unavailable"
+WORKSPACE_CONFIG_ERROR = "workspace-config-error"
 
 
 def launch_op(create: Callable[[dict], Awaitable[object]]) -> OpHandler:
@@ -241,11 +249,11 @@ def launch_op(create: Callable[[dict], Awaitable[object]]) -> OpHandler:
         operation_id = body.get("operation_id")
         project = body.get("project")
         if not isinstance(operation_id, str) or not _OPERATION_ID.fullmatch(operation_id):
-            return refusal("bad-request", "operation_id must be 32 hex")
+            return refusal("bad-operation-id", "operation_id must be 32 hex")
         if not isinstance(project, str) or not project:
-            return refusal("bad-request", "project is required")
+            return refusal("missing-project", "project is required")
         if not _HEX64.fullmatch(peer or ""):
-            return refusal("bad-request", "no authenticated peer")
+            return refusal("no-authenticated-peer", "no authenticated peer")
         machine = await asyncio.to_thread(session_presence.local_machine)
         names = await asyncio.to_thread(session_presence._machine_names)
         here = {
@@ -262,7 +270,7 @@ def launch_op(create: Callable[[dict], Awaitable[object]]) -> OpHandler:
                     # so, so the caller mints a new operation id; never
                     # relaunch silently under the old one.
                     return refusal(
-                        LAUNCH_REFUSED,
+                        LAUNCH_OP_SPENT,
                         f"operation {operation_id} already launched "
                         f"{existing['tmux_name']}, now {state}; retry with a "
                         f"new operation_id")
@@ -284,8 +292,9 @@ def launch_op(create: Callable[[dict], Awaitable[object]]) -> OpHandler:
                 data = {}
             if status != 202 or not data.get("tmux_name"):
                 error = str(data.get("error") or f"create returned {status}")
-                reason = (WORKSPACE_UNAVAILABLE if "Unknown project" in error
-                          else LAUNCH_REFUSED)
+                reason = {"unknown-project": WORKSPACE_UNAVAILABLE,
+                          "workspace-config-error": WORKSPACE_CONFIG_ERROR,
+                          }.get(data.get("code"), LAUNCH_REFUSED)
                 return refusal(reason, error)
         return ok({"tmux_name": data["tmux_name"], **here})
 

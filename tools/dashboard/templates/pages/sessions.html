@@ -126,7 +126,7 @@
                     </template>
                   </div>
                 </template>
-                <div class="lmt-reason" x-show="!t.reachable" x-text="launchTargetStats(t)"></div>
+                <div class="lmt-reason" x-show="!t.reachable" x-text="launchTargetStats(t)" :title="t.detail || ''"></div>
               </button>
             </template>
             </div>

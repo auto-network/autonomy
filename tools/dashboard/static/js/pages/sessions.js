@@ -1484,16 +1484,23 @@
         }
       },
 
-      // Both not_enabled reasons are raised on THIS machine before any
-      // request leaves it, so they describe this machine, not the target.
-      _notEnabledText(reason) {
-        if (reason === 'session-cap-missing') return 'this machine is not armed for remote launch';
-        if (reason === 'session-control-not-negotiated') return "this machine's relay does not offer remote launch yet";
-        return 'remote launch is not enabled';
+      // A refusal names its check and where it was decided (``at``); the
+      // shared describer (refusal-text.js) turns that into a sentence about
+      // the right machine, and keeps the code visible.
+      _localMachineLabel() {
+        var here = (this.launchTargets || []).find(function(t) { return t.local; });
+        return here ? here.label : '';
+      },
+
+      _refusalText(reason, at, there) {
+        var ref = {reason: reason, at: at};
+        var names = {here: this._localMachineLabel(), there: there};
+        return typeof window.describeRefusal === 'function'
+          ? window.describeRefusal(ref, names) : String(reason || 'remote sessions refused');
       },
 
       launchTargetStats(t) {
-        if (t.state === 'not_enabled') return this._notEnabledText(t.reason);
+        if (t.state === 'not_enabled') return this._refusalText(t.reason, t.at, t.label);
         if (!t.reachable) {
           return t.unreachable_since
             ? 'unreachable since ' + new Date(t.unreachable_since * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
@@ -1597,13 +1604,18 @@
           machine_reachable: r.machine_reachable !== false,
           machine_state: r.machine_state || 'reachable',
           machine_not_enabled_reason: r.machine_not_enabled_reason || null,
+          machine_refusal_detail: r.machine_refusal_detail || null,
+          machine_refusal_at: r.machine_refusal_at || null,
           machine_unreachable_since: r.machine_unreachable_since || null,
         };
       },
 
       machineTitle(s) {
         if (!s || !s.machine) return '';
-        if (s.machine_state === 'not_enabled') return s.machine + ': ' + this._notEnabledText(s.machine_not_enabled_reason);
+        if (s.machine_state === 'not_enabled') {
+          return this._refusalText(s.machine_not_enabled_reason, s.machine_refusal_at, s.machine)
+            + (s.machine_refusal_detail ? ' \u2014 ' + s.machine_refusal_detail : '');
+        }
         if (s.machine_reachable === false) {
           return s.machine + ' unreachable' + (s.machine_unreachable_since
             ? ' since ' + new Date(s.machine_unreachable_since * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})

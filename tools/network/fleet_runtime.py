@@ -12,6 +12,7 @@ expiry requires another unlock ceremony.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 import uuid
@@ -20,16 +21,25 @@ from typing import Iterable
 
 from tools.network import fleet_roster
 from tools.network.clock import FLEET_RUNTIME_DELEGATION_TTL_SECONDS
+from tools.network.fleet_process_scope import (
+    FLEET_SYNC_SCOPE,
+    SESSION_CONTROL_SCOPE,
+    scope_problem,
+)
 from tools.network.idkit import DelegationCert, KeyPair, verify_chain
 from tools.network.idkit.errors import IdkitError
 
 
-FLEET_SYNC_SCOPE = "fleet:sync"
-#: The standing grant to drive sessions on another fleet machine
-#: (graph://7eb29bc8-31a §6.3). A SEPARATE delegation from the same machine key
-#: to the same process key, never a second scope on the fleet:sync cert, so the
-#: sync check stays exact.
-SESSION_CONTROL_SCOPE = "session:control"
+# FLEET_SYNC_SCOPE / SESSION_CONTROL_SCOPE stay importable from here.
+logger = logging.getLogger(__name__)
+
+#: A key an earlier build minted beside ``delegation_cert``: a second,
+#: session:control-only certificate. The grant is now a second SCOPE on the
+#: one delegation, so a cached credential that still carries this key is
+#: accepted with the key dropped (and a log line) rather than refused, which
+#: would leave a restarted dashboard unarmed. Such a certificate expires with
+#: its runtime TTL (30 days), after which this tolerance can go.
+_LEGACY_SESSION_CONTROL_CERT = "session_control_cert"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 # Fixed namespace for deriving a personal identity's OWN auto.network org_uuid
@@ -83,20 +93,17 @@ class FleetRuntimeCredential:
     #: (serve_machine_keys) enforces that this pubkey is registered for the
     #: org; from_browser_payload only validates it is a well-formed key.
     serving_machine_key: "KeyPair | None" = None
-    #: The ``session:control`` delegation (machine key -> the same process
-    #: key), verified like ``delegation_cert``. None when the browser minted
-    #: none; remote session control is then refused with session-cap-missing.
-    session_control_cert: "DelegationCert | None" = None
+
+    @property
+    def has_session_control(self) -> bool:
+        """Whether the process delegation carries ``session:control``: false
+        for a runtime armed before the scope existed, until it is re-armed."""
+        return SESSION_CONTROL_SCOPE in self.delegation_cert.scope
 
     def delegations(self) -> list[dict]:
-        """The public scope and expiry of each process delegation held."""
-        certs = [self.delegation_cert]
-        if self.session_control_cert is not None:
-            certs.append(self.session_control_cert)
-        return [
-            {"scope": list(cert.scope), "not_after": cert.not_after}
-            for cert in certs
-        ]
+        """The public scope and expiry of the process delegation held."""
+        cert = self.delegation_cert
+        return [{"scope": list(cert.scope), "not_after": cert.not_after}]
 
     @classmethod
     def from_browser_payload(
@@ -115,7 +122,15 @@ class FleetRuntimeCredential:
             "delegation_cert",
         }
         optional = {"machine_private_seed", "reachability_cert",
-                    "serving_machine_private_seed", "session_control_cert"}
+                    "serving_machine_private_seed"}
+        if isinstance(payload, dict) and _LEGACY_SESSION_CONTROL_CERT in payload:
+            payload = {k: v for k, v in payload.items()
+                       if k != _LEGACY_SESSION_CONTROL_CERT}
+            logger.info(
+                "fleet runtime credential carries the retired %s; ignored "
+                "(session:control is a scope of delegation_cert; re-arm to grant it)",
+                _LEGACY_SESSION_CONTROL_CERT,
+            )
         keys = set(payload) if isinstance(payload, dict) else set()
         if not isinstance(payload, dict) or not required <= keys <= (required | optional):
             raise FleetRuntimeError(
@@ -161,8 +176,16 @@ class FleetRuntimeCredential:
             ) from exc
         if cert.parent_cert is not None:
             raise FleetRuntimeError("fleet runtime delegation must be machine-direct")
-        if cert.scope != (FLEET_SYNC_SCOPE,) or cert.target_types is not None:
-            raise FleetRuntimeError("fleet runtime delegation has excess authority")
+        # One delegation, one scope per purpose: fleet:sync always, and
+        # session:control once the browser grants it; nothing else.
+        problem = scope_problem(cert.scope, FLEET_SYNC_SCOPE)
+        if problem is not None:
+            raise FleetRuntimeError(
+                f"fleet runtime delegation scope {list(cert.scope)}: {problem} "
+                f"(fleet:sync is required; session:control is the only other scope)"
+            )
+        if cert.target_types is not None:
+            raise FleetRuntimeError("fleet runtime delegation must not carry target_types")
         if (
             verified.subject_kind != "machine"
             or verified.subject_id != machine_id
@@ -177,26 +200,6 @@ class FleetRuntimeCredential:
             > FLEET_RUNTIME_DELEGATION_TTL_SECONDS + 60
         ):
             raise FleetRuntimeError("fleet runtime delegation exceeds its TTL bound")
-
-        session_control_cert = None
-        if "session_control_cert" in keys:
-            try:
-                session_control_cert = DelegationCert.from_dict(
-                    payload["session_control_cert"]
-                )
-            except (IdkitError, ValueError, TypeError) as exc:
-                raise FleetRuntimeError(
-                    f"invalid session control delegation: {exc}"
-                ) from exc
-            _verify_process_delegation(
-                session_control_cert,
-                scope=SESSION_CONTROL_SCOPE,
-                machine_pub=machine_pub,
-                machine_id=machine_id,
-                anchor=anchor,
-                process_pub=process_key.public_hex,
-                now=current,
-            )
 
         machine_key = None
         reachability_cert = None
@@ -261,46 +264,7 @@ class FleetRuntimeCredential:
         return cls(
             machine_id, machine_pub, process_key, cert,
             machine_key, reachability_cert, serving_machine_key,
-            session_control_cert,
         )
-
-
-def _verify_process_delegation(
-    cert: DelegationCert,
-    *,
-    scope: str,
-    machine_pub: str,
-    machine_id: str,
-    anchor: str,
-    process_pub: str,
-    now: int,
-) -> None:
-    """The checks ``from_browser_payload`` applies to the fleet:sync cert,
-    for another single-scope process delegation from the same machine key."""
-    try:
-        verified = verify_chain(
-            cert,
-            machine_pub,
-            org=f"personal:{anchor}",
-            now=now,
-            required_scope=scope,
-        )
-    except IdkitError as exc:
-        raise FleetRuntimeError(
-            f"{scope} delegation does not verify: {exc}"
-        ) from exc
-    if cert.parent_cert is not None:
-        raise FleetRuntimeError(f"{scope} delegation must be machine-direct")
-    if cert.scope != (scope,) or cert.target_types is not None:
-        raise FleetRuntimeError(f"{scope} delegation has excess authority")
-    if verified.subject_kind != "machine" or verified.subject_id != machine_id:
-        raise FleetRuntimeError(f"{scope} delegation names another machine")
-    if verified.leaf_pub != process_pub:
-        raise FleetRuntimeError(
-            f"{scope} delegation is not to this runtime's process key"
-        )
-    if cert.not_after - cert.not_before > FLEET_RUNTIME_DELEGATION_TTL_SECONDS + 60:
-        raise FleetRuntimeError(f"{scope} delegation exceeds its TTL bound")
 
 
 def _hex(value: object, what: str) -> str:

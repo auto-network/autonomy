@@ -196,8 +196,17 @@ def test_a_write_floor_signed_by_the_delegated_process_key_verifies_through_its_
         machine, process.public_hex, scope=["fleet:sync", "link:*"], org="personal:" + "ab" * 32,
         subject=Subject("machine", "m-1"), not_before=now - 60, not_after=now + 3600,
     )
-    with pytest.raises(write_floors.WriteFloorError):
+    with pytest.raises(write_floors.WriteFloorError, match="excess"):
         write_floors.verify_machine_write_floor({**frame, "cert": wide.to_dict()}, now=now)
+    # The one process delegation also carries session:control
+    # (fleet_process_scope); a write floor under it verifies unchanged.
+    both = issue_cert(
+        machine, process.public_hex, scope=["fleet:sync", "session:control"],
+        org="personal:" + "ab" * 32,
+        subject=Subject("machine", "m-1"), not_before=now - 60, not_after=now + 3600,
+    )
+    assert write_floors.verify_machine_write_floor(
+        {**frame, "cert": both.to_dict()}, now=now)["write_floor_ns"] == 1_000
     with pytest.raises(write_floors.WriteFloorError):
         write_floors.verify_machine_write_floor({**frame, "signer": stranger.public_hex}, now=now)
     db.close(); peer.close()

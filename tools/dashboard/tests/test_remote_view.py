@@ -136,7 +136,7 @@ def test_a_large_tail_streams_and_unknown_query_keys_are_refused(tmp_path, monke
     assert json.loads(open(staged).read())["entries"][0]["x"].startswith("yyy")
     bad = asyncio.run(server._inbound_session_tail(
         {"session_id": "auto-9", "project": "p", "query": {"secret": "1"}}, PEER))
-    assert bad["refusal"] == "bad-request"
+    assert bad["refusal"] == "invalid-query"
 
 
 def test_a_missing_session_is_no_such_session(monkeypatch):

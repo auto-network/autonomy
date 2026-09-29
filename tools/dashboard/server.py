@@ -4083,12 +4083,14 @@ async def _inbound_session_send(body: dict, peer: str) -> dict:
 
     name, text = body.get("tmux_name"), body.get("text")
     kind = body.get("kind") or "input"
-    if not isinstance(name, str) or not name or not isinstance(text, str) or not text:
-        return scc.refusal("bad-request", "tmux_name and text are required")
+    if not isinstance(name, str) or not name:
+        return scc.refusal("invalid-tmux-name", "tmux_name is required")
+    if not isinstance(text, str) or not text:
+        return scc.refusal("missing-text", "text is required")
     if kind not in ("input", "crosstalk"):
-        return scc.refusal("bad-request", f"unknown send kind {kind!r}")
+        return scc.refusal("unknown-send-kind", f"unknown send kind {kind!r}")
     if len(text.encode("utf-8")) > scc.MAX_SEND_BYTES:
-        return scc.refusal(scc.OP_TOO_LARGE, f"text over {scc.MAX_SEND_BYTES} bytes")
+        return scc.refusal("text-too-large", f"text over {scc.MAX_SEND_BYTES} bytes")
     if not await asyncio.to_thread(_tmux_session_exists, name):
         return scc.refusal(scc.NO_SUCH_SESSION, name)
     roster = await asyncio.to_thread(session_presence._active_roster) or {}
@@ -4097,7 +4099,7 @@ async def _inbound_session_send(body: dict, peer: str) -> dict:
     if kind == "crosstalk":
         error = _validate_crosstalk_message(text)
         if error:
-            return scc.refusal("bad-request", error)
+            return scc.refusal("invalid-crosstalk", error)
         from tools.graph.schemas.personal_session_presence import is_tmux_name
 
         claimed = body.get("from_session")
@@ -4132,7 +4134,7 @@ async def _inbound_session_stop(body: dict, peer: str) -> dict:
 
     name = body.get("tmux_name")
     if not isinstance(name, str) or not name:
-        return scc.refusal("bad-request", "tmux_name is required")
+        return scc.refusal("invalid-tmux-name", "tmux_name is required")
     payload, _status = await _stop_session(name)
     if payload.get("status") == "not_found":
         return scc.refusal(scc.NO_SUCH_SESSION, name)
@@ -4163,21 +4165,21 @@ async def _inbound_session_fetch_branch(body: dict, peer: str) -> dict:
 
     name, repo, have = body.get("tmux_name"), body.get("repo"), body.get("have")
     if not isinstance(name, str) or not _TMUX_NAME_RE.match(name):
-        return scc.refusal("bad-request", "tmux_name")
+        return scc.refusal("invalid-tmux-name", "tmux_name")
     if not isinstance(repo, str) or not _REPO_NAME_RE.match(repo):
-        return scc.refusal("bad-request", "repo")
+        return scc.refusal("invalid-repo", "repo")
     if (not isinstance(have, list) or not have or len(have) > 16
             or not all(isinstance(h, str) and _SHA_RE.match(h) for h in have)):
-        return scc.refusal("bad-request", "have must be 1-16 commit ids")
+        return scc.refusal("invalid-have", "have must be 1-16 commit ids")
     worktree = _session_worktree_dir(WORKTREES_DIR, name, repo)
     if not (worktree / ".git").exists():
-        return scc.refusal(scc.NO_SUCH_SESSION, f"no {repo} worktree for {name}")
+        return scc.refusal("no-such-worktree", f"no {repo} worktree for {name}")
     branch = f"session/{name}"
 
     def _build() -> dict:
         head = _git(worktree, "rev-parse", "--verify", f"refs/heads/{branch}")
         if head.returncode != 0:
-            return scc.refusal(scc.NO_SUCH_SESSION, f"no branch {branch}")
+            return scc.refusal("no-such-branch", f"no branch {branch}")
         head_sha = head.stdout.strip()
         known = [h for h in have
                  if _git(worktree, "cat-file", "-e", f"{h}^{{commit}}").returncode == 0]
@@ -4261,7 +4263,7 @@ async def api_worktree_remote_fetch(request):
         result = reply.get("result") or {}
         if not reply.get("ok"):
             results.append({"repo": repo_name, "refusal": reply.get("refusal"),
-                            "error": reply.get("detail")})
+                            "at": reply.get("at"), "error": reply.get("detail")})
             continue
         if result.get("empty"):
             results.append({"repo": repo_name, "head": result.get("head"), "empty": True})
@@ -7029,15 +7031,18 @@ async def _remote_session_tail(request, project: str, address: str):
     reply = await remote_view.fetch_tail(machine, name, project, query)
     if not reply.get("ok"):
         refusal = reply.get("refusal")
-        if refusal in remote_view.NOT_ENABLED_REFUSALS:
+        state = remote_view.refusal_state(refusal)
+        if state == "not_enabled":
             return JSONResponse({
                 "entries": [], "is_live": False, "session_id": address,
                 "tmux_session": address, "tmux_name": address,
                 "machine": machine, "machine_reachable": False,
-                "machine_not_enabled": {"machine": machine, "reason": refusal},
+                "machine_not_enabled": {
+                    "machine": machine, "reason": refusal,
+                    "detail": reply.get("detail"), "at": reply.get("at")},
                 "live_updates": False,
             })
-        if refusal in remote_view.UNREACHABLE_REFUSALS:
+        if state == "unreachable":
             # The machine, not the session, is missing: the viewer shows
             # "<machine> unreachable since <t>" and no transcript
             # (design 64906530 revision f984e30b).
@@ -7074,13 +7079,13 @@ async def _inbound_session_tail(body: dict, peer: str) -> dict:
 
     name, project, query = body.get("session_id"), body.get("project"), body.get("query")
     if not isinstance(name, str) or not _TMUX_NAME_RE.match(name):
-        return scc.refusal("bad-request", "session_id")
+        return scc.refusal("invalid-session-id", "session_id")
     if not isinstance(project, str) or not _TMUX_NAME_RE.match(project):
-        return scc.refusal("bad-request", "project")
+        return scc.refusal("invalid-project", "project")
     if not isinstance(query, dict) or any(
             k not in remote_view.TAIL_QUERY_KEYS or not isinstance(v, str)
             for k, v in query.items()):
-        return scc.refusal("bad-request", "query")
+        return scc.refusal("invalid-query", "query")
     scope = {
         "type": "http", "method": "GET", "headers": [],
         "path": f"/api/session/{project}/{name}/tail",
@@ -8016,16 +8021,16 @@ async def _inbound_session_output(body: dict, peer: str) -> dict:
 
     name, rel_path = body.get("tmux_name"), body.get("path")
     if not isinstance(name, str) or not _TMUX_NAME_RE.match(name):
-        return scc.refusal("bad-request", "tmux_name")
+        return scc.refusal("invalid-tmux-name", "tmux_name")
     if (not isinstance(rel_path, str) or not rel_path or rel_path.startswith("/")
             or ".." in Path(rel_path).parts):
-        return scc.refusal("bad-request", "path")
+        return scc.refusal("invalid-path", "path")
     candidate = await asyncio.to_thread(_resolve_session_output, name, rel_path)
     if candidate is None:
         return scc.refusal("file-not-found", f"{name}:{rel_path}")
     size = candidate.stat().st_size
     if size > MAX_STREAM_BYTES:
-        return scc.refusal(scc.OP_TOO_LARGE, f"{size} bytes")
+        return scc.refusal("file-too-large", f"{size} bytes")
     logger.info("session-control output %s:%s (%d bytes) to machine=%s",
                 name, rel_path, size, peer[:16])
     return scc.ok({"name": candidate.name, "size": size,
@@ -10692,18 +10697,20 @@ async def _create_remote_session(request, body: dict):
     }
     reply = await session_control_client.request(
         str(body["machine"]), "launch", launch, timeout=20.0)
-    if reply.get("refusal") == "session-control-timeout":
+    if reply.get("refusal") in ("reply-timeout", "handshake-timeout"):
         # The far machine may have launched and only the reply was lost:
         # ask once more with the SAME id, which returns that session.
         reply = await session_control_client.request(
             str(body["machine"]), "launch", launch, timeout=20.0)
     if not reply.get("ok"):
+        from tools.dashboard import remote_view
+
         return JSONResponse(
             {"error": reply.get("detail") or reply.get("refusal"),
-             "refusal": reply.get("refusal"), "machine": body["machine"]},
-            status_code=502 if reply.get("refusal") in (
-                "session-control-timeout", "personal-connector-unavailable",
-            ) else 409)
+             "refusal": reply.get("refusal"), "at": reply.get("at"),
+             "machine": body["machine"]},
+            status_code=502 if remote_view.refusal_state(reply.get("refusal"))
+            == "unreachable" else 409)
     result = reply.get("result") or {}
     return JSONResponse({
         "tmux_name": result.get("tmux_name"),
@@ -10772,11 +10779,13 @@ async def _create_session_from_body(body: dict, request=None, provenance=None):
             proj = workspace_settings.get_workspace(project_name)
         except KeyError:
             return JSONResponse(
-                {"error": f"Unknown project '{project_name}'"}, status_code=400,
+                {"error": f"Unknown project '{project_name}'",
+                 "code": "unknown-project"}, status_code=400,
             )
         except workspace_settings.WorkspaceSettingsError as e:
             return JSONResponse(
-                {"error": f"Project config error: {e}"}, status_code=500,
+                {"error": f"Project config error: {e}",
+                 "code": "workspace-config-error"}, status_code=500,
             )
         missing_artifacts = workspace_settings.validate_artifacts(proj)
         if missing_artifacts:

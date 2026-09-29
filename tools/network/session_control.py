@@ -37,12 +37,16 @@ import secrets
 import time
 from typing import Any, Awaitable, Callable, Optional
 
+from tools.network.fleet_process_scope import SESSION_CONTROL_SCOPE, scope_problem
 from tools.network.fleet_sync_channel import (
-    SESSION_CAP_MISSING,
+    HANDSHAKE_REFUSALS,
     FleetAuthenticator,
+    FleetHandshakeRefused,
     authenticate_fleet_transport,
     serve_fleet_transport,
 )
+from tools.network.relaykit.frames import VIEWER_KIND_RECORD, tag_viewer_message
+from tools.network.relaykit.viewer import read_viewer_record
 from tools.network.relaykit.fleet_stream import (
     FleetStreamClosed,
     FleetStreamEndpoint,
@@ -52,7 +56,6 @@ from tools.network.relaykit.fleet_stream import (
 logger = logging.getLogger("fleet.session_control")
 
 SESSION_CONTROL_VERSION = 1
-SESSION_CONTROL_SCOPE = "session:control"
 #: Largest request or reply body, JSON-encoded.
 MAX_RECORD_BYTES = 256 * 1024
 #: How long an inbound request waits for the dashboard to answer it.
@@ -71,15 +74,48 @@ TRANSFER_DEADLINE_CAP_S = 600
 #: Seconds an incoming transfer file may sit before a later transfer sweeps it.
 TRANSFER_RETENTION_S = 3600
 
-# Typed refusals (graph://7eb29bc8-31a §9.2). ``destination-slot-absent`` and
-# the other relay admission reasons arrive verbatim from the relay.
-NOT_NEGOTIATED = "session-control-not-negotiated"
-UNARMED = "session-control-unarmed"
+# Typed refusals (graph://7eb29bc8-31a §9.2). One code per failure path, so
+# a refusal names the check that failed. Relay admission reasons arrive
+# verbatim from the relay; handshake checks carry FleetHandshakeRefused's
+# own-*/peer-* codes. Every refusal record also says WHERE it was decided:
+# ``at: "local"`` (the requesting machine) or ``at: "peer"`` (the target).
+#
+# This machine, before any pair is opened:
+NOT_NEGOTIATED = "session-control-not-negotiated"   # relay offered no session-control/1
+UNARMED = "session-control-unarmed"                 # no fleet runtime armed here
+NOT_GRANTED = "session-control-not-granted"         # our delegation lacks session:control
 NOT_IN_ROSTER = "peer-not-in-roster"
+SLOT_ABSENT = "destination-slot-absent"
+SLOT_LOOKUP_FAILED = "slot-lookup-failed"           # the relay's slot list could not be read
+REQUEST_TOO_LARGE = "request-too-large"
+# The pair, after the relay admitted it:
+PEER_CLOSED_AT_OPEN = "peer-closed-at-open"         # peer connector declined the pair
+PEER_CLOSED_IN_HANDSHAKE = "peer-closed-in-handshake"  # closed with no typed refusal
+HANDSHAKE_TIMEOUT = "handshake-timeout"
+REPLY_TIMEOUT = "reply-timeout"
+REPLY_NOT_JSON = "reply-not-json"
+REPLY_MALFORMED = "reply-malformed"
+STREAM_CHUNK_TIMEOUT = "stream-chunk-timeout"
+TRANSFER_DEADLINE = "transfer-deadline-exceeded"
+STREAM_TOO_LARGE = "stream-too-large"
+STREAM_SHORT = "stream-ended-short"
+FAILED = "session-control-failed"                   # an exception no path above names
+# The target, answering:
 DASHBOARD_UNAVAILABLE = "session-control-dashboard-unavailable"
 BUSY = "session-control-busy"
-PEER_REFUSED = "peer-refused-session-control"
-BAD_REQUEST = "bad-request"
+INCOMING_TOO_LARGE = "incoming-request-too-large"
+REQUEST_NOT_JSON = "request-not-json"
+REQUEST_MALFORMED = "request-malformed"
+REPLY_TOO_LARGE = "reply-too-large"
+FILE_NOT_STREAMABLE = "file-not-streamable"
+CTL_REQUEST_MALFORMED = "ctl-request-malformed"     # dashboard -> connector bridge
+#: A pre-handshake refusal record whose code is not one a target can send.
+PEER_REFUSED = "peer-refused"
+#: What a target may say in place of its hello: its own not-armed/not-granted
+#: state, or a handshake check it ran on our hello. The record is
+#: unauthenticated, so nothing else is believed (it could steer the UI).
+PEER_REFUSAL_CODES = frozenset({UNARMED, NOT_GRANTED}) | HANDSHAKE_REFUSALS
+#: Kept for callers that size their own payloads (send text, output files).
 OP_TOO_LARGE = "op-too-large"
 
 
@@ -92,34 +128,43 @@ class SessionControlError(Exception):
         self.detail = detail
 
 
-def encode(record: dict) -> bytes:
+def encode(record: dict, *, too_large: str = REPLY_TOO_LARGE) -> bytes:
     data = json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
     if len(data) > MAX_RECORD_BYTES:
-        raise SessionControlError(OP_TOO_LARGE, f"{len(data)} bytes")
+        raise SessionControlError(too_large, f"{len(data)} bytes")
     return data
 
 
-def refusal(reason: str, detail: str = "") -> dict:
+def refusal(reason: str, detail: str = "", *, at: str | None = None) -> dict:
     out = {"v": SESSION_CONTROL_VERSION, "ok": False, "refusal": reason}
     if detail:
         out["detail"] = detail[:300]
+    if at is not None:
+        out["at"] = at
     return out
+
+
+def _is_refusal_record(data: object) -> bool:
+    """A pre-handshake refusal the target sends in place of its hello."""
+    return (isinstance(data, dict) and data.get("v") == SESSION_CONTROL_VERSION
+            and data.get("ok") is False and isinstance(data.get("refusal"), str)
+            and set(data) <= {"v", "ok", "refusal", "detail"})
 
 
 def parse_request(raw: bytes) -> dict:
     if len(raw) > MAX_RECORD_BYTES:
-        raise SessionControlError(OP_TOO_LARGE, f"{len(raw)} bytes")
+        raise SessionControlError(INCOMING_TOO_LARGE, f"{len(raw)} bytes")
     try:
         request = json.loads(raw)
     except ValueError as exc:
-        raise SessionControlError(BAD_REQUEST, "not JSON") from exc
+        raise SessionControlError(REQUEST_NOT_JSON, "not JSON") from exc
     if (
         not isinstance(request, dict)
         or request.get("v") != SESSION_CONTROL_VERSION
         or not isinstance(request.get("op"), str)
         or not isinstance(request.get("body", {}), dict)
     ):
-        raise SessionControlError(BAD_REQUEST, "not a session-control request")
+        raise SessionControlError(REQUEST_MALFORMED, "not a session-control request")
     return {"op": request["op"], "body": request.get("body") or {}}
 
 
@@ -249,17 +294,22 @@ async def _stream_reply(header: dict, fd: int, size: int, path, delete: bool):
 def session_authenticator(runtime) -> FleetAuthenticator:
     """The session:control authenticator for an ARMED connector runtime.
 
-    Same process key, root and roster as the sync authenticator; only the
-    delegation (and so the verified scope) differs.
+    Same process key, root, roster and delegation as the sync authenticator:
+    one delegation carries both scopes (fleet_process_scope). Only the scope
+    this authenticator verifies differs.
     """
     scheduler = getattr(runtime, "scheduler", None)
-    cert = getattr(runtime, "session_control_cert", None)
     if scheduler is None:
         raise SessionControlError(UNARMED, "this process is not armed")
-    if cert is None:
-        raise SessionControlError(
-            SESSION_CAP_MISSING, "this runtime holds no session:control delegation")
     sync = scheduler.authenticator
+    cert = sync.delegation_cert
+    if cert is None or scope_problem(cert.scope, SESSION_CONTROL_SCOPE) is not None:
+        held = list(cert.scope) if cert is not None else []
+        raise SessionControlError(
+            NOT_GRANTED,
+            f"this runtime's delegation scope {held} does not include "
+            f"{SESSION_CONTROL_SCOPE!r}; it was armed before the scope existed "
+            f"or without it")
     return FleetAuthenticator(
         sync.machine_key,
         root_pub=sync.root_pub,
@@ -341,9 +391,13 @@ def session_control_offer_handler(
         try:
             authenticator = session_authenticator(runtime)
         except SessionControlError as exc:
+            # Accept the pair only to say why, in place of a hello: a bare
+            # decline reaches the requester as a reset with no reason.
             logger.info("session-control offer refused: %s", exc.refusal)
-            return False
-        task = asyncio.create_task(_serve(endpoint, authenticator, broker))
+            task = asyncio.create_task(
+                _refuse_pair(endpoint, exc.refusal, exc.detail))
+        else:
+            task = asyncio.create_task(_serve(endpoint, authenticator, broker))
         tasks.add(task)
         task.add_done_callback(tasks.discard)
         return True
@@ -351,11 +405,45 @@ def session_control_offer_handler(
     return on_offer
 
 
+#: How long a refused pair waits for the requester to read the refusal.
+REFUSAL_LINGER_S = 5.0
+
+
+async def _send_refusal(endpoint: FleetStreamEndpoint, code: str, detail: str) -> None:
+    """Send the pre-handshake refusal record, then half-close and linger so
+    the requester reads it before the pair resets. Unauthenticated by
+    nature (no channel exists yet): it can only report a refusal, never
+    grant anything, and the requester marks it ``at: "peer"``."""
+    record = encode(refusal(code, detail))
+    with contextlib.suppress(Exception):
+        await endpoint.send(tag_viewer_message(VIEWER_KIND_RECORD, record))
+        await endpoint.half_close()
+        await asyncio.wait_for(endpoint.closed.wait(), REFUSAL_LINGER_S)
+
+
+async def _refuse_pair(endpoint: FleetStreamEndpoint, code: str, detail: str) -> None:
+    try:
+        await endpoint.ready.wait()
+        if not endpoint.closed.is_set():
+            await _send_refusal(endpoint, code, detail)
+    finally:
+        with contextlib.suppress(Exception):
+            await endpoint.close()
+
+
 async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticator,
                  broker: InboundBroker) -> None:
     await endpoint.ready.wait()
     if endpoint.closed.is_set():
         return
+    hello_sent = False
+
+    async def send(message: bytes) -> None:
+        # The first message out is the server hello; once it is sent a
+        # handshake refusal can no longer be reported in its place.
+        nonlocal hello_sent
+        hello_sent = True
+        await endpoint.send(message)
 
     async def handler(_token, message, client_pub, **_extra):
         # The sender is the machine the handshake proved, never a field of
@@ -376,7 +464,7 @@ async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticato
                 if delete:
                     with contextlib.suppress(OSError):
                         os.unlink(path)
-                return encode(refusal(BAD_REQUEST, "the file cannot be streamed"))
+                return encode(refusal(FILE_NOT_STREAMABLE, "the file cannot be streamed"))
             fd, size = opened
             header = {**reply, "result": {**result, "stream": {"size": size}}}
             return _stream_reply(header, fd, size, path, delete)
@@ -390,9 +478,14 @@ async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticato
 
     try:
         await serve_fleet_transport(
-            token=endpoint.session, recv=endpoint.recv, send=endpoint.send,
+            token=endpoint.session, recv=endpoint.recv, send=send,
             handler=handler, close=close, authenticator=authenticator,
         )
+    except FleetHandshakeRefused as exc:
+        # The requester's hello failed one of our checks: tell it which.
+        logger.info("session-control hello refused: %s", exc.refusal)
+        if not hello_sent and not endpoint.closed.is_set():
+            await _send_refusal(endpoint, exc.refusal, exc.detail)
     except (FleetStreamClosed, ConnectionError):
         pass
     except Exception:
@@ -412,8 +505,11 @@ async def _receive_stream(channel, timeout: float) -> dict:
     import hashlib
 
     stream = channel.recv_message_stream()
-    first, final = await asyncio.wait_for(stream.__anext__(), timeout)
-    header = json.loads(first)
+    try:
+        first, final = await asyncio.wait_for(stream.__anext__(), timeout)
+    except asyncio.TimeoutError:
+        raise SessionControlError(REPLY_TIMEOUT, f"no reply within {timeout}s") from None
+    header = _decode_reply(first)
     announced = ((header.get("result") or {}).get("stream") or {}).get("size")
     if final or not header.get("ok") or announced is None:
         return header
@@ -432,25 +528,27 @@ async def _receive_stream(channel, timeout: float) -> dict:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     raise SessionControlError(
-                        "session-control-timeout", "transfer exceeded its deadline")
+                        TRANSFER_DEADLINE, "transfer exceeded its deadline")
                 try:
                     chunk, final = await asyncio.wait_for(
                         stream.__anext__(), min(timeout, remaining))
                 except asyncio.TimeoutError:
                     if loop.time() >= deadline:
                         raise SessionControlError(
-                            "session-control-timeout",
+                            TRANSFER_DEADLINE,
                             "transfer exceeded its deadline") from None
-                    raise
+                    raise SessionControlError(
+                        STREAM_CHUNK_TIMEOUT,
+                        f"no stream chunk within {min(timeout, remaining):.0f}s") from None
                 size += len(chunk)
                 if size > MAX_STREAM_BYTES or size > int(announced):
-                    raise SessionControlError(OP_TOO_LARGE, "stream exceeds its size")
+                    raise SessionControlError(STREAM_TOO_LARGE, "stream exceeds its size")
                 digest.update(chunk)
                 await asyncio.to_thread(fh.write, chunk)
                 if final:
                     break
         if size != int(announced):
-            raise SessionControlError(BAD_REQUEST, "stream ended short")
+            raise SessionControlError(STREAM_SHORT, "stream ended short")
     except BaseException:
         with contextlib.suppress(OSError):
             target.unlink()
@@ -460,15 +558,68 @@ async def _receive_stream(channel, timeout: float) -> dict:
     return header
 
 
+def _decode_reply(raw: bytes) -> dict:
+    try:
+        reply = json.loads(raw)
+    except ValueError as exc:
+        raise SessionControlError(REPLY_NOT_JSON, str(exc)) from exc
+    if not isinstance(reply, dict) or reply.get("v") != SESSION_CONTROL_VERSION:
+        raise SessionControlError(REPLY_MALFORMED, "not a session-control reply")
+    return reply
+
+
+class _RefusalAwareTransport:
+    """The pair as the handshake's transport, recognising the typed refusal
+    a target sends in place of its hello (see ``_send_refusal``)."""
+
+    def __init__(self, endpoint: FleetStreamEndpoint):
+        self._endpoint = endpoint
+        self.session = endpoint.session
+        self._first = True
+
+    async def send(self, message: bytes) -> None:
+        await self._endpoint.send(message)
+
+    async def recv(self):
+        raw = await self._endpoint.recv()
+        if self._first:
+            # Only the message in the hello's place can be a refusal; every
+            # later record is channel ciphertext.
+            self._first = False
+            data = None
+            if isinstance(raw, (bytes, bytearray)):
+                try:
+                    data = json.loads(read_viewer_record(bytes(raw)))
+                except Exception:
+                    data = None
+            if _is_refusal_record(data):
+                code = data["refusal"]
+                detail = str(data.get("detail", ""))[:300]
+                if code not in PEER_REFUSAL_CODES:
+                    detail = f"unrecognised peer refusal {code[:64]!r}"
+                    code = PEER_REFUSED
+                raise _PeerRefusal(code, detail)
+        return raw
+
+    async def close(self) -> None:
+        await self._endpoint.close()
+
+
+class _PeerRefusal(SessionControlError):
+    """A refusal the target reported, rather than one decided here."""
+
+
 async def request(connector, runtime, *, machine_pub: str, op: str,
                   body: dict, timeout: float = 15.0,
                   resolve_slot=None, stream: bool = False) -> dict:
     """Send one request to the fleet machine *machine_pub* and return its
     reply record. Every failure is a typed refusal record, never a raise, so
     an old relay ("unknown control op") or an unarmed peer reads the same way
-    as any other refusal."""
+    as any other refusal. A refusal carries ``at``: ``local`` when this
+    machine decided it, ``peer`` when the target did."""
     try:
-        record = encode({"v": SESSION_CONTROL_VERSION, "op": op, "body": body})
+        record = encode({"v": SESSION_CONTROL_VERSION, "op": op, "body": body},
+                        too_large=REQUEST_TOO_LARGE)
         adapter = getattr(connector, "session_streams", None)
         if adapter is None:
             # The relay did not negotiate session-control/1 on this tunnel,
@@ -483,9 +634,10 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
             (persona_pub, slot_machine), _source = await resolve_slot(
                 connector, runtime, machine_pub, timeout=timeout)
         except ConnectionError as exc:
-            reason = NOT_IN_ROSTER if "not in the active roster" in str(exc) \
-                else "destination-slot-absent"
-            raise SessionControlError(reason, str(exc)) from exc
+            # PeerSlotError names its reason; any other ConnectionError is
+            # the relay's slot list failing to load.
+            raise SessionControlError(
+                getattr(exc, "reason", None) or SLOT_LOOKUP_FAILED, str(exc)) from exc
         try:
             endpoint = await adapter.open(
                 persona_pub, slot_machine,
@@ -495,35 +647,45 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
             # predates session-control/1 says "unknown control op".
             raise SessionControlError(exc.reason) from exc
         except FleetStreamClosed as exc:
-            # Admitted by the relay, then refused by the peer's connector:
-            # unarmed, or holding no session:control delegation.
-            raise SessionControlError(PEER_REFUSED, str(exc)) from exc
+            # Admitted by the relay, then declined by the peer's connector
+            # without a word: a target that predates typed refusals.
+            raise SessionControlError(PEER_CLOSED_AT_OPEN, str(exc)) from exc
         try:
-            channel = await asyncio.wait_for(authenticate_fleet_transport(
-                endpoint, authenticator=authenticator,
-                expected_machine_pub=machine_pub, session=endpoint.session,
-            ), timeout)
+            try:
+                channel = await asyncio.wait_for(authenticate_fleet_transport(
+                    _RefusalAwareTransport(endpoint), authenticator=authenticator,
+                    expected_machine_pub=machine_pub, session=endpoint.session,
+                ), timeout)
+            except asyncio.TimeoutError:
+                raise SessionControlError(
+                    HANDSHAKE_TIMEOUT, f"no handshake within {timeout}s") from None
+            except FleetStreamClosed as exc:
+                raise SessionControlError(PEER_CLOSED_IN_HANDSHAKE, str(exc)) from exc
             await channel.send_message(record)
             if stream:
                 reply = await _receive_stream(channel, timeout)
             else:
-                reply = json.loads(
-                    await asyncio.wait_for(channel.recv_message(), timeout))
+                try:
+                    raw = await asyncio.wait_for(channel.recv_message(), timeout)
+                except asyncio.TimeoutError:
+                    raise SessionControlError(
+                        REPLY_TIMEOUT, f"no reply within {timeout}s") from None
+                reply = _decode_reply(raw)
         finally:
             with contextlib.suppress(Exception):
                 await endpoint.close()
-        if not isinstance(reply, dict) or reply.get("v") != SESSION_CONTROL_VERSION:
-            raise SessionControlError(BAD_REQUEST, "malformed reply")
+        if reply.get("ok") is False and "at" not in reply:
+            reply = {**reply, "at": "peer"}
         return reply
+    except _PeerRefusal as exc:
+        return refusal(exc.refusal, exc.detail, at="peer")
     except SessionControlError as exc:
-        return refusal(exc.refusal, exc.detail)
-    except asyncio.TimeoutError:
-        return refusal("session-control-timeout", f"no reply within {timeout}s")
-    except Exception as exc:  # handshake refusals, closed pairs, bad JSON
-        detail = f"{type(exc).__name__}: {exc}"
-        reason = SESSION_CAP_MISSING if SESSION_CAP_MISSING in str(exc) \
-            else "session-control-failed"
-        return refusal(reason, detail)
+        return refusal(exc.refusal, exc.detail, at="local")
+    except FleetHandshakeRefused as exc:
+        # Our check of the target's hello failed; the code says which check.
+        return refusal(exc.refusal, exc.detail, at="local")
+    except Exception as exc:  # nothing above names it
+        return refusal(FAILED, f"{type(exc).__name__}: {exc}", at="local")
 
 
 def ctl_op(op: str) -> bool:
@@ -538,7 +700,8 @@ async def handle_ctl(connector, runtime, op: str, args: Any,
     if op == "session-control-request":
         machine_pub, request_op = args.get("machine_pub"), args.get("op")
         if not isinstance(machine_pub, str) or not isinstance(request_op, str):
-            return {"ok": True, "reply": refusal(BAD_REQUEST, "machine_pub and op")}
+            return {"ok": True, "reply": refusal(
+                CTL_REQUEST_MALFORMED, "machine_pub and op are required", at="local")}
         reply = await request(
             connector, runtime, machine_pub=machine_pub, op=request_op,
             body=args.get("body") if isinstance(args.get("body"), dict) else {},

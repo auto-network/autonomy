@@ -69,9 +69,12 @@ def machine_state(reply: dict) -> dict:
     from tools.dashboard import remote_view
 
     refusal = reply.get("refusal")
-    if refusal in remote_view.NOT_ENABLED_REFUSALS:
-        return {"reachable": False, "state": "not_enabled", "reason": refusal}
-    return {"reachable": False, "state": "unreachable", "reason": refusal}
+    # The code names the failed check; detail and ``at`` (this machine or
+    # the target) say what and where, so the chooser never has to guess.
+    facts = {"reason": refusal, "detail": reply.get("detail"), "at": reply.get("at")}
+    if remote_view.refusal_state(refusal) == "not_enabled":
+        return {"reachable": False, "state": "not_enabled", **facts}
+    return {"reachable": False, "state": "unreachable", **facts}
 
 
 def _context():
@@ -173,6 +176,8 @@ async def remote_sessions() -> list[dict]:
             "machine_reachable": False,
             "machine_state": machine_state(reply)["state"],
             "machine_not_enabled_reason": machine_state(reply)["reason"],
+            "machine_refusal_detail": machine_state(reply)["detail"],
+            "machine_refusal_at": machine_state(reply)["at"],
             "machine_unreachable_since": since,
         } for r in presence if r["machine_pub"] == pub]
 

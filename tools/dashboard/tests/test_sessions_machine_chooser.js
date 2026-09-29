@@ -7,7 +7,14 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const path = require('path');
 const { SESSIONS_HTML, makeSessionsPage } = require('./sessions_page_harness');
+
+const REFUSAL_JS = path.join(__dirname, '..', 'static', 'js', 'lib', 'refusal-text.js');
+function loadRefusalText(win) {
+  new Function('window', 'globalThis', fs.readFileSync(REFUSAL_JS, 'utf8'))(win, win);
+  return win;
+}
 
 class CustomEvent {
   constructor(type, init) { this.type = type; this.detail = (init || {}).detail; }
@@ -48,7 +55,7 @@ describe('machine chooser', () => {
 
   it('never launches on a machine that is reachable but not enabled', () => {
     const p = makeSessionsPage({ CustomEvent });
-    const armed = Object.assign({}, SJC, { state: 'not_enabled', reason: 'session-cap-missing' });
+    const armed = Object.assign({}, SJC, { state: 'not_enabled', reason: 'session-control-not-granted', at: 'local' });
     p.launchTargets = [HOME, armed];
     p.pickWorkspace({ id: 'autonomy-docs', name: 'Docs' });
     assert.equal(p.launchOn(armed), false);
@@ -58,14 +65,42 @@ describe('machine chooser', () => {
 
   it('states each machine\'s figures, and why one cannot be used', () => {
     const p = makeSessionsPage({ CustomEvent });
+    loadRefusalText(p.__window);
+    p.launchTargets = [HOME];
     assert.equal(p.launchTargetStats(SJC),
       '2 live · 47.3 GB RAM free · 812 GB disk free · load 0.04');
-    assert.equal(p.launchTargetStats({ state: 'not_enabled', reason: 'session-cap-missing' }),
-      'this machine is not armed for remote launch');
-    assert.equal(p.launchTargetStats({ state: 'not_enabled', reason: 'session-control-not-negotiated' }),
-      "this machine's relay does not offer remote launch yet");
+    // The refusal names the machine that decided it and keeps its code.
+    assert.equal(
+      p.launchTargetStats({ label: 'sjc', state: 'not_enabled', reason: 'session-control-not-granted', at: 'local' }),
+      "Home's runtime delegation does not include session:control [session-control-not-granted]");
+    assert.equal(
+      p.launchTargetStats({ label: 'sjc', state: 'not_enabled', reason: 'peer-scope-missing', at: 'peer' }),
+      "Home's runtime delegation does not include session:control (refused by Sjc) [peer-scope-missing]");
+    assert.equal(
+      p.launchTargetStats({ label: 'sjc', state: 'not_enabled', reason: 'session-control-not-negotiated', at: 'local' }),
+      "Home's relay tunnel did not negotiate session control [session-control-not-negotiated]");
     assert.match(p.launchTargetStats({ reachable: false, state: 'unreachable', unreachable_since: 1800000000 }),
       /^unreachable since /);
+  });
+});
+
+describe('refusal text', () => {
+  const win = loadRefusalText({});
+  const names = { here: 'home', there: 'sjc' };
+
+  it('states handshake codes about the right machine, from either side', () => {
+    // own-* is the checker's own material; the checker is whoever decided.
+    assert.equal(win.describeRefusal({ reason: 'own-delegation-expired', at: 'local' }, names),
+      "Home's runtime delegation has expired [own-delegation-expired]");
+    assert.equal(win.describeRefusal({ reason: 'own-delegation-expired', at: 'peer' }, names),
+      "Sjc's runtime delegation has expired (refused by Sjc) [own-delegation-expired]");
+    assert.equal(win.describeRefusal({ reason: 'peer-scope-excess', at: 'local' }, names),
+      "Sjc's runtime delegation carries a scope outside fleet:sync and session:control [peer-scope-excess]");
+  });
+
+  it('never invents a cause for a code it does not know', () => {
+    assert.equal(win.describeRefusal({ reason: 'something-new' }, names),
+      'Remote sessions refused [something-new]');
   });
 });
 

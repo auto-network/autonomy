@@ -40,18 +40,37 @@ TAIL_QUERY_KEYS = ("tail_lines", "tail_entries", "before", "before_file",
 
 #: Refusals that mean the MACHINE cannot be reached right now (as opposed to
 #: a session it does not have): the viewer renders them as "unreachable".
+#: One entry per failure path (tools/network/session_control.py codes).
 UNREACHABLE_REFUSALS = frozenset({
-    "destination-slot-absent", "session-control-timeout",
-    "peer-refused-session-control", "personal-connector-unavailable",
-    "session-control-failed",
+    "destination-slot-absent", "slot-lookup-failed",
+    "handshake-timeout", "reply-timeout", "stream-chunk-timeout",
+    "transfer-deadline-exceeded", "peer-closed-in-handshake",
+    "personal-connector-unavailable", "connector-call-failed",
+    "connector-refused-request", "session-control-failed",
 })
-#: Refusals that mean remote sessions are not ENABLED (as opposed to the
-#: machine being down): this machine's relay or connector lacks the
-#: capability, or a machine holds no session:control grant (it needs a
-#: re-sign-in there, not patience).
+#: Refusals that mean the machine answered but remote sessions are not
+#: ENABLED between the two: a relay or connector without the capability, a
+#: runtime whose delegation lacks session:control, or a handshake check that
+#: refused. Every handshake code (``own-*`` / ``peer-*``, from
+#: fleet_sync_channel.FleetHandshakeRefused) counts, named by
+#: ``refusal_state``; this set is the rest.
 NOT_ENABLED_REFUSALS = frozenset({
-    "session-control-not-negotiated", "session-cap-missing",
+    "session-control-not-negotiated", "session-control-unarmed",
+    "session-control-not-granted", "peer-closed-at-open",
+    "peer-not-in-roster", "unknown-machine", "peer-refused",
 })
+
+
+def refusal_state(refusal: str | None) -> str | None:
+    """``unreachable``, ``not_enabled``, or None (a refusal about the request
+    or the session, not the machine)."""
+    if not refusal:
+        return None
+    if refusal in UNREACHABLE_REFUSALS:
+        return "unreachable"
+    if refusal in NOT_ENABLED_REFUSALS or refusal.startswith(("own-", "peer-")):
+        return "not_enabled"
+    return None
 
 
 def unreachable_since(machine: str) -> int | None:
@@ -111,7 +130,7 @@ async def fetch_tail(machine: str, name: str, project: str, query: dict,
     else:
         data = result.get("tail")
     if not isinstance(data, dict):
-        return {"v": 1, "ok": False, "refusal": "bad-request", "detail": "no tail"}
+        return {"v": 1, "ok": False, "refusal": "tail-missing", "detail": "the reply carried no tail", "at": "local"}
     return {"v": 1, "ok": True, "tail": data}
 
 

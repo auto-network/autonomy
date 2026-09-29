@@ -33,28 +33,34 @@ from tools.network.tests.test_fleet_relay_carrier import (
 
 
 class Runtime:
-    """What connector_runtime exposes: an armed scheduler's authenticator
-    and, when the browser minted it, the session:control delegation."""
+    """What connector_runtime exposes: an armed scheduler's authenticator,
+    whose one process delegation carries session:control beside fleet:sync
+    when the browser granted it."""
 
-    def __init__(self, root, machine, machine_id, roster, *, session_cert=True):
+    def __init__(self, root, machine, machine_id, roster, *, session_scope=True):
         self.process = KeyPair.generate()
-        now = int(time.time())
-
-        def cert(scope):
-            return issue_cert(
-                machine, self.process.public_hex, scope=[scope],
-                org=f"personal:{root.public_hex}",
-                subject=Subject(kind="machine", id=machine_id),
-                not_before=now - 30, not_after=now + 3600,
-            )
-
+        self._mint = (root, machine, machine_id)
         self.scheduler = type("S", (), {})()
         self.scheduler.authenticator = FleetAuthenticator(
             self.process, root_pub=root.public_hex,
             roster_entries=lambda: roster, roster_machine_pub=machine.public_hex,
-            delegation_cert=cert("fleet:sync"), require_delegation=True,
+            delegation_cert=self._cert(session_scope), require_delegation=True,
         )
-        self.session_control_cert = cert("session:control") if session_cert else None
+
+    def _cert(self, session_scope):
+        root, machine, machine_id = self._mint
+        now = int(time.time())
+        scope = ["fleet:sync", "session:control"] if session_scope else ["fleet:sync"]
+        return issue_cert(
+            machine, self.process.public_hex, scope=scope,
+            org=f"personal:{root.public_hex}",
+            subject=Subject(kind="machine", id=machine_id),
+            not_before=now - 30, not_after=now + 3600,
+        )
+
+    def grant(self, session_scope):
+        """Re-arm with or without the session:control scope."""
+        self.scheduler.authenticator.delegation_cert = self._cert(session_scope)
 
 
 async def _connector(port, root, machine, runtime, broker, *, caps):
@@ -131,25 +137,37 @@ async def _scenario(root, port, broker):
         reply = await session_control.request(
             a, runtime_a, machine_pub="cc" * 32, op="status", body={}, timeout=5)
         assert reply == {"v": 1, "ok": False, "refusal": "peer-not-in-roster",
-                         "detail": reply.get("detail")}
+                         "detail": reply.get("detail"), "at": "local"}
 
-        # A runtime without the session:control delegation cannot ask.
-        runtime_a.session_control_cert = None
+        # A runtime whose delegation lacks session:control cannot ask, and
+        # says so by name, decided here.
+        runtime_a.grant(False)
         reply = await session_control.request(
             a, runtime_a, machine_pub=machine_b.public_hex, op="status", body={},
             timeout=5)
-        assert reply["refusal"] == "session-cap-missing"
+        assert (reply["refusal"], reply["at"]) == (session_control.NOT_GRANTED, "local")
 
-        # ...and a destination without one refuses the pair.
-        runtime_a.session_control_cert = Runtime(root, machine_a, id_a, roster) \
-            .session_control_cert
-        runtime_b.session_control_cert = None
+        # A destination whose delegation lacks it answers the pair with the
+        # same typed refusal in place of its hello: decided THERE.
+        runtime_a.grant(True)
+        runtime_b.grant(False)
         reply = await session_control.request(
             a, runtime_a, machine_pub=machine_b.public_hex, op="status", body={},
             timeout=5)
-        assert reply["ok"] is False
-        assert reply["refusal"] in (session_control.PEER_REFUSED,
-                                    "session-control-failed"), reply
+        assert (reply["ok"], reply["refusal"], reply["at"]) == (
+            False, session_control.NOT_GRANTED, "peer"), reply
+
+        # A destination whose handshake check refuses our hello names that
+        # check: here B's roster no longer carries A.
+        runtime_b.grant(True)
+        auth_b = runtime_b.scheduler.authenticator
+        auth_b._roster_entries = lambda: (roster[1],)
+        auth_b.invalidate_authorization_cache()
+        reply = await session_control.request(
+            a, runtime_a, machine_pub=machine_b.public_hex, op="status", body={},
+            timeout=5)
+        assert (reply["ok"], reply["refusal"], reply["at"]) == (
+            False, "peer-not-in-roster", "peer"), reply
     finally:
         await _stop(a, task_a)
         await _stop(b, task_b)
@@ -203,7 +221,8 @@ def test_a_relay_that_did_not_negotiate_the_capability_is_refused_by_name():
         Connector(), object(), machine_pub="bb" * 32, op="status", body={}))
     assert reply == {"v": 1, "ok": False,
                      "refusal": session_control.NOT_NEGOTIATED,
-                     "detail": "the relay did not negotiate session-control/1"}
+                     "detail": "the relay did not negotiate session-control/1",
+                     "at": "local"}
 
 
 # ── the ctl ops and the broker ──────────────────────────────────────────────
@@ -312,7 +331,8 @@ async def _stream_scenario(root, port, source, payload, data_root):
             a, runtime_a, machine_pub=machine_b.public_hex, op="output",
             body={}, timeout=10, stream=True)
         await answering
-        assert reply["ok"] is False and reply["refusal"] == session_control.BAD_REQUEST
+        assert reply["ok"] is False
+        assert (reply["refusal"], reply["at"]) == (session_control.FILE_NOT_STREAMABLE, "peer")
 
         # A staged transfer asked to be deleted is removed after streaming.
         staged = data_root / "session-transfer" / "staged.bundle"

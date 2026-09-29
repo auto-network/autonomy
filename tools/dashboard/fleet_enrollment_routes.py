@@ -608,10 +608,12 @@ def connector_cache_payload(complete: dict, *, org_uuid: str | None) -> dict | N
     THAT org's serving seed under ``serving_machine_private_seed`` plus the
     org sync certificates. None when the complete payload carries no seed for
     the org (never provisioned to serve it). Never the seed map, never
-    another org's seed, and never the ``session:control`` delegation: that
-    grant drives sessions on the operator's own machines, so only the
-    personal connector holds it (graph://7eb29bc8-31a §6.3; org members are
-    admitted by the org hello, not by this certificate).
+    another org's seed. Every connector's ``delegation_cert`` is the one
+    process delegation, so it carries ``session:control`` beside
+    ``fleet:sync`` (graph://7eb29bc8-31a §6.3): a scope cannot be removed
+    from one certificate. Only the personal connector installs the
+    session-control offer handler and the ctl bridge (link_serving), so an
+    org connector holds the scope but never serves or sends session control.
 
     This is the only place a connector payload is derived; the field set is
     pinned by test_serving_org_arming.py.
@@ -622,7 +624,6 @@ def connector_cache_payload(complete: dict, *, org_uuid: str | None) -> dict | N
         base["org_sync_certs"] = certs
     if org_uuid is None:
         return base
-    base.pop("session_control_cert", None)
     seed = (complete.get("serving_machine_private_seeds") or {}).get(org_uuid)
     if not isinstance(seed, str) or not seed:
         return None
@@ -1262,8 +1263,8 @@ def runtime_preparation() -> JSONResponse:
         # null, and every machine derives the same value.
         "personal_org_uuid": fleet_runtime.personal_org_uuid(root_pub),
         # Scope and expiry of the process delegations currently armed; empty
-        # until an activation. session:control appears beside fleet:sync once
-        # the browser mints it (graph://7eb29bc8-31a §9.3).
+        # until an activation. One delegation; its scope lists session:control
+        # beside fleet:sync once the browser grants it (graph://7eb29bc8-31a §9.3).
         "delegations": list(_active_delegations),
         # The persona personal Services are reserved under, and therefore the
         # subject the personal serving delegate must name so the registry lets
