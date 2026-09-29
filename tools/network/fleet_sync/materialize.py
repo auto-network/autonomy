@@ -645,13 +645,15 @@ UNSIGNED_REASON = "settings_unsigned"
 #: and could never take them back.
 ENVELOPE_UNREADABLE_REASON = "settings_envelope_unreadable"
 
-#: S3 flag: refuse an UNSIGNED settings row arriving for a founded
-#: organization store. Off until the one-time signing pass (S4) has
-#: migrated every existing row; on before then, a founded store would
-#: refuse the whole pre-migration population. Ledger event rows are exempt
-#: always: they are self-signed in their wire and are what the fold is
-#: built from.
-REQUIRE_SIGNED_ORG_ROWS = False
+#: Refuse an UNSIGNED settings row arriving for a founded organization
+#: store (settings_unsigned). On since the one-time signing pass (S4)
+#: migrated every store on the fleet (2026-09-29: Home and SJC-2 read zero
+#: unsigned rows outside the ledger-event set and the two member-profile
+#: rows no delegate may sign); before that it was off, or a founded store
+#: would have refused the whole pre-migration population. Ledger event
+#: rows are exempt always: they are self-signed in their wire and are what
+#: the fold is built from.
+REQUIRE_SIGNED_ORG_ROWS = True
 
 
 def _verify_settings_row(row: dict[str, object], genesis: str | None) -> str | None:

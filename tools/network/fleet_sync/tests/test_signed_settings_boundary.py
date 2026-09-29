@@ -392,10 +392,12 @@ def test_deleting_a_signed_row_tombstones_its_slot_only(pair):
     assert _quarantine(b_db) == []
 
 
-def test_signing_an_existing_row_in_place_moves_it_to_its_signer_slot(pair):
+def test_signing_an_existing_row_in_place_moves_it_to_its_signer_slot(pair, monkeypatch):
     """The one-time signing pass (S4) UPDATEs an unsigned row in place; the
     address gains the signer slot, so it replicates as a tombstone of the
-    unsigned address and an insert at the signed one, under one row id."""
+    unsigned address and an insert at the signed one, under one row id.
+    The pre-migration world: unsigned rows still land."""
+    monkeypatch.setattr(materialize_module, "REQUIRE_SIGNED_ORG_ROWS", False)
     a_db, a, b_db, b = pair
     sim = Sim()
     member = _member(sim, "member")
