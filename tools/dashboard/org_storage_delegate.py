@@ -12,6 +12,7 @@ from tools.graph.schemas.network_identity import NETWORK_STORAGE_DELEGATE_SET_ID
 from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
 from tools.network.idkit import KeyPair
 from tools.network.ledger import Event, LedgerStore, org_ledger_db_path
+from tools.network.ledger.store import LEDGER_BUSY_TIMEOUT_S
 from tools.network.ledger.projections import organization_content_domain_id
 from tools.network.storagekit.delegate import storage_delegate_scopes
 
@@ -168,7 +169,9 @@ def accept(item: dict) -> None:
             or sorted(p["scope"]) not in shapes or p["can_redelegate"]
             or p.get("ttl") != TTL_MS):
         raise ValueError("organization storage grant has incorrect key or terms")
-    with LedgerStore(org_ledger_db_path(org)) as store:
+    # Background only (the unlock handler runs this in a worker thread): wait
+    # out fleet sync's writer on the shared org database.
+    with LedgerStore(org_ledger_db_path(org), timeout=LEDGER_BUSY_TIMEOUT_S) as store:
         known = event.event_id in store.ledger
         current = context["delegate_metadata"].get("grant_event_id")
         if known and current in store.ledger and event.event_id in store.ledger.ancestry([current]):

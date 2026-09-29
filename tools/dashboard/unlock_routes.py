@@ -1313,7 +1313,10 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             for item in body["organization_delegates"]:
                 org = item["organization"]
                 try:
-                    accept(item)
+                    # Off the event loop: accept() may wait up to
+                    # LEDGER_BUSY_TIMEOUT_S for fleet sync's writer on the
+                    # org database, and a blocked loop answers nothing.
+                    await asyncio.to_thread(accept, item)
                     organization_delegates[org] = {"ok": True}
                 except Exception as exc:
                     # With the traceback: the message alone ("database is
