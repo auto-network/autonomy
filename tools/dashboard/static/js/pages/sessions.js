@@ -1590,7 +1590,8 @@
       // else to launch; otherwise it opens the machine chooser. Returns true
       // when the menu should close.
       pickWorkspace(p) {
-        if (this.launchTargetsState === 'loading' || this.launchTargetsState === 'failed') {
+        if (this.launchTargetsState === 'idle') this._fetchLaunchTargets();
+        if (this.launchTargetsState !== 'ready') {
           this.launchWorkspace = p;
           this.launchPanel = 'machines';
           return false;

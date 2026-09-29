@@ -5,46 +5,10 @@
  */
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-
-const REPO_ROOT = process.env.REPO_ROOT || path.resolve(__dirname, '../../..');
-const SESSIONS_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/pages/sessions.js');
-
-function makeSessionsPage() {
-  const listeners = {};
-  const components = {};
-  const localStorage = {
-    getItem() { return null; },
-    setItem() {},
-  };
-  const document = {
-    body: { classList: { add() {}, remove() {} } },
-    addEventListener(name, callback) { (listeners[name] ||= []).push(callback); },
-  };
-  const Alpine = {
-    data(name, factory) { components[name] = factory; },
-    store() {},
-  };
-  const window = {
-    SessionStats: {
-      turnsStr() {}, ctxStr() {}, idleStr() {}, ctxWarn() {}, recencyColor() {},
-    },
-  };
-  const sandbox = {
-    window, document, Alpine, localStorage,
-    console, fetch() {}, setTimeout, clearTimeout, setInterval, clearInterval,
-    Date, Math, Object, Array, JSON, URLSearchParams,
-  };
-  window.localStorage = localStorage;
-  vm.createContext(sandbox);
-  vm.runInContext(fs.readFileSync(SESSIONS_JS, 'utf8'), sandbox, {
-    filename: SESSIONS_JS,
-  });
-  (listeners['alpine:init'] || []).forEach((callback) => callback());
-  return components.sessionsPage();
-}
+// The shared page harness: the same window/document/Alpine stubs every
+// sessions-page test uses, so a new load-time listener in sessions.js cannot
+// break this file's private copy again (it had no window.addEventListener).
+const { makeSessionsPage } = require('./sessions_page_harness');
 
 function ids(page) {
   return Array.from(page.sortedInteractive, (session) => session.session_id);

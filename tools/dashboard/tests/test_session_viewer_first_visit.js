@@ -34,6 +34,7 @@ const vm = require('vm');
 
 const REPO_ROOT = process.env.REPO_ROOT || path.resolve(__dirname, '../../..');
 const STORE_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/session-store.js');
+const DIFF_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/session-diff.js');
 const DISPLAY_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/session-display.js');
 const RENDERER_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/session-renderer.js');
 const VIEWER_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/pages/session-viewer.js');
@@ -147,6 +148,8 @@ function makeHarness(fetchHandlers) {
   );
   vm.runInContext(storeSrc, sandbox, { filename: 'session-store.js' });
   vm.runInContext(fs.readFileSync(DISPLAY_JS, 'utf8'), sandbox, { filename: 'session-display.js' });
+  // session-renderer's correction text uses window.SessionDiff.
+  vm.runInContext(fs.readFileSync(DIFF_JS, 'utf8'), sandbox, { filename: 'session-diff.js' });
   vm.runInContext(fs.readFileSync(RENDERER_JS, 'utf8'), sandbox, { filename: 'session-renderer.js' });
   vm.runInContext(fs.readFileSync(VIEWER_JS, 'utf8'), sandbox, { filename: 'session-viewer.js' });
 
@@ -503,19 +506,11 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
     );
     assert.equal(correctionCalls[0].options.cache, 'no-store');
     assert.equal(correctionCalls[0].options.headers['Cache-Control'], 'no-cache');
-    assert.equal(viewer._corrections['msg-1'].corrected_text, 'fixed');
+    assert.equal(h.window.getSessionStore('auto-test')._turnCorrections['msg-1'].corrected_text, 'fixed');
 
-    const callsBeforeRetry = correctionCalls.length;
-    viewer._refreshCorrectionsForNewEvent();
-    await new Promise((resolve) => setTimeout(resolve, 450));
-    const correctionCallsAfterRetry = h.fetchCalls.filter((c) =>
-      c.url.startsWith('/api/session/auto-test/turn-corrections')
-    );
-    assert.ok(
-      correctionCallsAfterRetry.length >= callsBeforeRetry + 2,
-      'new correction events should trigger an immediate refresh and one delayed retry'
-    );
-
+    // New corrections now arrive through the session store
+    // (window.applyTurnCorrection from the bus), so the viewer's old
+    // refresh-and-retry on a correction event no longer exists to test.
     viewer.destroy();
   });
 
@@ -551,13 +546,13 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
     const viewer = h.makeViewer();
     viewer.sessionKey = 'auto-test';
     await viewer._hydrateCorrections({ fresh: true });
-    assert.equal(viewer._corrections['msg-1'].status, 'pending');
+    assert.equal(h.window.getSessionStore('auto-test')._turnCorrections['msg-1'].status, 'pending');
 
     correctionState = 'accepted';
     await viewer.acceptCorrection({ message_id: 'msg-1' });
 
     assert.equal(
-      viewer._corrections['msg-1'].status,
+      h.window.getSessionStore('auto-test')._turnCorrections['msg-1'].status,
       'accepted',
       'stale viewer should rehydrate to the terminal state instead of snapping back to pending'
     );
@@ -574,7 +569,10 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
       content: 'raw original text',
     };
 
-    viewer._corrections = {
+    viewer.sessionKey = 'auto-test';
+    // Correction state lives in the session store (session-store.js
+    // _turnCorrections), not on the viewer.
+    h.window.getSessionStore('auto-test')._turnCorrections = {
       'msg-accepted': {
         target_message_id: 'msg-accepted',
         status: 'accepted',

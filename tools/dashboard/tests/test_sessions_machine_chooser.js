@@ -28,6 +28,7 @@ const SJC = { machine_pub: 'b1', label: 'sjc-2', local: false, reachable: true, 
 describe('machine chooser', () => {
   it('launches here directly when no other machine can be launched on', () => {
     const p = makeSessionsPage({ CustomEvent });
+    p.launchTargetsState = 'ready';
     p.launchTargets = [HOME];
     const closes = p.pickWorkspace({ id: 'autonomy-docs', name: 'Docs' });
     assert.equal(closes, true);
@@ -36,6 +37,7 @@ describe('machine chooser', () => {
 
   it('opens the chooser after a workspace when another machine exists', () => {
     const p = makeSessionsPage({ CustomEvent });
+    p.launchTargetsState = 'ready';
     p.launchTargets = [HOME, SJC];
     assert.equal(p.pickWorkspace({ id: 'autonomy-docs', name: 'Docs' }), false);
     assert.equal(p.launchPanel, 'machines');
@@ -218,5 +220,19 @@ describe('a refused create is stated, not swallowed', () => {
     const p = makeSessionsPage({ CustomEvent });
     assert.equal(p._createErrorText({ error: 'Unknown project' }, {}),
                  'Could not launch: Unknown project');
+  });
+});
+
+describe('machine list never fetched', () => {
+  it('starts the fetch and opens the chooser instead of launching here', () => {
+    const fetched = [];
+    const p = makeSessionsPage({ CustomEvent, fetch: (u) => { fetched.push(u); return new Promise(() => {}); } });
+    const created = [];
+    p.__window.addEventListener('create-terminal', (e) => created.push(e.detail));
+    assert.equal(p.launchTargetsState, 'idle');
+    assert.equal(p.pickWorkspace({ id: 'autonomy-docs', name: 'Docs' }), false);
+    assert.deepEqual(Array.from(fetched), ['/api/fleet/launch-targets']);
+    assert.equal(p.launchPanel, 'machines');
+    assert.equal(created.length, 0);
   });
 });
