@@ -391,9 +391,20 @@ def _local_scope_rows(
 
     Bytes are summed across peers for the scope, which IS this machine's total
     in and out for that organization, and is lifetime like the peer rows beside
-    it. Lag is zero because this machine is the reference every peer is
-    measured against -- unless it is mid-bootstrap, in which case it is behind
-    by a knowable amount and says so.
+    it.
+
+    Lag is how far THIS machine trails the peers it pulls from: for each peer
+    whose own position we hold (``frontier_ns``, recorded when it pulls from
+    us), ``their frontier - ours``, and the row shows the worst. A puller that
+    cannot apply a peer's delta is behind, and must say so on its own page:
+    hard-setting this to zero let SJC-2 read "in sync" 16k transactions
+    behind (auto-pmw2v). Mid-bootstrap it is behind by the sweep's remaining
+    distance; the larger of the two wins. ``behind`` names each peer it
+    trails (with when its position was recorded), so the row can say whom.
+    Lag is None -- unknown, never "in sync" -- when no peer's position is
+    recorded for the scope, or when this machine holds nothing yet for a
+    scope a peer has written; ``notMeasured`` names peers whose position was
+    never recorded because they never pulled from us.
     """
     totals: dict[str, dict] = {}
     for scopes in (peer_scope_rows or {}).values():
@@ -407,15 +418,47 @@ def _local_scope_rows(
     for scope in sorted(set(local) | set(totals) | set(bootstrap)):
         entry = totals.get(scope) or {"bytesIn": 0, "bytesOut": 0}
         filling = bootstrap.get(scope)
-        lag = 0
+        ours = int(local.get(scope) or 0)
+        behind: list[dict] = []
+        not_measured: list[str] = []
+        recorded = 0
+        for peer, scopes in (peer_scope_rows or {}).items():
+            for row in scopes or []:
+                if row.get("scope") != scope:
+                    continue
+                theirs = int(row.get("frontier_ns") or 0)
+                if not theirs:
+                    # The peer never pulled from us, so we never learned its
+                    # position: unknown, not "not ahead".
+                    not_measured.append(peer)
+                    continue
+                recorded += 1
+                if theirs > ours:
+                    observed = int(row.get("observed_at_ns") or 0)
+                    behind.append({
+                        "peer": peer,
+                        # Holding nothing yet is "not yet received"; theirs - 0
+                        # would render as fifty-six years.
+                        "lag": (theirs - ours) // 1_000_000 if ours else None,
+                        # A recorded position ages: a peer last seen an hour
+                        # ago may be further ahead than this says.
+                        "observedAt": observed // 1_000_000 if observed else None,
+                    })
+        if not recorded or any(b["lag"] is None for b in behind):
+            lag = None
+        else:
+            lag = max((b["lag"] for b in behind), default=0)
         if filling:
             # now - F is what remains: F is where the sweep is filling TO.
             target = max(filling["frontier"].values(), default=0)
-            ours = int(local.get(scope) or 0)
-            lag = max(0, (target - ours) // 1_000_000) if target else None
+            fill_lag = max(0, (target - ours) // 1_000_000) if target else None
+            lag = fill_lag if lag is None else (
+                None if fill_lag is None else max(lag, fill_lag))
         out.append({
             "scope": scope,
             "lag": lag,
+            "behind": sorted(behind, key=lambda b: -(b["lag"] or 0)),
+            "notMeasured": sorted(not_measured),
             "bytesIn": entry["bytesIn"],
             "bytesOut": entry["bytesOut"],
             "filling": filling["phase"] if filling else None,
