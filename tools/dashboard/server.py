@@ -23578,7 +23578,7 @@ async def _on_shutdown():
     except Exception:
         logger.exception("error stopping the personal fleet sync scheduler")
     # Cancel a still-running background bootstrap FIRST, so it cannot spawn a
-    # connector in the window between detach_all() and process exit.
+    # connector in the window between detach_all()/stop_all() and process exit.
     if _serving_bootstrap_task is not None and not _serving_bootstrap_task.done():
         _serving_bootstrap_task.cancel()
         try:
@@ -23593,13 +23593,20 @@ async def _on_shutdown():
         except (asyncio.CancelledError, Exception):
             pass
     _event_proxy_task = None
-    # Stop the serving watchdog and hand the connectors to the next process:
-    # they are detached so they outlive this worker, and the successor adopts
-    # a current one or replaces a stale one (_adopt_incumbent). Terminating
-    # them here restarted every connector twice per landing (auto-2am2l).
+    # A reload hands the connectors to the next process: they are detached so
+    # they outlive this worker, and the successor adopts a current one or
+    # replaces a stale one (_adopt_incumbent). Terminating them here restarted
+    # every connector twice per landing (auto-2am2l). Only the reloader's
+    # notice (api_internal_restart_notice) proves a successor is coming; any
+    # other shutdown is a real stop and takes the connectors with it, so none
+    # serves with no dashboard to supervise it.
     try:
         from tools.dashboard import link_serving_supervisor
-        link_serving_supervisor.get_supervisor().detach_all()
+        _supervisor = link_serving_supervisor.get_supervisor()
+        if _restart_notice_payload is not None:
+            _supervisor.detach_all()
+        else:
+            _supervisor.stop_all()
     except Exception:
         logger.exception("error stopping the serving supervisor")
     # Drain settings-mediator BEFORE cancelling the dispatcher tasks so
