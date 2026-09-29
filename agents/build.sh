@@ -35,7 +35,12 @@ done
 
 # The Dockerfiles fetch bd, dolt and Claude themselves, checksum-pinned, so
 # nothing is staged from this host (auto-2v6ay.5). The image's Claude version
-# comes from CLAUDE_VERSION, else the host's claude if one exists, else latest.
+# is the Dockerfile's pinned ARG default -- one version for every machine --
+# unless CLAUDE_VERSION is set in the environment to override it. It is never
+# read off a `claude` binary on the builder's PATH: Claude runs in containers,
+# so that pinned whatever shell happened to run the build (Home's host
+# terminal: its container's version; SJC-2: none, so "latest"), and machines
+# drifted apart (2026-09-29).
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 
@@ -60,10 +65,11 @@ cp "$SCRIPT_DIR/commit_sign_shim.sh" context/
 cp "$SCRIPT_DIR/grok_auth_shim.sh" context/
 cp "$SCRIPT_DIR/agent_browser_shim.sh" context/
 
-if [[ -z "${CLAUDE_VERSION:-}" ]] && command -v claude >/dev/null 2>&1; then
-    CLAUDE_VERSION=$(claude --version 2>/dev/null | awk '{print $1}')
+CLAUDE_ARG=()
+if [[ -n "${CLAUDE_VERSION:-}" ]]; then
+    CLAUDE_ARG=(--build-arg "CLAUDE_VERSION=${CLAUDE_VERSION}")
 fi
-docker build $NO_CACHE $PULL "${SOURCE_LABEL[@]}" --build-arg CLAUDE_VERSION="${CLAUDE_VERSION:-latest}" \
+docker build $NO_CACHE $PULL "${SOURCE_LABEL[@]}" "${CLAUDE_ARG[@]}" \
     -t autonomy-session context/
 echo "==> Done. Image: autonomy-session"
 docker images autonomy-session --format "  Size: {{.Size}}"

@@ -64,19 +64,19 @@ RUN curl -fsSL -o /tmp/dolt.tgz \
     && install -m 0755 /tmp/dolt-linux-amd64/bin/dolt /usr/local/bin/dolt \
     && rm -rf /tmp/dolt.tgz /tmp/dolt-linux-amd64
 
-# ── Claude Code CLI — official published installer, pinned to the version
-#    build.sh reads off the host binary (`bash -s -- <version>`). The ARG must
-#    be declared BEFORE this RUN: with no version in the command line the layer
-#    never changed and Docker served the cached install forever — the image sat
-#    on 2.1.237 through two "rebuilds" whose LABEL claimed newer (2026-09-06).
-#    Declaring it here makes the version part of the layer's cache key, so a
-#    host bump rebuilds exactly this step and the label cannot lie.
-ARG CLAUDE_VERSION=latest
+# ── Claude Code CLI — official published installer, pinned HERE: one version
+#    for every machine's images (`bash -s -- <version>`). Bump it deliberately;
+#    the change rebuilds exactly this layer everywhere. Never "latest": an
+#    unchanged command line lets Docker serve the cached install forever (the
+#    image sat on 2.1.237 through two "rebuilds", 2026-09-06), and it made
+#    each machine's harness whatever was latest when IT last built (SJC-2 on
+#    2.1.233 while the workspace model needed >= 2.1.251, 2026-09-29).
+#    CLAUDE_VERSION in build.sh's environment overrides it for one build.
+ARG CLAUDE_VERSION=2.1.284
 RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_VERSION}" \
     && ( install -m 0755 "$(readlink -f /root/.local/bin/claude)" /usr/local/bin/claude \
          || ln -sf /root/.local/bin/claude /usr/local/bin/claude ) \
-    && [ "${CLAUDE_VERSION}" = latest ] \
-       || /usr/local/bin/claude --version | grep -qF "${CLAUDE_VERSION}"
+    && [ "$(/usr/local/bin/claude --version | awk '{print $1}')" = "${CLAUDE_VERSION}" ]
 
 # Commit-signing shim (git gpg.program). Worktree setup points gpg.program
 # here when a workspace's policy requires a GPG signature; needs python3 + curl
