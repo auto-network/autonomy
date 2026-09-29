@@ -373,3 +373,78 @@ def test_a_reply_without_the_projection_marker_applies_zero_rows(tmp_path):
             follower._follow_receive(SLUG, store, _ReplayChannel([done]))
         )
     assert _mirror_sources(mirror) == {}
+
+
+# ── auto-hb67a: projected extras carry distinct indices; a repeated cursor is refused ──
+
+
+def _operation_indices_by_header(frames):
+    """{transaction_id: [operation index, ...]} in stream order."""
+    out: dict[str, list[int]] = {}
+    current = None
+    for f in frames:
+        if f.startswith(fss._TRANSACTION_MAGIC):
+            current = fss.decode_transaction_header(f)[1]
+            out.setdefault(current, [])
+        elif f.startswith(fss._OPERATION_MAGIC) and current is not None:
+            out[current].append(fss.decode_operation_frame(f)[0])
+    return out
+
+
+def test_a_delta_carrying_a_demoted_source_and_its_satellites_applies_and_advances_the_cursor(tmp_path, monkeypatch):
+    """Live 2026-09-29 (auto-hb67a): the public projection gave a demoted
+    source's tombstone and its satellites' tombstones the SAME operation
+    index; apply_remote_batch refuses a repeated index, so every follow
+    delta carrying one failed on the follower, its cursor never advanced,
+    and the member re-served the whole delta every round."""
+    server = _build_server(tmp_path, floor_at=300, rows=[
+        ("s1", 100, "published"),
+        ("s2", 200, "published", ("thought", "t2"), ("derivation", "d2")),
+        ("s3", 300, "published"),
+    ])
+    row = {"org_uuid": ORG, "rendezvous": "https://relay/l/tok", "link_pub": "ab" * 32}
+    channel = _ServerChannel(server)
+
+    async def connect(_row):
+        return channel
+
+    follower, mirror = _follower(tmp_path, connect=connect)
+    assert asyncio.run(follower._sync_follow_scope(SLUG, row)) == "ok"
+    assert set(_mirror_sources(mirror)) == {"s1", "s2", "s3"}
+    store = follower._store_for(SLUG)
+    before = store.follow_cursor()
+    # Demote s2 in a new transaction at 350: the delta carries s2's synthesized
+    # tombstone plus its two satellites' tombstones, all from ONE catalog row.
+    sdb = GraphDB(_server_org_db(server))
+    catalog = sdb.conn._fleet_sync_functions_owner
+    with catalog.transaction(350, "tx-demote"):
+        sdb.conn.execute("UPDATE sources SET publication_state='curated' WHERE id='s2'")
+    sdb.close()
+    # The org frontier advances past the demotion (the persona floor moves).
+    monkeypatch.setattr(fss.SQLiteFleetSyncStore, "covered_persona_frontiers", lambda self: {"p": 400})
+    assert asyncio.run(follower._sync_follow_scope(SLUG, row)) == "ok"
+    indices = _operation_indices_by_header(channel._frames)
+    assert "tx-demote" in indices and len(indices["tx-demote"]) == 3
+    assert len(set(indices["tx-demote"])) == 3 and indices["tx-demote"] == sorted(indices["tx-demote"])
+    assert set(_mirror_sources(mirror)) == {"s1", "s3"}
+    assert _mirror_count(mirror, "thoughts") == 0 and _mirror_count(mirror, "derivations") == 0
+    after = store.follow_cursor()
+    assert after is not None and before is not None and after[1] > before[1]
+
+
+def test_a_fresh_sweep_with_a_demoted_source_and_satellites_completes(tmp_path):
+    """The sweep numbers projected extras the same way."""
+    server = _build_server(tmp_path, floor_at=300, rows=[
+        ("s1", 100, "published"),
+        ("s2", 200, "curated", ("thought", "t2"), ("derivation", "d2")),
+        ("s3", 300, "published"),
+    ])
+    row = {"org_uuid": ORG, "rendezvous": "https://relay/l/tok", "link_pub": "ab" * 32}
+
+    async def connect(_row):
+        return _ServerChannel(server)
+
+    follower, mirror = _follower(tmp_path, connect=connect)
+    assert asyncio.run(follower._sync_follow_scope(SLUG, row)) == "ok"
+    assert set(_mirror_sources(mirror)) == {"s1", "s3"}
+    assert _mirror_count(mirror, "thoughts") == 0

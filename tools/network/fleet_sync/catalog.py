@@ -114,6 +114,32 @@ def purge_retired_catalog_addresses(
 
 
 MAX_TRANSACTION_OPERATIONS = 16_384
+#: The PUBLIC projection can turn one catalog row into several mutations (a
+#: demoted source's tombstone followed by its satellites' tombstones). They
+#: must sort immediately after the row's own position AND carry distinct
+#: operation indices: the receiver refuses a transaction that repeats one
+#: (apply_remote_batch), so sharing the row's index made every follow delta
+#: or sweep that carried a demoted source fail on every follower; the
+#: follower's cursor then never advanced and Home re-served one such
+#: 13.7k-transaction delta every 20 s (auto-hb67a, 2026-09-29). The
+#: projected index is the catalog index widened by this many bits, the k-th
+#: extra in the low bits; the frame carries a 32-bit index and a catalog
+#: index is below 2^14.
+PROJECTED_INDEX_SHIFT = 17
+
+
+def projected_operation_index(catalog_index: int, k: int) -> int:
+    """The operation index of the *k*-th public mutation projected from
+    catalog row *catalog_index*: unique, and ordered as (row, k)."""
+    if k >= (1 << PROJECTED_INDEX_SHIFT):
+        raise WatermarkError(
+            f"public projection of catalog row {catalog_index} exceeds "
+            f"{1 << PROJECTED_INDEX_SHIFT} mutations"
+        )
+    index = (int(catalog_index) << PROJECTED_INDEX_SHIFT) | int(k)
+    if index >= 1 << 32:
+        raise WatermarkError("projected operation index exceeds the frame's 32-bit field")
+    return index
 MAX_TRANSACTION_FRAME_BYTES = 128 * 1024 * 1024
 
 #: prune_acknowledged() lock-hold bounds: stop after this much wall time
@@ -1898,11 +1924,12 @@ class MutationCatalog:
             timestamp = int(raw[1])
             tombstone = bool(raw[2])
             if projection is Projection.PUBLIC:
-                for mutation in self._projected_public_mutations(
+                for k, mutation in enumerate(self._projected_public_mutations(
                     conn, table, address, timestamp, tombstone
-                ):
+                )):
                     yield AuthoredMutation(
-                        str(raw[3]), str(raw[4]), int(raw[5]), mutation
+                        str(raw[3]), str(raw[4]),
+                        projected_operation_index(int(raw[5]), k), mutation,
                     )
                 continue
             values = ()
@@ -2254,7 +2281,10 @@ class MutationCatalog:
                     # public surface.
                     continue
                 items.append(AuthoredMutation(
-                    incarnation, transaction_id, int(operation), parked,
+                    incarnation, transaction_id,
+                    projected_operation_index(int(operation), 0)
+                    if projection is Projection.PUBLIC else int(operation),
+                    parked,
                 ))
         # One row past the slice decides ``more``. Judging it by "the slice
         # was full" made a transaction of exactly ``limit`` rows (or any
@@ -2297,9 +2327,10 @@ class MutationCatalog:
                             table, address, transaction_id, exc,
                         )
                         projected = []
-                for mutation in projected:
+                for k, mutation in enumerate(projected):
                     items.append(AuthoredMutation(
-                        incarnation, transaction_id, int(raw[3]), mutation,
+                        incarnation, transaction_id,
+                        projected_operation_index(int(raw[3]), k), mutation,
                     ))
                 continue
             if bool(raw[2]):
