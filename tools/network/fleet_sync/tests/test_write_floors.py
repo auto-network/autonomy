@@ -373,8 +373,8 @@ def test_the_seal_names_why_it_declined(tmp_path: Path) -> None:
     assert write_floors.seal_persona_write_floor(db.conn, signer=sealer, persona_cert=cert, org=ORG,
                                  roster_machines={m1.public_hex}, positions={m1.public_hex: 100})
     assert write_floors.persona_seal_blocker(
-        db.conn, persona=P, roster_machines={m1.public_hex}, positions={m1.public_hex: 100},
-    ) == "minimum position 100 is not above the held persona write floor 100"
+        db.conn, persona=P, roster_machines={m1.public_hex}, positions={m1.public_hex: 100}, now_ns=100,
+    ) == f"minimum position 100 (0s old, held by roster machine(s) {m1.public_hex[:12]}) is not above the held persona write floor 100"
     assert write_floors.persona_seal_blocker(
         db.conn, persona=P, roster_machines={m1.public_hex}, positions={m1.public_hex: 150},
     ) is None
@@ -442,3 +442,87 @@ def test_decline_names_an_unbuilt_channel_when_both_parts_are_held(tmp_path: Pat
         "alpha": {"certificate": {"child_pub": "aa" * 32}, "key_held": True, "channel": False},
     })
     assert "certificate and serving key are both held but the channel was not built" in line
+
+
+# ── a decline is a signal, not a heartbeat (auto-mmwgu, reopened 2026-09-28) ──
+
+def test_the_settled_decline_names_the_pinning_machine_and_its_age(tmp_path: Path) -> None:
+    persona, sealer, m1, m2 = KeyPair.generate(), KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+    db = GraphDB(tmp_path / "pin.db")
+    MutationCatalog(db.conn, sealer.public_hex).install()
+    cert = _persona_cert(persona, sealer)
+    P = persona.public_hex
+    roster = {m1.public_hex, m2.public_hex}
+    day = 86400 * 1_000_000_000
+    now = 10 * day
+    assert write_floors.seal_persona_write_floor(db.conn, signer=sealer, persona_cert=cert, org=ORG,
+                                                 roster_machines=roster,
+                                                 positions={m1.public_hex: 5 * day, m2.public_hex: 9 * day})
+    reason = write_floors.persona_seal_blocker(
+        db.conn, persona=P, roster_machines=roster,
+        positions={m1.public_hex: 5 * day, m2.public_hex: now}, now_ns=now,
+    )
+    assert write_floors.persona_seal_settled(reason)
+    assert reason == (f"minimum position {5 * day} (5d old, held by roster machine(s) {m1.public_hex[:12]}) "
+                      f"is not above the held persona write floor {5 * day}")
+    assert not write_floors.persona_seal_settled("no position held for roster machine(s) abc")
+    db.close()
+
+
+class _DeclineStore:
+    def __init__(self, held):
+        self.held = held
+
+    def persona_frontiers(self):
+        return {"P": self.held} if self.held is not None else {}
+
+
+def _decline_scheduler(monkeypatch):
+    from tools.network import fleet_sync_scheduler as fss
+    scheduler = object.__new__(fss.FleetSyncScheduler)
+    clock = {"mono": 1000.0}
+    monkeypatch.setattr(fss.time, "monotonic", lambda: clock["mono"])
+    return scheduler, clock
+
+
+def test_a_settled_fleet_declines_at_debug_until_the_held_floor_is_stale(monkeypatch, caplog) -> None:
+    import logging
+    from tools.network import fleet_sync_scheduler as fss
+    scheduler, clock = _decline_scheduler(monkeypatch)
+    fresh = time.time_ns() - 30 * 1_000_000_000
+    reason = "minimum position 5 (30s old, held by roster machine(s) abc) is not above the held persona write floor 5"
+    with caplog.at_level(logging.DEBUG, logger="tools.network.fleet_sync_scheduler"):
+        for _ in range(3):
+            scheduler._log_seal_decline("alpha", reason, store=_DeclineStore(fresh), persona="P")
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert sum("settled" in r.getMessage() for r in caplog.records) == 3
+    caplog.clear()
+    stale = time.time_ns() - (fss.PERSONA_FLOOR_STALE_S + 60) * 1_000_000_000
+    reason = "minimum position 1 (5d old, held by roster machine(s) sjc2) is not above the held persona write floor 1"
+    with caplog.at_level(logging.DEBUG, logger="tools.network.fleet_sync_scheduler"):
+        for _ in range(3):
+            scheduler._log_seal_decline("alpha", reason, store=_DeclineStore(stale), persona="P")
+        clock["mono"] += fss.SEAL_DECLINE_REPEAT_S + 1
+        scheduler._log_seal_decline("alpha", reason, store=_DeclineStore(stale), persona="P")
+    warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warned) == 2 and all("(held floor is stale)" in w and "sjc2" in w for w in warned)
+
+
+def test_other_decline_reasons_warn_when_they_appear_or_change_then_repeat_slowly(monkeypatch, caplog) -> None:
+    import logging
+    from tools.network import fleet_sync_scheduler as fss
+    scheduler, clock = _decline_scheduler(monkeypatch)
+    with caplog.at_level(logging.DEBUG, logger="tools.network.fleet_sync_scheduler"):
+        for _ in range(5):
+            scheduler._log_seal_decline("beta", "no position held for roster machine(s) 571d62ab69c5")
+        scheduler._log_seal_decline("beta", "this process holds no org sync channel: neither installed")
+        scheduler._log_seal_decline("beta", "this process holds no org sync channel: neither installed")
+        clock["mono"] += fss.SEAL_DECLINE_REPEAT_S + 1
+        scheduler._log_seal_decline("beta", "this process holds no org sync channel: neither installed")
+        # Another scope is its own signal.
+        scheduler._log_seal_decline("gamma", "no position held for roster machine(s) 571d62ab69c5")
+    warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [w.split(": ", 1)[0] for w in warned] == [
+        "fleet sync scope 'beta'", "fleet sync scope 'beta'", "fleet sync scope 'beta'", "fleet sync scope 'gamma'"]
+    assert warned[0].endswith("no position held for roster machine(s) 571d62ab69c5")
+    assert warned[1].endswith("no org sync channel: neither installed")

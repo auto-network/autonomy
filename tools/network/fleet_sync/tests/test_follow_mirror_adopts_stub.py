@@ -110,3 +110,57 @@ def test_the_follow_round_materializes_the_mirror_itself(data_root, monkeypatch)
     asyncio.run(scheduler._sync_follow_scopes(0.0))
     assert _org_row(stub) == (ORG, "followed")        # adopted by the round
     assert attempted == [ORG]                          # and the pull was attempted as a follow
+
+
+# ── a member of the org it follows (auto-mmwgu, reopened 2026-09-28) ──────────
+
+def test_membership_supersedes_a_seeded_follow_row_once_not_every_round(data_root, caplog, monkeypatch):
+    """Home holds autonomy as a MEMBER store (orgs.id is a locally minted id,
+    type shared) and the bootstrap allowlist seeded a follow row naming the
+    registry org_uuid: the slug-collision guard refused the node's own org
+    every round for two days. Membership supersedes the follow: said once at
+    INFO, never as an error, and the store is left alone."""
+    import logging
+
+    monkeypatch.setattr(fss, "_FOLLOW_LOGGED", set())
+    monkeypatch.setattr(fss, "_member_org_uuid", lambda slug: None)   # no binding row held
+    member = data_root / "orgs" / "autonomy.db"
+    GraphDB.create_org_db("autonomy", type_="shared", org_id="019dae5c-d13b-7b95-9e48-408ac581cd75", path=member).close()
+    with caplog.at_level(logging.INFO, logger="tools.network.fleet_sync_scheduler"):
+        assert fss.materialize_follow_scopes() == []
+        assert fss.materialize_follow_scopes() == []
+        assert fss.materialize_follow_scopes() == []
+    assert _org_row(member) == ("019dae5c-d13b-7b95-9e48-408ac581cd75", "shared")
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors == []
+    superseded = [r.getMessage() for r in caplog.records if "superseded by membership" in r.getMessage()]
+    assert len(superseded) == 1 and "'autonomy'" in superseded[0] and ORG in superseded[0]
+
+
+def test_a_member_org_bound_to_another_registry_uuid_is_a_collision_said_once(data_root, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setattr(fss, "_FOLLOW_LOGGED", set())
+    monkeypatch.setattr(fss, "_member_org_uuid", lambda slug: "11111111-1111-4111-8111-111111111111")
+    member = data_root / "orgs" / "autonomy.db"
+    GraphDB.create_org_db("autonomy", type_="shared", org_id="019dae5c-d13b-7b95-9e48-408ac581cd75", path=member).close()
+    with caplog.at_level(logging.INFO, logger="tools.network.fleet_sync_scheduler"):
+        assert fss.materialize_follow_scopes() == []
+        assert fss.materialize_follow_scopes() == []
+    refusals = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(refusals) == 1
+    assert "11111111-1111-4111-8111-111111111111" in refusals[0] and ORG in refusals[0]
+    assert not any("superseded" in r.getMessage() for r in caplog.records)
+
+
+def test_a_mirror_of_another_org_is_refused_once_per_process(data_root, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setattr(fss, "_FOLLOW_LOGGED", set())
+    other = data_root / "orgs" / "autonomy.db"
+    GraphDB.create_org_db("autonomy", type_="followed", org_id="11111111-1111-4111-8111-111111111111", path=other).close()
+    with caplog.at_level(logging.INFO, logger="tools.network.fleet_sync_scheduler"):
+        for _ in range(3):
+            assert fss.materialize_follow_scopes() == []
+    refusals = [r.getMessage() for r in caplog.records if "refusing to mirror" in r.getMessage()]
+    assert len(refusals) == 1 and "11111111-1111-4111-8111-111111111111" in refusals[0]

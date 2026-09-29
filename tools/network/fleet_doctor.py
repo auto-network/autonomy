@@ -54,6 +54,9 @@ _QUIET = False  # set True in main() for --json: report data still collected, no
 #: connector is still up (its pid was just listed), it simply has not logged
 #: lately, so an alarming tail is not evidence of a live fault.
 _CONNECTOR_LOG_FRESH_S = 30 * 60.0
+#: A persona write floor older than this is stale: the scheduler's decline
+#: line (fleet_sync_scheduler.PERSONA_FLOOR_STALE_S) and this report agree.
+PERSONA_FLOOR_STALE_S = 600
 
 
 def _observe(path) -> "sqlite3.Connection":
@@ -1176,9 +1179,16 @@ def check_sync_frontiers(report: dict) -> None:
                                 machine for machine, position in machines.items()
                                 if held_positions.get(machine, -1) < int(position)
                             )
+                            floor_ns = int(record.get("write_floor_ns", 0))
                             personas.append({
-                                "persona": str(persona), "write_floor_ns": int(record.get("write_floor_ns", 0)),
+                                "persona": str(persona), "write_floor_ns": floor_ns,
                                 "machines": len(machines), "behind_on": behind_on,
+                                # The floor IS the minimum position: the machine(s)
+                                # at it are what pins a floor that stops moving.
+                                "pinned_by": sorted(
+                                    machine for machine, position in machines.items()
+                                    if int(position) == floor_ns
+                                ),
                             })
                         entry["personas"] = personas
                 else:
@@ -1251,10 +1261,19 @@ def check_sync_frontiers(report: dict) -> None:
                     verdict = f"NOT covered: behind on machine(s) {names}"
                 else:
                     verdict = "covered (advertised to the relay)"
+                # A covered floor that stopped moving is the fault Home carried
+                # for five days (auto-mmwgu): a roster machine's cursor is
+                # frozen here, and nothing the persona wrote since the floor
+                # can be claimed by this member (share links close 4431).
+                stale = floor_age > PERSONA_FLOOR_STALE_S
+                if stale:
+                    names = ", ".join(m[:12] for m in persona.get("pinned_by") or []) or "?"
+                    verdict += (f"; STALE: pinned by roster machine(s) {names}, whose position "
+                                "here has not moved since the floor")
                 _line(
                     f"  {slug} persona {persona['persona'][:12]}",
                     f"write floor {floor_age}s old over {persona['machines']} machine(s); {verdict}",
-                    warn=bool(persona["behind_on"]),
+                    warn=bool(persona["behind_on"]) or stale,
                 )
             newest_thought = (entry.get("thoughts") or {}).get("newest")
             if newest_thought:

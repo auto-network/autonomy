@@ -127,6 +127,12 @@ _REFUSAL_MAGIC = b"FSR1"
 #: reply, which otherwise opens straight with its first transaction header,
 #: opens with this record instead.
 PULL_BEGIN_KIND = "pull.begin"
+#: A persona write floor older than this while the seal declines is a fault
+#: worth a WARNING: a roster machine's cursor has stopped moving here, so
+#: this member cannot claim anything the persona wrote since (auto-mmwgu).
+PERSONA_FLOOR_STALE_S = 600
+#: An unchanged decline reason repeats at WARNING at most this often.
+SEAL_DECLINE_REPEAT_S = 600
 #: The typed refusal a follow pull receives when its watermark predates the
 #: catalog's retention window: no delta rows follow it, and the follower
 #: answers by starting a full sweep (design §10.2).
@@ -536,6 +542,37 @@ def _enabled_follow_rows() -> list[tuple[str, dict]]:
     return rows
 
 
+#: Follow seeding runs every round; a refusal or a supersession is said once
+#: per process per (kind, slug, ids), not every 12 s.
+_FOLLOW_LOGGED: set[tuple] = set()
+
+
+def _log_follow_once(key: tuple, emit, message: str, *args) -> None:
+    if key in _FOLLOW_LOGGED:
+        return
+    _FOLLOW_LOGGED.add(key)
+    emit(message, *args)
+
+
+def _member_org_uuid(slug: str) -> str | None:
+    """The registry org_uuid of the organization this node is a member of
+    under *slug*, from its network binding row; None when no binding is
+    held (a member store's orgs.id is not that uuid)."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.network_identity import NETWORK_BINDING_SET_ID
+
+    try:
+        members = settings_ops.read_owned_set(NETWORK_BINDING_SET_ID, org=slug).members
+    except Exception:
+        return None
+    for member in sorted(members, key=lambda m: m.key):
+        payload = member.payload if isinstance(member.payload, dict) else {}
+        value = payload.get("org_uuid")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def materialize_follow_scopes() -> list[str]:
     """Create the local read-only mirror ``orgs/<slug>.db`` for every enabled
     followed organization this machine does not yet have, so
@@ -568,20 +605,51 @@ def materialize_follow_scopes() -> list[str]:
             # ids — never reused as if it were the followed org.
             import sqlite3 as _sqlite3
 
-            existing_id = None
+            existing_id = existing_type = None
             try:
                 conn = _sqlite3.connect(
                     f"file:{path}?mode=ro", uri=True, timeout=2.0
                 )
                 try:
-                    r = conn.execute("SELECT id FROM orgs LIMIT 1").fetchone()
-                    existing_id = r[0] if r else None
+                    r = conn.execute("SELECT id, type FROM orgs LIMIT 1").fetchone()
+                    existing_id, existing_type = (r[0], r[1]) if r else (None, None)
                 finally:
                     conn.close()
             except Exception:
-                existing_id = None
+                existing_id = existing_type = None
+            if existing_id is not None and existing_type != "followed":
+                # A MEMBER store under this slug (type shared/personal): this
+                # node holds the organization itself, and membership
+                # supersedes the follow (join-after-follow, design of record
+                # graph://5f2f5a49-00d D7). A member store's orgs.id is a
+                # locally minted id, not the registry org_uuid the follow row
+                # names, so the two never compare equal: Home, a member of
+                # autonomy with the bootstrap follow row seeded, was refused
+                # every round for two days (4,630 lines, 2026-09-27..29). The
+                # registry binding, when this node holds one, is the only id
+                # comparable with the follow's; a binding naming ANOTHER org
+                # is the real slug collision.
+                bound = _member_org_uuid(slug)
+                if bound is not None and bound != org_uuid:
+                    _log_follow_once(
+                        ("collision", slug, bound, org_uuid), logger.error,
+                        "follow: refusing to mirror org %r — this node is a member of "
+                        "an organization under that slug whose registry org_uuid is %s, "
+                        "but the follow names org_uuid %s. Resolve the slug collision "
+                        "before following (design of record graph://5f2f5a49-00d D7).",
+                        slug, bound, org_uuid,
+                    )
+                    continue
+                _log_follow_once(
+                    ("superseded", slug, org_uuid), logger.info,
+                    "follow: %r is an organization this node is a member of (%s); "
+                    "the enabled follow row for org_uuid %s is superseded by membership "
+                    "and not mirrored", slug, path, org_uuid,
+                )
+                continue
             if existing_id is not None and str(existing_id) != org_uuid:
-                logger.error(
+                _log_follow_once(
+                    ("collision", slug, str(existing_id), org_uuid), logger.error,
                     "follow: refusing to mirror org %r — a database at %s "
                     "already exists with orgs.id %s, but the follow names "
                     "org_uuid %s. Resolve the slug collision before following "
@@ -3951,10 +4019,7 @@ class FleetSyncScheduler:
                 # No silent exit (auto-mmwgu observability), and no guessed
                 # cause: the line names which part of the channel this
                 # process lacks, read from the installed state.
-                logger.warning(
-                    "fleet sync scope %r: persona write floor NOT sealed: %s",
-                    scope, self._org_channel_absence(scope),
-                )
+                self._log_seal_decline(scope, self._org_channel_absence(scope))
                 continue
             # The persona cert names the org channel's key as its leaf, so
             # that key signs the persona write floor (the sync process key may be a
@@ -3974,10 +4039,50 @@ class FleetSyncScheduler:
                 persona=str(channel.persona_cert.subject.id),
                 roster_machines=roster_machines,
             )
-            logger.warning(
-                "fleet sync scope %r: persona write floor NOT sealed: %s",
-                scope, reason or "unknown",
-            )
+            self._log_seal_decline(scope, reason or "unknown", store=store,
+                                   persona=str(channel.persona_cert.subject.id))
+
+    def _log_seal_decline(self, scope: str, reason: str, *, store=None, persona: str | None = None) -> None:
+        """One persona write floor decline line per scope at WARNING when it
+        means something, DEBUG otherwise (auto-mmwgu, reopened 2026-09-28:
+        4,569 identical WARNING lines a day on Home said nothing).
+
+        The settled case (every roster machine has a position, none moved
+        since the last seal) is the normal state of a quiet fleet and logs
+        at DEBUG, until the held floor is older than PERSONA_FLOOR_STALE_S:
+        then a roster machine's cursor has stopped moving here, share links
+        published after the floor are unservable from this member, and the
+        line (naming that machine) is a WARNING. Any other reason is a
+        WARNING when it first appears or changes, and again at most every
+        SEAL_DECLINE_REPEAT_S; in between it is DEBUG."""
+        from tools.network.fleet_sync import write_floors
+
+        log = getattr(self, "_seal_decline_log", None)
+        if log is None:
+            log = self._seal_decline_log = {}
+        now = time.monotonic()
+        kind = re.sub(r"\d+", "#", reason)
+        stale = False
+        if write_floors.persona_seal_settled(reason) and store is not None and persona:
+            try:
+                held = store.persona_frontiers().get(persona)
+            except Exception:
+                held = None
+            if held is not None:
+                stale = (time.time_ns() - int(held)) / 1e9 > PERSONA_FLOOR_STALE_S
+            if not stale:
+                logger.debug("fleet sync scope %r: persona write floor settled: %s", scope, reason)
+                return
+            kind = "stale:" + kind
+        last = log.get(scope)
+        if last is not None and last[0] == kind and now - last[1] < SEAL_DECLINE_REPEAT_S:
+            logger.debug("fleet sync scope %r: persona write floor NOT sealed (repeat): %s", scope, reason)
+            return
+        log[scope] = (kind, now)
+        logger.warning(
+            "fleet sync scope %r: persona write floor NOT sealed%s: %s",
+            scope, " (held floor is stale)" if stale else "", reason,
+        )
 
     def _frontier_changed(self, scope: str) -> None:
         """A persona write floor of *scope* moved here: tell whoever

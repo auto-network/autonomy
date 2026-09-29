@@ -347,11 +347,15 @@ def seal_persona_write_floor(
 
 def persona_seal_blocker(
     conn: sqlite3.Connection, *, persona: str, roster_machines: set[str],
-    positions: Mapping[str, int],
+    positions: Mapping[str, int], now_ns: int | None = None,
 ) -> str | None:
     """Why seal_persona_write_floor would decline right now, in words, or None when
     it would seal: an empty roster, a roster machine with no position in
-    this store, or a minimum not above the persona write floor already held."""
+    this store, or a minimum not above the persona write floor already held.
+    The last case names the roster machine(s) whose position IS the minimum
+    and how old that position is: the persona write floor is the minimum, so
+    one machine whose cursor stopped moving here pins it (Home, 2026-09-24
+    to 09-29: SJC-2's frozen cursor held the floor five days)."""
     if not roster_machines:
         return "the persona's roster lists no machines"
     missing = sorted(m for m in roster_machines if m not in positions)
@@ -360,8 +364,31 @@ def persona_seal_blocker(
     minimum = min(int(positions[m]) for m in roster_machines)
     held = persona_write_floors(conn).get(persona)
     if held is not None and int(held.get("write_floor_ns", 0)) >= minimum:
-        return f"minimum position {minimum} is not above the held persona write floor {int(held['write_floor_ns'])}"
+        pinned = ", ".join(m[:12] for m in sorted(roster_machines) if int(positions[m]) == minimum)
+        now = time.time_ns() if now_ns is None else int(now_ns)
+        return (
+            f"minimum position {minimum} ({_age_words(now - minimum)} old, held by roster "
+            f"machine(s) {pinned}) is not above the held persona write floor {int(held['write_floor_ns'])}"
+        )
     return None
+
+
+def persona_seal_settled(reason: str | None) -> bool:
+    """Whether a decline reason is the settled case: every roster machine has
+    a position and none moved since the last seal. Not a fault by itself;
+    it becomes one only when the held floor grows old."""
+    return bool(reason) and reason.startswith("minimum position ")
+
+
+def _age_words(age_ns: int) -> str:
+    seconds = max(0, int(age_ns) // 1_000_000_000)
+    if seconds < 120:
+        return f"{seconds}s"
+    if seconds < 7200:
+        return f"{seconds // 60}m"
+    if seconds < 172800:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
 
 
 def verify_persona_write_floor(record: Mapping, *, org: str, now: int) -> tuple[str, int]:
