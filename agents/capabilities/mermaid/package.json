@@ -1,0 +1,19 @@
+{
+  "name": "autonomy-mermaid",
+  "version": "1.0.0",
+  "description": "Mermaid → SVG capability for Autonomy workspaces. Renders via puppeteer-core driving the existing agent-browser Chromium.",
+  "private": true,
+  "type": "module",
+  "main": "render.mjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "mermaid": "^11.4.0",
+    "puppeteer-core": "^23.6.0"
+  },
+  "scripts": {
+    "render": "node render.mjs",
+    "probe": "node render.mjs --probe"
+  }
+}

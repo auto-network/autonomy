@@ -1,0 +1,7 @@
+#!/bin/sh
+# Render Mermaid source → SVG. Stdin or --in <file>; stdout or --out <file>.
+# Thin wrapper around the package's render.mjs so the command lives on
+# PATH inside the container regardless of the package install layout.
+set -e
+PKG_ROOT="${MERMAID_PACKAGE_ROOT:-/opt/autonomy/capabilities/autonomy-mermaid}"
+exec node "${PKG_ROOT}/render.mjs" "$@"

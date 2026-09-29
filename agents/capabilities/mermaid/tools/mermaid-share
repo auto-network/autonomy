@@ -1,0 +1,84 @@
+#!/bin/sh
+# Render Mermaid source → SVG → graph share, in one call.
+#
+#   echo 'flowchart LR; A --> B' | mermaid-share --alt "..."
+#   mermaid-share --in diagram.mmd --caption "..."
+#   mermaid-share --probe
+#
+# Flags forwarded to mermaid-render: --in/-i, --theme, --probe.
+# Flags forwarded to graph share: --alt, --caption.
+# Extra flags:
+#   --keep   Keep the rendered SVG file under /tmp/mermaid-share/
+#            (default: deleted after share).
+
+set -e
+PKG_ROOT="${MERMAID_PACKAGE_ROOT:-/opt/autonomy/capabilities/autonomy-mermaid}"
+
+ALT=""
+CAPTION=""
+IN=""
+THEME="default"
+KEEP=0
+PROBE=0
+HELP=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --alt)        ALT="$2"; shift 2 ;;
+    --caption)    CAPTION="$2"; shift 2 ;;
+    --in|-i)      IN="$2"; shift 2 ;;
+    --theme)      THEME="$2"; shift 2 ;;
+    --keep)       KEEP=1; shift ;;
+    --probe)      PROBE=1; shift ;;
+    -h|--help)    HELP=1; shift ;;
+    --)           shift; break ;;
+    -*)           echo "mermaid-share: unknown flag $1" >&2; exit 2 ;;
+    *)            if [ -z "$IN" ]; then IN="$1"; else echo "mermaid-share: extra positional arg $1" >&2; exit 2; fi; shift ;;
+  esac
+done
+
+if [ "$HELP" -eq 1 ]; then
+  cat <<'EOF'
+mermaid-share — render Mermaid source to SVG and share as a viewer tile.
+
+Usage:
+  echo 'flowchart LR; A --> B' | mermaid-share --alt "..."
+  mermaid-share --in diagram.mmd --caption "..."
+  mermaid-share --probe
+
+Flags:
+  --in / -i <path>   Read Mermaid source from file (default: stdin).
+  --alt <text>       Alt text / accessibility description for the tile.
+  --caption <text>   Optional caption shown under the tile.
+  --theme <name>     Palette preset (default: default).
+  --keep             Keep the rendered SVG file (default: deleted).
+  --probe            Render a trivial diagram + exit 0 if successful.
+  -h, --help         Show this help.
+
+One share per Bash tool result. Don't print other stdout in the same call.
+EOF
+  exit 0
+fi
+
+if [ "$PROBE" -eq 1 ]; then
+  exec node "${PKG_ROOT}/render.mjs" --probe
+fi
+
+OUT_DIR="/tmp/mermaid-share"
+mkdir -p "$OUT_DIR"
+TS="$(date +%Y%m%d-%H%M%S)"
+OUT="${OUT_DIR}/diagram-${TS}-$$.svg"
+
+if [ -n "$IN" ]; then
+  node "${PKG_ROOT}/render.mjs" --in "$IN" --theme "$THEME" --out "$OUT"
+else
+  node "${PKG_ROOT}/render.mjs" --theme "$THEME" --out "$OUT" < /dev/stdin
+fi
+
+# Build graph share argv. Only pass --alt / --caption if non-empty.
+set -- "$OUT"
+if [ -n "$ALT" ]; then set -- "$@" --alt "$ALT"; fi
+if [ -n "$CAPTION" ]; then set -- "$@" --caption "$CAPTION"; fi
+graph share "$@"
+
+if [ "$KEEP" -eq 0 ]; then rm -f "$OUT"; fi

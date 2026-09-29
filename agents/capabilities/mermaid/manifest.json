@@ -1,0 +1,30 @@
+{
+    "name": "autonomy/mermaid",
+    "version": 1,
+    "implements": [
+        {"contract": "diagram", "version": 1}
+    ],
+    "delivery_mode": "mounted_tools",
+    "package_root": "agents/capabilities/mermaid",
+    "tool_paths": ["agents/capabilities/mermaid/tools"],
+    "tool_target": {
+        "source": "agents/capabilities/mermaid/tools",
+        "target": "/opt/mermaid-tools",
+        "expose_commands": ["mermaid-share", "mermaid-render"]
+    },
+    "skill_path": "agents/capabilities/mermaid/SKILL.md",
+    "primer_path": "agents/capabilities/mermaid/primer.md",
+    "probe": {
+        "kind": "command",
+        "entrypoint": "mermaid-share --probe"
+    },
+    "host_install": {
+        "command": ["npm", "install", "--omit=optional"],
+        "env": {
+            "PUPPETEER_SKIP_DOWNLOAD": "1",
+            "PUPPETEER_SKIP_CHROMIUM_DOWNLOAD": "1"
+        },
+        "fingerprint_files": ["package.json"]
+    },
+    "notes": "Diagram surface: Mermaid → SVG via puppeteer-core driving the existing agent-browser Chromium. The host_install block declares the once-per-host setup the host runner executes when fingerprint_files change; the lockfile is host-generated (not in repo) and regenerates as a side effect of npm install. Until the runner ships, run the command manually in this directory after pulls. See graph://47b55d8d-491 (canonical signpost) and graph://defbdeec-2cf (graph-first development protocol)."
+}
