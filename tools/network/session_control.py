@@ -397,7 +397,7 @@ def session_control_offer_handler(
             task = asyncio.create_task(
                 _refuse_pair(endpoint, exc.refusal, exc.detail))
         else:
-            task = asyncio.create_task(_serve(endpoint, authenticator, broker))
+            task = asyncio.create_task(_serve(endpoint, authenticator, broker, runtime))
         tasks.add(task)
         task.add_done_callback(tasks.discard)
         return True
@@ -432,7 +432,7 @@ async def _refuse_pair(endpoint: FleetStreamEndpoint, code: str, detail: str) ->
 
 
 async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticator,
-                 broker: InboundBroker) -> None:
+                 broker: InboundBroker, runtime=None) -> None:
     await endpoint.ready.wait()
     if endpoint.closed.is_set():
         return
@@ -450,7 +450,14 @@ async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticato
         # the request.
         try:
             request = parse_request(message)
-        except SessionControlError as exc:
+            # A channel stays open across requests: this machine's own grant
+            # and the sender's roster membership are checked on each one, not
+            # only at the handshake, and a failure is answered by its code.
+            # Built from the live runtime each time: the one made at the
+            # offer holds the roster and grant as they were then.
+            (session_authenticator(runtime) if runtime is not None
+             else authenticator).authorize(client_pub)
+        except (SessionControlError, FleetHandshakeRefused) as exc:
             return encode(refusal(exc.refusal, exc.detail))
         if request["op"] == "subscribe":
             return await _accept_subscription(request, client_pub, broker, endpoint)
@@ -659,10 +666,56 @@ async def _open_channel(connector, runtime, machine_pub: str, timeout: float,
                 HANDSHAKE_TIMEOUT, f"no handshake within {timeout}s") from None
         except FleetStreamClosed as exc:
             raise SessionControlError(PEER_CLOSED_IN_HANDSHAKE, str(exc)) from exc
-        yield channel
+        yield channel, endpoint
     finally:
         with contextlib.suppress(Exception):
             await endpoint.close()
+
+
+class _RequestChannel:
+    """The one open request channel to a peer. Requests take turns on it;
+    the handshake is paid once, not per request."""
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.channel = None
+        self.endpoint = None
+        self._stack: Optional[contextlib.AsyncExitStack] = None
+
+    def usable(self) -> bool:
+        return self.channel is not None and not self.endpoint.closed.is_set()
+
+    async def open(self, connector, runtime, machine_pub, timeout, resolve_slot):
+        stack = contextlib.AsyncExitStack()
+        try:
+            self.channel, self.endpoint = await stack.enter_async_context(
+                _open_channel(connector, runtime, machine_pub, timeout, resolve_slot))
+        except BaseException:
+            await stack.aclose()
+            raise
+        self._stack = stack
+
+    async def close(self) -> None:
+        stack, self._stack, self.channel, self.endpoint = self._stack, None, None, None
+        if stack is not None:
+            with contextlib.suppress(Exception):
+                await stack.aclose()
+
+
+#: machine_pub -> the open request channel to it.
+_request_channels: dict[str, _RequestChannel] = {}
+
+
+async def _exchange(channel, record: bytes, timeout: float, stream: bool) -> dict:
+    await channel.send_message(record)
+    if stream:
+        return await _receive_stream(channel, timeout)
+    try:
+        raw = await asyncio.wait_for(channel.recv_message(), timeout)
+    except asyncio.TimeoutError:
+        raise SessionControlError(
+            REPLY_TIMEOUT, f"no reply within {timeout}s") from None
+    return _decode_reply(raw)
 
 
 async def request(connector, runtime, *, machine_pub: str, op: str,
@@ -672,22 +725,43 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
     reply record. Every failure is a typed refusal record, never a raise, so
     an old relay ("unknown control op") or an unarmed peer reads the same way
     as any other refusal. A refusal carries ``at``: ``local`` when this
-    machine decided it, ``peer`` when the target did."""
+    machine decided it, ``peer`` when the target did.
+
+    Requests reuse one open channel per peer, so the relay open and the
+    fleet handshake are paid once rather than per request."""
     try:
         record = encode({"v": SESSION_CONTROL_VERSION, "op": op, "body": body},
                         too_large=REQUEST_TOO_LARGE)
-        async with _open_channel(connector, runtime, machine_pub, timeout,
-                                 resolve_slot) as channel:
-            await channel.send_message(record)
-            if stream:
-                reply = await _receive_stream(channel, timeout)
+        entry = _request_channels.setdefault(machine_pub, _RequestChannel())
+        async with entry.lock:
+            reused = entry.usable()
+            if reused:
+                # Our own grant is checked on every request; opening a
+                # channel checks it anyway.
+                session_authenticator(runtime)
             else:
+                await entry.close()
+                await entry.open(connector, runtime, machine_pub, timeout, resolve_slot)
+            try:
+                reply = await _exchange(entry.channel, record, timeout, stream)
+            except (FleetStreamClosed, ConnectionError):
+                await entry.close()
+                if not reused:
+                    raise
+                # The reused channel was closed before any reply (the peer's
+                # idle close, or its check of us failing): once more on a new
+                # channel, whose handshake names any refusal.
+                await entry.open(connector, runtime, machine_pub, timeout, resolve_slot)
                 try:
-                    raw = await asyncio.wait_for(channel.recv_message(), timeout)
-                except asyncio.TimeoutError:
-                    raise SessionControlError(
-                        REPLY_TIMEOUT, f"no reply within {timeout}s") from None
-                reply = _decode_reply(raw)
+                    reply = await _exchange(entry.channel, record, timeout, stream)
+                except BaseException:
+                    await entry.close()
+                    raise
+            except BaseException:
+                # A channel whose exchange failed or timed out may still carry
+                # that reply later; it is never reused.
+                await entry.close()
+                raise
         if reply.get("ok") is False and "at" not in reply:
             reply = {**reply, "at": "peer"}
         return reply
@@ -831,7 +905,7 @@ async def _hold_subscription(connector, runtime, machine_pub: str, persona: str,
     try:
         record = encode({"v": SESSION_CONTROL_VERSION, "op": "subscribe",
                          "body": {"persona": persona}})
-        async with _open_channel(connector, runtime, machine_pub, timeout) as channel:
+        async with _open_channel(connector, runtime, machine_pub, timeout) as (channel, _endpoint):
             await channel.send_message(record)
             stream = channel.recv_message_stream()
             try:

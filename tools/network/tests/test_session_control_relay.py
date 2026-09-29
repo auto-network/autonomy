@@ -128,10 +128,19 @@ async def _scenario(root, port, broker):
         assert reply["result"] == {"op": "status", "body": {"n": 1},
                                    "peer": machine_a.public_hex}
         assert elapsed < 2.0
-        deadline = time.time() + 5
-        while time.time() < deadline and broker.snapshot()["pairs"]:
-            await asyncio.sleep(0.05)
-        assert broker.snapshot()["pairs"] == 0
+        # The channel stays open: a second request reuses it, with no new
+        # pair and no second handshake.
+        assert broker.snapshot()["pairs"] == 1
+        answering = asyncio.create_task(_answer(broker_b))
+        started = time.monotonic()
+        reply = await session_control.request(
+            a, runtime_a, machine_pub=machine_b.public_hex, op="status",
+            body={"n": 2}, timeout=5)
+        reused_elapsed = time.monotonic() - started
+        await answering
+        assert reply["result"]["body"] == {"n": 2}
+        assert broker.snapshot()["pairs"] == 1
+        assert reused_elapsed < elapsed
 
         # A machine that is not in the roster is refused before any pair.
         reply = await session_control.request(
