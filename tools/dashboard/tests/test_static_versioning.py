@@ -93,11 +93,14 @@ def test_every_vendored_library_carries_its_version_in_its_name():
     """The one form that works with no substitution anywhere, including
     inside a frame whose markup was built as a string in JavaScript."""
     vendor = DASHBOARD / "static" / "vendor"
+    # A multi-file package (novnc-1.5.0/core/...) carries the version in its
+    # directory: every file under it changes address on a bump just the same.
     bad = [
-        f.name for f in vendor.rglob("*")
+        str(f.relative_to(vendor)) for f in vendor.rglob("*")
         if f.is_file()
         and f.suffix in {".js", ".css", ".mjs"}
-        and not re.search(r"-\d+\.\d+\.\d+", f.name)
+        and not any(re.search(r"-\d+\.\d+\.\d+", part)
+                    for part in f.relative_to(vendor).parts)
     ]
     assert not bad, (
         "vendored libraries with no version in the filename; a version bump "
@@ -111,11 +114,13 @@ def test_every_vendored_library_is_recorded():
     Two libraries sat in that directory for months without an entry."""
     vendor = DASHBOARD / "static" / "vendor"
     manifest = (vendor / "VENDOR.md").read_text()
+    # A package directory is recorded once, as `<dir>/`, for every file in it.
     missing = [
-        f.name for f in vendor.rglob("*")
+        str(f.relative_to(vendor)) for f in vendor.rglob("*")
         if f.is_file()
         and f.suffix in {".js", ".css", ".mjs"}
         and f.name not in manifest
+        and not any(f"{part}/" in manifest for part in f.relative_to(vendor).parts[:-1])
     ]
     assert not missing, (
         "vendored but absent from VENDOR.md, so nothing records the version, "
