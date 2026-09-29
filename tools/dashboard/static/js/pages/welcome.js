@@ -321,7 +321,9 @@ function welcomeApp() {
       if (st.certificate === 'failed') return st.origin + ' — certificate issuance failed; see Published Links.';
       if (st.certificate === 'retrying') return st.origin + ' — setting up (certificate; the last attempt failed, retrying)…';
       if (st.gate !== 'up' && st.advertised) return st.origin + ' — waiting for the passkey gate.';
-      return st.origin + ' — setting up (' + (st.certificate === 'ok' ? 'route' : 'certificate') + ')…';
+      // Run 11: the announcement sat in the polling view, which the done
+      // view does not show; the summary is what the operator reads.
+      return st.origin + ' — setting up (' + (st.certificate === 'ok' ? 'route' : 'certificate') + ')… then this page continues there.';
     },
 
     async resumeFleetEnrollment() {
