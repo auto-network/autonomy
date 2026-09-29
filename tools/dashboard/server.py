@@ -19,6 +19,7 @@ import re
 import shlex
 import signal
 import sqlite3
+from tools.graph import sqlite_defaults
 import struct
 import subprocess
 import sys
@@ -2142,6 +2143,7 @@ def _timeline_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    sqlite_defaults.apply(conn)
     return conn
 
 

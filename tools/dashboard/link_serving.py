@@ -2418,6 +2418,12 @@ def _start_cpu_stack_sampler() -> None:
 
 
 def main() -> None:
+    # Every SQLite connection this process opens (the serving connector: the
+    # fleet listener and the serve side of every pull) carries the
+    # per-connection defaults (synchronous=NORMAL, never FULL).
+    from tools.graph import sqlite_defaults
+
+    sqlite_defaults.install()
     # UTC-timestamped lines: this file is append-mode and shared across
     # connector generations, so without wall-clock stamps a post-incident
     # read cannot even tell which generation wrote a line (bit us live

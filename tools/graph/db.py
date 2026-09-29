@@ -10,6 +10,7 @@ import re
 import secrets
 import functools
 import sqlite3
+from tools.graph import sqlite_defaults
 import threading
 import weakref
 import time
@@ -787,6 +788,7 @@ class GraphDB:
             self.conn, capture_fail_closed=fleet_activated,
         )
         self.conn.execute("PRAGMA journal_mode = WAL")
+        sqlite_defaults.apply(self.conn)
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._fleet_catalog = None
         # Bring the database to the current schema BEFORE activating authored

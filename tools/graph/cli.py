@@ -5966,6 +5966,9 @@ def cmd_share(args):
 
 
 def main():
+    from tools.graph import sqlite_defaults
+
+    sqlite_defaults.install()
     parser = argparse.ArgumentParser(
         prog="autonomy-graph",
         description="Autonomy Knowledge Graph CLI",

@@ -127,6 +127,13 @@ def _connect(database, *args, **kwargs):
     else:
         kwargs["factory"] = _traceable(kwargs.get("factory") or sqlite3.Connection)
     conn = _original_connect(database, *args, **kwargs)
+    # Every file-backed connection this process opens carries the
+    # per-connection defaults (tools/graph/sqlite_defaults: synchronous=
+    # NORMAL, never FULL). Applied here because this is the one place all
+    # openers pass through once install() has run.
+    from tools.graph import sqlite_defaults
+
+    sqlite_defaults.apply(conn)
     key = (name, _opener())
     conn_id = id(conn)
     ref = weakref.ref(conn, lambda r, conn_id=conn_id: _forget(conn_id, r))

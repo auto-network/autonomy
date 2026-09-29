@@ -14,6 +14,7 @@ inserted after the last completed stream.
 from __future__ import annotations
 
 import asyncio
+from tools.graph import sqlite_defaults
 import contextlib
 import hashlib
 import json
@@ -1366,6 +1367,7 @@ class SQLiteFleetSyncStore:
         conn = sqlite3.connect(
             self.path, factory=FleetSyncConnection, timeout=30.0,
         )
+        sqlite_defaults.apply(conn)
         conn.row_factory = sqlite3.Row
         register_streaming_functions(conn)
         catalog = attach_active_production_catalog(conn)

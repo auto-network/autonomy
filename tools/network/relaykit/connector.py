@@ -1382,6 +1382,9 @@ class TunnelConnector:
 
 
 def main() -> None:
+    from tools.graph import sqlite_defaults
+
+    sqlite_defaults.install()
     parser = argparse.ArgumentParser(description="auto.network dashboard tunnel connector")
     parser.add_argument("--relay", required=True, help="relay base URL, e.g. ws://127.0.0.1:8477")
     parser.add_argument("--org", required=True)

@@ -117,6 +117,7 @@ from pathlib import Path
 from tools.network.fleet_sync_connection import FleetSyncConnection
 
 from tools.network.ledger.store import org_ledger_db_path
+from tools.graph import sqlite_defaults
 
 from . import acceptance
 from . import bridge as bridge_mod
@@ -425,6 +426,7 @@ class KeyControlStore:
         self.db = sqlite3.connect(self.path, factory=FleetSyncConnection)
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")
+            sqlite_defaults.apply(self.db)
             # Two writers racing for the last pending slot must serialize,
             # not fail: the loser waits for the lock and then sees the
             # committed counters.

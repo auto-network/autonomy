@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 
 from tools.data_paths import resolve_store
+from tools.graph import sqlite_defaults
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DB_PATH = resolve_store("approval_requests")
@@ -45,6 +46,7 @@ def _conn(db_path: Path | str | None = None) -> sqlite3.Connection:
     c = sqlite3.connect(str(p))
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
+    sqlite_defaults.apply(c)
     c.executescript(SCHEMA)  # cheap CREATE IF NOT EXISTS; keeps callers simple
     try:  # pre-``staged`` databases: additive migration
         c.execute("ALTER TABLE approval_requests ADD COLUMN staged TEXT")

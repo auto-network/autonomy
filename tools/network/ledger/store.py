@@ -75,6 +75,7 @@ LEDGER_DB_SUFFIX = ".ledger.db"
 #: tools.network.clock (an expiry-sweep gate); re-exported here for the
 #: staging call sites that always read it from this module.
 from tools.network.clock import PENDING_CLAIM_TTL_MS
+from tools.graph import sqlite_defaults
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -177,6 +178,7 @@ class LedgerStore:
         self.db.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")
+            sqlite_defaults.apply(self.db)
         with self.db:
             self.db.executescript(_SCHEMA)
             # Retired 2026-09-22: heads are computed from the events.

@@ -28,6 +28,7 @@ from pathlib import Path
 
 from tools.network.fleet_sync_connection import FleetSyncConnection
 from tools.network.idkit.canonical import canonical_json
+from tools.graph import sqlite_defaults
 
 from .recipients import PERSONAL_ROOT_RECIPIENT
 from .errors import ConcurrencyError, PolicyClassError, VaultError
@@ -154,6 +155,7 @@ class VaultStore:
         self.db = sqlite3.connect(self.path, factory=FleetSyncConnection)
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")
+            sqlite_defaults.apply(self.db)
         with self.db:
             self.db.executescript(_SCHEMA)
         from tools.network.fleet_sync.catalog import (

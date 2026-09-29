@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 from tools.data_paths import resolve_store
+from tools.graph import sqlite_defaults
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -289,6 +290,7 @@ def init_db(db_path: Path | None = None) -> None:
     _active_path = path
     _conn.row_factory = sqlite3.Row
     _conn.execute("PRAGMA journal_mode=WAL")
+    sqlite_defaults.apply(_conn)
     _conn.execute("PRAGMA busy_timeout=5000")
     _conn.executescript(_SCHEMA)
     _conn.commit()
