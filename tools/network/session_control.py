@@ -463,8 +463,12 @@ async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticato
             return encode(refusal(exc.refusal, exc.detail))
         if request["op"] == "subscribe":
             return await _accept_subscription(request, client_pub, broker, endpoint)
+        submitted = time.monotonic()
         reply = await broker.submit(
             request["op"], request["body"], peer_machine_pub=client_pub)
+        logger.info("session-control served op=%s from=%s dashboard_ms=%.0f ok=%s",
+                    request["op"], client_pub[:12],
+                    (time.monotonic() - submitted) * 1000, reply.get("ok"))
         result = reply.get("result") if reply.get("ok") else None
         if isinstance(result, dict) and "stream_file" in result:
             result = dict(result)
@@ -752,7 +756,9 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
                 reply = await _receive_stream(channel, timeout)
         else:
             entry = _request_channels.setdefault(machine_pub, _RequestChannel())
+            started = time.monotonic()
             async with entry.lock:
+                waited = time.monotonic() - started
                 reused = entry.usable()
                 if reused:
                     # Our own grant is checked on every request; opening a
@@ -761,8 +767,15 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
                 else:
                     await entry.close()
                     await entry.open(connector, runtime, machine_pub, timeout, resolve_slot)
+                opened = time.monotonic()
                 try:
                     reply = await _exchange(entry.channel, record, timeout)
+                    logger.info(
+                        "session-control request op=%s to=%s channel=%s lock_ms=%.0f "
+                        "open_ms=%.0f exchange_ms=%.0f", op, machine_pub[:12],
+                        "reused" if reused else "new", waited * 1000,
+                        (opened - started - waited) * 1000,
+                        (time.monotonic() - opened) * 1000)
                 except _NotSent:
                     await entry.close()
                     if not reused:
