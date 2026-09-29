@@ -2248,12 +2248,22 @@ class MutationCatalog:
                 items.append(AuthoredMutation(
                     incarnation, transaction_id, int(operation), parked,
                 ))
+        # One row past the slice decides ``more``. Judging it by "the slice
+        # was full" made a transaction of exactly ``limit`` rows (or any
+        # multiple) report more=True on its last group: the serve then sent
+        # that group with last=false, found the next slice empty, and sent
+        # no trailing header — so the puller held every operation but never
+        # the completion, its cursor stuck below the transaction forever
+        # (SJC-2, 2026-09-29: 41 transactions of exactly 2,000 rows, all
+        # complete=0, the autonomy cursor pinned at 09-27 22:27Z).
         rows = self.conn.execute(
             "SELECT address,timestamp_ns,tombstone,operation_index "
             "FROM fleet_sync_catalog WHERE transaction_ref=? "
             "ORDER BY operation_index LIMIT ? OFFSET ?",
-            (int(transaction_ref), int(limit), int(offset)),
+            (int(transaction_ref), int(limit) + 1, int(offset)),
         ).fetchall()
+        more = len(rows) > int(limit)
+        rows = rows[:int(limit)]
         for raw in rows:
             table, address = self._decode_address(bytes(raw[0]))
             if not self._serveable(table, address, transaction_id):
@@ -2324,7 +2334,7 @@ class MutationCatalog:
                 incarnation, transaction_id, int(raw[3]), mutation,
             ))
         items.sort(key=lambda item: item.operation_index)
-        return items, len(rows) == int(limit)
+        return items, more
 
     def transaction_items(
         self, transaction_ref: int, incarnation: str, transaction_id: str

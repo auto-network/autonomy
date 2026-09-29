@@ -1298,6 +1298,33 @@ def _digest_add(digest, message: bytes) -> None:
     digest.update(message)
 
 
+async def in_worker_thread(fn, *args, **kwargs):
+    """Run *fn* in the loop's worker pool and return
+    ``(result, waited_s, ran_s)``: how long the call sat in the pool's queue
+    before a thread took it, and how long it ran. On Home (2026-09-29) every
+    serve phase logged 2-3 s while the same calls measured 0-57 ms in
+    isolation; the split says whether the pool is saturated (waited) or the
+    call is starved of the GIL / the disk once running (ran)."""
+    submitted = time.monotonic()
+
+    def run():
+        started = time.monotonic()
+        result = fn(*args, **kwargs)
+        return result, started, time.monotonic()
+
+    result, started, ended = await asyncio.to_thread(run)
+    return result, started - submitted, ended - started
+
+
+def _executor_queue_depth() -> int | None:
+    """Calls queued in the running loop's default executor, when readable."""
+    try:
+        executor = asyncio.get_running_loop()._default_executor
+        return executor._work_queue.qsize() if executor is not None else 0
+    except Exception:
+        return None
+
+
 async def bounded_stream_frames(
     channel, *, first_allowance_s: float, silence_limit_s: float
 ):
@@ -3202,16 +3229,17 @@ class FleetSyncScheduler:
                 slowest_phase = ("", 0.0, "")
                 while True:
                     authorize(peer_pub)
-                    phase_started = time.monotonic()
-                    page = await asyncio.to_thread(pager.next)
-                    phase_s = time.monotonic() - phase_started
+                    page, waited_s, ran_s = await in_worker_thread(pager.next)
+                    phase_s = waited_s + ran_s
                     if phase_s > slowest_phase[1]:
                         slowest_phase = ("heads", phase_s, "")
                     if phase_s >= SLOW_SERVE_PHASE_S:
                         logger.warning(
                             "fleet sync serve %s scope %r: fetching the next "
-                            "transaction heads took %.1fs", peer_pub[:12],
-                            scope, phase_s,
+                            "transaction heads took %.1fs (%.1fs waiting for a "
+                            "worker thread, %.1fs running; %s queued)",
+                            peer_pub[:12], scope, phase_s, waited_s, ran_s,
+                            _executor_queue_depth(),
                         )
                     if page is None:
                         break
@@ -3226,17 +3254,16 @@ class FleetSyncScheduler:
                     if True:
                         while more:
                             authorize(peer_pub)
-                            phase_started = time.monotonic()
                             # A large transaction is paged: each group
                             # carries its own header and the receiver
                             # applies them as they land.
                             group_limit = SERVE_GROUP_OPERATIONS
-                            items, more = await asyncio.to_thread(
+                            (items, more), waited_s, ran_s = await in_worker_thread(
                                 store.transaction_group, ref, origin_key,
                                 transaction_id, offset=offset,
                                 limit=group_limit, projection=projection,
                             )
-                            phase_s = time.monotonic() - phase_started
+                            phase_s = waited_s + ran_s
                             if phase_s > slowest_phase[1]:
                                 slowest_phase = ("slice", phase_s, transaction_id)
                             if phase_s >= SLOW_SERVE_PHASE_S:
@@ -3244,9 +3271,11 @@ class FleetSyncScheduler:
                                 logger.warning(
                                     "fleet sync serve %s scope %r: building "
                                     "%d row(s) of transaction %s (offset %d, "
-                                    "tables %s) took %.1fs", peer_pub[:12],
-                                    scope, len(items), transaction_id, offset,
-                                    ",".join(tables), phase_s,
+                                    "tables %s) took %.1fs (%.1fs waiting for a "
+                                    "worker thread, %.1fs running; %s queued)",
+                                    peer_pub[:12], scope, len(items), transaction_id,
+                                    offset, ",".join(tables), phase_s, waited_s, ran_s,
+                                    _executor_queue_depth(),
                                 )
                             offset += group_limit
                             if not items:
