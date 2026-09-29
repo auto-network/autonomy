@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
@@ -115,12 +116,18 @@ async def request(machine: str, op: str, body: dict | None = None, *,
             "timeout": timeout}
     if stream:
         args["stream"] = True
+    started = time.monotonic()
     try:
         reply = await asyncio.to_thread(
             _control, "session-control-request", args,
             timeout=timeout + (120.0 if stream else 10.0))
     except Exception as exc:
         return refusal(CONNECTOR_CALL_FAILED, f"{type(exc).__name__}: {exc}", at="local")
+    finally:
+        # With the connector's own line (lock, open, exchange), the rest of
+        # this is the control socket and the thread hop.
+        logger.info("session-control request op=%s to=%s total_ms=%.0f",
+                    op, machine_pub[:12], (time.monotonic() - started) * 1000)
     if not (isinstance(reply, dict) and reply.get("ok") is True
             and isinstance(reply.get("reply"), dict)):
         detail = reply.get("error") if isinstance(reply, dict) else repr(reply)

@@ -750,10 +750,15 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
         if stream:
             # A transfer gets its own channel, so it never holds up the
             # small requests queued on the shared one.
+            started = time.monotonic()
             async with _open_channel(connector, runtime, machine_pub, timeout,
                                      resolve_slot) as (channel, _endpoint):
+                opened = time.monotonic()
                 await channel.send_message(record)
                 reply = await _receive_stream(channel, timeout)
+            logger.info("session-control request op=%s to=%s channel=transfer "
+                        "open_ms=%.0f exchange_ms=%.0f", op, machine_pub[:12],
+                        (opened - started) * 1000, (time.monotonic() - opened) * 1000)
         else:
             entry = _request_channels.setdefault(machine_pub, _RequestChannel())
             started = time.monotonic()
@@ -786,6 +791,9 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
                     await entry.open(connector, runtime, machine_pub, timeout, resolve_slot)
                     try:
                         reply = await _exchange(entry.channel, record, timeout)
+                        logger.info("session-control request op=%s to=%s channel=retried "
+                                    "total_ms=%.0f", op, machine_pub[:12],
+                                    (time.monotonic() - started) * 1000)
                     except _NotSent:
                         await entry.close()
                         raise SessionControlError(
