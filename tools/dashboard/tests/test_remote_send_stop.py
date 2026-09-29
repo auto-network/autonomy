@@ -62,10 +62,11 @@ def test_crosstalk_is_stamped_with_the_proved_machine_not_a_claim(here):
 
 @pytest.mark.parametrize("body,refusal", [
     ({"tmux_name": "auto-gone", "text": "x"}, scc.NO_SUCH_SESSION),
-    ({"tmux_name": "auto-1", "text": "x" * (scc.MAX_SEND_BYTES + 1)}, scc.OP_TOO_LARGE),
-    ({"tmux_name": "auto-1", "text": "x", "kind": "shell"}, "bad-request"),
-    ({"tmux_name": "auto-1"}, "bad-request"),
-    ({"tmux_name": "auto-1", "kind": "crosstalk", "text": "a</crosstalk>"}, "bad-request"),
+    # One code per refusal path (auto-1jlpf rework).
+    ({"tmux_name": "auto-1", "text": "x" * (scc.MAX_SEND_BYTES + 1)}, "text-too-large"),
+    ({"tmux_name": "auto-1", "text": "x", "kind": "shell"}, "unknown-send-kind"),
+    ({"tmux_name": "auto-1"}, "missing-text"),
+    ({"tmux_name": "auto-1", "kind": "crosstalk", "text": "a</crosstalk>"}, "invalid-crosstalk"),
 ])
 def test_bad_sends_are_typed_refusals_and_paste_nothing(here, body, refusal):
     pasted, _ = here
@@ -157,3 +158,34 @@ def test_a_remote_stop_of_an_unknown_session_is_404(monkeypatch):
     monkeypatch.setattr(api_auth, "require_global_api_authority", lambda request: None)
     response = asyncio.run(server.api_terminal_kill(_Request("auto-x@sjc-2")))
     assert response.status_code == 404
+
+
+class _JsonRequest:
+    def __init__(self, body):
+        self._body = body
+        self.headers = {}
+        self.query_params = {}
+        self.path_params = {}
+
+    async def json(self):
+        return self._body
+
+
+def test_a_delivered_remote_send_answers_ok_like_a_local_one(monkeypatch):
+    """The outbox reads ``ok``: without it every delivered remote message
+    showed as failed until its transcript echo arrived."""
+    sent = []
+
+    async def fake_request(machine, op, body=None, *, timeout=15.0, stream=False):
+        sent.append((machine, op, body))
+        return {"v": 1, "ok": True, "result": {"delivered": True, "tmux_name": "auto-9"}}
+
+    monkeypatch.setattr(scc, "request", fake_request)
+    monkeypatch.setattr(api_auth, "require_global_api_authority", lambda r: None)
+    response = asyncio.run(server.api_session_send(_JsonRequest(
+        {"tmux_session": f"auto-9@{PEER}", "message": "hi", "client_id": "c1"})))
+    body = json.loads(response.body)
+    assert response.status_code == 200
+    assert (body["ok"], body["client_id"], body["tmux_session"]) == (True, "c1", "auto-9")
+    assert isinstance(body["last_input_at"], float)
+    assert sent == [(PEER, "send", {"tmux_name": "auto-9", "kind": "input", "text": "hi"})]

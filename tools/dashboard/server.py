@@ -7579,8 +7579,14 @@ async def api_session_send(request):
             return JSONResponse(
                 {"error": reply.get("detail") or reply.get("refusal"),
                  "refusal": reply.get("refusal")}, status_code=status)
-        return JSONResponse({"status": "sent", "tmux_session": tmux_session,
-                             "machine": machine})
+        # The same success shape as a local send: the outbox reads ``ok``,
+        # and without it every delivered remote message showed as failed
+        # until its transcript echo arrived.
+        resp = {"ok": True, "status": "sent", "tmux_session": tmux_session,
+                "machine": machine, "last_input_at": time.time()}
+        if body.get("client_id"):
+            resp["client_id"] = body["client_id"]
+        return JSONResponse(resp)
 
     try:
         exists = _tmux_session_exists(tmux_session)
