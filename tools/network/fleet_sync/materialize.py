@@ -607,12 +607,32 @@ def _payload_is_genesis(payload: object) -> bool:
         return False
 
 
+#: Quarantine reasons the boundary files a signed settings row under.
+#: ``settings_signature_invalid`` and ``settings_signer_stale`` are
+#: judgements on signed bytes and the slot they target: never written,
+#: never forwarded, never retried. ``settings_signature_pending`` (no
+#: genesis here yet) and every ``settings_signer_*`` verdict (the fold
+#: does not yet, or no longer, authorize the key) are parked WITH their
+#: frame and re-judged by the drain each round: a claim or delegation
+#: that arrives later can turn a refusal into a landing, and a store
+#: whose fold lags must not diverge permanently from one that is current.
+SIGNATURE_FINAL_REASONS = ("settings_signature_invalid", "settings_signer_stale")
+SIGNER_PENDING_PREFIX = "settings_signer_"
+UNSIGNED_REASON = "settings_unsigned"
+
+#: S3 flag: refuse an UNSIGNED settings row arriving for a founded
+#: organization store. Off until the one-time signing pass (S4) has
+#: migrated every existing row; on before then, a founded store would
+#: refuse the whole pre-migration population. Ledger event rows are exempt
+#: always: they are self-signed in their wire and are what the fold is
+#: built from.
+REQUIRE_SIGNED_ORG_ROWS = False
+
+
 def _verify_settings_row(row: dict[str, object], genesis: str | None) -> str | None:
-    """None when the row's envelope verifies against its own signing key;
-    otherwise the quarantine reason. The cryptographic step only: persona
-    resolution, membership, scope, revocation and the witness bound are the
-    fold's boundary checks (design of record, "Verification, at the
-    boundaries") and belong to the org channel."""
+    """Step 1 only: None when the row's envelope verifies against its own
+    signing key; otherwise the quarantine reason. Steps 2 to 6 are
+    :func:`_judge_settings_row`."""
     if genesis is None:
         return "settings_signature_pending"
     from tools.network.idkit.errors import SignatureError
@@ -627,14 +647,59 @@ def _verify_settings_row(row: dict[str, object], genesis: str | None) -> str | N
     return None
 
 
+def _judge_settings_row(conn: sqlite3.Connection, row: dict[str, object], fold) -> str | None:
+    """Steps 2 to 6 of the boundary (design of record, "Verification, at
+    the boundaries") for a row whose signature already verified. *fold* is
+    the store's own fold (None: no ledger folds here yet, so every verdict
+    is pending). Returns the quarantine reason, or None to write."""
+    from tools.network.settingskit.authority import judge_row
+
+    if fold is None:
+        return SIGNER_PENDING_PREFIX + "unknown"
+    verdict = judge_row(fold, row)
+    if not verdict.ok:
+        return SIGNER_PENDING_PREFIX + verdict.reason.removeprefix("signer_")
+    # The stored terminal persona is the slot the row occupies. It must be
+    # the persona the fold resolves the key to: a valid key naming another
+    # member's persona would otherwise replace that member's row.
+    if str(row.get("terminal_persona") or "") != verdict.persona:
+        return SIGNER_PENDING_PREFIX + "persona_mismatch"
+    # Step 6: the per-signer freshness floor. The row replaces the same
+    # persona's row in this slot (see _upsert); a statement not newer than
+    # the one held there is a replay and is refused.
+    clauses = ["set_id=?", "schema_revision=?", '"key"=?', "publication_state=?",
+               "terminal_persona=?"]
+    params: list[object] = [row["set_id"], row["schema_revision"], row["key"],
+                            row["publication_state"], row.get("terminal_persona")]
+    if row.get("supersedes") is not None or row.get("excludes") is not None:
+        clauses.append("id=?")
+        params.append(row["id"])
+    else:
+        clauses.extend(["supersedes IS NULL", "excludes IS NULL"])
+    held = conn.execute(
+        "SELECT signed_at FROM settings WHERE " + " AND ".join(clauses), params,
+    ).fetchone()
+    if held is not None and held[0] is not None and row.get("signed_at") is not None \
+            and int(row["signed_at"]) <= int(held[0]):
+        return "settings_signer_stale"
+    return None
+
+
 def materialize(
     conn: sqlite3.Connection,
     mutations: Iterable[Mutation],
     *,
     blob_store: ContentAddressedBlobStore | None = None,
     manage_transaction: bool = True,
+    require_signed: bool | None = None,
 ) -> MaterializationReport:
-    """Apply already-converged winners as one foreign-key-safe transaction."""
+    """Apply already-converged winners as one foreign-key-safe transaction.
+
+    *require_signed* (default :data:`REQUIRE_SIGNED_ORG_ROWS`) refuses an
+    unsigned settings row for a founded organization store.
+    """
+    if require_signed is None:
+        require_signed = REQUIRE_SIGNED_ORG_ROWS
 
     grouped: dict[str, list[Mutation]] = {table: [] for table in _TABLE_ORDER}
     for mutation in mutations:
@@ -669,9 +734,15 @@ def materialize(
             # batch targets its own address, so an address's own operations
             # keep their order and its final state is unchanged.
             written = {tuple(m.address) for m in table_mutations if not m.tombstone}
+            # Among the writes, ledger event rows go first: a signed row that
+            # arrives in the same batch as the claim or delegation that
+            # authorizes it is judged against a fold that already holds them.
             ordered = sorted(
                 table_mutations,
-                key=lambda m: not (m.tombstone and tuple(m.address) not in written),
+                key=lambda m: (
+                    not (m.tombstone and tuple(m.address) not in written),
+                    not (table == "settings" and m.address and m.address[0] == LEDGER_EVENT_SET_ID),
+                ),
             )
             for mutation in ordered:
                 if mutation.tombstone:
@@ -681,11 +752,25 @@ def materialize(
                 row = _row(mutation)
                 if table == "settings" and row.get("signature") is not None:
                     verdict = _verify_settings_row(row, genesis)
+                    if verdict is None:
+                        # The fold is read lazily, once per batch, and only
+                        # when a signed row needs it; a ledger row applied
+                        # earlier in this batch changes the depth and is
+                        # folded in (authority.store_fold).
+                        from tools.network.settingskit.authority import store_fold
+
+                        verdict = _judge_settings_row(conn, row, store_fold(conn))
                     if verdict is not None:
                         rejected.append(
                             (mutation.table, tuple(mutation.address), verdict)
                         )
                         continue
+                elif (
+                    table == "settings" and require_signed and genesis is not None
+                    and row.get("set_id") != LEDGER_EVENT_SET_ID
+                ):
+                    rejected.append((mutation.table, tuple(mutation.address), UNSIGNED_REASON))
+                    continue
                 if table == "attachments":
                     if blob_store is None:
                         pending.append(str(row["id"]))

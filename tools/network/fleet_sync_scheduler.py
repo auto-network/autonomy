@@ -5442,8 +5442,8 @@ class FleetSyncScheduler:
                 )
                 if cleared:
                     logger.info(
-                        "fleet sync scope %r: %d signed row(s) verified after "
-                        "their organization genesis arrived", scope, cleared,
+                        "fleet sync scope %r: %d parked signed row(s) landed on "
+                        "re-judgement (genesis or signer authority arrived)", scope, cleared,
                     )
             except Exception:
                 logger.warning(

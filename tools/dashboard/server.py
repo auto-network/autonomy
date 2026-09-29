@@ -24115,6 +24115,9 @@ app = Starlette(
     lifespan=_lifespan,
     exception_handlers={
         settings_ops.ProtectedSettingError: _protected_setting_handler,
+        # This process's delegate may not sign the row (the organization's
+        # fold refuses it): 403, nothing written (auto-qrmlg.6 S3).
+        settings_ops.SettingsSignerRefused: _protected_setting_handler,
     },
     middleware=[
         Middleware(_RequestDurationMiddleware),

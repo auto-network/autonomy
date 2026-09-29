@@ -363,6 +363,21 @@ class ProtectedSettingError(PermissionError):
     without the internal identity-route capability. Surfaces as 403."""
 
 
+class SettingsSignerRefused(PermissionError):
+    """This process's signer may not sign the row it was asked to write
+    (auto-qrmlg.6 S3): the organization's fold does not authorize its key
+    for the set, the set's key strategy requires the row persona, or the
+    set's signer tier requires the persona itself and only a delegate is
+    held. Nothing is written. Surfaces as 403."""
+
+    def __init__(self, org: str, set_id: str, key: str, reason: str, persona=None):
+        self.org, self.set_id, self.key, self.reason, self.persona = org, set_id, key, reason, persona
+        super().__init__(
+            f"signed settings: this process may not sign {set_id!r} key {key!r} "
+            f"in organization {org!r}: {reason}"
+        )
+
+
 class VaultSealerMissing(RuntimeError):
     """A write to a vaulted set could not be encrypted.
 
@@ -3023,8 +3038,31 @@ def _envelope_columns(
                 "its rows are written unsigned by this process until one is", org,
             )
         return unsigned
+    # The boundary, at the write (S3): the same steps 2 to 5 sync apply
+    # runs on arrival, against this store's own fold, cached by ledger depth
+    # (authority.store_fold: one count query per write, a refold only when
+    # the ledger advances). A row this process may not sign is not written.
     from tools.network.clock import now_ms as _now_ms
+    from tools.network.settingskit.authority import (
+        signing_key_strategy, store_fold,
+    )
+    from tools.network.settingskit.boundary import check_signer
     from tools.network.settingskit.envelope import build_record, sign_record
+
+    if schemas.declared_signer(set_id, int(schema_revision)) == "persona":
+        # D8: a value of this set may not be chosen with nobody present.
+        # The delegate signs unattended; only a persona envelope may write
+        # here, and no inbound for one exists yet.
+        raise SettingsSignerRefused(org, set_id, key, "signer_tier_persona_required")
+    frontier = store_fold(db.conn)
+    if frontier is None:
+        raise SettingsSignerRefused(org, set_id, key, "ledger_unavailable")
+    verdict = check_signer(
+        frontier, signing_key=context.key.public_hex, set_id=set_id,
+        key_strategy=signing_key_strategy(set_id, int(schema_revision)), row_key=key,
+    )
+    if not verdict.ok:
+        raise SettingsSignerRefused(org, set_id, key, verdict.reason, verdict.persona)
 
     signed_at = int(_now_ms())
     record = build_record(
@@ -3036,7 +3074,9 @@ def _envelope_columns(
     )
     signature = sign_record(context.key, record)
     witness_json = None if context.witness is None else json.dumps(context.witness, sort_keys=True)
-    return (signed_at, context.key.public_hex, signature, witness_json, context.terminal_persona)
+    # The terminal persona is the fold's answer for the key, now — what a
+    # receiver will resolve it to — not the context's memory of it.
+    return (signed_at, context.key.public_hex, signature, witness_json, verdict.persona)
 
 
 def add_setting(

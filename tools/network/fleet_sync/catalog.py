@@ -2145,7 +2145,7 @@ class MutationCatalog:
                 "SELECT frame,operation_index FROM fleet_sync_quarantine "
                 "WHERE origin=? AND transaction_id=? AND frame IS NOT NULL "
                 "AND operation_index IS NOT NULL "
-                "AND reason!='settings_signature_invalid'",
+                "AND reason NOT IN ('settings_signature_invalid','settings_signer_stale')",
                 (incarnation, transaction_id),
             ).fetchall()
         ]
@@ -2242,7 +2242,7 @@ class MutationCatalog:
                 "SELECT frame,operation_index FROM fleet_sync_quarantine "
                 "WHERE origin=? AND transaction_id=? AND frame IS NOT NULL "
                 "AND operation_index IS NOT NULL "
-                "AND reason!='settings_signature_invalid'",
+                "AND reason NOT IN ('settings_signature_invalid','settings_signer_stale')",
                 (incarnation, transaction_id),
             ).fetchall():
                 parked = decode_mutation_frame(bytes(frame))
@@ -2461,17 +2461,25 @@ class MutationCatalog:
         ]
 
     def drain_pending_signatures(self) -> int:
-        """Re-apply signed settings rows parked as ``settings_signature_pending``
-        (this store had no organization genesis to verify against when they
-        arrived). Each entry goes back through ordinary apply: it lands, or
-        it is inert against a newer winner, or it is re-parked (still
-        pending, or now provably invalid). Returns the entries cleared."""
+        """Re-judge signed settings rows the boundary parked as
+        ``settings_signature_pending`` (no organization genesis here when
+        they arrived) or ``settings_signer_*`` (the fold did not authorize
+        the key: unknown, not a member, revoked, superseded, lacking the
+        scope, or not the row persona). Each goes back through ordinary
+        apply: it lands, or it is inert against a newer winner, or it is
+        re-parked with its current reason and one more retry. Returns the
+        entries cleared. ``settings_signature_invalid`` and
+        ``settings_signer_stale`` are final and never retried."""
+        from tools.network.fleet_sync.materialize import SIGNER_PENDING_PREFIX
+
         ensure_quarantine_table(self.conn)
         rows = self.conn.execute(
             "SELECT address,frame,origin,transaction_id,operation_index "
-            "FROM fleet_sync_quarantine WHERE reason='settings_signature_pending' "
+            "FROM fleet_sync_quarantine WHERE (reason='settings_signature_pending' "
+            "OR (reason LIKE ? AND reason!='settings_signer_stale')) "
             "AND frame IS NOT NULL AND origin IS NOT NULL "
-            "AND transaction_id IS NOT NULL AND operation_index IS NOT NULL"
+            "AND transaction_id IS NOT NULL AND operation_index IS NOT NULL",
+            (SIGNER_PENDING_PREFIX + "%",),
         ).fetchall()
         cleared = 0
         for address, frame, origin, transaction_id, operation_index in rows:
@@ -2479,9 +2487,13 @@ class MutationCatalog:
                 str(origin), str(transaction_id), int(operation_index),
                 decode_mutation_frame(bytes(frame)),
             )])
-            if not applied and not ignored:
-                continue
             with self.conn:
+                if not applied and not ignored:
+                    self.conn.execute(
+                        "UPDATE fleet_sync_quarantine SET retries=retries+1 WHERE address=?",
+                        (bytes(address),),
+                    )
+                    continue
                 self.conn.execute(
                     "DELETE FROM fleet_sync_quarantine WHERE address=?",
                     (bytes(address),),

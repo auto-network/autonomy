@@ -115,13 +115,19 @@ def status(*, warm: bool, now_ms: int) -> dict:
             "detail": detail, "organizations": organizations}
 
 
-def signing_key(org: str):
-    """Open the target organization's existing audited key on demand."""
+def _genesis_of(org: str):
     path = org_ledger_db_path(org) if org else None
     if path is None or not path.exists():
         return None
     with LedgerStore(path) as store:
-        genesis = store.ledger.genesis_id
+        return store.ledger.genesis_id
+
+
+def signing_key(org: str):
+    """Open the target organization's existing audited key on demand."""
+    genesis = _genesis_of(org)
+    if genesis is None:
+        return None
     row = settings_ops.read_set_key(NETWORK_STORAGE_DELEGATE_SET_ID, genesis, org=None)
     metadata = (row or {}).get("payload") or {}
     # The index is keyed by this ledger's genesis. Its recorded slug is local
@@ -140,41 +146,67 @@ def signing_key(org: str):
     return key
 
 
+#: org slug -> (SigningContext, delegate expires_at ms). Resolving a context
+#: opens the ledger store and reads the personal index and the audited
+#: vault: ~8 ms per open on SJC-2 (2026-09-29, 22 events), which S2 as
+#: merged paid on EVERY organization write. Now paid once per delegate
+#: lifetime; the write boundary re-judges the key against the fold cached
+#: by ledger depth (settingskit.authority), so a revocation or a narrowed
+#: role still refuses the very next write.
 _SIGNING_CONTEXTS: dict = {}
+
+
+def forget_signing_context(org: str | None = None) -> None:
+    """Drop the cached signer for *org* (all when None): a renewed or
+    replaced delegate is picked up on the next write."""
+    if org is None:
+        _SIGNING_CONTEXTS.clear()
+    else:
+        _SIGNING_CONTEXTS.pop(org, None)
 
 
 def signing_context(org: str):
     """The settings signer for *org* (settings_ops.SigningContext), or None.
 
     The storage delegate's key signs the row; its member persona, resolved
-    once per grant through the fold (a delegate key walks the delegation
-    edges to the member it acts for), is the row's terminal persona. The
-    witness cited is the attestation this node holds for the organization;
-    none is held today (the adopted-checkpoint cache carries no attestation),
-    so the envelope states None, and the boundary's witness bound (step 7)
-    cannot apply until a node holds one (auto-qrmlg.6 S3).
+    through the fold (a delegate key walks the delegation edges to the
+    member it acts for), is the row's terminal persona. The witness cited is
+    the attestation this node holds for the organization; none is held
+    today (the adopted-checkpoint cache carries no attestation), so the
+    envelope states None, and the boundary's witness bound (step 7) cannot
+    apply until a node holds one (auto-qrmlg.6 S3 precondition).
     """
     from tools.graph.settings_ops import SigningContext
-    from tools.network.settingskit.boundary import resolve_signer_persona
 
+    now = int(time.time() * 1000)
+    cached = _SIGNING_CONTEXTS.get(org)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+    _SIGNING_CONTEXTS.pop(org, None)
     key = signing_key(org)
     if key is None:
         return None
-    path = org_ledger_db_path(org)
-    with LedgerStore(path) as store:
-        genesis = store.ledger.genesis_id
-        cached = _SIGNING_CONTEXTS.get((genesis, key.public_hex))
-        if cached is not None:
-            return cached
-        from tools.network.ledger import fold as fold_ledger
-
-        frontier = fold_ledger(store.ledger, now=int(time.time() * 1000))
-    persona = resolve_signer_persona(frontier, key.public_hex)
+    genesis, persona = _resolve_signer_persona(org, key.public_hex, now)
     if persona is None:
         return None
+    row = settings_ops.read_set_key(NETWORK_STORAGE_DELEGATE_SET_ID, genesis, org=None)
+    expires_at = int(((row or {}).get("payload") or {}).get("expires_at") or 0)
     context = SigningContext(key=key, terminal_persona=persona, genesis_id=genesis, witness=None)
-    _SIGNING_CONTEXTS[(genesis, key.public_hex)] = context
+    if expires_at > now:
+        _SIGNING_CONTEXTS[org] = (context, expires_at)
     return context
+
+
+def _resolve_signer_persona(org: str, public_hex: str, now: int):
+    """(genesis id, the member persona *public_hex* acts for or None), from
+    the organization's ledger folded now. The one store open per resolution."""
+    from tools.network.ledger import fold as fold_ledger
+    from tools.network.settingskit.boundary import resolve_signer_persona
+
+    with LedgerStore(org_ledger_db_path(org)) as store:
+        genesis = store.ledger.genesis_id
+        frontier = fold_ledger(store.ledger, now=now)
+    return genesis, resolve_signer_persona(frontier, public_hex)
 
 
 def install_settings_signer() -> None:
