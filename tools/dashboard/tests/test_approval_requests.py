@@ -329,8 +329,8 @@ def test_wait_get_times_out_pending_and_decided_returns_immediately(tmp_path, mo
 # ── post-approval executors: verdict now, backend execution, outcome in result ──
 
 
-def _jira_write(client_or_none=None):
-    return {"kind": "jira_write", "session": "auto-2",
+def _legacy_write(client_or_none=None):
+    return {"kind": "legacy_example", "session": "auto-2",
             "request": {"op": "comment", "key": "ENT-1", "body_markdown": "hi"}}
 
 
@@ -346,11 +346,11 @@ def test_executor_runs_after_verdict_and_delivers_outcome(tmp_path, monkeypatch)
         await asyncio.sleep(0.05)
         return {"ok": True, "ticket": "ENT-1"}
 
-    monkeypatch.setitem(approvals_routes.EXECUTORS, "jira_write", fake_executor)
+    monkeypatch.setitem(approvals_routes.EXECUTORS, "legacy_example", fake_executor)
 
     async def scenario():
         async with _async_client() as c:
-            rid = (await c.post("/api/approvals", json=_jira_write())).json()["id"]
+            rid = (await c.post("/api/approvals", json=_legacy_write())).json()["id"]
             held_task = asyncio.create_task(c.get(f"/api/approvals/{rid}?wait=30"))
             await asyncio.sleep(0.05)
             d = await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
@@ -377,9 +377,9 @@ def test_executor_never_runs_on_decline(tmp_path, monkeypatch):
         calls.append(row)
         return {"ok": True}
 
-    monkeypatch.setitem(approvals_routes.EXECUTORS, "jira_write", fake_executor)
+    monkeypatch.setitem(approvals_routes.EXECUTORS, "legacy_example", fake_executor)
     client = TestClient(Starlette(routes=approvals_routes.ROUTES))
-    rid = client.post("/api/approvals", json=_jira_write()).json()["id"]
+    rid = client.post("/api/approvals", json=_legacy_write()).json()["id"]
     assert client.post(f"/api/approvals/{rid}/decision",
                        json={"approved": False}).json() == {"ok": True}
     assert client.get(f"/api/approvals/{rid}").json()["result"] == {"approved": False}
@@ -392,11 +392,11 @@ def test_executor_failure_reported_not_hung(tmp_path, monkeypatch):
     async def fake_executor(row, decision):
         raise ValueError("boom")
 
-    monkeypatch.setitem(approvals_routes.EXECUTORS, "jira_write", fake_executor)
+    monkeypatch.setitem(approvals_routes.EXECUTORS, "legacy_example", fake_executor)
 
     async def scenario():
         async with _async_client() as c:
-            rid = (await c.post("/api/approvals", json=_jira_write())).json()["id"]
+            rid = (await c.post("/api/approvals", json=_legacy_write())).json()["id"]
             await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
             d = (await c.get(f"/api/approvals/{rid}?wait=10")).json()
             assert d["result"]["approved"] is True
@@ -414,11 +414,11 @@ def test_double_approve_executes_once(tmp_path, monkeypatch):
         await asyncio.sleep(0.2)
         return {"ok": True}
 
-    monkeypatch.setitem(approvals_routes.EXECUTORS, "jira_write", slow_executor)
+    monkeypatch.setitem(approvals_routes.EXECUTORS, "legacy_example", slow_executor)
 
     async def scenario():
         async with _async_client() as c:
-            rid = (await c.post("/api/approvals", json=_jira_write())).json()["id"]
+            rid = (await c.post("/api/approvals", json=_legacy_write())).json()["id"]
             first = await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
             second = await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
             assert first.json() == {"ok": True}
