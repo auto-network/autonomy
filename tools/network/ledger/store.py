@@ -166,6 +166,10 @@ CREATE TABLE IF NOT EXISTS ledger_pending_claims (
 """
 
 
+#: Seconds a ledger write waits for another writer on the org database.
+LEDGER_BUSY_TIMEOUT_S = 30.0
+
+
 class LedgerStore:
     """A durable, self-verifying replica. Not thread-safe (one writer)."""
 
@@ -173,7 +177,12 @@ class LedgerStore:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
+        # The ledger tables live inside the org's own database, which fleet
+        # sync writes in exclusive per-batch transactions; during a large
+        # catch-up those arrive back to back. SQLite's default 5 s wait turned
+        # an organization delegate activation into "database is locked"
+        # (SJC-2, 2026-09-29), so wait for the writer instead of failing.
+        self.db = sqlite3.connect(self.path, timeout=LEDGER_BUSY_TIMEOUT_S)
         self.db.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")

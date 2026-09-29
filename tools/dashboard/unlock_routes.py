@@ -1316,7 +1316,10 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
                     accept(item)
                     organization_delegates[org] = {"ok": True}
                 except Exception as exc:
-                    logger.warning("organization delegate refused for %s: %s", org, exc)
+                    # With the traceback: the message alone ("database is
+                    # locked") does not say which of accept()'s writes failed.
+                    logger.warning("organization delegate refused for %s: %s", org, exc,
+                                   exc_info=True)
                     organization_delegates[org] = {"ok": False, "error": str(exc)}
         if audited_private is not None:
             # Certificate issuance may have failed before this first recipient
