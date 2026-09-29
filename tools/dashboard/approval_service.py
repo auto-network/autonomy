@@ -743,6 +743,10 @@ class ApprovalService:
                 resolution=resolution,
             )
 
+    def now(self) -> float:
+        """The service clock, which also decides expiry."""
+        return self._now(None)
+
     def list_statuses(self, *, now: float | None = None) -> list[ApprovalStatus]:
         """Every approval with its current state, from one read of each set."""
         requests = self._store_call(self.store.list_requests)

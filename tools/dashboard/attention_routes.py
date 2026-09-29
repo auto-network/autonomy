@@ -53,6 +53,7 @@ _SSE_CLOSE = object()
 _SUBSCRIBER_QUEUE_SIZE = 32
 _HEARTBEAT_SECONDS = 15.0
 _MAX_MUTATION_BODY_BYTES = 32 * 1024
+_DECIDED_SHOWN_SECONDS = 7 * 86400
 
 
 def is_private_central_set_id(value: Any) -> bool:
@@ -552,7 +553,12 @@ def _inbox_item(status: ApprovalStatus) -> InboxItem | None:
 
 
 def _inbox_items() -> list[InboxItem]:
-    items = [item for item in map(_inbox_item, _runtime.approvals.list_statuses()) if item]
+    """Every open approval, and those decided in the last week."""
+    since = _runtime.approvals.now() - _DECIDED_SHOWN_SECONDS
+    items = [
+        item for item in map(_inbox_item, _runtime.approvals.list_statuses())
+        if item and (item.status.resolution is None or item.occurred_at >= since)
+    ]
     items.sort(key=lambda item: (-item.occurred_at, item.approval_id))
     return items
 

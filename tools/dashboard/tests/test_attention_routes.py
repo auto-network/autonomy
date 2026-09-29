@@ -238,6 +238,23 @@ class TestAttentionOperatorAPI:
         assert body["counts"]["total_needs_attention"] == 1
         assert body["counts"]["applications"] == {"test_app": {"needs_attention": 1, "waiting": 0}}
 
+    def test_the_list_keeps_open_approvals_and_drops_decisions_older_than_a_week(self, route_client):
+        client, runtime = route_client
+        runtime.approvals.create_from_principal(
+            "test_kind",
+            api_auth.ApiPrincipal(api_auth.ApiPrincipalKind.LOCAL_SESSION, "session-2"),
+            {},
+        )
+        assert _decide(client, "declined", approval_id=OTHER_ID).status_code == 200
+        clock = runtime.approvals._clock
+        runtime.approvals._clock = lambda: clock() + 7 * 86400 + 1
+        try:
+            body = client.get("/api/attention/items").json()
+        finally:
+            runtime.approvals._clock = clock
+        assert [item["attention_id"] for item in body["items"]] == [APPROVAL_ID]
+        assert client.get("/api/attention/items/" + OTHER_ID).status_code == 200
+
     def test_operator_application_result_is_joined_and_bounded(self, route_client):
         client, runtime = route_client
         runtime.operator_result_projectors = {
