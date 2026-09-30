@@ -9,6 +9,8 @@ The argparse setup lives in cli.py; per-subcommand handlers live here.
 
 from __future__ import annotations
 
+import argparse
+
 import getpass
 import json
 import os
@@ -1611,12 +1613,22 @@ def _add_org_arg(parser) -> None:
     )
 
 
+class _AppendKey(argparse.Action):
+    """The optional second positional of an address: appended to
+    ``id_parts`` so readers keep one list (``[id]`` or ``[set_id, key]``)."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if values is not None:
+            namespace.id_parts = [*namespace.id_parts, values]
+
+
 def _add_address_arg(parser, *, help_text: str) -> None:
-    """Wire the dual positional ``id [key]`` form onto a subparser."""
-    parser.add_argument(
-        "id_parts", nargs="+", metavar="ID",
-        help=help_text,
-    )
+    """Wire the dual positional ``id [key]`` form onto a subparser. Two
+    positionals, so the usage reads ``ID [KEY]``: one id, or ``set_id key``,
+    never a list of ids (which ``ID [ID ...]`` used to promise)."""
+    parser.add_argument("id_parts", nargs=1, metavar="ID", help=help_text)
+    parser.add_argument("address_key", nargs="?", metavar="KEY", action=_AppendKey,
+                        help="with ID naming a set_id: the key within that set")
 
 
 def attach_set_subparser(sub) -> None:
