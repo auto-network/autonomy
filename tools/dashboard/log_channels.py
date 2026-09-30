@@ -14,6 +14,10 @@ duplicated; buckets for the spammers". So:
   ``data/dashboard.log`` capture reads as "what's wrong". Uvicorn's own
   lifecycle lines (``uvicorn.error``) stay on stderr as today and are ALSO
   written to the ``dashboard`` channel so the file has the restart timeline.
+* ``connector-<org>.log`` — a link to each serving connector's own log
+  (``data/network/serve-*.log``): a separate process, so its lines
+  (``fleet.session_control`` requests served, pulls) never pass through
+  these channels. Written by link_serving_supervisor at each launch.
 * rotation: size-based, ``DASHBOARD_LOG_MAX_BYTES`` × ``DASHBOARD_LOG_BACKUPS``
   per channel (default 50 MB × 5 — days at post-hygiene rates).
 

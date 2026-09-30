@@ -1739,3 +1739,28 @@ def test_detached_dashboard_does_not_retake_ownership(env):
     second = sup.ServingSupervisor(spawn=second_spawn)
     assert second.ensure(ORG)["reason"] != "owned-by-other-dashboard"
     second.stop_all()
+
+
+def test_the_connector_log_is_findable_in_the_dashboard_log_dir(tmp_path):
+    """Its lines (fleet.session_control requests served) come from the
+    connector process and never pass through the dashboard's channels; a
+    search of the log dir found none of them."""
+    net = tmp_path / "network"
+    net.mkdir()
+    old = net / "serve-org-old.log"
+    new = net / "serve-org-new.log"
+    old.write_text("old generation\n")
+    new.write_text("session-control served op=tail\n")
+    logs = tmp_path / "logs"
+    sup._link_connector_log("personal", str(old), logs_dir=logs)
+    sup._link_connector_log("personal", str(new), logs_dir=logs)   # relaunch
+    link = logs / "connector-personal.log"
+    assert link.is_symlink() and not os.path.isabs(os.readlink(link))
+    assert link.read_text() == "session-control served op=tail\n"
+    assert sorted(p.name for p in logs.iterdir()) == ["connector-personal.log"]
+
+
+def test_a_log_dir_that_cannot_be_written_never_stops_a_launch(tmp_path):
+    blocked = tmp_path / "file"
+    blocked.write_text("")
+    sup._link_connector_log("personal", str(tmp_path / "x.log"), logs_dir=blocked / "logs")

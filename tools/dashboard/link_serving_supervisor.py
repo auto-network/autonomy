@@ -705,6 +705,28 @@ def _log_path_for(work_base: str) -> str:
     return os.path.splitext(work_base)[0] + ".log"
 
 
+def _link_connector_log(org: str, log_path: str, logs_dir=None) -> None:
+    """Point ``<dashboard log dir>/connector-<org>.log`` at the connector's
+    own log, which stays in the connector's working directory (fleet_doctor
+    reads it there). Its lines -- every ``fleet.session_control`` request
+    served, with its timing -- come from the connector process, never
+    through the dashboard's log channels, so without this link a search of
+    the log directory found none of them."""
+    from tools.dashboard import log_channels
+
+    logs = Path(logs_dir) if logs_dir is not None else log_channels.log_dir()
+    link = logs / f"connector-{org}.log"
+    tmp = logs / f".connector-{org}.log.tmp"
+    try:
+        logs.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+        tmp.symlink_to(os.path.relpath(os.path.abspath(log_path), logs))
+        os.replace(tmp, link)
+    except OSError:
+        _log.debug("could not link %s to %s", link, log_path, exc_info=True)
+
+
 def _control_path_for(work_base: str) -> str:
     """The loopback control-listener descriptor file the connector writes
     ({port, auth}) so the dashboard can drive D19 control ops on its
@@ -1845,6 +1867,7 @@ class ServingSupervisor:
                 argv, env, log_path=_log_path_for(work_base),
                 ctl_path=ctl_path,
             )
+            _link_connector_log(org, _log_path_for(work_base))
         except Exception:
             self._release_lock(org)
             raise
