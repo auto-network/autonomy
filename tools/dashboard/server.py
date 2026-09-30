@@ -4065,6 +4065,8 @@ async def api_terminal_kill(request):
         from tools.dashboard import session_control_client
 
         target, _, machine = name.rpartition("@")
+        name = await asyncio.to_thread(
+            session_control_client.canonical_address, name) or name
         reply = await session_control_client.request(
             machine, "stop", {"tmux_name": target})
         if not reply.get("ok"):
@@ -6900,6 +6902,9 @@ async def _remote_session_tail(request, project: str, address: str):
     machine_pub = await asyncio.to_thread(session_control_client.resolve_machine, machine)
     display = (await asyncio.to_thread(fleet_machines.label_for, machine_pub)
                if machine_pub else machine)
+    if machine_pub:
+        # Forwarded events name the session by its key: so does the tail.
+        address = f"{name}@{machine_pub}"
     query = {k: str(v) for k, v in request.query_params.items()
              if k in remote_view.TAIL_QUERY_KEYS}
     reply = await remote_view.fetch_tail(machine, name, project, query)
@@ -12101,6 +12106,19 @@ async def page_terminal_fragment(request):
 
 
 async def page_session_view(request):
+    session_id = request.path_params.get("session_id") or ""
+    if "@" in session_id and not os.environ.get("DASHBOARD_MOCK"):
+        # A session on another fleet machine is stored under
+        # <name>@<machine_pub> only; a display name typed into the URL
+        # would open a viewer no forwarded event ever reaches.
+        from tools.dashboard import session_control_client
+
+        canonical = await asyncio.to_thread(
+            session_control_client.canonical_address, session_id)
+        if canonical and canonical != session_id:
+            return RedirectResponse(
+                url=f"/session/{request.path_params['project']}/{canonical}",
+                status_code=302)
     return HTMLResponse(_load_template("base.html"))
 
 async def page_session_view_fragment(request):
@@ -12143,8 +12161,9 @@ async def page_session_view_by_name(request):
         row = next((r for r in rows if r["tmux_name"] == name
                     and r["machine_pub"] == machine_pub and r.get("project")), None)
         if row is not None:
+            # The key form, however the machine was typed.
             return RedirectResponse(
-                url=f"/session/{row['project']}/{session_id}", status_code=302)
+                url=f"/session/{row['project']}/{name}@{machine_pub}", status_code=302)
 
     # Tier 1: live session in tmux_sessions.
     session = dashboard_db.get_session(session_id)

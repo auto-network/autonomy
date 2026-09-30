@@ -130,6 +130,7 @@ def test_remote_stop_needs_authority_and_routes_to_the_machine(monkeypatch):
                                                "id": body["tmux_name"]}}
 
     monkeypatch.setattr(scc, "request", fake_request)
+    monkeypatch.setattr(scc, "resolve_machine", lambda name: PEER)
     monkeypatch.setattr(api_auth, "require_global_api_authority",
                         lambda request: JSONResponse({}, status_code=403))
     assert asyncio.run(server.api_terminal_kill(_Request("auto-9@sjc-2"))).status_code == 403
@@ -138,7 +139,8 @@ def test_remote_stop_needs_authority_and_routes_to_the_machine(monkeypatch):
     response = asyncio.run(server.api_terminal_kill(_Request("auto-9@sjc-2")))
     assert response.status_code == 202
     assert sent == [("sjc-2", "stop", {"tmux_name": "auto-9"})]
-    assert json.loads(response.body) == {"status": "stopping", "id": "auto-9@sjc-2"}
+    # Typed by display name, answered under the key (auto-37b1t).
+    assert json.loads(response.body) == {"status": "stopping", "id": f"auto-9@{PEER}"}
 
 
 def test_a_malformed_from_session_never_reaches_the_envelope(here):

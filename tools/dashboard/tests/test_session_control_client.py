@@ -21,6 +21,17 @@ def test_a_name_resolves_to_its_roster_machine():
     assert scc.resolve_machine(B[:12], roster=ROSTER, names=NAMES) == B
 
 
+def test_an_address_is_canonical_by_key_however_its_machine_was_typed():
+    """name@machine_pub is the one stored form; a display name only
+    renders (auto-37b1t)."""
+    for typed in ("sjc-2", "SJC-2", B, B[:12]):
+        assert scc.canonical_address(
+            f"auto-9@{typed}", roster=ROSTER, names=NAMES) == f"auto-9@{B}"
+    assert scc.canonical_address("auto-9@nowhere", roster=ROSTER, names=NAMES) is None
+    assert scc.canonical_address("auto-9", roster=ROSTER, names=NAMES) is None
+    assert scc.canonical_address("@sjc-2", roster=ROSTER, names=NAMES) is None
+
+
 def test_unknown_or_ambiguous_names_resolve_to_nothing():
     assert scc.resolve_machine("nowhere", roster=ROSTER, names=NAMES) is None
     assert scc.resolve_machine("cc" * 32, roster=ROSTER, names=NAMES) is None

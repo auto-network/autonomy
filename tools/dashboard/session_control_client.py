@@ -100,6 +100,19 @@ def resolve_machine(name: str, *, roster: dict[str, str] | None = None,
 # ── outbound ────────────────────────────────────────────────────────────────
 
 
+def canonical_address(address: str, **resolve) -> str | None:
+    """``name@<machine_pub>`` for a session address on another fleet
+    machine, however its machine was typed (key, key prefix or display
+    name), or None when the machine is not an active roster machine. The
+    key form is the one address that is stored, returned or navigated to;
+    a display name is only ever rendered."""
+    name, _, machine = (address or "").rpartition("@")
+    if not name or not machine:
+        return None
+    machine_pub = resolve_machine(machine, **resolve)
+    return f"{name}@{machine_pub}" if machine_pub else None
+
+
 async def request(machine: str, op: str, body: dict | None = None, *,
                   timeout: float = 15.0, stream: bool = False) -> dict:
     """Send *op* to the fleet machine named *machine*; the reply record.

@@ -106,7 +106,9 @@ def test_the_viewers_tail_is_proxied_and_rewritten(monkeypatch):
         {"tail_entries": "100", "ignored": "x"})))
     assert response.status_code == 200
     body = json.loads(response.body)
-    assert body["session_id"] == ADDRESS
+    # Opened by display name, named by key -- as forwarded events name it
+    # (auto-37b1t).
+    assert body["session_id"] == body["machine_address"] == f"auto-9@{PEER}"
     assert (body["machine"], body["machine_pub"]) == ("sjc-2", PEER)   # display, key
     assert body["live_updates"] is True     # new entries arrive over the subscription
 
@@ -129,7 +131,27 @@ def test_the_viewer_page_redirects_a_remote_address_to_its_project(monkeypatch):
         "machine": "sjc-2", "local": False}])
     response = asyncio.run(server.page_session_view_by_name(_Req({"session_id": ADDRESS})))
     assert response.status_code == 302
-    assert response.headers["location"] == f"/session/autonomy-developer-opus/{ADDRESS}"
+    assert response.headers["location"] == f"/session/autonomy-developer-opus/auto-9@{PEER}"
+
+
+def test_the_viewer_page_turns_a_display_name_address_into_the_key(monkeypatch):
+    """/session/<project>/<name>@<display name> would store the viewer under
+    a key no forwarded event reaches (auto-37b1t)."""
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+    monkeypatch.setattr(server, "_load_template", lambda name: "<html></html>")
+    monkeypatch.setattr(scc, "resolve_machine",
+                        lambda name: PEER if name in ("sjc-2", PEER) else None)
+    typed = asyncio.run(server.page_session_view(_Req({"project": "p", "session_id": ADDRESS})))
+    assert typed.status_code == 302
+    assert typed.headers["location"] == f"/session/p/auto-9@{PEER}"
+    keyed = asyncio.run(server.page_session_view(
+        _Req({"project": "p", "session_id": f"auto-9@{PEER}"})))
+    assert keyed.status_code == 200
+    unknown = asyncio.run(server.page_session_view(
+        _Req({"project": "p", "session_id": "auto-9@nowhere"})))
+    assert unknown.status_code == 200
+    local = asyncio.run(server.page_session_view(_Req({"project": "p", "session_id": "auto-9"})))
+    assert local.status_code == 200
 
 
 def test_an_attachment_url_with_the_address_goes_to_the_remote_machine(tmp_path, monkeypatch):
