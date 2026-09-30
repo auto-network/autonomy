@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from tools.network.idkit import RevocationRecord, RevocationSet
-from tools.graph import sqlite_defaults
+from tools.network import sqlite_defaults
 
 from .witness import (
     WITNESS_TOPICS,

@@ -14,7 +14,7 @@ inserted after the last completed stream.
 from __future__ import annotations
 
 import asyncio
-from tools.graph import sqlite_defaults
+from tools.network import sqlite_defaults
 import contextlib
 import hashlib
 import json

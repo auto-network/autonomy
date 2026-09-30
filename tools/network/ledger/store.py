@@ -75,7 +75,7 @@ LEDGER_DB_SUFFIX = ".ledger.db"
 #: tools.network.clock (an expiry-sweep gate); re-exported here for the
 #: staging call sites that always read it from this module.
 from tools.network.clock import PENDING_CLAIM_TTL_MS
-from tools.graph import sqlite_defaults
+from tools.network import sqlite_defaults
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
