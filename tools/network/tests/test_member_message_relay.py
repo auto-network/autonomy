@@ -147,6 +147,28 @@ async def _scenario(root, port, relay_broker):
             False, member_message.ORG_HELLO_REFUSED, "peer"), reply
         node_b.adopt(2, members)
 
+        # The hello admits Alice, but Bob's node cannot CONFIRM her membership
+        # afterwards (is_member None: no member list behind the newest
+        # adoption). Cannot-tell is refused as not-a-member; the broker
+        # receives nothing.
+        node_b.auth.is_member = lambda persona: None
+        reply = await member_message.request(
+            a, runtime_a, op="send", body={}, timeout=5, **to_b)
+        assert (reply["ok"], reply["refusal"], reply["at"]) == (
+            False, member_message.NOT_A_MEMBER, "peer"), reply
+        assert await broker_b.next(0.1) is None
+        del node_b.auth.is_member
+
+        # The requester states, not implies, that it reached the member it
+        # addressed: Bob's machine proving Bob's persona under Carol's name
+        # is refused here before any request is sent.
+        carol = KeyPair.generate().public_hex
+        reply = await member_message.request(
+            a, runtime_a, op="send", body={}, timeout=5,
+            genesis=GENESIS, persona_pub=carol, machine=node_b.machine.public_hex)
+        assert reply["ok"] is False and reply["at"] == "local"
+        assert reply["refusal"] in (member_message.WRONG_MEMBER, "destination-slot-absent"), reply
+
         # A destination holding no org channel for the organization refuses
         # by name in place of its hello.
         runtime_b.scheduler._org_channel_for_genesis = lambda org: None

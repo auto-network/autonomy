@@ -83,7 +83,8 @@ NOT_NEGOTIATED = "member-message-not-negotiated"     # the relay offered no memb
 UNARMED = "member-message-unarmed"                   # no fleet runtime armed in this process
 NO_ORG_CHANNEL = "member-message-no-org-channel"     # this process holds no org hello for the organization
 NOT_ORG_ADMITTED = "member-message-not-org-admitted" # the pair was not admitted by the org hello
-NOT_A_MEMBER = "member-message-not-a-member"         # the proved persona is not a current member
+NOT_A_MEMBER = "member-message-not-a-member"         # the proved persona is not a CONFIRMED current member
+WRONG_MEMBER = "member-message-wrong-member"         # the target's hello proved a persona other than the one addressed
 ORG_HELLO_REFUSED = "member-message-org-hello-refused" # the target's org hello check refused ours (detail names it)
 FAILED = "member-message-failed"                     # an exception no path above names
 
@@ -160,8 +161,11 @@ async def _serve(endpoint: FleetStreamEndpoint, scheduler, broker: InboundBroker
             return encode(refusal(exc.refusal, exc.detail))
         channel = scheduler._org_channel_for_genesis(admitted_org)
         peer = channel.admitted(client_pub) if channel is not None else None
-        if peer is None or channel.is_member(peer.persona_pub) is False:
-            return encode(refusal(NOT_A_MEMBER, "the peer is not a current member"))
+        # Membership must be CONFIRMED: is_member answers None when this
+        # node cannot tell (no member list adopted yet), and "cannot tell"
+        # never admits a message as a member's (review of 02ed8f96).
+        if peer is None or channel.is_member(peer.persona_pub) is not True:
+            return encode(refusal(NOT_A_MEMBER, "the peer is not a confirmed current member"))
         submitted = time.monotonic()
         # The dashboard receives WHO the org hello proved: the organization,
         # the persona and the serving machine — never anything the body says.
@@ -248,6 +252,13 @@ async def request(connector, runtime, *, genesis: str, persona_pub: str,
                 raise MemberMessageError(HANDSHAKE_TIMEOUT, f"no handshake within {timeout}s") from None
             except FleetStreamClosed as exc:
                 raise MemberMessageError(PEER_CLOSED_IN_HANDSHAKE, str(exc)) from exc
+            # The hello proved the machine (expected_machine_pub); the persona
+            # it proved for that machine must be the member addressed, stated
+            # outright rather than implied by the relay slot.
+            reached = authenticator.admitted(machine)
+            if reached is None or reached.persona_pub != persona_pub:
+                raise MemberMessageError(
+                    WRONG_MEMBER, "the target's hello proved a persona other than the one addressed")
             try:
                 reply = await _exchange(channel, record, timeout)
             except _NotSent as exc:
