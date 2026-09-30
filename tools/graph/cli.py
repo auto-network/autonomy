@@ -1136,6 +1136,9 @@ def cmd_read(args):
     """
     import json as _json
 
+    if _remote_session_tail(args.source, None, getattr(args, "max_chars", None)):
+        return
+
     # Parse @N version suffix
     source_arg = args.source
     original_arg = args.source
@@ -1656,6 +1659,92 @@ def _entry_role_label(entry: dict) -> str:
     return "USER" if entry.get("entry_type") == "thought" else "ASSISTANT"
 
 
+# ── sessions on another fleet machine (auto-x6iel) ─────────────────────────
+
+#: Remote tail entries that are turns, as the graph's USER / ASSISTANT turns
+#: are: what was said, not the tool traffic between.
+_REMOTE_TURN_LABELS = {"user": "USER", "crosstalk": "USER", "assistant_text": "ASSISTANT"}
+
+
+def _remote_session_address(value: str) -> tuple[str, str] | None:
+    """``(name, machine)`` when *value* is ``<tmux name>@<machine>``, a
+    session on another fleet machine; else None. ``@`` is also the note
+    version suffix: ``f6c6c43e@1`` (a hex source id), ``<name>@`` and
+    ``<name>@3`` (a version of a session's source) stay local."""
+    if not value or "@" not in value:
+        return None
+    name, _, machine = value.rpartition("@")
+    if not _looks_like_tmux_name(name) or not machine or machine.isdigit():
+        return None
+    return name, machine
+
+
+def _remote_presence_row(name: str, machine: str) -> dict | None:
+    """The presence row for *name* on *machine* (display name, any case; the
+    machine key; or a key prefix of 8+ hex)."""
+    rows = (_dashboard_json("GET", "/api/sessions/presence") or {}).get("sessions") or []
+    wanted = machine.lower()
+    hits = []
+    for row in rows:
+        row_name, _, pub = str(row.get("session_id") or "").rpartition("@")
+        if row_name != name:
+            continue
+        label = str(row.get("machine") or "").lower()
+        if wanted in (label, pub) or (len(wanted) >= 8 and pub.startswith(wanted)):
+            hits.append(row)
+    return hits[0] if len(hits) == 1 else None
+
+
+def _remote_session_tail(value: str, n: int | None, max_chars: int | None) -> bool:
+    """Print the last *n* turns (all fetched turns when None) of a session on
+    another fleet machine, through the dashboard's remote tail. True when
+    *value* was such an address; a refusal prints one line and exits 1."""
+    address = _remote_session_address(value)
+    if address is None:
+        return False
+    name, machine = address
+    row = _remote_presence_row(name, machine)
+    if row is None:
+        print(f"  \u2717 {name}@{machine}: no such session on another fleet machine "
+              "(graph sessions --status lists them)", file=sys.stderr)
+        sys.exit(1)
+    import urllib.parse
+
+    key = row["session_id"]          # name@machine_pub: the one address form
+    entries_wanted = 400 if n is None else max(100, n * 25)
+    data = _dashboard_json(
+        "GET", f"/api/session/{urllib.parse.quote(row.get('project') or 'default')}/"
+               f"{urllib.parse.quote(key)}/tail?tail_entries={entries_wanted}") or {}
+    shown = row.get("machine") or machine
+    for flag, why in (("machine_unreachable", "unreachable"),
+                      ("machine_timed_out", "did not answer in time"),
+                      ("machine_not_enabled", "has remote sessions not enabled")):
+        if data.get(flag):
+            detail = (data[flag] or {}).get("reason") if isinstance(data[flag], dict) else None
+            print(f"  \u2717 {shown} {why}" + (f" ({detail})" if detail else ""),
+                  file=sys.stderr)
+            sys.exit(1)
+    turns = [e for e in data.get("entries") or []
+             if isinstance(e, dict) and e.get("type") in _REMOTE_TURN_LABELS
+             and str(e.get("content") or "").strip()]
+    if n is not None:
+        turns = turns[-n:]
+    print(f"Session: {name}@{shown} [{row.get('project') or '?'}] \u2014 on another machine")
+    print(f"Showing last {len(turns)} turns")
+    print(f"{'─' * 72}")
+    for e in turns:
+        label = _REMOTE_TURN_LABELS[e["type"]]
+        if e["type"] == "crosstalk" and e.get("sender"):
+            label = f"CROSSTALK from {e['sender']}"
+        content = str(e.get("content") or "")
+        if max_chars and len(content) > max_chars:
+            content = content[:max_chars] + f"\n... [{len(content) - max_chars} chars truncated]"
+        stamp = f" \u00b7 {e['timestamp']}" if e.get("timestamp") else ""
+        print(f"\n## {label}{stamp}")
+        print(content)
+    return True
+
+
 def cmd_context(args):
     """Show turns around a specific turn in a source — useful for expanding search hits.
 
@@ -1666,6 +1755,18 @@ def cmd_context(args):
     Accepts ``<turn>``, ``last`` (latest turn centered with --window), or
     ``last:N`` (last N turns of the source as a tail-read).
     """
+    if _remote_session_address(args.source):
+        raw = args.turn
+        if isinstance(raw, str) and raw.startswith("last"):
+            n = (int(raw.split(":", 1)[1]) if raw.startswith("last:")
+                 else max(1, 2 * (getattr(args, "window", 0) or 0) + 1))
+            _remote_session_tail(args.source, n, getattr(args, "max_chars", None))
+            return
+        print("  \u2717 a session on another machine has no turn numbers here; "
+              "use `graph context <name>@<machine> last` or `graph tail`",
+              file=sys.stderr)
+        sys.exit(1)
+
     client = get_client()
 
     original_arg = args.source
