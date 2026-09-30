@@ -10,8 +10,9 @@
 #     build time. (We don't gate Claude on a 7-day hold because there is no
 #     dry-run on `claude update` to peek at the target version.)
 #
-# Action: if either drifts from what was last baked, rewrite the Dockerfile
-# CODEX_VERSION arg and run agents/build.sh. Log to ~/.cache/autonomy/.
+# Action: if any drifts from what was last baked, rewrite the Dockerfile
+# CODEX_VERSION / GROK_VERSION args, run agents/build.sh, and on a successful
+# build commit the Dockerfile bump. Log to ~/.cache/autonomy/.
 # Notify via graph crosstalk broadcast on actual rebuilds and failures.
 
 set -euo pipefail
@@ -151,6 +152,18 @@ fi
 log "Running agents/build.sh"
 if ! "$SCRIPT_DIR/build.sh" >>"$LOG_FILE" 2>&1; then
     fail "agents/build.sh failed — see $LOG_FILE"
+fi
+
+# Commit the pin bump so it does not sit uncommitted in the shared checkout,
+# where it blocks every other session's fast-forward merge. The pathspec
+# commits the Dockerfile alone, leaving anything else staged untouched.
+if ! git -C "$REPO_ROOT" diff --quiet -- agents/Dockerfile; then
+    log "Committing Dockerfile pin bump"
+    git -C "$REPO_ROOT" commit -q -m "agents image: ${REASONS[*]}
+
+Nightly harness version bump by agents/auto-update-image.sh (${HOLD_DAYS}-day hold)." \
+        -- agents/Dockerfile >>"$LOG_FILE" 2>&1 \
+        || log "WARN: commit of Dockerfile bump failed — left uncommitted"
 fi
 
 # Persist state
