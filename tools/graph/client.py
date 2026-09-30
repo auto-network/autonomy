@@ -487,6 +487,17 @@ class HttpClient:
         quoted = urllib.parse.quote(name, safe="@")
         return self._post(f"/api/terminal/{quoted}/kill", {})
 
+    def org_runners(self, slug: str):
+        """The organization's verified runner offers (auto-a51qv)."""
+        return self._get(f"/api/orgs/{urllib.parse.quote(slug)}/runners")
+
+    def org_runner_set(self, slug: str, offered: bool, capacity: int | None = None):
+        """Offer this machine to *slug* as a session runner, or withdraw it."""
+        body = {"offered": offered}
+        if capacity is not None:
+            body["capacity"] = capacity
+        return self._put(f"/api/orgs/{urllib.parse.quote(slug)}/runner", body)
+
     def remote_status(self, machine: str):
         """``status`` of another fleet machine over session-control/1."""
         quoted = urllib.parse.quote(machine, safe="")

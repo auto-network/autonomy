@@ -2239,6 +2239,41 @@ def cmd_session(args):
             sys.exit(2)
 
 
+def cmd_runner(args):
+    """graph runner offer|withdraw|list <org> (auto-a51qv)."""
+    client = get_client()
+    if not isinstance(client, HttpClient):
+        print("Error: graph runner needs the dashboard API", file=sys.stderr)
+        sys.exit(1)
+    try:
+        if args.runner_subcmd == "list":
+            reply = client.org_runners(args.org)
+        else:
+            reply = client.org_runner_set(
+                args.org, args.runner_subcmd == "offer",
+                getattr(args, "capacity", None))
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if not reply.get("ok"):
+        print(f"Error: {reply.get('error') or reply}", file=sys.stderr)
+        sys.exit(2)
+    if args.runner_subcmd == "offer":
+        print(f"Offered this machine to {args.org} "
+              f"(capacity {reply['offer']['capacity']})")
+    elif args.runner_subcmd == "withdraw":
+        print(f"Withdrew this machine from {args.org}" if reply.get("withdrawn")
+              else f"This machine had no offer in {args.org}")
+    else:
+        for r in reply.get("runners") or []:
+            state = "live" if r["live"] else "offline"
+            mine = "  (this machine)" if r.get("this_machine") else ""
+            print(f"{r['label']:<24} {state:<8} capacity {r['capacity']:<3} "
+                  f"{','.join(r['harnesses'])}{mine}")
+        if not reply.get("runners"):
+            print(f"No machine offers itself in {args.org}")
+
+
 def cmd_set_role(args):
     """Set the session role."""
     role = " ".join(args.role)
@@ -6589,6 +6624,19 @@ def main():
     p_stats.add_argument("--since", help="Duration filter, e.g. 7d, 30d")
     p_stats.add_argument("--json", action="store_true", help="JSON output")
     p_stats.set_defaults(func=cmd_dispatch_stats)
+
+    # runner — offer this machine to an organization's members (auto-a51qv)
+    p_runner = sub.add_parser("runner", help="Offer this machine to an organization as a session runner")
+    runner_sub = p_runner.add_subparsers(dest="runner_subcmd", required=True)
+    p_runner_offer = runner_sub.add_parser("offer", help="Offer this machine to <org>")
+    p_runner_offer.add_argument("org", help="Organization slug")
+    p_runner_offer.add_argument("--capacity", type=int, help="Concurrent member sessions")
+    p_runner_offer.set_defaults(func=cmd_runner)
+    for name, help_text in (("withdraw", "Withdraw this machine's offer from <org>"),
+                            ("list", "List <org>'s runners and whether each is live")):
+        p_runner_cmd = runner_sub.add_parser(name, help=help_text)
+        p_runner_cmd.add_argument("org", help="Organization slug")
+        p_runner_cmd.set_defaults(func=cmd_runner)
 
     # worktree — inspect and integrate the current session worktree
     p_wt = sub.add_parser("worktree", help="Inspect, synchronize, and merge session worktrees")

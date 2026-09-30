@@ -43,8 +43,44 @@ ROW_DOMAIN = b"autonomy.network.fleet-org-reachability.row.v1\n"
 ORG_SYNC_SCOPE = "fleet:sync"
 
 
-def _signing_input(body: dict[str, Any]) -> bytes:
-    return ROW_DOMAIN + canonical_json({k: v for k, v in body.items() if k != "sig"})
+def _signing_input(body: dict[str, Any], domain: bytes = ROW_DOMAIN) -> bytes:
+    return domain + canonical_json({k: v for k, v in body.items() if k != "sig"})
+
+
+def sign_certified(machine_key: KeyPair, body: dict[str, Any], domain: bytes) -> str:
+    """The machine key's signature over *body* (which names ``machine_pub``)
+    under *domain*: the self-certification an org-homed per-machine row
+    carries (this set, and autonomy.org.session-runner)."""
+    return machine_key.sign_hex(_signing_input(body, domain))
+
+
+def verify_certified(key: str, payload: dict[str, Any], *, org: str,
+                     domain: bytes, now: int | None = None) -> str | None:
+    """The persona that certified a per-machine org row, or None.
+
+    *payload* is the stored row with ``machine_pub`` (the row key) put back.
+    The persona certificate must be for *org*, of subject kind persona, name
+    ``persona_pub``, carry scope fleet:sync and end at the machine key; the
+    machine key must have signed the row under *domain*."""
+    try:
+        cert = DelegationCert.from_dict(payload["persona_cert"])
+    except (IdkitError, ValueError, TypeError, KeyError):
+        return None
+    if cert.org != org or cert.subject.kind != "persona" \
+            or str(cert.subject.id) != payload.get("persona_pub"):
+        return None
+    try:
+        verified = verify_chain(
+            cert, payload["persona_pub"], org=org,
+            now=int(time.time() if now is None else now),
+            required_scope=ORG_SYNC_SCOPE,
+        )
+        if verified.leaf_pub != key:
+            return None
+        verify_signature(key, payload["sig"], _signing_input(payload, domain))
+    except IdkitError:
+        return None
+    return payload["persona_pub"]
 
 
 def build_row(
@@ -64,7 +100,7 @@ def build_row(
         "addresses": list(dict.fromkeys(addresses))[:MAX_ADDRESSES],
         "updated_at": int(time.time() if now is None else now),
     }
-    body["sig"] = machine_key.sign_hex(_signing_input(body))
+    body["sig"] = sign_certified(machine_key, body, ROW_DOMAIN)
     # The signature covers machine_pub; the STORED row does not repeat it,
     # because the row key is that same value. verify_row puts it back from
     # the key before checking, so both shapes sign identical bytes.
@@ -96,23 +132,7 @@ def verify_row(
     # Reinstate the field the key carries, so the signed bytes are the ones
     # the machine signed. A revision-1 row upconverts to the same shape.
     payload = {**dict(payload), "machine_pub": key}
-    try:
-        cert = DelegationCert.from_dict(payload["persona_cert"])
-    except (IdkitError, ValueError, TypeError, KeyError):
-        return None
-    if cert.org != org or cert.subject.kind != "persona" \
-            or str(cert.subject.id) != payload["persona_pub"]:
-        return None
-    try:
-        verified = verify_chain(
-            cert, payload["persona_pub"], org=org,
-            now=int(time.time() if now is None else now),
-            required_scope=ORG_SYNC_SCOPE,
-        )
-        if verified.leaf_pub != key:
-            return None
-        verify_signature(key, payload["sig"], _signing_input(payload))
-    except IdkitError:
+    if verify_certified(key, payload, org=org, domain=ROW_DOMAIN, now=now) is None:
         return None
     if is_member is not None and is_member(payload["persona_pub"]) is False:
         return None

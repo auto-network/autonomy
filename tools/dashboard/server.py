@@ -181,6 +181,7 @@ from tools.dashboard import org_storage_delegate as _org_storage_delegate  # noq
 _org_storage_delegate.install_settings_signer()
 from tools.dashboard import network_routes
 from tools.dashboard import org_membership_routes
+from tools.dashboard import org_runners
 from tools.dashboard import web_push, web_push_proof, web_push_routes, web_push_worker
 from tools.dashboard import image_build_worker
 from tools.dashboard import web_gateway_supervisor
@@ -22371,6 +22372,7 @@ routes = [
     # Personal identity + passkey enrollment (Get started onboarding)
     *identity_routes.ROUTES,
     *org_membership_routes.ROUTES,
+    *org_runners.ROUTES,
     *fleet_enrollment_routes.ROUTES,
     *vault_routes.ROUTES,
 
