@@ -64,6 +64,12 @@ MAX_DUMPS_PER_EPISODE = 20
 LAG_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0)
 
 _CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+#: Continuous stack sampling rate. A one-shot stack at the end of a second
+#: misses the burst that used the CPU (observed 2026-09-30 16:36Z: ten pool
+#: threads at 56% all caught idle), so every thread is sampled this often and
+#: the samples of the last seconds are what a spike dump attributes.
+STACK_HZ = float(os.environ.get("DASHBOARD_PERF_STACK_HZ", "20"))
+STACK_WINDOW_S = 10
 
 
 # ── /proc readers ────────────────────────────────────────────────────────
@@ -227,14 +233,110 @@ def _read_text(path: str) -> str:
         return ""
 
 
+# ── continuous stack sampling ───────────────────────────────────────────
+
+
+class StackSampler:
+    """Samples every thread's stack ``STACK_HZ`` times a second, keyed by the
+    thread's native id, and turns each second's samples into CPU attribution
+    once that second's per-thread CPU is known (:meth:`attribute`): a
+    thread's measured CPU-seconds are split across the code paths it was
+    sampled in. Sleeping or waiting threads therefore attribute nothing,
+    whatever their stack looks like."""
+
+    def __init__(self, *, hz: float = STACK_HZ, window_s: int = STACK_WINDOW_S,
+                 frames_fn: Callable[[], dict] = sys._current_frames) -> None:
+        from collections import Counter, deque
+        self.hz = max(1.0, hz)
+        self.frames_fn = frames_fn
+        self._Counter = Counter
+        self._pending: dict[int, "Counter"] = {}          # native id -> Counter[path] since last attribute()
+        self._names: dict[int, str] = {}
+        self.attributed = deque(maxlen=window_s)          # (unix second, Counter[(pool, path)] cpu-seconds)
+        self._lock = threading.Lock()
+        self.samples = 0
+
+    def sample_once(self, *, threads: list | None = None, skip: set[int] | None = None) -> None:
+        """One sample of every thread. *threads* is ``[(ident, native_id, name)]``
+        (tests inject it); default from :func:`threading.enumerate`."""
+        if threads is None:
+            threads = [(t.ident, t.native_id, t.name) for t in threading.enumerate()]
+        frames = self.frames_fn()
+        skip = skip or set()
+        with self._lock:
+            for ident, native_id, name in threads:
+                if ident in skip or native_id is None:
+                    continue
+                frame = frames.get(ident)
+                if frame is None:
+                    continue
+                self._pending.setdefault(native_id, self._Counter())[repo_path(frame)] += 1
+                self._names[native_id] = name
+            self.samples += 1
+
+    def attribute(self, thread_cpu: dict[int, float], elapsed: float, *, now: float | None = None) -> None:
+        """Split each thread's CPU-seconds over the paths it was sampled in
+        since the last call. *thread_cpu* maps native id -> CPU ratio."""
+        with self._lock:
+            pending, self._pending = self._pending, {}
+            names = dict(self._names)
+        out = self._Counter()
+        for native_id, ratio in thread_cpu.items():
+            counts = pending.get(native_id)
+            if not counts or ratio <= 0:
+                continue
+            total = sum(counts.values())
+            cpu_s = ratio * elapsed
+            pool = thread_label(names.get(native_id, f"tid-{native_id}"))
+            for path, n in counts.items():
+                out[(pool, path)] += cpu_s * n / total
+        with self._lock:
+            self.attributed.append((int(now if now is not None else time.time()), out))
+
+    def window(self, seconds: int, *, now: float | None = None) -> "Counter":
+        cutoff = int(now if now is not None else time.time()) - seconds
+        total = self._Counter()
+        with self._lock:
+            for second, counts in self.attributed:
+                if second > cutoff:
+                    total.update(counts)
+        return total
+
+    def run(self) -> None:
+        me = threading.get_ident()
+        period = 1.0 / self.hz
+        while True:
+            try:
+                self.sample_once(skip={me})
+            except Exception:
+                logger.debug("stack sample failed", exc_info=True)
+            time.sleep(period)
+
+
+def render_window(counts, seconds: int, limit: int = 15) -> list[str]:
+    """Where the worker's CPU went over the last *seconds*: CPU-seconds per
+    thread pool and repository call path (stack samples weighted by each
+    thread's measured CPU)."""
+    if not counts:
+        return [f"  where the worker's CPU went over the last {seconds}s: no attributed CPU"]
+    total = sum(counts.values())
+    lines = [f"  where the worker's CPU went over the last {seconds}s "
+             f"({total:.2f} CPU-seconds attributed):"]
+    for (pool, path), cpu_s in counts.most_common(limit):
+        lines.append(f"    {cpu_s:6.2f}s {cpu_s / total * 100:4.0f}%  {pool:<22} {path}")
+    return lines
+
+
 # ── the live state: metrics + spike dumps ────────────────────────────────
 
 
 class Telemetry:
     def __init__(self, *, sampler: Sampler, dump_path: Path | None,
                  heartbeat_age: Callable[[], float] | None = None,
-                 loop_thread_ident: Callable[[], int | None] | None = None) -> None:
+                 loop_thread_ident: Callable[[], int | None] | None = None,
+                 stacks: "StackSampler | None" = None) -> None:
         self.sampler = sampler
+        self.stacks = stacks
         self.dump_path = dump_path
         self.heartbeat_age = heartbeat_age or (lambda: 0.0)
         self.loop_thread_ident = loop_thread_ident or (lambda: None)
@@ -282,6 +384,9 @@ class Telemetry:
         if sample is None:
             return None
         sample.lag_max_s = lag_max
+        if self.stacks is not None:
+            self.stacks.attribute({tid: ratio for tid, (_, ratio) in sample.threads.items()},
+                                  sample.elapsed)
         try:
             sample.heartbeat_age_s = max(0.0, float(self.heartbeat_age()))
         except Exception:
@@ -328,6 +433,10 @@ class Telemetry:
             return
         self.spike_dumps += 1
         lines = render_dump(s, reasons, idents, self.loop_thread_ident())
+        if self.stacks is not None:
+            # First dump of an episode covers the lead-in too; later ones the last 2 s.
+            span = 5 if self._episode_dumps == 1 else 2
+            lines[2:2] = render_window(self.stacks.window(span), span)
         lines.extend(self._recent_lock_events())
         self._write(lines)
 
@@ -380,7 +489,8 @@ class Telemetry:
             out.append(f"# TYPE {name} {kind}")
             for labels, value in rows:
                 lbl = ",".join(f'{k}="{_escape(v)}"' for k, v in labels.items())
-                out.append(f"{name}{{{lbl}}} {value:.6g}" if lbl else f"{name} {value:.6g}")
+                text = repr(float(value)) if abs(value) >= 1e5 else f"{value:.6g}"
+                out.append(f"{name}{{{lbl}}} {text}" if lbl else f"{name} {text}")
 
         if s is not None:
             metric("dashboard_container_cpu_ratio", "gauge",
@@ -503,6 +613,28 @@ def render_dump(s: Sample, reasons: list[str], idents: dict[int, int],
 
 
 _APP_ROOT = str(Path(__file__).resolve().parents[2]) + "/"
+#: A thread whose innermost frame is one of these is waiting, not working.
+_IDLE_NAMES = frozenset({"wait", "get", "_worker", "select", "poll", "accept", "recv", "recv_into",
+                         "read", "readline", "sleep", "acquire", "join", "_wait_for_tstate_lock"})
+_IDLE_FILES = ("threading.py", "queue.py", "concurrent/futures/thread.py", "selectors.py",
+               "socket.py", "ssl.py", "subprocess.py", "inotify_simple.py", "socketserver.py")
+
+
+def repo_path(frame, depth: int = 4) -> str:
+    """Up to *depth* repository frames of *frame*, innermost first
+    (``a.py:10 f < b.py:20 g``), ``idle`` for a thread waiting for work, or
+    the innermost frame when no repository frame is on the stack."""
+    leaf = repo_leaf(frame)
+    if leaf in ("idle", "native") or ".py:" not in leaf or leaf.startswith(("threading.py", "queue.py", "selectors.py")):
+        return leaf
+    out = []
+    f = frame
+    while f is not None and len(out) < depth:
+        name = f.f_code.co_filename
+        if name.startswith(_APP_ROOT) and "perf_telemetry" not in name:
+            out.append(f"{name[len(_APP_ROOT):]}:{f.f_lineno} {f.f_code.co_name}")
+        f = f.f_back
+    return " < ".join(out) if out else leaf
 
 
 def repo_leaf(frame) -> str:
@@ -511,6 +643,9 @@ def repo_leaf(frame) -> str:
     repository frame is on the stack."""
     if frame is None:
         return "native"
+    top = frame.f_code
+    if top.co_name in _IDLE_NAMES and any(k in top.co_filename for k in _IDLE_FILES):
+        return "idle"
     f = frame
     while f is not None:
         name = f.f_code.co_filename
@@ -563,8 +698,12 @@ def start(*, heartbeat_age: Callable[[], float], loop_thread_ident: Callable[[],
     if _started or os.environ.get("DASHBOARD_PERF_TELEMETRY", "on").lower() in ("0", "off", "false"):
         return _telemetry
     _started = True
+    stacks = StackSampler() if STACK_HZ > 0 else None
     _telemetry = Telemetry(sampler=Sampler(), dump_path=Path(log_dir) / "perf-spikes.log",
-                           heartbeat_age=heartbeat_age, loop_thread_ident=loop_thread_ident)
+                           heartbeat_age=heartbeat_age, loop_thread_ident=loop_thread_ident,
+                           stacks=stacks)
+    if stacks is not None:
+        threading.Thread(target=stacks.run, name="perf-stack-sampler", daemon=True).start()
     threading.Thread(target=_run, args=(_telemetry,), name="perf-telemetry", daemon=True).start()
     port = int(os.environ.get("DASHBOARD_METRICS_PORT", "9464"))
     if port > 0:

@@ -196,3 +196,53 @@ def test_a_long_write_lock_logs_lock_hold(tmp_path, caplog):
         write_lock_stats.LONG_S = old
     assert any("LOCK-HOLD store=slow.db" in r.getMessage() and "thread=" in r.getMessage()
                for r in caplog.records)
+
+
+def test_cpu_is_attributed_to_the_paths_each_thread_was_sampled_in():
+    """A thread measured at 80% that was sampled 3 times in hot() and once in
+    warm() gets 0.6 and 0.2 CPU-seconds there; a sleeping thread whose stack
+    looks busy but used no CPU attributes nothing."""
+    def hot():
+        return sys._getframe()
+
+    def warm():
+        return sys._getframe()
+
+    hot_f, warm_f = hot(), warm()
+    seq = [hot_f, hot_f, hot_f, warm_f]
+    st = pt.StackSampler(hz=4, frames_fn=lambda: {1: seq.pop(0) if seq else hot_f, 2: hot_f})
+    for _ in range(4):
+        st.sample_once(threads=[(1, 101, "asyncio_3"), (2, 102, "sleeper")])
+    st.attribute({101: 0.8, 102: 0.0}, 1.0, now=1000.0)
+    window = st.window(5, now=1000.5)
+    by_leaf = {path.split(" < ")[0].rsplit(" ", 1)[-1]: round(v, 3) for (pool, path), v in window.items()}
+    assert by_leaf == {"hot": 0.6, "warm": 0.2}
+    assert all(pool == "asyncio" for pool, _ in window)
+    text = "\n".join(pt.render_window(window, 5))
+    assert "0.80 CPU-seconds attributed" in text and " 75%  asyncio" in text
+
+
+def test_a_spike_dump_reports_where_the_cpu_went(tmp_path):
+    def busy():
+        return sys._getframe()
+
+    frame = busy()
+    st = pt.StackSampler(hz=10, frames_fn=lambda: {threading.get_ident(): frame})
+    tid = threading.get_native_id()
+    for _ in range(10):
+        st.sample_once(threads=[(threading.get_ident(), tid, "ThreadPoolExecutor-0_1")])
+    sample = _sample(2.5)
+    sample.threads = {tid: ("ThreadPoolExecutor-0_1", 2.5)}
+    dump = tmp_path / "perf-spikes.log"
+    t = pt.Telemetry(sampler=StubSampler([sample]), dump_path=dump, stacks=st)
+    t.tick()
+    text = dump.read_text()
+    assert "where the worker's CPU went over the last 5s (2.50 CPU-seconds attributed)" in text
+    assert "ThreadPoolExecutor" in text and "busy" in text
+
+
+def test_large_gauges_keep_full_precision(tmp_path):
+    t = pt.Telemetry(sampler=StubSampler([_sample(0.1)]), dump_path=tmp_path / "x.log")
+    t.tick()
+    line = next(l for l in t.exposition().splitlines() if l.startswith("dashboard_worker_start_time_seconds "))
+    assert abs(float(line.split()[1]) - pt._WORKER_STARTED) < 0.01
