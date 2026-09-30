@@ -1614,8 +1614,7 @@ def _add_org_arg(parser) -> None:
 def _add_address_arg(parser, *, help_text: str) -> None:
     """Wire the dual positional ``id [key]`` form onto a subparser."""
     parser.add_argument(
-        # Shown as "ID [KEY ...]": one id, or `set_id key` -- never a list of ids.
-        "id_parts", nargs="+", metavar=("ID", "KEY"),
+        "id_parts", nargs="+", metavar="ID",
         help=help_text,
     )
 
