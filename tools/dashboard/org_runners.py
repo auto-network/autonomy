@@ -16,6 +16,7 @@ on this machine" toggle, and ``graph runner offer|withdraw|list``, drive:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import subprocess
 
@@ -67,6 +68,39 @@ def local_images(slug: str) -> list[str]:
     return sorted({line.strip() for line in out.splitlines() if line.startswith(prefix)})
 
 
+def _verified(slug: str, channel) -> dict[str, dict]:
+    """machine_pub -> the newest offer row under that key whose own evidence
+    verifies from a confirmed member, with its setting ``id``.
+
+    Every live base row is read, not one resolved winner per key: another
+    member's forged row under a machine's key must neither hide that
+    machine's real offer nor be the row a withdraw acts on."""
+    from tools.network.org_session_runner import verify_row
+
+    db = settings_ops._open(slug, SET_ID, for_read=True)
+    try:
+        rows = db.conn.execute(
+            'SELECT id, "key", payload FROM settings WHERE set_id = ? '
+            "AND schema_revision = ? AND supersedes IS NULL AND excludes IS NULL "
+            "AND deprecated = 0", (SET_ID, REVISION)).fetchall()
+    finally:
+        db.close()
+    out: dict[str, dict] = {}
+    for setting_id, key, payload in rows:
+        try:
+            value = json.loads(payload) if isinstance(payload, str) else payload
+        except ValueError:
+            continue
+        offer_row = verify_row(key, value, org=channel.org,
+                               is_member=lambda p: channel.is_member(p) is True)
+        if offer_row is None:
+            continue
+        held = out.get(key)
+        if held is None or offer_row["updated_at"] > held["updated_at"]:
+            out[key] = {**offer_row, "id": setting_id}
+    return out
+
+
 def offer(slug: str, capacity: int | None = None) -> dict:
     """Write (or refresh) this machine's offer in *slug*."""
     from tools.network.org_session_runner import build_row
@@ -88,37 +122,29 @@ def withdraw(slug: str) -> dict:
     channel = _channel(slug)
     if channel is None:
         return {"ok": False, "error": NOT_SERVING}
-    withdrawn = 0
-    for member in settings_ops.read_owned_set(SET_ID, org=slug).members:
-        if member.key == channel.machine_pub and not member.deprecated:
-            settings_ops.deprecate_setting(member.id, org=slug)
-            withdrawn += 1
-    return {"ok": True, "machine_pub": channel.machine_pub, "withdrawn": withdrawn}
+    own = _verified(slug, channel).get(channel.machine_pub)
+    if own is not None:
+        settings_ops.deprecate_setting(own["id"], org=slug)
+    return {"ok": True, "machine_pub": channel.machine_pub,
+            "withdrawn": 0 if own is None else 1}
 
 
 def runners(slug: str) -> dict:
     """The organization's verified offers, each marked live or not."""
     from tools.dashboard import org_sync_channels
-    from tools.network.org_session_runner import verify_row
 
     channel = _channel(slug)
     if channel is None:
         return {"ok": False, "error": NOT_SERVING}
     slots = org_sync_channels.relay_slots_provider()().get(slug) or []
     live = {s.get("machine") for s in slots if isinstance(s, dict)}
-    out = []
-    for member in settings_ops.read_owned_set(SET_ID, org=slug).members:
-        offer_row = verify_row(member.key, member.payload, org=channel.org,
-                               is_member=channel.is_member)
-        if offer_row is None:
-            continue
-        out.append({
-            "machine_pub": member.key, "persona_pub": offer_row["persona_pub"],
-            "label": offer_row["label"], "capacity": offer_row["capacity"],
-            "harnesses": offer_row["harnesses"], "images": offer_row["images"],
-            "updated_at": offer_row["updated_at"], "live": member.key in live,
-            "this_machine": member.key == channel.machine_pub,
-        })
+    out = [{
+        "machine_pub": key, "persona_pub": offer_row["persona_pub"],
+        "label": offer_row["label"], "capacity": offer_row["capacity"],
+        "harnesses": offer_row["harnesses"], "images": offer_row["images"],
+        "updated_at": offer_row["updated_at"], "live": key in live,
+        "this_machine": key == channel.machine_pub,
+    } for key, offer_row in _verified(slug, channel).items()]
     return {"ok": True, "runners": sorted(out, key=lambda r: r["label"])}
 
 
@@ -127,8 +153,7 @@ def offered_here(slug: str) -> bool:
     channel = _channel(slug)
     if channel is None:
         return False
-    return any(m.key == channel.machine_pub and not m.deprecated
-               for m in settings_ops.read_owned_set(SET_ID, org=slug).members)
+    return channel.machine_pub in _verified(slug, channel)
 
 
 # ── routes (global operator authority) ──────────────────────────────────────

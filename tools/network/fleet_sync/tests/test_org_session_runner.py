@@ -116,3 +116,40 @@ def test_a_row_naming_another_members_machine_is_never_listed(tmp_path: Path, mo
     settings_ops.upsert_by_key(ORG_SESSION_RUNNER_SET_ID, ORG_SESSION_RUNNER_REVISION,
                                victim.public_hex, forged, org="alpha", state="published")
     assert org_runners.runners("alpha")["runners"] == []
+
+
+def test_a_forged_row_under_a_members_key_does_not_hide_the_real_offer(
+        tmp_path: Path, monkeypatch) -> None:
+    from tools.graph import settings_ops
+    from tools.graph.schemas.org_session_runner import (
+        ORG_SESSION_RUNNER_REVISION, ORG_SESSION_RUNNER_SET_ID)
+
+    pa, pb = KeyPair.generate(), KeyPair.generate()
+    a = Member(tmp_path, "a", pa, [pa.public_hex, pb.public_hex])
+    org_runners = _dashboard(monkeypatch, a, [{"machine": a.machine.public_hex}])
+    org_runners.offer("alpha")
+    # Another member writes a later row under this machine's key.
+    intruder = KeyPair.generate()
+    forged = runner.build_row(intruder, _cert(pb, intruder), label="hijack", capacity=64,
+                              harnesses=["claude"], images=[])
+    # In a signed store each signer has its own slot under a key; this
+    # unsigned test store keys slots by publication state, so the second row
+    # takes the other state to sit beside the real offer.
+    settings_ops.add_setting(ORG_SESSION_RUNNER_SET_ID, ORG_SESSION_RUNNER_REVISION,
+                             a.machine.public_hex, forged, org="alpha", state="raw")
+    (listed,) = org_runners.runners("alpha")["runners"]
+    assert (listed["label"], listed["machine_pub"]) == ("SJC-2", a.machine.public_hex)
+    # And withdraw acts on this machine's own row, never the forged one.
+    assert org_runners.withdraw("alpha")["withdrawn"] == 1
+    assert org_runners.runners("alpha")["runners"] == []
+
+
+def test_an_unconfirmed_persona_is_not_listed(tmp_path: Path, monkeypatch) -> None:
+    pa = KeyPair.generate()
+    a = Member(tmp_path, "a", pa, [pa.public_hex])
+    org_runners = _dashboard(monkeypatch, a, [])
+    org_runners.offer("alpha")
+    channel = org_runners._channel("alpha")
+    monkeypatch.setattr(org_runners, "_channel", lambda slug: SimpleNamespace(
+        **{**vars(channel), "is_member": lambda p: None}))
+    assert org_runners.runners("alpha")["runners"] == []
