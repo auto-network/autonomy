@@ -16,6 +16,10 @@
  */
 (function () {
   var FAST_OPEN_TAIL_LINES = 200;
+  // A live session with fewer transcript entries than this shows the
+  // "New Session" badge in header row 1 (operator decision 2026-09-30:
+  // new means under 100 turns; row 1 carries only HOST plus plugin badges).
+  var NEW_SESSION_TURN_LIMIT = 100;
 
   function _formatProject(project) {
     const cleaned = project
@@ -117,6 +121,14 @@
       get role() {
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? (s.role || '') : '';
+      },
+      // A session is "new" while its transcript is still short. Derived
+      // from the same entry count the drawer's TURNS stat shows, so the
+      // header badge and the stat can never disagree; host sessions carry
+      // the HOST badge in that slot instead.
+      get isNewSession() {
+        return this.isLive && this.sessionType !== 'host'
+          && this.entryCount < NEW_SESSION_TURN_LIMIT;
       },
       get activityState() {
         var s = Alpine.store('sessions')[this.sessionKey];

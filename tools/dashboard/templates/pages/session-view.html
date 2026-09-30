@@ -62,7 +62,7 @@
             </svg>
           </button>
           <div class="sv-header-content">
-          <!-- Header row 1: status dot, role badge, indicator rail, terminal toggle, chevron -->
+          <!-- Header row 1: status dot, HOST badge, New Session badge, plugin badges, terminal toggle, chevron -->
           <div class="sv-header-row1" style="display:flex;align-items:center;gap:12px;margin-top:3px;">
             <button type="button"
                     class="indicator-dot voice-dot-button"
@@ -108,19 +108,17 @@
                   x-show="sessionType === 'host'"
                   x-text="'HOST'"
                   data-testid="session-type"></span>
-            <span class="sc-role"
-                  x-show="role"
-                  x-text="role ? role.charAt(0).toUpperCase() + role.slice(1) : ''"
-                  data-testid="session-role"></span>
-            <!-- A live session has a short interval before the agent knows
-                 enough to name its work and choose a role. Keep that state
-                 composed like the finished header instead of leaving an
-                 orphaned status dot beside a blank row. This is presentation
-                 only; it disappears as soon as a real role arrives. Host
-                 sessions already have the HOST type badge in this slot. -->
+            <!-- Row 1 carries only the HOST type badge and plugin badges;
+                 the agent-chosen role moved to the expanded drawer because
+                 it rarely says more than the title and it took the width
+                 that plugin badges and quick-links need. A young live
+                 session is flagged NEW from its turn count (under
+                 NEW_SESSION_TURN_LIMIT entries), never from whether the
+                 agent has published a role, so the flag clears on its own
+                 as the transcript grows. -->
             <span class="sc-role sv-identity-placeholder"
-                  x-show="isLive && sessionType !== 'host' && !role"
-                  data-testid="session-role-placeholder">New Session</span>
+                  x-show="isNewSession"
+                  data-testid="session-new-badge">New Session</span>
             <!-- The machine a remote session runs on (auto-mje3g); the
                  status dot at the start of this row carries reachability. -->
             <span class="sc-machine" x-show="remoteMachine" x-cloak
@@ -362,6 +360,13 @@
                      :class="window.SessionStats.ctxWarn({contextTokens: contextTokens}) ? 'warn' : ''"
                      x-text="window.SessionStats.ctxStr({contextTokens: contextTokens}) || '—'"></div>
               </div>
+              <template x-if="role">
+                <div class="sv-exp-stat-cell">
+                  <div class="sv-exp-stat-key">ROLE</div>
+                  <div class="sv-exp-stat-val" data-testid="session-role"
+                       x-text="role.charAt(0).toUpperCase() + role.slice(1)"></div>
+                </div>
+              </template>
               <div class="sv-exp-stat-cell">
                 <div class="sv-exp-stat-key">IDLE</div>
                 <div class="sv-exp-stat-val"

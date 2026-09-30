@@ -33,15 +33,26 @@ def test_title_not_contenteditable(test_client):
         )
 
 
-def test_live_unset_identity_balances_badge_with_session_id(test_client):
-    """A new live session should look intentional before metadata arrives."""
+def test_new_session_badge_derives_from_turn_count_not_role(test_client):
+    """Row 1 flags a young live session from its turn count, never from
+    whether the agent has published a role; the role lives in the drawer."""
     resp = test_client.get("/pages/session-view")
     assert resp.status_code == 200
     html = resp.text
 
-    assert 'data-testid="session-role-placeholder"' in html
-    assert "x-show=\"isLive && sessionType !== 'host' && !role\"" in html
+    assert 'data-testid="session-new-badge"' in html
+    assert 'x-show="isNewSession"' in html
     assert '>New Session</span>' in html
+    # The role pill is gone from header row 1: the only badges left there
+    # are the HOST type badge and plugin contribution badges.
+    row1 = html.split('sv-header-row1', 1)[1].split('sv-header-actions', 1)[0]
+    assert 'data-testid="session-type"' in row1
+    assert 'data-testid="session-role"' not in row1
+    assert 'session-viewer-contribution-badge' in row1
+    # The role is still rendered, as a stat cell in the expanded drawer.
+    drawer = html.split('sv-exp-stats-grid', 1)[1]
+    assert 'data-testid="session-role"' in drawer
+    assert '>ROLE</div>' in drawer
     # Both live and ended untitled sessions keep their stable machine
     # identifier beneath the badge/title row.
     assert html.count('x-text="_label || _sessionDisplayName"') == 2
