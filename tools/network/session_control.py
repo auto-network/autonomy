@@ -651,12 +651,43 @@ class _PeerRefusal(SessionControlError):
 
 @contextlib.asynccontextmanager
 async def _open_channel(connector, runtime, machine_pub: str, timeout: float,
-                        resolve_slot=None):
+                        resolve_slot=None, timing: Optional[dict] = None):
     """Open a directed stream to *machine_pub* through this connector's relay
     tunnel and run the session:control handshake on it; yields the
     authenticated channel and resets the stream on exit. Failures raise
     SessionControlError (decided here), _PeerRefusal (the target's refusal)
-    or FleetHandshakeRefused (our check of the target's hello)."""
+    or FleetHandshakeRefused (our check of the target's hello).
+
+    *timing*, when given, receives each step's time as it completes:
+    ``slot_ms`` (the relay's slot list), ``pair_ms`` (the relay pairs the
+    stream with the peer's connector) and ``handshake_ms``. An open that
+    fails logs the steps it reached, so a slow or failed open names its
+    step (auto-5ovcb)."""
+    timing = {} if timing is None else timing
+    step, mark = "slot", time.monotonic()
+
+    def done(name: str, next_step: str) -> None:
+        nonlocal step, mark
+        now = time.monotonic()
+        timing[f"{name}_ms"] = round((now - mark) * 1000)
+        step, mark = next_step, now
+
+    try:
+        async with _open_channel_steps(connector, runtime, machine_pub, timeout,
+                                       resolve_slot, done) as opened:
+            yield opened
+    except BaseException as exc:
+        if step != "open":
+            logger.info("session-control open to=%s failed at=%s after_ms=%.0f %s reason=%s",
+                        machine_pub[:12], step, (time.monotonic() - mark) * 1000,
+                        _steps(timing),
+                        getattr(exc, "refusal", None) or type(exc).__name__)
+        raise
+
+
+@contextlib.asynccontextmanager
+async def _open_channel_steps(connector, runtime, machine_pub: str, timeout: float,
+                              resolve_slot, done):
     adapter = getattr(connector, "session_streams", None)
     if adapter is None:
         # The relay did not negotiate session-control/1 on this tunnel,
@@ -674,6 +705,7 @@ async def _open_channel(connector, runtime, machine_pub: str, timeout: float,
         # the relay's slot list failing to load.
         raise SessionControlError(
             getattr(exc, "reason", None) or SLOT_LOOKUP_FAILED, str(exc)) from exc
+    done("slot", "pair")
     try:
         endpoint = await adapter.open(
             persona_pub, slot_machine,
@@ -686,6 +718,7 @@ async def _open_channel(connector, runtime, machine_pub: str, timeout: float,
         # Admitted by the relay, then declined by the peer's connector
         # without a word: a target that predates typed refusals.
         raise SessionControlError(PEER_CLOSED_AT_OPEN, str(exc)) from exc
+    done("pair", "handshake")
     try:
         try:
             channel = await asyncio.wait_for(authenticate_fleet_transport(
@@ -697,6 +730,7 @@ async def _open_channel(connector, runtime, machine_pub: str, timeout: float,
                 HANDSHAKE_TIMEOUT, f"no handshake within {timeout}s") from None
         except FleetStreamClosed as exc:
             raise SessionControlError(PEER_CLOSED_IN_HANDSHAKE, str(exc)) from exc
+        done("handshake", "open")
         yield channel, endpoint
     finally:
         with contextlib.suppress(Exception):
@@ -716,11 +750,13 @@ class _RequestChannel:
     def usable(self) -> bool:
         return self.channel is not None and not self.endpoint.closed.is_set()
 
-    async def open(self, connector, runtime, machine_pub, timeout, resolve_slot):
+    async def open(self, connector, runtime, machine_pub, timeout, resolve_slot,
+                   timing: Optional[dict] = None):
         stack = contextlib.AsyncExitStack()
         try:
             self.channel, self.endpoint = await stack.enter_async_context(
-                _open_channel(connector, runtime, machine_pub, timeout, resolve_slot))
+                _open_channel(connector, runtime, machine_pub, timeout, resolve_slot,
+                              timing))
         except BaseException:
             await stack.aclose()
             raise
@@ -735,6 +771,12 @@ class _RequestChannel:
 
 #: machine_pub -> the open request channel to it.
 _request_channels: dict[str, _RequestChannel] = {}
+
+
+def _steps(timing: dict) -> str:
+    """``slot_ms=… pair_ms=… handshake_ms=…`` for an open's log line; a
+    reused channel opened nothing and says so."""
+    return " ".join(f"{k}={v}" for k, v in timing.items()) or "steps=none"
 
 
 class _NotSent(Exception):
@@ -776,17 +818,20 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
             # A transfer gets its own channel, so it never holds up the
             # small requests queued on the shared one.
             started = time.monotonic()
+            steps: dict = {}
             async with _open_channel(connector, runtime, machine_pub, timeout,
-                                     resolve_slot) as (channel, _endpoint):
+                                     resolve_slot, steps) as (channel, _endpoint):
                 opened = time.monotonic()
                 await channel.send_message(record)
                 reply = await _receive_stream(channel, timeout)
             logger.info("session-control request op=%s to=%s channel=transfer "
-                        "open_ms=%.0f exchange_ms=%.0f", op, machine_pub[:12],
-                        (opened - started) * 1000, (time.monotonic() - opened) * 1000)
+                        "open_ms=%.0f %s exchange_ms=%.0f", op, machine_pub[:12],
+                        (opened - started) * 1000, _steps(steps),
+                        (time.monotonic() - opened) * 1000)
         else:
             entry = _request_channels.setdefault(machine_pub, _RequestChannel())
             started = time.monotonic()
+            steps = {}
             async with entry.lock:
                 waited = time.monotonic() - started
                 reused = entry.usable()
@@ -796,15 +841,16 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
                     session_authenticator(runtime)
                 else:
                     await entry.close()
-                    await entry.open(connector, runtime, machine_pub, timeout, resolve_slot)
+                    await entry.open(connector, runtime, machine_pub, timeout, resolve_slot,
+                                     steps)
                 opened = time.monotonic()
                 try:
                     reply = await _exchange(entry.channel, record, timeout)
                     logger.info(
                         "session-control request op=%s to=%s channel=%s lock_ms=%.0f "
-                        "open_ms=%.0f exchange_ms=%.0f", op, machine_pub[:12],
+                        "open_ms=%.0f %s exchange_ms=%.0f", op, machine_pub[:12],
                         "reused" if reused else "new", waited * 1000,
-                        (opened - started - waited) * 1000,
+                        (opened - started - waited) * 1000, _steps(steps),
                         (time.monotonic() - opened) * 1000)
                 except _NotSent:
                     await entry.close()

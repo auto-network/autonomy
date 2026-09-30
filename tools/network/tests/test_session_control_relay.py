@@ -91,11 +91,19 @@ async def _answer(broker, *, count=1):
             "peer": item["peer_machine_pub"]}})
 
 
-def test_session_control_request_reply_over_the_relay():
+def test_session_control_request_reply_over_the_relay(caplog):
     root = KeyPair.generate()
     port = _free_port()
+    caplog.set_level("INFO", logger="fleet.session_control")
     with _live_registry(port) as app:
         asyncio.run(_scenario(root, port, app.state.directed_streams))
+    # Each open names its steps (auto-5ovcb); a reused channel opened nothing.
+    lines = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith("session-control request op=status")]
+    assert "channel=new" in lines[0]
+    for step in ("slot_ms=", "pair_ms=", "handshake_ms="):
+        assert step in lines[0], lines[0]
+    assert "channel=reused" in lines[1] and "steps=none" in lines[1]
 
 
 async def _scenario(root, port, broker):
@@ -220,6 +228,48 @@ def test_an_old_relay_is_a_typed_refusal_not_a_crash():
     reply = asyncio.run(run())
     assert reply["ok"] is False
     assert reply["refusal"] == "unknown control op: 'session-open'"
+
+
+def test_a_failed_open_names_the_step_it_failed_at(caplog):
+    """A slow or failed open logged nothing about which step it spent its
+    time in (auto-5ovcb): the slot lookup, the relay pairing the stream, or
+    the handshake."""
+    from tools.network.relaykit.fleet_stream import FleetStreamClosed
+
+    caplog.set_level("INFO", logger="fleet.session_control")
+
+    class Streams:
+        async def open(self, *a, **k):
+            await asyncio.sleep(0.05)
+            raise FleetStreamClosed("pair-1", "declined")
+
+    class Connector:
+        session_streams = Streams()
+
+    root = KeyPair.generate()
+    machine_a, machine_b = KeyPair.generate(), KeyPair.generate()
+    roster = (
+        fleet_roster.enroll(root, machine_id="a1" * 32,
+                            machine_pub=machine_a.public_hex, seq=0),
+        fleet_roster.enroll(root, machine_id="b1" * 32,
+                            machine_pub=machine_b.public_hex, seq=0),
+    )
+    runtime = Runtime(root, machine_a, "a1" * 32, roster)
+
+    async def slot(connector, runtime, machine_pub, timeout):
+        await asyncio.sleep(0.03)
+        return (PERSONA, machine_b.public_hex), "org-slots"
+
+    reply = asyncio.run(session_control.request(
+        Connector(), runtime, machine_pub=machine_b.public_hex, op="tail",
+        body={}, timeout=2, resolve_slot=slot, stream=True))
+    assert reply["refusal"] == session_control.PEER_CLOSED_AT_OPEN
+    (line,) = [r.getMessage() for r in caplog.records
+               if "session-control open" in r.getMessage()]
+    assert "failed at=pair" in line and "slot_ms=" in line, line
+    after_ms = int(line.split("after_ms=")[1].split()[0])
+    slot_ms = int(line.split("slot_ms=")[1].split()[0])
+    assert after_ms >= 40 and slot_ms >= 20
 
 
 def test_a_relay_that_did_not_negotiate_the_capability_is_refused_by_name():
