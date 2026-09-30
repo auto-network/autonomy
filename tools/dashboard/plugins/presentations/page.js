@@ -156,6 +156,13 @@
       '</div>';
   }
 
+  // The identity of what the deck topbar shows: a different deck, or a new
+  // revision of it, rebuilds the topbar; anything else updates it in place.
+  function topbarDeckKey(deck) {
+    deck = deck || {};
+    return String(deck.design_id || deck.key || '') + ':' + String(deck.latest_revision_id || '');
+  }
+
   // Sessions for the shared AssetPresence control: the deck's owner first,
   // then every present participant (SurfacePresence rows).
   function presenceSessions(deck, participants, ownerPresence) {
@@ -234,8 +241,15 @@
       // scroller back to the slide top, making tall-slide bottoms unreadable.
       'function applySnapMode(){if(!root)return;var vh=root.clientHeight||window.innerHeight;var anyTall=false;slides.forEach(function(el){var tall=el.offsetHeight>vh+8;if(tall)anyTall=true;el.style.scrollSnapAlign=tall?"none":"";el.style.scrollSnapStop=tall?"normal":"";});root.style.scrollSnapType=anyTall?"y proximity":"";}' +
       'function reveal(index){index=Math.max(0,Math.min(slides.length-1,Number(index)||0));var el=slides[index];if(el){el.classList.add("in");el.classList.add("present-runtime-active");}}' +
-      'var scheduled=false;' +
-      'function report(){scheduled=false;var index=activeIndex();reveal(index);post("present:active",{index:index,count:slides.length});}' +
+      // present:active is posted only when the active slide (or the slide count)
+      // actually changed. The scroll listener schedules report() on every scroll
+      // frame, and a deck whose content re-lays out under the reader (an image
+      // gallery swapping a data-URI image) fires scroll events without moving
+      // between slides; posting on each of those made the parent rebuild its
+      // topbar and re-read share state per frame (50 requests/s observed
+      // 2026-09-30) until the tab froze.
+      'var scheduled=false,lastIndex=-1,lastCount=-1;' +
+      'function report(){scheduled=false;var index=activeIndex();reveal(index);if(index===lastIndex&&slides.length===lastCount)return;lastIndex=index;lastCount=slides.length;post("present:active",{index:index,count:slides.length});}' +
       'function schedule(){if(scheduled)return;scheduled=true;requestAnimationFrame(report);}' +
       'function go(index,behavior){index=Math.max(0,Math.min(slides.length-1,Number(index)||0));reveal(index);var el=slides[index];if(el&&root){root.scrollTo({top:el.offsetTop||0,behavior:behavior||"smooth"});}setTimeout(report,80);}' +
       'window.__presentGoToSlide=go;' +
@@ -584,6 +598,21 @@
           var deckName = (this.deck && this.deck.name) || '';
           document.title = deckName ? deckName + ' · Slides' : 'Slides';
           if (!window.Autonomy || typeof window.Autonomy.setTopbar !== 'function') return;
+          // The topbar is rebuilt only when the deck it shows changes. A slide
+          // change updates the counter in place: rebuilding the HTML on every
+          // present:active replaced the presence host, and each replacement
+          // re-mounted the AssetPresence control, whose mount re-reads share
+          // state from the server (one GET per message; 50/s in a scroll
+          // storm, 2026-09-30). The control's sessions still refresh through
+          // _mountPresence -> update() on the same host.
+          var deckKey = topbarDeckKey(this.deck);
+          var counter = document.querySelector('.present-topbar .present-topbar-count');
+          if (counter && this._topbarDeckKey === deckKey) {
+            counter.textContent = String(Number(this.activeSlide || 0) + 1) + ' / ' + String(this.slideCount || 1);
+            this._mountPresence();
+            return;
+          }
+          this._topbarDeckKey = deckKey;
           window.Autonomy.setTopbar({
             html: topbarHtml(
               this.deck,
@@ -598,6 +627,7 @@
 
         updateLibraryTopbar: function () {
           document.title = 'Slides';
+          this._topbarDeckKey = null;
           if (!window.Autonomy || typeof window.Autonomy.setTopbar !== 'function') return;
           if (this._presence) { this._presence.destroy(); this._presence = null; }
           var self = this;

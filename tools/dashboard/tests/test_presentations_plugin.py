@@ -592,8 +592,12 @@ assert(
   'Present runtime must define reveal(index) so slide 2 content is not left opacity-hidden',
 );
 assert(
-  doc.includes('reveal(index);post("present:active"'),
-  'scroll reporting must reveal the active slide before updating the topbar/page indicator',
+  doc.includes('reveal(index);if(index===lastIndex&&slides.length===lastCount)return;lastIndex=index;lastCount=slides.length;post("present:active"'),
+  'scroll reporting must reveal the active slide, then post present:active only when the slide or count changed',
+);
+assert(
+  doc.includes('var scheduled=false,lastIndex=-1,lastCount=-1;'),
+  'the runtime must remember the last reported slide so a scroll storm posts nothing new',
 );
 assert(
   doc.includes('reveal(index);var el=slides[index]'),
@@ -601,3 +605,28 @@ assert(
 );
 """
     subprocess.run([node, "-e", script], check=True)
+
+
+def test_slide_changes_update_the_topbar_in_place():
+    """2026-09-30: every present:active rebuilt the topbar HTML, which replaced
+    the presence host, re-mounted the AssetPresence control and re-read share
+    state from the server on each scroll frame (50 GET/s while a gallery slide
+    re-laid out), until the tab froze and the dashboard loop stalled. The
+    topbar is rebuilt only when the deck changes; a slide change updates the
+    counter in place, and the deck route reads owner presence off the loop."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "plugins" / "presentations"
+    page = (root / "page.js").read_text(encoding="utf-8")
+    update = page[page.index("updateTopbar: function"):page.index("updateLibraryTopbar: function")]
+    assert "topbarDeckKey(this.deck)" in update
+    assert "this._topbarDeckKey === deckKey" in update
+    assert "counter.textContent" in update
+    # The rebuild path still exists for a new deck (or revision), after the key is stamped.
+    assert update.index("this._topbarDeckKey = deckKey") < update.index("window.Autonomy.setTopbar(")
+    assert "function topbarDeckKey(deck)" in page
+    assert "deck.latest_revision_id" in page[page.index("function topbarDeckKey"):page.index("function topbarDeckKey") + 400]
+    # Leaving the deck for the library forgets the key, so the next deck view rebuilds.
+    library = page[page.index("updateLibraryTopbar: function"):page.index("deckLive: function")]
+    assert "this._topbarDeckKey = null" in library
+    api = (root / "entrypoints" / "api.py").read_text(encoding="utf-8")
+    assert "await asyncio.to_thread(_owner_presence, deck)" in api

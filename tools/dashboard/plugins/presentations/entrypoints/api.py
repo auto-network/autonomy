@@ -1,6 +1,8 @@
 """Present plugin backend API."""
 from __future__ import annotations
 
+import asyncio
+
 import os
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -308,7 +310,10 @@ async def get_deck(request: Request) -> JSONResponse:
     return JSONResponse({
         "deck": deck,
         "design": design,
-        "owner_presence": _owner_presence(deck),
+        # Session rows come from the dashboard DB and Settings (session
+        # groups): synchronous reads that stalled the event loop 9 s under a
+        # request storm (2026-09-30), so they run off the loop.
+        "owner_presence": await asyncio.to_thread(_owner_presence, deck),
     })
 
 
