@@ -180,3 +180,28 @@ async def _lost_reply_scenario(root, port, monkeypatch):
     finally:
         await _stop(a, task_a)
         await _stop(b, task_b)
+
+
+def test_the_broker_times_the_wait_for_pickup_apart_from_the_run():
+    """The served line says whether a request waited for this machine's
+    dashboard or ran long (auto-efp7c)."""
+    async def run():
+        broker = session_control.InboundBroker()
+        timing = {}
+        submitted = asyncio.create_task(
+            broker.submit("tail", {}, peer_machine_pub="a1" * 32, timing=timing))
+        await asyncio.sleep(0.05)
+        item = await broker.next(1.0)
+        await asyncio.sleep(0.05)
+        broker.reply(item["id"], {"v": 1, "ok": True, "result": {}})
+        await submitted
+        assert timing["wait_ms"] >= 40 and timing["run_ms"] >= 40
+
+        never = session_control.InboundBroker(reply_timeout=0.05)
+        untouched = {}
+        reply = await never.submit("tail", {}, peer_machine_pub="a1" * 32,
+                                   timing=untouched)
+        assert reply["refusal"] == session_control.DASHBOARD_UNAVAILABLE
+        assert untouched == {"wait_ms": None, "run_ms": None}
+
+    asyncio.run(run())

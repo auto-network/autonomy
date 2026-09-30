@@ -96,7 +96,11 @@ def test_the_pump_answers_a_request_through_the_op_table(monkeypatch):
             "id": "r1", "op": "echo", "body": {"n": 2}, "peer_machine_pub": A}},
         reply=lambda request_id, record: replies.append((request_id, record)),
     )
-    assert asyncio.run(pump.once()) is True
+    async def run():
+        assert await pump.once() is True
+        await pump.drain()
+
+    asyncio.run(run())
     assert replies == [("r1", {"v": 1, "ok": True,
                                "result": {"body": {"n": 2}, "peer": A}})]
 
@@ -154,3 +158,78 @@ def test_a_connector_that_refuses_at_once_is_not_polled_in_a_tight_loop(monkeypa
 
     asyncio.run(run())
     assert len(calls) <= 2
+
+
+def test_a_slow_request_does_not_hold_back_the_next(monkeypatch):
+    """One at a time, one slow op stalled every request behind it past the
+    requester's timeout (SJC-2, 2026-09-30 19:45Z; auto-efp7c)."""
+    replies = []
+    release = None
+
+    async def slow(body, peer):
+        await release.wait()
+        return scc.ok({"slow": True})
+
+    async def quick(body, peer):
+        return scc.ok({"quick": True})
+
+    monkeypatch.setitem(scc.OPS, "slow", slow)
+    monkeypatch.setitem(scc.OPS, "quick", quick)
+    queue = [{"id": "r1", "op": "slow", "peer_machine_pub": A},
+             {"id": "r2", "op": "quick", "peer_machine_pub": A}]
+
+    async def run():
+        nonlocal release
+        release = asyncio.Event()
+        pump = scc.InboundPump(poll=lambda: {"ok": True, "request": queue.pop(0)},
+                               reply=lambda request_id, record: replies.append(request_id))
+        # One at a time, the first once() never returned while r1 ran.
+        assert await asyncio.wait_for(pump.once(), 2) is True
+        assert await asyncio.wait_for(pump.once(), 2) is True   # polled again while r1 runs
+        for _ in range(50):
+            if replies:
+                break
+            await asyncio.sleep(0.01)
+        assert replies == ["r2"]
+        release.set()
+        await pump.drain()
+        assert replies == ["r2", "r1"]
+
+    asyncio.run(run())
+
+
+def test_no_more_than_the_bound_run_at_once(monkeypatch):
+    monkeypatch.setattr(scc, "INBOUND_CONCURRENCY", 2)
+    running, peak = 0, 0
+    release = None
+
+    async def hold(body, peer):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await release.wait()
+        running -= 1
+        return scc.ok({})
+
+    monkeypatch.setitem(scc.OPS, "hold", hold)
+    polls = []
+
+    def poll():
+        polls.append(1)
+        return {"ok": True, "request": {"id": f"r{len(polls)}", "op": "hold",
+                                        "peer_machine_pub": A}}
+
+    async def run():
+        nonlocal release
+        release = asyncio.Event()
+        pump = scc.InboundPump(poll=poll, reply=lambda *a: None)
+        task = asyncio.create_task(pump.run())
+        await asyncio.sleep(0.2)
+        assert len(polls) == 2 and running == 2    # the third poll waits for a slot
+        release.set()
+        await asyncio.sleep(0.2)
+        task.cancel()
+        await pump.stop()
+
+    asyncio.run(run())
+    assert peak == 2

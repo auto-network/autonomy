@@ -33,6 +33,10 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 POLL_WAIT_S = 20.0
 #: Backoff while the personal connector is not reachable.
 UNAVAILABLE_BACKOFF_S = 5.0
+#: Inbound requests answered at once. One at a time let a single slow op, or
+#: a connector hiccup, stall every request queued behind it past the
+#: requester's timeout (SJC-2, 2026-09-30 19:45-19:52Z).
+INBOUND_CONCURRENCY = 8
 
 #: The dashboard could not reach its personal connector's control socket.
 CONNECTOR_CALL_FAILED = "connector-call-failed"
@@ -319,6 +323,8 @@ class InboundPump:
             "session-control-reply", {"id": request_id, "reply": record},
             timeout=10.0))
         self._task: asyncio.Task | None = None
+        self._slots = asyncio.Semaphore(INBOUND_CONCURRENCY)
+        self._answering: set[asyncio.Task] = set()
 
     def start(self) -> None:
         if self._task is None:
@@ -336,24 +342,55 @@ class InboundPump:
         if self._task is not None:
             self._task.cancel()
             self._task = None
+        for task in list(self._answering):
+            task.cancel()
+
+    async def drain(self) -> None:
+        """Wait until every request taken so far has been answered."""
+        while self._answering:
+            await asyncio.gather(*list(self._answering), return_exceptions=True)
 
     async def once(self) -> bool:
-        """One poll; True when a request was answered."""
-        reply = await asyncio.to_thread(self._poll)
-        if not (isinstance(reply, dict) and reply.get("ok") is True):
-            # A connector that answers at once without the op (the window
-            # after a hot reload, before it restarts) must not be polled in
-            # a tight loop.
-            await asyncio.sleep(UNAVAILABLE_BACKOFF_S)
-            return False
-        item = reply.get("request")
-        if not isinstance(item, dict):
-            return False
-        record = await dispatch(
-            str(item.get("op")), item.get("body") or {},
-            str(item.get("peer_machine_pub") or ""))
-        await asyncio.to_thread(self._reply, item["id"], record)
-        return True
+        """One poll; True when a request was taken. It is answered in its own
+        task, so the next poll does not wait for it; a free slot is taken
+        first, so at most INBOUND_CONCURRENCY run at once and the rest wait
+        at the connector, where their wait is timed."""
+        await self._slots.acquire()
+        taken = False
+        try:
+            reply = await asyncio.to_thread(self._poll)
+            if not (isinstance(reply, dict) and reply.get("ok") is True):
+                # A connector that answers at once without the op (the window
+                # after a hot reload, before it restarts) must not be polled
+                # in a tight loop.
+                await asyncio.sleep(UNAVAILABLE_BACKOFF_S)
+                return False
+            item = reply.get("request")
+            if not isinstance(item, dict):
+                return False
+            task = asyncio.get_running_loop().create_task(self._answer(item))
+            taken = True
+            self._answering.add(task)
+            task.add_done_callback(self._answering.discard)
+            return True
+        finally:
+            if not taken:
+                self._slots.release()
+
+    async def _answer(self, item: dict) -> None:
+        try:
+            record = await dispatch(
+                str(item.get("op")), item.get("body") or {},
+                str(item.get("peer_machine_pub") or ""))
+            await asyncio.to_thread(self._reply, item["id"], record)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # The connector went away mid-answer; its requester times out.
+            logger.info("session-control reply for %s not delivered: %s",
+                        item.get("op"), exc)
+        finally:
+            self._slots.release()
 
     async def run(self) -> None:
         while True:

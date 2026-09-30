@@ -333,15 +333,20 @@ class InboundBroker:
                  reply_timeout: float = INBOUND_REPLY_TIMEOUT_S):
         self._queue: asyncio.Queue = asyncio.Queue()
         self._waiting: dict[str, asyncio.Future] = {}
+        self._picked_up: dict[str, float] = {}     # request id -> monotonic
         self._limit = limit
         self._reply_timeout = reply_timeout
 
-    async def submit(self, op: str, body: dict, *, peer_machine_pub: str, **proved) -> dict:
+    async def submit(self, op: str, body: dict, *, peer_machine_pub: str,
+                     timing: Optional[dict] = None, **proved) -> dict:
         """Park one request and wait for the dashboard's reply. *proved*
         carries what the pair's hello proved beyond the machine (a
-        member-message pair adds ``org`` and ``persona_pub``)."""
+        member-message pair adds ``org`` and ``persona_pub``). *timing*, when
+        given, receives ``wait_ms`` (parked until the dashboard picked it up;
+        None if it never did) and ``run_ms`` (picked up until answered)."""
         if len(self._waiting) >= self._limit:
             return refusal(BUSY, "too many requests waiting for the dashboard")
+        parked = time.monotonic()
         request_id = secrets.token_hex(16)
         future = asyncio.get_running_loop().create_future()
         self._waiting[request_id] = future
@@ -357,6 +362,13 @@ class InboundBroker:
                            "the dashboard did not answer in time")
         finally:
             self._waiting.pop(request_id, None)
+            picked = self._picked_up.pop(request_id, None)
+            if timing is not None:
+                done = time.monotonic()
+                timing["wait_ms"] = (None if picked is None
+                                     else round((picked - parked) * 1000))
+                timing["run_ms"] = (None if picked is None
+                                    else round((done - picked) * 1000))
 
     async def next(self, wait_s: float) -> Optional[dict]:
         """The next request whose submitter is still waiting, or None."""
@@ -370,6 +382,7 @@ class InboundBroker:
             except asyncio.TimeoutError:
                 return None
             if item["id"] in self._waiting:
+                self._picked_up[item["id"]] = time.monotonic()
                 return item
 
     def reply(self, request_id: str, reply: dict) -> bool:
@@ -467,11 +480,17 @@ async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticato
         if request["op"] == "subscribe":
             return await _accept_subscription(request, client_pub, broker, endpoint)
         submitted = time.monotonic()
+        timing: dict = {}
         reply = await broker.submit(
-            request["op"], request["body"], peer_machine_pub=client_pub)
-        logger.info("session-control served op=%s from=%s dashboard_ms=%.0f ok=%s",
+            request["op"], request["body"], peer_machine_pub=client_pub,
+            timing=timing)
+        # wait_ms: queued until this machine's dashboard picked it up (None:
+        # never); run_ms: picked up until answered. A stall names its cause.
+        logger.info("session-control served op=%s from=%s dashboard_ms=%.0f "
+                    "wait_ms=%s run_ms=%s ok=%s",
                     request["op"], client_pub[:12],
-                    (time.monotonic() - submitted) * 1000, reply.get("ok"))
+                    (time.monotonic() - submitted) * 1000,
+                    timing.get("wait_ms"), timing.get("run_ms"), reply.get("ok"))
         result = reply.get("result") if reply.get("ok") else None
         if isinstance(result, dict) and "stream_file" in result:
             result = dict(result)
