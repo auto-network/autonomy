@@ -4,6 +4,7 @@ exposition, and SQLite write-lock timing (operator requirement 2026-09-30)."""
 from __future__ import annotations
 
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -90,7 +91,8 @@ def test_a_spike_writes_one_episode_naming_process_thread_and_stack(tmp_path):
     assert t.spike_episodes == 1 and t.spike_dumps == 2
     assert "SPIKE" in text and "hottest process worker 280%" in text
     assert "hottest worker thread MainThread 280%" in text
-    assert "stack: hot thread" in text and "test_perf_telemetry.py" in text
+    assert "stack: event-loop thread" in text and "thread tid" in text and "test_perf_telemetry.py" in text
+    assert "busy threads by pool" in text and "MainThread: 1 threads, 280%" in text
     assert "=== episode end" in text
 
 
@@ -157,3 +159,40 @@ def test_the_process_wrapper_times_locks_on_every_open(tmp_path):
     conn.execute("COMMIT")
     assert ("hold", "wrapped.db") in write_lock_stats.snapshot()["hist"]
     conn.close()
+
+
+def test_a_spike_spread_over_a_pool_is_summarised_by_function(tmp_path):
+    """Twelve pool threads at 15% each: every one gets a stack, and one line
+    counts which repository function the pool's threads are in."""
+    s = pt.Sample(at=time.time(), elapsed=1.0)
+    s.procs = {1: ("worker", "spawn_main", 1.8)}
+    s.threads = {100 + i: (f"asyncio_{i}", 0.15) for i in range(12)}
+
+    def busy():
+        return sys._getframe()
+
+    frame = busy()
+    lines = pt.render_dump(s, ["worker CPU 180%"], {100 + i: 5000 + i for i in range(12)}, None,
+                           frames={5000 + i: frame for i in range(12)})
+    text = "\n".join(lines)
+    assert "asyncio: 12 threads, 180%" in text
+    assert "test_perf_telemetry.py" in text and " busy x12" in text
+    assert text.count("stack: thread tid") == pt.MAX_STACKS
+
+
+def test_a_long_write_lock_logs_lock_hold(tmp_path, caplog):
+    db = tmp_path / "slow.db"
+    base = write_lock_stats.timed_class(sqlite3.Connection, lambda conn: "slow.db")
+    conn = sqlite3.connect(db, factory=base, isolation_level=None)
+    conn.execute("CREATE TABLE t (x)")
+    old = write_lock_stats.LONG_S
+    write_lock_stats.LONG_S = 0.05
+    try:
+        with caplog.at_level("WARNING", logger="tools.graph.write_lock_stats"):
+            conn.execute("BEGIN IMMEDIATE")
+            time.sleep(0.1)
+            conn.execute("COMMIT")
+    finally:
+        write_lock_stats.LONG_S = old
+    assert any("LOCK-HOLD store=slow.db" in r.getMessage() and "thread=" in r.getMessage()
+               for r in caplog.records)

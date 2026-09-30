@@ -53,7 +53,19 @@ def _traceable(factory: type) -> type:
 
 def _connection_database(conn) -> str:
     """The database file name of *conn*, for write-lock labels."""
-    return _names.get(id(conn)) or "unknown"
+    name = _names.get(id(conn))
+    if name:
+        return name
+    # Opened before install() or through a factory handed in already timed:
+    # ask the connection once and remember.
+    try:
+        rows = sqlite3.Connection.execute(conn, "PRAGMA database_list").fetchall()
+        path = next((r[2] for r in rows if r[1] == "main"), "") or ""
+        name = Path(path).name if path else "memory"
+    except Exception:
+        name = "unknown"
+    _names[id(conn)] = name
+    return name
 
 
 #: id(connection) -> database file name, recorded at open for lock labels.

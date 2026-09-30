@@ -45,7 +45,7 @@ CATCH_ALL = "dashboard"
 #: channel -> logger-name prefixes routed to it (children inherit the route).
 CHANNELS: dict[str, tuple[str, ...]] = {
     "http": ("tools.dashboard.server.http",),
-    "stalls": ("tools.dashboard.server.stall",),
+    "stalls": ("tools.dashboard.server.stall", "tools.graph.write_lock_stats"),
     "voice": (
         "tools.dashboard.server.voice",
         "tools.dashboard.voice_whisperlive",

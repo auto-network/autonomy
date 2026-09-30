@@ -52,8 +52,12 @@ SAMPLE_S = 1.0
 CONTAINER_SPIKE = float(os.environ.get("DASHBOARD_PERF_CONTAINER_SPIKE", "1.5"))
 WORKER_SPIKE = float(os.environ.get("DASHBOARD_PERF_WORKER_SPIKE", "1.0"))
 LAG_SPIKE_S = float(os.environ.get("DASHBOARD_PERF_LAG_SPIKE_S", "0.5"))
-#: A thread (or process) is "hot" in a dump when it used at least this ratio.
-HOT_RATIO = 0.25
+#: A thread gets its stack in a dump when it used at least this ratio. Low on
+#: purpose: a CPU spike is often spread over a whole to_thread pool (a dozen
+#: asyncio_N threads at 15% each), and every one of them is the evidence.
+HOT_RATIO = 0.05
+#: At most this many thread stacks per dump (hottest first).
+MAX_STACKS = 12
 #: At most this many dumped samples per episode, then one line per second.
 MAX_DUMPS_PER_EPISODE = 20
 #: Lag histogram bucket bounds, seconds.
@@ -458,24 +462,68 @@ def render_dump(s: Sample, reasons: list[str], idents: dict[int, int],
         if ratio < 0.01:
             break
         lines.append(f"    {ratio * 100:6.1f}%  tid {tid:<8} {name}")
+    for tid, (name, ratio) in sorted(s.threads.items(), key=lambda kv: kv[1][1], reverse=True)[:MAX_STACKS]:
         if ratio >= HOT_RATIO:
             hot.append(tid)
     current = frames if frames is not None else sys._current_frames()
-    wanted: list[tuple[str, int | None]] = [(f"hot thread tid {t} ({s.threads[t][0]}, "
-                                             f"{s.threads[t][1] * 100:.0f}%)", idents.get(t)) for t in hot]
+    # Per pool: how many busy threads, their total CPU, and which repository
+    # function each one is in right now. This is the line that names a spike
+    # spread over a to_thread pool.
+    pools: dict[str, list] = {}
+    for tid in hot:
+        name, ratio = s.threads[tid]
+        frame = current.get(idents.get(tid)) if idents.get(tid) is not None else None
+        pools.setdefault(thread_label(name), []).append((ratio, repo_leaf(frame)))
+    if pools:
+        lines.append("  busy threads by pool, and the repository function each is in:")
+        for pool, rows in sorted(pools.items(), key=lambda kv: -sum(r for r, _ in kv[1])):
+            leaves: dict[str, int] = {}
+            for _, leaf in rows:
+                leaves[leaf] = leaves.get(leaf, 0) + 1
+            top = ", ".join(f"{leaf} x{n}" for leaf, n in sorted(leaves.items(), key=lambda kv: -kv[1])[:5])
+            lines.append(f"    {pool}: {len(rows)} threads, {sum(r for r, _ in rows) * 100:.0f}% | {top}")
+    loop_title = (f"event-loop thread (lag max {s.lag_max_s:.2f}s, heartbeat age "
+                  f"{s.heartbeat_age_s:.2f}s)")
+    wanted: list[tuple[str, int | None]] = [
+        ((loop_title + ", " if loop_ident is not None and idents.get(t) == loop_ident else "")
+         + f"thread tid {t} ({s.threads[t][0]}, {s.threads[t][1] * 100:.0f}%)", idents.get(t))
+        for t in hot]
     if loop_ident is not None and loop_ident not in [i for _, i in wanted]:
-        wanted.append((f"event-loop thread (lag max {s.lag_max_s:.2f}s, heartbeat age "
-                       f"{s.heartbeat_age_s:.2f}s)", loop_ident))
+        wanted.append((loop_title, loop_ident))
     for title, ident in wanted:
         frame = current.get(ident) if ident is not None else None
         lines.append(f"  stack: {title}")
         if frame is None:
             lines.append("    (no Python frame: native code or the thread exited)")
             continue
-        for entry in traceback.format_stack(frame)[-18:]:
+        for entry in traceback.format_stack(frame)[-12:]:
             for part in entry.rstrip().splitlines():
                 lines.append("    " + part)
     return lines
+
+
+_APP_ROOT = str(Path(__file__).resolve().parents[2]) + "/"
+
+
+def repo_leaf(frame) -> str:
+    """The innermost repository frame of *frame* as ``path:line function``,
+    or ``idle`` for a pool thread waiting for work, or ``native`` when no
+    repository frame is on the stack."""
+    if frame is None:
+        return "native"
+    f = frame
+    while f is not None:
+        name = f.f_code.co_filename
+        if name.startswith(_APP_ROOT) and "perf_telemetry" not in name:
+            return f"{name[len(_APP_ROOT):]}:{f.f_lineno} {f.f_code.co_name}"
+        f = f.f_back
+    top = frame.f_code
+    if top.co_name in ("wait", "get", "_worker", "select") and ("threading" in top.co_filename
+                                                                  or "queue" in top.co_filename
+                                                                  or "thread.py" in top.co_filename
+                                                                  or "selectors" in top.co_filename):
+        return "idle"
+    return f"{Path(top.co_filename).name}:{frame.f_lineno} {top.co_name}"
 
 
 def _rotate(path: Path, max_bytes: int = 20 * 1024 * 1024, backups: int = 3) -> None:

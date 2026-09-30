@@ -30,6 +30,8 @@ timed here; its ``database is locked`` errors are still counted.
 
 from __future__ import annotations
 
+import logging
+import os
 import sys
 import threading
 import time
@@ -37,9 +39,12 @@ from collections import deque
 from pathlib import Path
 
 BUCKETS = (0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
-LONG_S = 1.0
+#: The lane design of record (graph://c12efd9d-39a §4) fixes 2 s: a holder is
+#: named before its victims hit the 5 s busy_timeout.
+LONG_S = 2.0
 _REPO_ROOT = str(Path(__file__).resolve().parents[2]) + "/"
 
+_log = logging.getLogger("tools.graph.write_lock_stats")
 _lock = threading.Lock()
 #: (kind, database) -> [bucket counts..., +Inf count], sum
 _hist: dict[tuple[str, str], list[float]] = {}
@@ -62,8 +67,12 @@ def _observe(kind: str, database: str, seconds: float, *, frames: str = "") -> N
             row[len(BUCKETS)] += 1
         row[-1] += seconds
     if seconds >= LONG_S:
-        long_events.append((time.time(), kind, database, seconds,
-                            threading.current_thread().name, frames or _frames()))
+        where = frames or _frames()
+        thread = threading.current_thread().name
+        long_events.append((time.time(), kind, database, seconds, thread, where))
+        _log.warning("LOCK-%s store=%s held=%.2fs pid=%d thread=%s at %s",
+                     "HOLD" if kind == "hold" else "WAIT", database, seconds,
+                     os.getpid(), thread, where)
 
 
 def note_locked(database: str) -> None:
