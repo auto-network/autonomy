@@ -18428,7 +18428,11 @@ async def api_graph_search(request):
     ranker = request.query_params.get("ranker", "legacy")
     if ranker not in ("legacy", "smart"):
         return JSONResponse({"error": "invalid ranker"}, status_code=400)
-    results = graph_ops.search(
+    # Off the event loop: a search runs SQLite FTS over every org in scope,
+    # and on the loop one call stalled every request for up to 15 s
+    # (2026-09-30).
+    results = await asyncio.to_thread(
+        graph_ops.search,
         q, org=org, peers=peers, only_org=only_org,
         limit=limit, or_mode=or_mode, tag=tag,
         states=states, include_raw=include_raw,
@@ -18564,7 +18568,10 @@ async def api_graph_attention(request):
     session = params.get("session") or None
     ctx_raw = params.get("context")
     context = int(ctx_raw) if ctx_raw else 0
-    rows = graph_ops.list_attention(
+    # Off the event loop: on the loop one attention query stalled every
+    # request for up to 17.5 s (2026-09-30), even without a search term.
+    rows = await asyncio.to_thread(
+        graph_ops.list_attention,
         org=org, since=since, search=search, last=last,
         session=session, context=context,
     )
