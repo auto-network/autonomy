@@ -1090,6 +1090,11 @@ class HumanGateMiddleware:
         if not _path_is_gated(path):
             await self.app(scope, receive, send)
             return
+        # Dispatched in-process by the remote API: authenticated by its
+        # handshake (remote_api.SCOPE_KEY is not settable over HTTP).
+        if "autonomy.remote_caller" in scope:
+            await self.app(scope, receive, send)
+            return
         if not gate_enforced():
             await self.app(scope, receive, send)
             return

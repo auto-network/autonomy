@@ -57,6 +57,12 @@ class ApiPrincipalKind(str, Enum):
     #: when a stored exact method/path capability matches the current request.
     EXTERNAL_SERVICE = "external_service"
     COMPATIBILITY = "compatibility"
+    #: A request another of THIS operator's roster machines forwarded through
+    #: the remote API (remote_api): the operator acting from that machine.
+    REMOTE_MACHINE = "remote_machine"
+    #: A request a confirmed member of an organization forwarded through the
+    #: remote API: bound to that organization, never global.
+    REMOTE_MEMBER = "remote_member"
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,11 +88,12 @@ class ApiPrincipal:
         return self.kind in {
             ApiPrincipalKind.OPERATOR_COOKIE,
             ApiPrincipalKind.LOCAL_SESSION,
+            ApiPrincipalKind.REMOTE_MACHINE,
         }
 
     @property
     def org_bound(self) -> bool:
-        return self.kind is ApiPrincipalKind.ORG_SESSION
+        return self.kind in (ApiPrincipalKind.ORG_SESSION, ApiPrincipalKind.REMOTE_MEMBER)
 
     def allows_api(self, method: str, path: str) -> bool:
         """Whether a scoped external principal allows this exact API call."""
@@ -404,6 +411,19 @@ class ApiIdentityMiddleware:
         self, request: Request, header_org: str | None,
     ) -> tuple[ApiPrincipal, str | None]:
         path = request.url.path
+
+        # A request dispatched in-process by the remote API: the caller is the
+        # one its handshake proved, set under a scope key no HTTP request can
+        # carry (remote_api.SCOPE_KEY). Only decorated routes are dispatched.
+        from tools.dashboard import remote_api
+
+        caller = request.scope.get(remote_api.SCOPE_KEY)
+        if caller is not None:
+            if caller.kind == remote_api.FLEET:
+                return ApiPrincipal(ApiPrincipalKind.REMOTE_MACHINE,
+                                    subject=caller.machine_pub), header_org
+            return ApiPrincipal(ApiPrincipalKind.REMOTE_MEMBER, subject=caller.machine_pub,
+                                org=caller.org, persona_id=caller.persona), caller.org
 
         # Non-API requests keep the existing selection semantics.  The human
         # gate remains their authentication boundary.

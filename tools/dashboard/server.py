@@ -183,6 +183,7 @@ _org_storage_delegate.install_settings_signer()
 from tools.dashboard import network_routes
 from tools.dashboard import org_membership_routes
 from tools.dashboard import org_runners
+from tools.dashboard import remote_api
 from tools.dashboard import web_push, web_push_proof, web_push_routes, web_push_worker
 from tools.dashboard import image_build_worker
 from tools.dashboard import web_gateway_supervisor
@@ -1287,6 +1288,7 @@ async def api_dispatch_pause_post(request):
     return JSONResponse({"paused": new_pause, "reasons": new_reasons})
 
 
+@remote_api.remote("fleet")
 async def api_dispatch_limits_get(request):
     """GET /api/dispatch/limits — effective dispatch concurrency limits."""
     limits = await asyncio.to_thread(_resolved_dispatch_limits)
@@ -23678,6 +23680,8 @@ async def _activate_worker(reason: str) -> None:
                      "output": _inbound_session_output,
                      "tail": _inbound_session_tail,
                      "subscribe": remote_sessions.subscribe_op(event_bus),
+                     # The remote API's one generic op (remote_api, b76a496e).
+                     "api": remote_api.fleet_op(app),
                      # Remote access recovery from another fleet machine
                      # (auto-fnj20): re-open enrollment, revoke a passkey.
                      **remote_access_ops.ops()})
@@ -24059,6 +24063,9 @@ app = Starlette(
         # to the dashboard's own org instead. It sits inside _CSPMiddleware
         # so its redirect/401 responses still carry the standard headers.
         Middleware(unlock_routes.HumanGateMiddleware),
+        # A remote target (X-Autonomy-Machine / _machine) on a route that is
+        # not @remote is refused rather than run here (remote_api).
+        Middleware(remote_api.RemoteTargetGuard),
     ],
 )
 

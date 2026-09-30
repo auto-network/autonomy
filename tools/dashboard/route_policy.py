@@ -149,6 +149,8 @@ def _guarded(endpoint, path: str, *, plugin: bool):
         return await endpoint(request)
 
     guarded._route_policy_wrapped = True  # idempotence marker (see below)
+    # A remote API marker survives the wrap (remote_api.rule_of).
+    guarded.__remote__ = getattr(endpoint, "__remote__", None)
     return guarded
 
 
@@ -214,6 +216,7 @@ def gate_plugin_enabled(plugin_id: str, routes: list, enabled_fn) -> list:
                                         status_code=404)
                 return await original(request)
             gated.__name__ = getattr(original, "__name__", "route")
+            gated.__remote__ = getattr(original, "__remote__", None)
             return gated
 
         out.append(Route(r.path, _make(original),
