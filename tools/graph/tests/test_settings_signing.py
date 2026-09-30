@@ -304,3 +304,25 @@ def test_the_write_boundary_reads_the_fold_once_per_ledger_depth(founded_org, mo
     # query) and rebuilt none of those times beyond the first.
     assert len(calls) == 5 and len(set(calls)) == 1
     assert len(_rows(ORG)) == 5
+
+
+def test_the_signer_is_prepared_before_the_write_lock(founded_org, monkeypatch):
+    """The envelope is built, and its signer's fold read, before BEGIN
+    IMMEDIATE: the write lock is held for the write alone, never through
+    the signing. A signature is taken once and written as is."""
+    settings_ops.install_signer_provider(_provider_for(founded_org))
+    in_transaction = []
+    real = settings_ops.prepare_signer
+
+    def recording(db, org):
+        in_transaction.append(db.conn.in_transaction)
+        return real(db, org)
+
+    monkeypatch.setattr(settings_ops, "prepare_signer", recording)
+    base = settings_ops.upsert_by_key(SET_ID, 1, "k9", {"label": "new"}, org=ORG)
+    settings_ops.upsert_by_key(SET_ID, 1, "k9", {"label": "over an existing row"}, org=ORG)
+    settings_ops.override_setting(base, {"label": "layer"}, org=ORG)
+    settings_ops.override_setting(base, {"label": "collapse"}, org=ORG, deprecate_previous=True)
+    assert in_transaction and not any(in_transaction), in_transaction
+    for row in _rows(ORG):
+        verify_record(record_from_row(row, founded_org.genesis_id), row["signature"])
