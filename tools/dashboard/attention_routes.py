@@ -258,6 +258,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
     from tools.dashboard import mcp_crosstalk_central as crosstalk
     from tools.dashboard import visitor_approvals as visitor
     from tools.dashboard import jira_central
+    from tools.dashboard import vault_seal_central as vault_seal
     dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
     approval_registry = build_production_registry(runtimes={
         dashboard_access_central.KIND: dashboard_approval_runtime,
@@ -268,6 +269,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
         crosstalk.KIND: crosstalk.build_approval_runtime(),
         visitor.KIND: visitor.build_approval_runtime(),
         jira_central.KIND: jira_central.build_approval_runtime(),
+        vault_seal.KIND: vault_seal.build_approval_runtime(),
         **{kind: link_approval_central.build_approval_runtime(kind) for kind in link_approval_central.KINDS},
     })
     approval_waiters = ApprovalWaitHub()
@@ -305,9 +307,11 @@ def build_production_runtime() -> AttentionRouteRuntime:
     jira_desk = jira_central.JiraWriteDesk(approvals=approvals)
     jira_coordinator = jira_central.JiraWriteCoordinator(desk=jira_desk, approvals=approvals)
     link_desk = link_approval_central.LinkApprovalDesk(approvals=approvals)
+    vault_seal_coordinator = vault_seal.VaultSealCoordinator(approvals=approvals)
     # The kinds that act when a decision arrives; each ignores other kinds' ids.
     reconcilers = mailbox_central.ReconcilerGroup(
         coordinator, email_coordinator, vault_coordinator, crosstalk_coordinator, jira_coordinator,
+        vault_seal_coordinator,
     )
     approval_http = ApprovalHttpBridge(
         approvals=approvals,
@@ -324,6 +328,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
                     jira_desk, reconcile=jira_coordinator.reconcile_exact,
                 ),
                 visitor.KIND: visitor.build_http_adapter(visitor_desk),
+                vault_seal.KIND: vault_seal.build_http_adapter(),
                 vault_open_central.KIND: vault_open_central.build_http_adapter(
                     vault_delivery, reconcile=vault_coordinator.reconcile_exact,
                 ),
@@ -345,6 +350,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
             crosstalk.KIND: crosstalk.inbox_text,
             visitor.KIND: visitor.inbox_text,
             jira_central.KIND: jira_central.inbox_text,
+            vault_seal.KIND: vault_seal.inbox_text,
             **{kind: link_approval_central.inbox_text for kind in link_approval_central.KINDS},
         },
         approval_http=approval_http,
@@ -357,6 +363,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
                                     crosstalk.KIND: crosstalk_desk.operator_result,
                                     visitor.KIND: visitor_desk.operator_result,
                                     jira_central.KIND: jira_desk.operator_result,
+                                    vault_seal.KIND: vault_seal.project_result,
                                     **{kind: link_desk.operator_result
                                        for kind in link_approval_central.KINDS}},
         vault_open_delivery=vault_delivery,

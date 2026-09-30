@@ -363,6 +363,13 @@ _PRODUCTION_ROWS = (
     ("vault_open", "vault", RequesterPolicy.SESSION_PRINCIPAL,
      AuthorityRequirement.VAULT_POLICY,
      ApprovalExpiryPolicy(ExpiryMode.FIXED, fixed_seconds=300)),
+    # An agent asks the operator to DEPOSIT a secret it does not have. The
+    # operator types the value in the browser and it is sealed into the vault
+    # (vault_seal_central.py). Sealing needs no vault factor — writes are
+    # public-key — so an unlocked operator session is the authority. NEVER
+    # expires: the request waits in Central until the operator gets to it.
+    ("vault_seal", "vault", RequesterPolicy.SESSION_PRINCIPAL,
+     AuthorityRequirement.OPERATOR_SESSION, ApprovalExpiryPolicy(ExpiryMode.NEVER)),
 )
 
 
@@ -372,7 +379,7 @@ def build_production_registry(
     """Build the exact production catalog with a bounded runtime delta.
 
     Registration metadata is code-owned and immutable.  Migrations may only
-    activate a complete runtime for one of the twelve canonical kinds; they
+    activate a complete runtime for one of the fourteen canonical kinds; they
     cannot add, remove, or relabel a kind through dependency injection.
     """
     supplied = {} if runtimes is None else dict(runtimes)

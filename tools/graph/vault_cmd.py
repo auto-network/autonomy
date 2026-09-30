@@ -181,6 +181,69 @@ def cmd_vault_seal(args) -> None:
     print(f"  ✓ {args.tier} secret sealed: {args.name}  ({ident})")
 
 
+def cmd_vault_request(args) -> None:
+    """Ask the operator to vault a secret this session does not hold.
+
+    The mirror of ``seal``: the value is never on this side. The request lands
+    in Central with the description; the operator types the secret in the
+    browser and it is sealed into the namespace derived from this session's
+    bearer. Default is async-notify — post and return a pending receipt; the
+    decision wakes this session by task-notification. ``--wait N`` opts into a
+    bounded synchronous wait that degrades to the pending receipt.
+    """
+    if ":" in args.name:
+        print(
+            "Error: the organization namespace is derived from your session; "
+            "do not put an explicit prefix in the name",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    description = (args.description or "").strip()
+    if not description:
+        print(
+            "Error: describe what the secret is and why you need it "
+            "(--description); the operator decides from that text alone",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    org = _vault_org(args)
+    client = get_client()
+    requester = getattr(client, "request_vault_seal", None)
+    if requester is None:
+        print(
+            "Error: vault requests need the dashboard; retry without --force-host",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        receipt = requester(
+            args.name, tier=args.tier, description=description, org=org,
+            replace=args.replace, wait_seconds=getattr(args, "wait", 0) or 0,
+        )
+    except Exception as exc:  # the server's message is the useful part
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if receipt.get("pending"):
+        print(
+            f"⧖ Vault request pending — approval {receipt['approval_id']} "
+            f"for {args.name!r} ({args.tier}).\n"
+            "  The operator will see it in Central; you will be notified when "
+            "they decide.\n"
+            f"  Once deposited, read it with: graph vault read {args.name}"
+        )
+        return
+    if receipt.get("approved"):
+        print(f"  ✓ {receipt.get('tier', args.tier)} secret vaulted: {args.name}")
+        print(f"  read it with: graph vault read {args.name}")
+        return
+    print(
+        f"Error: the operator did not vault {args.name!r} "
+        f"({receipt.get('outcome') or 'declined'})",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def cmd_vault_read(args) -> None:
     org = _vault_org(args)
     client = get_client()
@@ -416,6 +479,33 @@ def attach_vault_subparser(sub) -> None:
         help="read one hidden line interactively",
     )
     p_seal.set_defaults(func=cmd_vault_seal)
+
+    p_request = vault_sub.add_parser(
+        "request",
+        help="Ask the operator to vault a secret you do not have; Central "
+             "tracks the request and you are notified when they decide",
+    )
+    p_request.add_argument("name", help="Stable credential name (no org prefix)")
+    _add_scope(p_request)
+    p_request.add_argument(
+        "--tier", choices=("secured", "audited"), default="secured",
+        help="secured (human factor on every read) or audited (unattended "
+             "release). Default: secured",
+    )
+    p_request.add_argument(
+        "-m", "--description", required=True, metavar="TEXT",
+        help="what the secret is and why you need it — the operator decides "
+             "from this text",
+    )
+    p_request.add_argument(
+        "--replace", action="store_true",
+        help="allow the operator to rotate a name that already exists at this tier",
+    )
+    p_request.add_argument(
+        "--wait", type=int, default=0, metavar="N",
+        help="opt-in bounded wait (seconds) for the operator's decision",
+    )
+    p_request.set_defaults(func=cmd_vault_request)
 
     p_read = vault_sub.add_parser(
         "read", help="Release a secret to /run/secrets/<name> (path only, never the value)",

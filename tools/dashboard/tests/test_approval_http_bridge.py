@@ -213,6 +213,11 @@ PRODUCTION_KIND_INVENTORY = {
     "vault_open": (
         "session_principal", "terminal execution.receipt", ".27", False,
     ),
+    # Born on Central (no legacy rendezvous row to migrate): the deposit
+    # happens before the decision, so the resolution IS the terminal result.
+    "vault_seal": (
+        "session_principal", "terminal execution.setting_id", "native", False,
+    ),
 }
 
 
@@ -223,16 +228,16 @@ def test_production_composition_shares_one_service_and_activates_dashboard_acces
     assert runtime.approval_http.registry.approvals is runtime.approvals.registry
     assert set(runtime.approval_http.registry.adapters) == {
         "dashboard_access", "email_send", "vault_open", "link_publish", "link_revoke",
-        "visitor_token", "jira_write"}
+        "visitor_token", "jira_write", "vault_seal"}
     assert set(PRODUCTION_KIND_INVENTORY) == set(PRODUCTION_APPROVAL_REGISTRY.kinds)
     for kind, registration in PRODUCTION_APPROVAL_REGISTRY.kinds.items():
         assert runtime.approval_http.claims_kind(kind) is (
             kind in {"dashboard_access", "fleet_machine_admission", "email_send", "vault_open",
                      "link_publish", "link_revoke", "external_service_access",
-                     "mcp_crosstalk", "visitor_token", "jira_write"})
+                     "mcp_crosstalk", "visitor_token", "jira_write", "vault_seal"})
         assert runtime.approval_http.migrated_kind(kind) is (
             kind in {"dashboard_access", "email_send", "vault_open", "link_publish",
-                     "link_revoke", "visitor_token", "jira_write"})
+                     "link_revoke", "visitor_token", "jira_write", "vault_seal"})
         assert registration.runtime is None
 
 
@@ -247,6 +252,7 @@ def test_exact_kind_inventory_freezes_requester_result_and_owner():
         assert result_dependency
         assert migration_owner in {
             ".8", ".9", ".10", ".11", ".12", ".13", ".14", ".25", ".26", ".27",
+            "native",
         }
         if fleet_cookie_legacy:
             exceptions.append(kind)

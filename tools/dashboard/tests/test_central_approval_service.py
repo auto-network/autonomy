@@ -58,6 +58,7 @@ EXPECTED_KINDS = {
     "fleet_machine_admission",
     "external_service_access",
     "vault_open",
+    "vault_seal",
 }
 
 
@@ -95,6 +96,7 @@ def test_production_catalog_field_map_is_exact():
         "fleet_machine_admission": ("fleet", "internal_producer", "personal_root", "trusted_source_deadline"),
         "external_service_access": ("dropbox", "internal_producer", "operator_session", "never"),
         "vault_open": ("vault", "session_principal", "vault_policy", "fixed"),
+        "vault_seal": ("vault", "session_principal", "operator_session", "never"),
     }
     actual = {}
     for kind, item in registry.kinds.items():

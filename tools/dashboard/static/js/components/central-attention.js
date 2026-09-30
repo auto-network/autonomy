@@ -349,7 +349,8 @@
           'approval.email_send.review', 'approval.vault_open.review',
           'approval.link_publish.review', 'approval.link_revoke.review',
           'approval.external_service_access.review', 'approval.mcp_crosstalk.review',
-          'approval.visitor_token.review', 'approval.jira_write.review'].includes(item.rendererId);
+          'approval.visitor_token.review', 'approval.jira_write.review',
+          'approval.vault_seal.review'].includes(item.rendererId);
         this.selectedItem = shared ? null : item;
         try {
           const payload = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id));
@@ -402,6 +403,13 @@
               const { openLinkCentralApproval } = await import('./link-central-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = await openLinkCentralApproval(item, {
+                onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+              });
+            } else if (item.rendererId === 'approval.vault_seal.review') {
+              const { openVaultSealApproval } = await import('./vault-seal-approval.js');
+              this._sharedApprovalItem = item;
+              this._sharedApprovalDialog = openVaultSealApproval(item, {
                 onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
                 onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
               });

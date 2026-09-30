@@ -104,6 +104,28 @@ graph set seal --key mac.ssh --policy-class <CID> --from-file /run/secrets/key
 # also: --from-fd N, --prompt for one line, or stdin
 ```
 
+## Asking the operator for a secret you do not have
+
+`seal` writes a value the caller holds. The other direction is a Central
+approval kind, `vault_seal` (`tools/dashboard/vault_seal_central.py`):
+
+```bash
+graph vault request github.token --tier audited \
+    -m "Personal access token for pushing release tags from CI"
+# ⧖ Vault request pending — approval central-… ; you are notified on decision
+graph vault read github.token        # after the wake
+```
+
+The request freezes its destination from the caller's bearer (an org session
+lands under `<org>:name`, the operator's own session under the bare name) and
+refuses a name that already exists unless `--replace` is passed. Central shows
+it; the operator types the value in the browser, which POSTs it to
+`/api/vault/deposit/{approval_id}` — the same `write_by_key` seal as the CLI —
+and then commits a decision carrying only the sealed row's id. The validator
+proves that row sits at the frozen destination before the grant is recorded,
+so a granted request always names a deposited secret. The plaintext is never
+in a request, decision, resolution, attention item, or wake.
+
 ## This construction was attacked before it was consumed
 
 New and unreviewed at authoring (2026-08-01). Per the bead, a cross-model attack

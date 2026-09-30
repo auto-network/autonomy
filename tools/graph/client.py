@@ -860,6 +860,76 @@ class HttpClient:
             raise GraphHttpError("vault-open approval expired", 408)
         return self._pending_vault_receipt(request_id, key)
 
+    def request_vault_seal(
+        self, name, *, tier, description, org, replace=False, wait_seconds=0,
+    ):
+        """Ask the operator to DEPOSIT a secret this session does not hold.
+
+        Posts a Central ``vault_seal`` approval. The dashboard derives the
+        requester and the destination namespace from this client's bearer;
+        the body carries only the credential name, tier, why it is needed,
+        and whether an existing value may be replaced.
+
+        ``wait_seconds`` selects the completion model exactly as
+        :meth:`request_vault_open` does: ``0`` (the default) returns a
+        PENDING receipt immediately and the operator's decision wakes the
+        session by task-notification; ``> 0`` holds up to that long for the
+        decision and degrades to the pending receipt. Nothing here returns
+        the value — a deposited secret is read with ``graph vault read``.
+        """
+        org = _resolve_client_org_arg(org)
+        created = self._request(
+            "POST",
+            "/api/approvals",
+            body={
+                "kind": "vault_seal",
+                "request": {
+                    "name": name,
+                    "tier": tier,
+                    "description": description,
+                    "replace": bool(replace),
+                },
+            },
+            headers=_settings_headers(org),
+        )
+        request_id = (created or {}).get("id")
+        if not isinstance(request_id, str) or not request_id:
+            raise GraphHttpError("dashboard created no vault request", 500)
+        pending = {
+            "pending": True, "approval_id": request_id, "name": name, "tier": tier,
+        }
+        if not wait_seconds or wait_seconds <= 0:
+            return pending
+        deadline = time.monotonic() + float(wait_seconds)
+        result = None
+        while result is None and time.monotonic() < deadline:
+            remaining = max(0, deadline - time.monotonic())
+            response = self._request(
+                "GET",
+                f"/api/approvals/{urllib.parse.quote(request_id, safe='')}",
+                params={"wait": min(60, int(remaining) or 1)},
+                headers=_settings_headers(org),
+                timeout=min(65, max(2, int(remaining) + 1)),
+            )
+            result = (response or {}).get("result")
+        if result is None:
+            return pending
+        if result.get("approved") is not True:
+            return {
+                "pending": False, "approved": False, "approval_id": request_id,
+                "name": name, "tier": tier, "outcome": result.get("outcome"),
+            }
+        execution = result.get("execution") or {}
+        if execution.get("ok") is not True:
+            raise GraphHttpError(
+                execution.get("error") or "vault deposit failed", 500, execution,
+            )
+        return {
+            "pending": False, "approved": True, "approval_id": request_id,
+            "name": name, "tier": execution.get("tier") or tier,
+            "key": execution.get("key"), "setting_id": execution.get("setting_id"),
+        }
+
     def _post_vault_open(self, set_id, key, org, ttl_seconds):
         created = self._request(
             "POST",

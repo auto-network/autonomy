@@ -147,6 +147,45 @@ async def create_root_class(request: Request):
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
+def resolve_personal_root_class_id(class_id: str) -> str:
+    """The policy class a personal secured seal targets, proven root-reachable.
+
+    ``"personal-root"`` is a selector, not a class id: it names the one
+    current root-reachable class carried by the operator's personal root. An
+    explicit id is accepted only when it is such a class. Shared by the
+    ``graph vault seal`` route and the Central ``vault_seal`` deposit so both
+    seal to exactly the same recipient.
+    """
+    with _store() as store:
+        if class_id == "personal-root":
+            root_pub = _personal_root_pub()
+            candidates = [
+                record
+                for record in (store.get_class(i) for i in store.class_ids())
+                if record.governance
+                and record.governance.get("form") == "root-reachable"
+                and store.get_root_anchor(
+                    record.governance["anchor_id"]
+                ).root_pub == root_pub
+            ]
+            if len(candidates) != 1:
+                raise VaultError(
+                    "personal-root policy selector requires exactly one "
+                    "current root-reachable class"
+                )
+            class_id = candidates[0].class_id
+        policy_class = store.get_class(class_id)
+        if (
+            not policy_class.governance
+            or policy_class.governance.get("form") != "root-reachable"
+        ):
+            raise VaultError("the selected class is not personal-root reachable")
+        anchor = store.get_root_anchor(policy_class.governance["anchor_id"])
+        if anchor.root_pub != _personal_root_pub():
+            raise VaultError("the selected class is not carried by the current personal root")
+    return class_id
+
+
 async def seal_personal_setting(request: Request):
     """Route one submitted secret into the personal secured store.
 
@@ -242,33 +281,7 @@ async def seal_personal_setting(request: Request):
                 {"error": "a session or operator principal is required"},
                 status_code=403,
             )
-        with _store() as store:
-            if class_id == "personal-root":
-                root_pub = _personal_root_pub()
-                candidates = [
-                    record
-                    for record in (store.get_class(i) for i in store.class_ids())
-                    if record.governance
-                    and record.governance.get("form") == "root-reachable"
-                    and store.get_root_anchor(
-                        record.governance["anchor_id"]
-                    ).root_pub == root_pub
-                ]
-                if len(candidates) != 1:
-                    raise VaultError(
-                        "personal-root policy selector requires exactly one "
-                        "current root-reachable class"
-                    )
-                class_id = candidates[0].class_id
-            policy_class = store.get_class(class_id)
-            if (
-                not policy_class.governance
-                or policy_class.governance.get("form") != "root-reachable"
-            ):
-                raise VaultError("the selected class is not personal-root reachable")
-            anchor = store.get_root_anchor(policy_class.governance["anchor_id"])
-            if anchor.root_pub != _personal_root_pub():
-                raise VaultError("the selected class is not carried by the current personal root")
+        class_id = resolve_personal_root_class_id(class_id)
         setting_id = settings_ops.write_by_key(
             VAULT_SECURED_SET_ID,
             VAULT_CREDENTIAL_REVISION,
@@ -301,6 +314,112 @@ async def seal_personal_setting(request: Request):
         return JSONResponse({"error": str(exc)}, status_code=423)
     except (KeyError, TypeError, ValueError, VaultError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def deposit_vault_secret(request: Request):
+    """POST /api/vault/deposit/{approval_id}  {"value": ...} -> the sealed row.
+
+    The operator's half of a Central ``vault_seal`` request: the value typed in
+    the browser is sealed into the destination the request FROZE (tier, set
+    and ``<org>:name`` key), through the same ``write_by_key`` seam ``graph
+    vault seal`` uses. The browser then commits the decision with only the
+    returned ``setting_id``; the validator proves that row sits at the frozen
+    destination before the grant is recorded.
+
+    Authority is the verified human operator session — the same actor that
+    may decide the request — and the request must still be open. The value
+    is never logged, never stored outside the sealed row, and never echoed.
+    """
+    # Local imports: the approval machinery must not load with this module.
+    from tools.dashboard import vault_seal_central
+    from tools.dashboard.approval_service import (
+        ApprovalServiceError,
+        resolve_human_approval_actor,
+    )
+    from tools.dashboard.attention_routes import approval_runtime
+
+    try:
+        actor = resolve_human_approval_actor(request)
+    except ApprovalServiceError as exc:
+        status = 503 if exc.code == "not_configured" else 401
+        return JSONResponse({"error": exc.code}, status_code=status)
+    approval_id = request.path_params["approval_id"]
+    try:
+        status = approval_runtime().approvals.status(approval_id)
+    except ApprovalServiceError as exc:
+        if exc.code == "not_found":
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({"error": "unavailable"}, status_code=503)
+    payload = status.request.payload
+    if payload.get("kind") != vault_seal_central.KIND:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if payload.get("decider") != {"kind": "person", "id": actor.decider_ref}:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if status.resolution is not None:
+        return JSONResponse(
+            {"error": "this request has already been decided"}, status_code=409,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or set(body) != {"value"}:
+        return JSONResponse(
+            {"error": "vault deposit accepts only value"}, status_code=400,
+        )
+    value = body.get("value")
+    if not isinstance(value, str) or not value:
+        return JSONResponse(
+            {"error": "refusing to vault an empty secret"}, status_code=400,
+        )
+    if len(value.encode("utf-8")) > vault_seal_central.MAX_VALUE_BYTES:
+        return JSONResponse(
+            {"error": "the secret exceeds the vault size limit"}, status_code=400,
+        )
+    try:
+        destination = vault_seal_central.frozen_destination(payload)
+        if (
+            not destination["replace"]
+            and vault_seal_central.existing_row_id(
+                destination["set_id"], destination["key"],
+            ) is not None
+        ):
+            raise VaultError(
+                f"{destination['name']!r} already exists; the request did not "
+                "ask to replace it"
+            )
+        class_id = None
+        if destination["tier"] == "secured":
+            class_id = resolve_personal_root_class_id("personal-root")
+        setting_id = settings_ops.write_by_key(
+            destination["set_id"],
+            VAULT_CREDENTIAL_REVISION,
+            destination["key"],
+            {"value": value},
+            org=None,
+            state="raw",
+            vault_policy_class_id=class_id,
+        )
+    except SchemaValidationError as exc:
+        return JSONResponse({"error": f"schema validation failed: {exc}"}, status_code=400)
+    except settings_ops.VaultSealerMissing as exc:
+        return JSONResponse({"error": str(exc)}, status_code=423)
+    except (KeyError, TypeError, ValueError, VaultError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    finally:
+        value = ""
+        body = None
+    logger.info(
+        "vault_seal_deposited approval=%s tier=%s key=%s setting_id=%s",
+        approval_id, destination["tier"], destination["key"], setting_id,
+    )
+    return JSONResponse({
+        "setting_id": setting_id,
+        "set_id": destination["set_id"],
+        "key": destination["key"],
+        "tier": destination["tier"],
+        "name": destination["name"],
+    }, status_code=201)
 
 
 async def remove_vault_credential(request: Request):
@@ -707,6 +826,7 @@ ROUTES = [
         methods=["POST"],
     ),
     Route("/api/identity/vault-settings", seal_personal_setting, methods=["POST"]),
+    Route("/api/vault/deposit/{approval_id}", deposit_vault_secret, methods=["POST"]),
     Route(
         "/api/vault/credential/{set_id}/{name}",
         remove_vault_credential,
