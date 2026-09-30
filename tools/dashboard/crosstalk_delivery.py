@@ -55,6 +55,16 @@ async def deliver_from_chat(handle: str, to: str, message: str) -> dict:
     live = _tmux_session_exists(to)
     if live:
         await tmux_send(to, render_envelope(from_id=handle, label=handle, message=message))
+    elif "@" in to:
+        # A session on another machine (``name@machine``): the operator's own
+        # fleet machine, else a co-member's (auto-qrmlg.9). The far machine
+        # renders the envelope from what its handshake proved.
+        from tools.dashboard import member_message_client
+
+        name, _, machine = to.rpartition("@")
+        reply = await member_message_client.remote_crosstalk(
+            name, machine, message, from_session=handle, from_label=handle)
+        live = bool(reply.get("ok"))
     await asyncio.to_thread(
         auth_db.insert_message, handle, handle, to, None, None, message, time.time(),
         1 if live else 0)

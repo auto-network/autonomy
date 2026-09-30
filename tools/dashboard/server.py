@@ -280,10 +280,6 @@ from tools.dashboard import notifications_actions as _notifications_actions  # n
 # composing under it via ``set_id_suffix`` registers before
 # ``flush_schema_meta_machine_store`` runs at lifespan startup.
 from tools.dashboard import crosstalk_directive as _crosstalk_directive  # noqa: E402, F401
-# Fleet crosstalk (Path A): the personal-homed FleetCrosstalkV1 directive must
-# register alongside the base, and its synced-delivery bridge wires onto the
-# sync-materialization hook in _on_startup.
-from tools.dashboard import fleet_crosstalk as _fleet_crosstalk  # noqa: E402, F401
 
 # Settings Nexus plugin schemas (bead auto-ct3ey) — imported eagerly so
 # ``dashboard.nexus.scene#1`` + ``dashboard.nexus.tile#1`` are in the
@@ -4136,6 +4132,40 @@ async def _inbound_session_send(body: dict, peer: str) -> dict:
     return scc.ok({"delivered": True, "tmux_name": name})
 
 
+async def _inbound_member_send(body: dict, proved: dict) -> dict:
+    """member-message ``send``: paste a co-member's CrossTalk into a session
+    HERE. The envelope's ``from`` is the claimed sending session ADDRESSED
+    AT THE MEMBER AND MACHINE THE ORG HELLO PROVED (auto-qrmlg.9); the
+    organization, member and machine are never body claims."""
+    from tools.dashboard import member_message_client as mmc
+
+    name, text = body.get("tmux_name"), body.get("text")
+    if not isinstance(name, str) or not name:
+        return mmc.refusal("invalid-tmux-name", "tmux_name is required")
+    if not isinstance(text, str) or not text:
+        return mmc.refusal("missing-text", "text is required")
+    if len(text.encode("utf-8")) > mmc.MAX_SEND_BYTES:
+        return mmc.refusal("text-too-large", f"text over {mmc.MAX_SEND_BYTES} bytes")
+    error = _validate_crosstalk_message(text)
+    if error:
+        return mmc.refusal("invalid-crosstalk", error)
+    if not await asyncio.to_thread(_tmux_session_exists, name):
+        return mmc.refusal(mmc.NO_SUCH_SESSION, name)
+    org = await asyncio.to_thread(mmc.slug_of, proved["org"]) or proved["org"][:12]
+    member = await asyncio.to_thread(mmc.member_label, org, proved["persona_pub"])
+    payload = mmc.render_member_envelope(
+        claimed_session=str(body.get("from_session") or ""),
+        label=str(body.get("from_label") or ""), org=org, member=member,
+        machine=proved["peer_machine_pub"][:12], text=text)
+    sender = f"{body.get('from_session') or 'unknown'}@{member}"
+    await tmux_send(name, payload)
+    await asyncio.to_thread(
+        auth_db.insert_message, sender, sender, name, None, None, text, time.time())
+    logger.info("member-message send to=%s org=%s from_member=%s from_machine=%s",
+                name, org, proved["persona_pub"][:12], proved["peer_machine_pub"][:12])
+    return mmc.ok({"delivered": True, "tmux_name": name})
+
+
 async def _inbound_session_stop(body: dict, peer: str) -> dict:
     """session-control ``stop``: stop a session HERE for another machine of
     this fleet (the handshake-proved *peer*, logged for audit)."""
@@ -4978,21 +5008,21 @@ async def api_crosstalk_send(request):
                              "target": target, "group": slug, "members": delivered})
 
     # <name>@<machine>, or a name that lives only on another fleet machine:
-    # deliver over session-control/1 (graph://7eb29bc8-31a §9.2). The far
-    # machine builds the envelope and stamps the machine the handshake proved.
+    # deliver over session-control/1 (graph://7eb29bc8-31a §9.2) when the
+    # machine is the operator's own, else over member-message/1 to the
+    # co-member's machine (auto-qrmlg.9). The far machine builds the
+    # envelope and stamps what its handshake proved.
     remote = await _remote_crosstalk_target(target)
     if isinstance(remote, JSONResponse):
         return remote
     if remote is not None:
-        from tools.dashboard import session_control_client
+        from tools.dashboard import member_message_client
 
         name, machine = remote
         sender_row = dashboard_db.get_session(sender)
         sender_label = (sender_row or {}).get("label", "") or sender
-        reply = await session_control_client.request(machine, "send", {
-            "tmux_name": name, "kind": "crosstalk", "text": message,
-            "from_session": sender, "from_label": sender_label,
-        })
+        reply = await member_message_client.remote_crosstalk(
+            name, machine, message, from_session=sender, from_label=sender_label)
         delivered = bool(reply.get("ok"))
         await asyncio.to_thread(
             auth_db.insert_message, sender, sender_label, target,
@@ -22429,6 +22459,7 @@ _harness_usage_poller_task: asyncio.Task | None = None
 _software_update_poller_task: asyncio.Task | None = None
 _session_presence_writer = None
 _session_control_pump = None
+_member_message_pumps = None
 
 
 async def _software_update_poller() -> None:
@@ -22802,13 +22833,13 @@ async def _on_startup():
         dashboard_fleet_sync_service,
         set_settings_materialization_hook,
     )
-    # Chain the sync-materialization hook: keep the approval-reconciler hint,
-    # and ALSO deliver any FleetCrosstalk row that just arrived by sync. Both
-    # ride the same event-based signal the scheduler fires on every apply — no
-    # timer, no poll. The crosstalk delivery is async (a tmux paste), so it is
-    # scheduled onto this loop; the hook itself may be called from the sync
-    # worker's thread. Scoped: it only schedules work when a materialized
-    # address is in the fleet-crosstalk set, so no other set pays any cost.
+    # The sync-materialization hook: the approval-reconciler hint, checkpoint
+    # adoption after ledger events, and the presence-row notice all ride the
+    # event-based signal the scheduler fires on every apply; no timer, no
+    # poll. The hook may be called from the sync worker's thread, so loop
+    # work is scheduled onto this loop. (Fleet crosstalk rows no longer
+    # exist: a message to a session on another machine rides session-control
+    # or member-message, never Settings replication; auto-qrmlg.9.)
     _materialization_loop = asyncio.get_running_loop()
     # Membership events that arrive by sync may complete the head of a
     # registry checkpoint this node could not adopt yet (OrgAdmissionBundleBound
@@ -22847,23 +22878,6 @@ async def _on_startup():
                 _materialization_loop.call_soon_threadsafe(_schedule_adopt_after_membership_events)
         except Exception:
             logger.warning("checkpoint adoption scheduling failed", exc_info=True)
-        try:
-            from tools.dashboard.fleet_crosstalk import (
-                FLEET_CROSSTALK_SET_ID,
-                deliver_synced_crosstalk,
-            )
-            if not gap and any(
-                getattr(a, "set_id", None) == FLEET_CROSSTALK_SET_ID
-                for a in addresses
-            ):
-                asyncio.run_coroutine_threadsafe(
-                    deliver_synced_crosstalk(addresses, gap=gap),
-                    _materialization_loop,
-                )
-        except Exception:
-            logger.warning(
-                "fleet crosstalk sync delivery scheduling failed", exc_info=True,
-            )
         # A synced presence row changes which sessions the list shows: tell
         # the page, as a local write would (sync applies rows without the
         # settings emit hook).
@@ -23650,6 +23664,15 @@ async def _activate_worker(reason: str) -> None:
             _remote_subscriptions.start()
         except Exception:
             logger.exception("session-control inbound pump failed to start")
+        # member-message/1 inbound: answer co-members' messages to sessions
+        # here (auto-qrmlg.9). One pump per organization connector.
+        try:
+            from tools.dashboard import member_message_client
+            global _member_message_pumps
+            _member_message_pumps = member_message_client.install(
+                {"send": _inbound_member_send})
+        except Exception:
+            logger.exception("member-message inbound pumps failed to start")
 
     if _should_run_harness_usage_poller():
         # Fetches origin and may fast-forward the checkout: one worker only,
