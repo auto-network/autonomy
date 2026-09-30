@@ -5,7 +5,9 @@ machine, opened at startup with the operator's persona and kept open
 (session-control ``subscribe``, tools/network/session_control.py). Over it:
 
 * HOST side (:func:`subscribe_op`): the machine running sessions forwards each
-  event of its own bus about the persona's sessions as it happens --
+  event of its own bus about the persona's sessions as it happens -- only
+  sessions it runs itself, never a ``name@machine`` one a subscriber
+  republished here --
   ``session:registry`` (rows cut to SESSIONS_ROW_FIELDS), ``session:messages``
   and ``session:ended``. Nothing else crosses. There is no snapshot.
 * SUBSCRIBER side (:class:`Subscriptions`): rewrites each session to
@@ -57,16 +59,30 @@ def _personal_persona() -> str | None:
 # ── host side ────────────────────────────────────────────────────────────────
 
 
+def _remote(name) -> bool:
+    """Whether *name* addresses a session another machine runs
+    (``name@machine``): a subscriber republished it on this bus, and
+    forwarding it would send it back where it came from -- each pass adding
+    another ``@machine``, without end."""
+    return not isinstance(name, str) or "@" in name
+
+
 def _project(topic: str, data):
-    """What crosses for one event, or None to drop it."""
+    """What crosses for one event, or None to drop it. Only this machine's
+    own sessions cross."""
     from tools.dashboard.session_control_client import SESSIONS_ROW_FIELDS
 
     if topic == "session:registry":
         if not isinstance(data, list):
             return None
-        return [{k: row[k] for k in SESSIONS_ROW_FIELDS if k in row}
-                for row in data if isinstance(row, dict)]
-    return data if isinstance(data, dict) else None
+        rows = [{k: row[k] for k in SESSIONS_ROW_FIELDS if k in row}
+                for row in data
+                if isinstance(row, dict) and not _remote(row.get("session_id"))]
+        return rows if rows or not data else None
+    if not isinstance(data, dict):
+        return None
+    key = "session_id" if topic == "session:messages" else "id"
+    return None if _remote(data.get(key)) else data
 
 
 #: Attempts to end a subscription whose forwarding failed, one second apart.

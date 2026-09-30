@@ -39,6 +39,64 @@ def test_the_host_forwards_only_session_topics_cut_to_card_fields():
     asyncio.run(run())
 
 
+def test_the_host_never_forwards_a_session_another_machine_runs():
+    """A subscriber republishes a far machine's events on its own bus as
+    name@machine. Forwarding those back bounced them between Home and SJC-2
+    without end, each pass adding another @machine (auto-8b1bm)."""
+    async def run():
+        bus = EventBus()
+        sent = []
+
+        def control(op, args, **_kw):
+            sent.append(args["record"])
+            if args["record"]["data"] == {"id": "auto-9"}:
+                return {"ok": False, "error_kind": "subscription-not-found"}
+            return {"ok": True}
+
+        task = asyncio.create_task(remote_sessions.forward(bus, "sub", control=control))
+        await asyncio.sleep(0)
+        await bus.broadcast("session:messages", {"session_id": f"auto-7@{SJC}",
+                                                 "entries": [1]}, dedup=False)
+        await bus.broadcast("session:ended", {"id": f"auto-7@{SJC}"})
+        await bus.broadcast("session:registry", [{"session_id": f"auto-7@{SJC}"}])
+        await bus.broadcast("session:registry", [{"session_id": f"auto-7@{SJC}"},
+                                                 {"session_id": "auto-9"}])
+        await bus.broadcast("session:messages", {"session_id": "auto-9"}, dedup=False)
+        await bus.broadcast("session:ended", {"id": "auto-9"})
+        await asyncio.wait_for(task, 5)
+        assert sent == [
+            {"topic": "session:registry", "data": [{"session_id": "auto-9"}]},
+            {"topic": "session:messages", "data": {"session_id": "auto-9"}},
+            {"topic": "session:ended", "data": {"id": "auto-9"}}]
+
+    asyncio.run(run())
+
+
+def test_a_republished_event_is_not_forwarded_back():
+    """End to end on one bus: what the subscriber republishes from SJC-2 is
+    not what the host forwards to SJC-2."""
+    subs, _ = _subscriptions()
+
+    async def run():
+        bus = EventBus()
+        subs._bus = bus
+        sent = []
+
+        def control(op, args, **_kw):
+            sent.append(args["record"])
+            return {"ok": False, "error_kind": "subscription-not-found"}
+
+        task = asyncio.create_task(remote_sessions.forward(bus, "sub", control=control))
+        await asyncio.sleep(0)
+        await subs._apply({"machine_pub": SJC, "event": {"topic": "session:messages",
+            "data": {"session_id": "auto-9", "entries": []}}}, "p")
+        await bus.broadcast("session:messages", {"session_id": "auto-1"}, dedup=False)
+        await asyncio.wait_for(task, 5)
+        assert sent == [{"topic": "session:messages", "data": {"session_id": "auto-1"}}]
+
+    asyncio.run(run())
+
+
 def test_the_host_serves_only_its_own_persona(monkeypatch):
     monkeypatch.setattr(remote_sessions, "_personal_persona", lambda: "p1")
     monkeypatch.setattr(remote_sessions, "forward", lambda *a, **k: asyncio.sleep(0))
