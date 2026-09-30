@@ -992,8 +992,10 @@
       // API path
       _tailUrl: '',
       // A session on another fleet machine (<name>@<machine>, auto-mje3g):
-      // {name, state: 'reachable'|'unreachable'|'not_enabled', since, reason}.
+      // {name, state: 'reachable'|'timeout'|'unreachable'|'not_enabled', since, reason}.
       remoteMachine: null,
+      _remoteRetryTimer: null,
+      _remoteRetryDelay: 0,
 
       // ── State machine ───────────────────────────────────────────
       // Source of truth: store.loaded, store.isLive, store.resolved
@@ -1832,6 +1834,7 @@
 
       destroy() {
         this._approvalDestroyed = true;
+        if (this._remoteRetryTimer) { clearTimeout(this._remoteRetryTimer); this._remoteRetryTimer = null; }
         this._approvalGeneration++;
         window.removeEventListener('central:refreshed', this._centralApprovalHandler);
         // Do NOT unregister SSE — store keeps accumulating outside component lifecycle
@@ -2271,6 +2274,15 @@
 
       _applyMachine(data) {
         if (!data || !data.machine) return;
+        if (data.machine_timed_out) {
+          // One request ran out of time: keep what is shown, say so, retry.
+          this.remoteMachine = {name: data.machine, state: 'timeout',
+                                reason: data.machine_timed_out.reason || null,
+                                detail: data.machine_timed_out.detail || null};
+          this._retryRemoteTail();
+          return;
+        }
+        this._remoteRetryDelay = 0;
         if (data.machine_unreachable) {
           this.remoteMachine = {name: data.machine, state: 'unreachable',
                                 since: data.machine_unreachable.since || null};
@@ -2291,12 +2303,37 @@
       },
 
       get machineDown() {
-        return !!(this.remoteMachine && this.remoteMachine.state !== 'reachable');
+        return !!(this.remoteMachine && this.remoteMachine.state !== 'reachable'
+                  && this.remoteMachine.state !== 'timeout');
+      },
+
+      // The machine's last answer ran out of time; it is not down.
+      get machineSlow() {
+        return !!(this.remoteMachine && this.remoteMachine.state === 'timeout');
+      },
+
+      // Fetch the tail again after a timed-out answer, backing off 3 s to
+      // 30 s, while this viewer still shows the same session.
+      _retryRemoteTail() {
+        if (this._remoteRetryTimer) return;
+        var delay = Math.min((this._remoteRetryDelay || 1500) * 2, 30000);
+        this._remoteRetryDelay = delay;
+        var key = this.sessionKey;
+        var self = this;
+        this._remoteRetryTimer = setTimeout(function () {
+          self._remoteRetryTimer = null;
+          if (self.sessionKey !== key || !self.machineSlow) return;
+          var store = Alpine.store('sessions')[key];
+          if (store) self._fetchBacklog(store).catch(function () {});
+        }, delay);
       },
 
       machineText() {
         var m = this.remoteMachine;
         if (!m) return '';
+        if (m.state === 'timeout') {
+          return m.name + ' did not answer in time \u2014 retrying';
+        }
         if (m.state === 'unreachable') {
           return m.name + ' unreachable' + (m.since
             ? ' since ' + new Date(m.since * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})

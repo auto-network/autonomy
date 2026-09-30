@@ -6910,7 +6910,20 @@ async def _remote_session_tail(request, project: str, address: str):
     reply = await remote_view.fetch_tail(machine, name, project, query)
     if not reply.get("ok"):
         refusal = reply.get("refusal")
-        state = remote_view.refusal_state(refusal)
+        state = remote_view.refusal_state(refusal, reply.get("detail"))
+        if state == "timeout":
+            # One request ran out of time; the machine is not gone. The
+            # viewer keeps what it shows, says so and retries. No is_live:
+            # a timeout says nothing about the session.
+            return JSONResponse({
+                "entries": [], "session_id": address,
+                "tmux_session": address, "tmux_name": address,
+                "machine": display, "machine_pub": machine_pub, "machine_reachable": True,
+                "machine_timed_out": {
+                    "machine": display, "reason": refusal, "detail": reply.get("detail")},
+                "live_updates": bool(_remote_subscriptions
+                                     and _remote_subscriptions.connected(machine_pub)),
+            })
         if state == "not_enabled":
             return JSONResponse({
                 "entries": [], "is_live": False, "session_id": address,
@@ -10598,8 +10611,9 @@ async def _create_remote_session(request, body: dict):
             {"error": reply.get("detail") or reply.get("refusal"),
              "refusal": reply.get("refusal"), "at": reply.get("at"),
              "machine": body["machine"]},
-            status_code=502 if remote_view.refusal_state(reply.get("refusal"))
-            == "unreachable" else 409)
+            status_code=502 if remote_view.refusal_state(
+                reply.get("refusal"), reply.get("detail")) in ("unreachable", "timeout")
+            else 409)
     result = reply.get("result") or {}
     return JSONResponse({
         "tmux_name": result.get("tmux_name"),

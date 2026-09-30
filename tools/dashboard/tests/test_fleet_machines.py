@@ -226,6 +226,41 @@ def test_an_unreachable_machine_yields_an_explicit_viewer_state(monkeypatch):
     assert data["machine_unreachable"] == {"machine": "sjc-2", "since": 1_800_000_000}
 
 
+def test_one_timed_out_request_is_a_timeout_not_an_unreachable_machine(monkeypatch):
+    """A reply that ran out of time said "unreachable" with 0 entries; the
+    viewer then hid everything it showed (remote-sessions item 3)."""
+    from tools.dashboard import api_auth
+
+    async def slow(machine, name, project, query, *, timeout=20.0):
+        return {"v": 1, "ok": False, "refusal": "reply-timeout",
+                "detail": "no reply within 20.0s"}
+
+    monkeypatch.setattr(api_auth, "require_global_api_authority", lambda r: None)
+    monkeypatch.setattr(remote_view, "fetch_tail", slow)
+    response = asyncio.run(server.api_session_tail(_Req(
+        {"project": "p", "session_id": "auto-9@sjc-2"}, {"tail_entries": "100"})))
+    assert response.status_code == 200
+    data = json.loads(response.body)
+    assert data["machine_timed_out"] == {"machine": "sjc-2", "reason": "reply-timeout",
+                                         "detail": "no reply within 20.0s"}
+    assert "machine_unreachable" not in data
+    assert data["machine_reachable"] is True
+    assert "is_live" not in data        # says nothing about the session
+
+
+def test_which_refusals_are_timeouts():
+    for code in ("reply-timeout", "handshake-timeout", "stream-chunk-timeout",
+                 "transfer-deadline-exceeded"):
+        assert remote_view.refusal_state(code) == "timeout"
+    # this machine's own control call to its connector ran out of time
+    assert remote_view.refusal_state(
+        "connector-call-failed", "TimeoutError: timed out") == "timeout"
+    assert remote_view.refusal_state(
+        "connector-call-failed", "ConnectionRefusedError: no listener") == "unreachable"
+    assert remote_view.refusal_state("destination-slot-absent") == "unreachable"
+    assert remote_view.refusal_state("session-control-not-granted") == "not_enabled"
+
+
 def test_a_missing_session_on_a_reachable_machine_is_still_404(monkeypatch):
     from tools.dashboard import api_auth
 

@@ -72,7 +72,7 @@ def machine_state(reply: dict) -> dict:
     # The code names the failed check; detail and ``at`` (this machine or
     # the target) say what and where, so the chooser never has to guess.
     facts = {"reason": refusal, "detail": reply.get("detail"), "at": reply.get("at")}
-    if remote_view.refusal_state(refusal) == "not_enabled":
+    if remote_view.refusal_state(refusal, reply.get("detail")) == "not_enabled":
         return {"reachable": False, "state": "not_enabled", **facts}
     return {"reachable": False, "state": "unreachable", **facts}
 

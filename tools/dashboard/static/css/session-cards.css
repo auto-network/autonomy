@@ -869,6 +869,7 @@ body.zoom-compact .sc-phase-chip {
 .launch-machine-here { font-weight: 400; color: #6b7280; font-size: .75rem; }
 /* Viewer: a remote session whose machine cannot be reached */
 .sv-machine-state { margin: 3rem auto 0; text-align: center; color: #9ca3af; font-size: .875rem; }
+.sv-machine-state.sv-machine-state--slow { margin: .5rem auto; }
 .sv-input-row.sv-input-disabled { opacity: .5; pointer-events: none; }
 /* Machine tiles in the chooser: capacity and current load per machine.
    Meter fill = used fraction; severity by ramp (accent < 70%, warning < 90%,

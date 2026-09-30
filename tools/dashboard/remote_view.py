@@ -27,9 +27,16 @@ TAIL_QUERY_KEYS = ("tail_lines", "tail_entries", "before", "before_file",
 UNREACHABLE_REFUSALS = frozenset({
     "destination-slot-absent", "slot-lookup-failed",
     "handshake-timeout", "reply-timeout", "stream-chunk-timeout",
-    "transfer-deadline-exceeded", "peer-closed-in-handshake",
+    "peer-closed-in-handshake",
     "personal-connector-unavailable", "connector-call-failed",
     "connector-refused-request", "session-control-failed",
+})
+#: Refusals that mean ONE request ran out of time: the machine may answer
+#: the next. The viewer says so, keeps what it shows and retries; it never
+#: reads a slow answer as a machine that is gone.
+TIMEOUT_REFUSALS = frozenset({
+    "handshake-timeout", "reply-timeout", "stream-chunk-timeout",
+    "transfer-deadline-exceeded",
 })
 #: Refusals that mean the machine answered but remote sessions are not
 #: ENABLED between the two: a relay or connector without the capability, a
@@ -44,11 +51,17 @@ NOT_ENABLED_REFUSALS = frozenset({
 })
 
 
-def refusal_state(refusal: str | None) -> str | None:
-    """``unreachable``, ``not_enabled``, or None (a refusal about the request
-    or the session, not the machine)."""
+def refusal_state(refusal: str | None, detail: str | None = None) -> str | None:
+    """``timeout``, ``unreachable``, ``not_enabled``, or None (a refusal
+    about the request or the session, not the machine)."""
     if not refusal:
         return None
+    if refusal in TIMEOUT_REFUSALS or (
+            # This machine's own control call to its connector timed out
+            # (session_control_client.request names the exception).
+            refusal == "connector-call-failed"
+            and str(detail or "").startswith("TimeoutError")):
+        return "timeout"
     if refusal in UNREACHABLE_REFUSALS:
         return "unreachable"
     if refusal in NOT_ENABLED_REFUSALS or refusal.startswith(("own-", "peer-")):
