@@ -1,0 +1,19 @@
+{
+    "name": "autonomy/browser",
+    "version": 1,
+    "implements": [
+        {
+            "contract": "browser",
+            "version": 1
+        }
+    ],
+    "delivery_mode": "host_proxy",
+    "package_root": "agents/capabilities/browser",
+    "skill_path": "agents/capabilities/browser/SKILL.md",
+    "primer_path": "agents/capabilities/browser/primer.md",
+    "probe": {
+        "kind": "http",
+        "entrypoint": "GET $GRAPH_API/api/browser/leases/brl_00000000000000000000000000000000 (404 = enabled, 403 = not granted)"
+    },
+    "notes": "Broker-backed: the dashboard plugin `browser` (tools/dashboard/plugins/browser) runs each lease in its own capped Chrome container and serves the lease API over the session token. Nothing is mounted into the session and no credential enters it. Runbook: graph://12bf59f5-813. Design: graph://c330323d-986."
+}

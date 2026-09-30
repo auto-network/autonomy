@@ -1,0 +1,35 @@
+{
+    "name": "browser",
+    "version": 1,
+    "summary": "A shared, visible browser for a session: the agent drives it through structured commands, the operator watches it and can take control. The session never holds site credentials.",
+    "ops": [
+        {
+            "name": "lease",
+            "summary": "Start a browser (ephemeral, or a persistent profile by name); release it with DELETE.",
+            "input_schema": {"type": "object", "properties": {
+                "adapter": {"type": "string", "enum": ["chrome-headed"]},
+                "profile": {"type": "object"},
+                "ttl_s": {"type": "integer", "minimum": 60}}, "required": ["adapter", "profile"]},
+            "output_schema": {"type": "object", "properties": {
+                "lease": {"type": "string"}, "state": {"type": "string"}, "expires_at": {"type": "number"}}}
+        },
+        {
+            "name": "command",
+            "summary": "One structured command: goto, snapshot, screenshot, click, fill, type, press, wait, url, title, text, download. No caller-supplied script.",
+            "input_schema": {"type": "object", "properties": {
+                "op": {"type": "string"}, "args": {"type": "object"}}, "required": ["op"]},
+            "output_schema": {"type": "object", "properties": {
+                "ok": {"type": "boolean"}, "result": {}}}
+        },
+        {
+            "name": "secure_login",
+            "summary": "Sign in with a stored credential the caller never sees (also needs repl_login).",
+            "input_schema": {"type": "object", "properties": {
+                "target_key": {"type": "string"}, "fields": {"type": "object"},
+                "submit": {}, "success_text": {"type": "string"}}, "required": ["target_key", "fields", "submit"]},
+            "output_schema": {"type": "object", "properties": {
+                "ok": {"type": "boolean"}, "signed_in": {"type": "boolean"}}}
+        }
+    ],
+    "notes": "Served by the dashboard plugin `browser`. Runbook: graph://12bf59f5-813."
+}

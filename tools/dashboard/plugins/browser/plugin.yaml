@@ -7,9 +7,9 @@ org: personal
 # running lease containers still end at expiry through their own watchdog.
 default_enabled: true
 
-# Agent-facing usage; embedded into session primers while enabled and
-# served at GET /api/plugins/browser/skill.
-skill: SKILL.md
+# Agent-facing usage is the `browser` capability
+# (agents/capabilities/browser): it reaches only the primers of workspaces
+# granted `<workspace>:browser`, in any organization.
 
 entrypoints:
   # Caller, operator and page routes plus the viewer WebSocket. The page

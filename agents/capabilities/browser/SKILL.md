@@ -1,12 +1,18 @@
-# Browser broker (the `browser` plugin)
+---
+name: browser
+description: Start and drive a shared, visible Chrome that the operator can watch and take over (the dashboard's browser broker). Use when a person must see or act on the same page as the agent.
+---
+
+# Browser broker (the `browser` capability)
 
 Lends your session a real, headed Chrome in its own capped container, driven
 by structured commands. The operator can watch it and take control from
 `/browser` (and from the globe on your session viewer). Your workspace needs
 the `browser` capability; secure sign-in also needs `repl_login`.
 
-Every call carries your session token (`Authorization: Bearer ...`) against
-`$GRAPH_API`.
+Every call carries your session token (`Authorization: Bearer $CROSSTALK_TOKEN`)
+against `$GRAPH_API`. Runbook (enabling, operator view, limits, failure modes):
+graph://12bf59f5-813.
 
 ```text
 POST   /api/browser/leases                       {"adapter":"chrome-headed","profile":{"kind":"ephemeral"},"ttl_s":1800}
@@ -28,7 +34,9 @@ Answers to expect:
 - `409` while the operator holds control or a command is running: wait and retry.
 - `503 {reason}`: the broker is starting, at its lease limit, short of disk,
   or Docker is down; the reason says which.
-- A lease ends at its expiry even if you never release it.
+- A lease ends at its time limit even if you never release it (ephemeral:
+  30 min), and after 10 min with no command or operator input.
+- A link whose key is in its `#fragment` must be opened with the fragment.
 
 With secure sign-in you never see the credential: the broker types it and
 tells you whether the sign-in succeeded.
