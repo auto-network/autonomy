@@ -173,6 +173,7 @@ from tools.graph import sqlite_open_diag
 # auto-bkv3p: count every SQLite open by its opener, before anything opens
 # one, so /api/diag/sqlite-opens can name the site that leaks connections.
 sqlite_open_diag.install()
+from tools.dashboard import perf_telemetry  # noqa: E402  (1 s CPU/lag sampler)
 # Organization settings rows this process writes are signed by its storage
 # delegates (auto-qrmlg.6 S2); a row it cannot sign is written unsigned and
 # said so once per organization.
@@ -22585,6 +22586,7 @@ async def _event_loop_watchdog():
         now = time.monotonic()
         _loop_heartbeat = now
         lag = now - t0 - _TICK
+        perf_telemetry.note_lag(lag)
         if lag >= _LAG_HANG_S:
             _stall_logger.error(
                 "EVENT-LOOP STALL: loop blocked %.2fs — a sync or CPU-bound "
@@ -23077,6 +23079,17 @@ async def _on_startup():
         threading.Thread(
             target=_loop_stall_sampler, name="loop-stall-sampler", daemon=True,
         ).start()
+        # One-second CPU + loop-lag sampler, Prometheus listener and automatic
+        # spike dumps (tools/dashboard/perf_telemetry.py; operator 2026-09-30).
+        try:
+            from tools.dashboard import log_channels as _lc
+            perf_telemetry.start(
+                heartbeat_age=lambda: time.monotonic() - _loop_heartbeat,
+                loop_thread_ident=lambda: _loop_thread_id,
+                log_dir=_lc.log_dir(),
+            )
+        except Exception:
+            _stall_logger.warning("perf telemetry did not start", exc_info=True)
     _mark("watcher_tasks_created (dispatch/stall/recent_sessions)")
     # Vault release reconciliation + sweeper (auto-pw9bs.5). Reconcile FIRST,
     # before the sweeper loop and before traffic: a delivered secret whose

@@ -40,14 +40,24 @@ _factories: dict[type, type] = {}
 
 
 def _traceable(factory: type) -> type:
-    """A subclass of *factory* whose instances take weak references."""
+    """A subclass of *factory* whose instances take weak references and time
+    their write locks (``tools.graph.write_lock_stats``: how long BEGIN
+    IMMEDIATE waited, how long the lock was held until COMMIT/ROLLBACK)."""
     cls = _factories.get(factory)
     if cls is None:
-        cls = factory if factory.__weakrefoffset__ else type(
-            factory.__name__, (factory,), {"__slots__": ("__weakref__",)},
-        )
+        from tools.graph import write_lock_stats
+        cls = write_lock_stats.timed_class(factory, _connection_database)
         _factories[factory] = cls
     return cls
+
+
+def _connection_database(conn) -> str:
+    """The database file name of *conn*, for write-lock labels."""
+    return _names.get(id(conn)) or "unknown"
+
+
+#: id(connection) -> database file name, recorded at open for lock labels.
+_names: dict[int, str] = {}
 
 
 _repo_paths: dict[str, str | None] = {}
@@ -116,6 +126,7 @@ def _drain_collected() -> None:
         entry = _live.get(conn_id)
         if entry is not None and entry[0] is ref:
             del _live[conn_id]
+            _names.pop(conn_id, None)
 
 
 def _connect(database, *args, **kwargs):
@@ -136,6 +147,7 @@ def _connect(database, *args, **kwargs):
     sqlite_defaults.apply(conn)
     key = (name, _opener())
     conn_id = id(conn)
+    _names[conn_id] = name
     ref = weakref.ref(conn, lambda r, conn_id=conn_id: _forget(conn_id, r))
     with _lock:
         _drain_collected()

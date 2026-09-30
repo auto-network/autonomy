@@ -568,6 +568,32 @@ services:
   # source is operator-chosen via DOLT_IMAGE; the beads schema itself is
   # created by the `bd` CLI (github.com/steveyegge/beads), which operators
   # install separately if they want work tracking.
+  # Dashboard performance history (operator 2026-09-30): Prometheus scrapes
+  # the dashboard worker's one-second telemetry (tools/dashboard/
+  # perf_telemetry.py, listener dashboard:9464 on this network only):
+  # container/process/thread CPU, event-loop lag, SQLite write-lock wait and
+  # hold histograms. 30 days kept. The UI and API bind the host's loopback
+  # only. Enable per node with COMPOSE_PROFILES=...,observability.
+  prometheus:
+    profiles: ["observability"]
+    image: ${PROMETHEUS_IMAGE:-docker.io/prom/prometheus:v3.5.0}
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.listen-address=:9090
+    configs:
+      - source: prometheus-config
+        target: /etc/prometheus/prometheus.yml
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - prometheus-data:/prometheus
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
+
   dolt:
     profiles: ["beads"]
     image: ${DOLT_IMAGE:-docker.io/dolthub/dolt-sql-server:latest}
@@ -595,6 +621,8 @@ volumes:
   service-gateway-control:
     name: autonomy-service-gateway-control
   dolt-data:
+  prometheus-data:
+    name: autonomy-prometheus-data
 
 # Pin the project network — never let the daemon choose. Left undeclared, the
 # daemon allocates from its built-in pools (172.17.0.0/12 in /16s, then
@@ -611,6 +639,19 @@ volumes:
 #     python3 -m tools.network.network_preflight --env >> .env
 #
 # There are no existing installations, so failing closed costs nothing.
+
+configs:
+  prometheus-config:
+    content: |
+      global:
+        scrape_interval: 1s
+        scrape_timeout: 900ms
+        evaluation_interval: 15s
+      scrape_configs:
+        - job_name: dashboard
+          static_configs:
+            - targets: ["dashboard:9464"]
+
 networks:
   default:
     ipam:
