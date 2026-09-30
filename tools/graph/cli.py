@@ -1943,7 +1943,9 @@ def _render_session_status_rows(rows: list[dict], since: str | None = None,
             last = ""
         ctx = int(row.get("context_tokens") or 0)
         ctx_str = f"{ctx // 1000}K" if ctx >= 1000 else str(ctx)
-        src = str(row.get("graph_source_id") or "")[:12] or "\u2014"
+        # A co-member's session (organization roster) shows its organization
+        # where a local row shows its graph source.
+        src = str(row.get("graph_source_id") or row.get("org") or "")[:12] or "\u2014"
         label = str(row.get("label") or "")[:40].replace("\n", " ")
         print(f"{tmux:<28} {state:<8} {last:<14} {ctx_str:>7} {src:<12} {label}")
         if show_topics:

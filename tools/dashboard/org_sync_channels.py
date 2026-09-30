@@ -128,6 +128,15 @@ def install(certs: object, keys: Mapping[str, Any]) -> int:
         _keys.clear()
         _keys.update({k: v for k, v in dict(keys).items() if v is not None})
         _channels.clear()
+    # The organization rosters exist from here (auto-qrmlg.8): write this
+    # machine's live sessions into each org sink now rather than at the
+    # next roster event.
+    try:
+        from tools.dashboard import session_presence
+
+        session_presence.wake()
+    except Exception:  # noqa: BLE001 — best-effort nudge
+        pass
     return len(kept)
 
 

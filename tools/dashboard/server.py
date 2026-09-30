@@ -5241,7 +5241,23 @@ async def api_crosstalk_peers(request):
         " WHERE state NOT IN ('ENDED','FAILED') AND tmux_name != ?",
         (sender,),
     ).fetchall()
-    return JSONResponse({"peers": [dict(r) for r in rows]})
+    peers = [dict(r) for r in rows]
+    # Co-members' sessions from the organization rosters (auto-qrmlg.8):
+    # addressed <name>@<machine>, with the organization and the member
+    # persona; ``reachable`` says whether that machine is live at the relay.
+    try:
+        from tools.dashboard import session_presence
+
+        for row in await asyncio.to_thread(session_presence.org_status_rows):
+            peers.append({
+                "tmux_name": row["tmux_name"], "type": "remote", "label": row.get("label"),
+                "created_at": row.get("created_at"), "org": row["org"],
+                "persona_pub": row.get("persona_pub"), "machine": row["machine"],
+                "reachable": row["reachable"],
+            })
+    except Exception:
+        logger.warning("organization roster read failed", exc_info=True)
+    return JSONResponse({"peers": peers})
 
 
 async def api_crosstalk_log(request):
@@ -14158,6 +14174,13 @@ async def api_dao_session_status(request):
                 session_presence.remote_status_rows)
         except Exception:
             logger.warning("session presence read failed", exc_info=True)
+        # Co-members' sessions in every organization this machine holds a
+        # channel for (auto-qrmlg.8), the same shape plus ``org``.
+        try:
+            rows = list(rows) + await asyncio.to_thread(
+                session_presence.org_status_rows)
+        except Exception:
+            logger.warning("organization roster read failed", exc_info=True)
     return JSONResponse(rows)
 
 async def api_fleet_launch_targets(request):

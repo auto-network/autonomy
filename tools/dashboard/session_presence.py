@@ -28,6 +28,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from tools.graph import settings_ops
+from tools.graph.schemas.org_session_presence import (
+    ORG_SESSION_PRESENCE_REVISION,
+    ORG_SESSION_PRESENCE_SET_ID,
+    OrgSessionPresenceV1,
+)
 from tools.graph.schemas.personal_session_presence import (
     PERSONAL_SESSION_PRESENCE_REVISION,
     PERSONAL_SESSION_PRESENCE_SET_ID,
@@ -58,6 +63,54 @@ class LocalMachine:
     machine_id: str
 
 
+@dataclass(frozen=True)
+class OrgSink:
+    """One organization this machine writes its roster rows into
+    (auto-qrmlg.8): the org's slug, this machine's serving machine key for
+    that org (the row key's prefix, as the org channel presents it), and
+    the member persona the rows name. Rows written into an organization
+    store are signed by that member's delegate and verified on arrival
+    (signed settings), so the persona is also the row's signer."""
+
+    org: str
+    machine_pub: str
+    persona_pub: str
+
+
+def org_sinks() -> list[OrgSink]:
+    """The organizations this process holds a fleet:sync certificate for
+    (org_sync_channels.report): the certificate names the serving machine
+    key and the persona. Empty before sign-on installs them."""
+    try:
+        from tools.dashboard import org_sync_channels
+
+        report = org_sync_channels.report()
+    except Exception:
+        logger.debug("session_presence: org channels unavailable", exc_info=True)
+        return []
+    out = []
+    for slug, entry in sorted(report.items()):
+        cert = entry.get("certificate") if isinstance(entry, dict) else None
+        if not cert or not cert.get("child_pub") or not cert.get("persona"):
+            continue
+        out.append(OrgSink(str(slug), str(cert["child_pub"]), str(cert["persona"])))
+    return out
+
+
+def session_org(session: dict) -> str | None:
+    """The organization slug a live session belongs to, or None when it is
+    personal or unknown: only that organization's roster lists it."""
+    try:
+        from tools.dashboard.org_identity import UNKNOWN_SLUG, session_org_slug
+
+        slug = session_org_slug(session)
+    except Exception:
+        return None
+    if not slug or slug in ("personal", "machine") or slug == UNKNOWN_SLUG:
+        return None
+    return str(slug)
+
+
 def local_machine() -> LocalMachine | None:
     """This machine's durable roster identity, or None before enrollment."""
     from tools.dashboard import fleet_enrollment_routes
@@ -73,18 +126,23 @@ def local_machine() -> LocalMachine | None:
     return LocalMachine(entry.machine_pub, entry.machine_id)
 
 
-def desired_rows(machine_id: str, live: list[dict]) -> dict[str, dict]:
-    """tmux_name -> payload for each live interactive session."""
+def desired_rows(machine_id: str, live: list[dict], *, sink: OrgSink | None = None) -> dict[str, dict]:
+    """tmux_name -> payload for each live interactive session; with *sink*,
+    only the sessions of that organization, each naming the member persona."""
     rows: dict[str, dict] = {}
     for session in live:
         tmux_name = session.get("tmux_name")
         if not is_tmux_name(tmux_name):
+            continue
+        if sink is not None and session_org(session) != sink.org:
             continue
         payload: dict[str, Any] = {
             "machine_id": machine_id,
             "state": session.get("state") or "ACTIVE",
             "since": int(float(session.get("created_at") or 0)),
         }
+        if sink is not None:
+            payload["persona_pub"] = sink.persona_pub
         for name in _COPIED:
             value = session.get(name)
             if isinstance(value, str) and value:
@@ -94,7 +152,7 @@ def desired_rows(machine_id: str, live: list[dict]) -> dict[str, dict]:
             if isinstance(value, str) and value:
                 payload[name] = value
         try:
-            PersonalSessionPresenceV1.validate(payload)
+            (OrgSessionPresenceV1 if sink is not None else PersonalSessionPresenceV1).validate(payload)
         except Exception:
             logger.warning(
                 "session_presence: skipping %s, payload invalid", tmux_name,
@@ -105,26 +163,67 @@ def desired_rows(machine_id: str, live: list[dict]) -> dict[str, dict]:
     return rows
 
 
-def _members(prefix: str | None = None):
-    return [
-        member for member in settings_ops.read_owned_set(
-            PERSONAL_SESSION_PRESENCE_SET_ID,
-            org=_ORG,
-            target_revision=PERSONAL_SESSION_PRESENCE_REVISION,
-            prefix=prefix,
-        ).members
-        if not member.deprecated
-    ]
+@dataclass(frozen=True)
+class _OwnRow:
+    id: str
+    key: str
+    payload: dict
 
 
-def reconcile(machine: LocalMachine, live: list[dict]) -> dict[str, int]:
-    """Make this machine's rows equal *live*; write only differences."""
-    wanted = desired_rows(machine.machine_id, live)
+def _members(prefix: str | None = None, *, org: str = _ORG):
+    """The live base rows this writer reconciles against. The personal set
+    is read through resolution as before. An organization set is read RAW
+    (base rows, not deprecated, under the key prefix): they are this
+    machine's own statements and the writer must see them whatever the
+    store's resolution says of them — resolution drops a signed row whose
+    persona is not in the fold, and a store that has not folded the
+    membership yet would otherwise make the writer rewrite its rows every
+    pass."""
+    if org == _ORG:
+        return [
+            member for member in settings_ops.read_owned_set(
+                PERSONAL_SESSION_PRESENCE_SET_ID, org=_ORG,
+                target_revision=PERSONAL_SESSION_PRESENCE_REVISION, prefix=prefix,
+            ).members
+            if not member.deprecated
+        ]
+    import json as _json
+
+    db = settings_ops._open_read(org, ORG_SESSION_PRESENCE_SET_ID)
+    try:
+        rows = db.conn.execute(
+            "SELECT id, key, payload FROM settings WHERE set_id=? AND schema_revision=? "
+            "AND deprecated=0 AND supersedes IS NULL AND excludes IS NULL AND key LIKE ?",
+            (ORG_SESSION_PRESENCE_SET_ID, ORG_SESSION_PRESENCE_REVISION, (prefix or "") + ":%"),
+        ).fetchall()
+    finally:
+        db.close()
+    out = []
+    for row_id, key, payload in rows:
+        try:
+            value = _json.loads(payload) if isinstance(payload, str) else dict(payload)
+        except (ValueError, TypeError):
+            continue
+        out.append(_OwnRow(str(row_id), str(key), value))
+    return out
+
+
+def reconcile(machine: LocalMachine, live: list[dict], *, sink: OrgSink | None = None) -> dict[str, int]:
+    """Make this machine's rows equal *live*; write only differences. With
+    *sink*, the rows are that organization's, under the org serving machine
+    key, and hold only that organization's sessions."""
+    org = sink.org if sink is not None else _ORG
+    key_pub = sink.machine_pub if sink is not None else machine.machine_pub
+    set_id, revision = (
+        (ORG_SESSION_PRESENCE_SET_ID, ORG_SESSION_PRESENCE_REVISION) if sink is not None
+        else (PERSONAL_SESSION_PRESENCE_SET_ID, PERSONAL_SESSION_PRESENCE_REVISION)
+    )
+    wanted = desired_rows(machine.machine_id, live, sink=sink)
     stored = {}
     # read_set appends the ":" separator itself (_prefix_like_pattern).
-    for member in _members(prefix=machine.machine_pub):
+    for member in _members(prefix=key_pub, org=org):
         parts = split_key(member.key)
-        if parts is None or parts[0] != machine.machine_pub:
+        if parts is None or parts[0] != key_pub:
             continue
         stored[parts[1]] = member
     upserted = deprecated = 0
@@ -133,29 +232,38 @@ def reconcile(machine: LocalMachine, live: list[dict]) -> dict[str, int]:
         if member is not None and member.payload == payload:
             continue
         settings_ops.upsert_by_key(
-            PERSONAL_SESSION_PRESENCE_SET_ID,
-            PERSONAL_SESSION_PRESENCE_REVISION,
-            presence_key(machine.machine_pub, tmux_name),
-            payload,
-            org=_ORG,
+            set_id, revision, presence_key(key_pub, tmux_name), payload, org=org,
         )
         upserted += 1
     for tmux_name, member in stored.items():
         if tmux_name in wanted:
             continue
-        settings_ops.deprecate_setting(member.id, org=_ORG)
+        settings_ops.deprecate_setting(member.id, org=org)
         deprecated += 1
     return {"upserted": upserted, "deprecated": deprecated}
 
 
 def reconcile_local() -> dict[str, int] | None:
-    """Reconcile from the dashboard's live roster; None before enrollment."""
+    """Reconcile from the dashboard's live roster into the personal sink
+    and into every organization sink this process holds a channel for;
+    None before enrollment. Counts are summed; an organization sink that
+    fails (its store refused the write, its delegate is not held) is
+    logged and does not stop the others."""
     from tools.dashboard.dao import dashboard_db
 
     machine = local_machine()
     if machine is None:
         return None
-    return reconcile(machine, dashboard_db.get_live_sessions())
+    live = dashboard_db.get_live_sessions()
+    total = reconcile(machine, live)
+    for sink in org_sinks():
+        try:
+            result = reconcile(machine, live, sink=sink)
+        except Exception:
+            logger.warning("session_presence: organization %r roster reconcile failed", sink.org, exc_info=True)
+            continue
+        total = {k: total[k] + result[k] for k in total}
+    return total
 
 
 # ── reader ──────────────────────────────────────────────────────────────────
@@ -259,6 +367,221 @@ def read_presence(
     return out
 
 
+# ── the organization roster's reader ────────────────────────────────────────
+
+
+def _org_relay_slots() -> dict[str, set[str]]:
+    """org slug -> serving machine pubs holding a LIVE slot at the org's
+    relay right now (org_sync_channels.relay_slots_provider): the only live
+    presence signal a member has about a co-member's machine."""
+    try:
+        from tools.dashboard import org_sync_channels
+
+        slots = org_sync_channels.relay_slots_provider()()
+    except Exception:
+        logger.debug("session_presence: relay slots unavailable", exc_info=True)
+        return {}
+    out: dict[str, set[str]] = {}
+    for slug, entries in (slots or {}).items():
+        out[str(slug)] = {
+            str(e.get("machine")) for e in (entries or ()) if isinstance(e, dict) and e.get("machine")
+        }
+    return out
+
+
+def _org_peer_last_success_s(org: str) -> dict[str, int]:
+    """machine_pub -> unix seconds of the newest successful pull of *org*'s
+    scope from it."""
+    try:
+        from tools.graph.db import _org_db_path
+        from tools.network.fleet_sync_scheduler import SQLiteFleetSyncStore
+
+        raw = SQLiteFleetSyncStore(_org_db_path(org)).peer_last_success()
+    except Exception:
+        logger.debug("session_presence: no peer state for %r", org, exc_info=True)
+        return {}
+    return {pub: int(ns // 1_000_000_000) for pub, ns in raw.items() if ns}
+
+
+def _machine_personas(org: str) -> dict[str, str]:
+    """serving machine_pub -> member persona for *org*, from what binds the
+    two: this node's own org channel certificates, the org's live relay
+    serving slots ({persona_pub, machine}), and the VERIFIED reachability
+    rows replicated into the org store (a persona certificate over the
+    machine key, verified by fleet_org_reachability.verify_row). A machine
+    no binding names is unknown here and its rows do not count."""
+    out: dict[str, str] = {}
+    for sink in org_sinks():
+        if sink.org == org:
+            out[sink.machine_pub] = sink.persona_pub
+    try:
+        from tools.dashboard import org_sync_channels
+
+        for entry in (org_sync_channels.relay_slots_provider()() or {}).get(org, ()) or ():
+            if isinstance(entry, dict) and entry.get("machine") and entry.get("persona_pub"):
+                out.setdefault(str(entry["machine"]), str(entry["persona_pub"]))
+        genesis = org_sync_channels._genesis_id(org)
+    except Exception:
+        logger.debug("session_presence: org channel state unavailable for %r", org, exc_info=True)
+        genesis = None
+    if genesis:
+        try:
+            from tools.graph.db import _org_db_path
+            from tools.network.fleet_org_reachability import read_rows, verify_row
+
+            for machine_pub, payload in read_rows(_org_db_path(org)).items():
+                verified = verify_row(machine_pub, payload, org=genesis, now=int(time.time()))
+                if verified is not None:
+                    out.setdefault(str(machine_pub), str(verified[0]))
+        except Exception:
+            logger.debug("session_presence: reachability rows unavailable for %r", org, exc_info=True)
+    return out
+
+
+def _org_rows(org: str) -> list[dict]:
+    """Live base rows of the org roster with the persona each was SIGNED
+    for: the boundary verified the signer on arrival and the store keeps
+    that persona on the row (terminal_persona), so a row whose payload
+    names another persona than its signer is not that member's statement
+    and is dropped here."""
+    from tools.graph.schemas.org_session_presence import ORG_SESSION_PRESENCE_SET_ID as SET_ID
+
+    db = settings_ops._open_read(org, SET_ID)
+    try:
+        rows = db.conn.execute(
+            "SELECT id, key, payload, terminal_persona FROM settings WHERE set_id=? "
+            "AND schema_revision=? AND deprecated=0 AND supersedes IS NULL AND excludes IS NULL",
+            (SET_ID, ORG_SESSION_PRESENCE_REVISION),
+        ).fetchall()
+    finally:
+        db.close()
+    import json as _json
+
+    out = []
+    for row in rows:
+        payload = row[2]
+        try:
+            payload = _json.loads(payload) if isinstance(payload, str) else dict(payload)
+        except (ValueError, TypeError):
+            continue
+        signer = row[3]
+        # An unsigned row has no member behind it (a row that landed before
+        # the require-signed flag, or a store where it is off) and could
+        # name anyone: it does not count.
+        if signer is None or str(payload.get("persona_pub")) != str(signer):
+            logger.debug("session_presence: dropping %s: names %s, signed for %s",
+                         row[1], str(payload.get("persona_pub"))[:12], str(signer or "")[:12])
+            continue
+        out.append({"id": row[0], "key": row[1], "payload": payload, "signer": signer})
+    return out
+
+
+def read_org_presence(
+    org: str,
+    *,
+    local_pubs: set[str] | None = None,
+    relay_slots: set[str] | None = None,
+    peer_last_success: dict[str, int] | None = None,
+    names: dict[str, str] | None = None,
+    machine_personas: dict[str, str] | None = None,
+    now: float | None = None,
+) -> list[dict]:
+    """Every member machine's roster rows for *org*, each with ``org``,
+    ``persona_pub``, ``machine`` and ``reachable``.
+
+    A row counts only when it is signed, its payload names its signer, and
+    the machine in its key is bound to that signer (``machine_personas``:
+    this node's own channels, the live relay slots, the verified
+    reachability rows). A member cannot list a session under another
+    member's persona, nor under another member's machine.
+
+    A row is live when it is this machine's own, or its machine holds a
+    live serving slot at the org's relay, or that machine was pulled from
+    within REACHABLE_WINDOW_S; otherwise ``unreachable_since`` carries the
+    last successful pull (None: never). A powered-off machine's rows are
+    therefore never shown live.
+    """
+    if local_pubs is None:
+        local_pubs = {sink.machine_pub for sink in org_sinks() if sink.org == org}
+    if relay_slots is None:
+        relay_slots = _org_relay_slots().get(org, set())
+    last = _org_peer_last_success_s(org) if peer_last_success is None else peer_last_success
+    names = _machine_names() if names is None else names
+    bindings = _machine_personas(org) if machine_personas is None else machine_personas
+    current = time.time() if now is None else now
+    out = []
+    for entry in _org_rows(org):
+        parts = split_key(entry["key"])
+        if parts is None:
+            continue
+        machine_pub, tmux_name = parts
+        payload = dict(entry["payload"])
+        if bindings.get(machine_pub) != entry["signer"]:
+            logger.debug("session_presence: dropping %s: machine %s is not the signer's (%s)",
+                         entry["key"], machine_pub[:12], str(entry["signer"])[:12])
+            continue
+        own = machine_pub in local_pubs
+        seen = last.get(machine_pub)
+        reachable = own or machine_pub in relay_slots or (
+            seen is not None and current - seen <= REACHABLE_WINDOW_S
+        )
+        machine_id = payload.get("machine_id") or ""
+        out.append({
+            **payload,
+            "org": org,
+            "tmux_name": tmux_name,
+            "machine_pub": machine_pub,
+            "machine": names.get(machine_id) or machine_pub[:12],
+            "local": own,
+            "reachable": reachable,
+            "unreachable_since": None if reachable else seen,
+        })
+    return out
+
+
+def org_status_rows(**kwargs) -> list[dict]:
+    """Co-members' sessions across every organization this machine holds a
+    channel for, shaped for ``graph sessions --status``: ``tmux_name`` is
+    ``<name>@<machine>``, ``org`` names the organization, an unreachable
+    row's state reads ``unreach``."""
+    rows = []
+    for org in sorted({sink.org for sink in org_sinks()}):
+        try:
+            entries = read_org_presence(org, **kwargs)
+        except Exception:
+            logger.warning("session_presence: organization %r roster read failed", org, exc_info=True)
+            continue
+        for row in entries:
+            if row["local"]:
+                continue
+            rows.append({
+                "tmux_name": f"{row['tmux_name']}@{row['machine']}",
+                "org": org,
+                "persona_pub": row.get("persona_pub"),
+                "state": row.get("state"),
+                "attention": "remote" if row["reachable"] else "unreach",
+                "created_at": row.get("since"),
+                "last_activity": row.get("unreachable_since") or row.get("since"),
+                "label": row.get("label"),
+                "machine": row["machine"],
+                "machine_pub": row["machine_pub"],
+                "remote": True,
+                "reachable": row["reachable"],
+            })
+    return rows
+
+
+def wake() -> None:
+    """Ask the running writer for a reconcile pass (org channels installed
+    at sign-on: the org sinks exist only from then)."""
+    writer = _WRITER
+    if writer is not None:
+        writer.request()
+
+
+_WRITER = None
+
+
 def remote_status_rows(**kwargs) -> list[dict]:
     """Presence rows of OTHER machines shaped for ``graph sessions --status``.
 
@@ -295,11 +618,21 @@ class PresenceWriter:
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
         self._lock = threading.Lock()
+        self._loop = None
 
     def start(self) -> None:
+        global _WRITER
         if self._task is None:
             self._task = asyncio.get_running_loop().create_task(self._run())
             self._task.add_done_callback(self._on_done)
+            _WRITER = self
+
+    def request(self) -> None:
+        """Schedule a reconcile pass from any thread."""
+        try:
+            self._loop.call_soon_threadsafe(self._wake.set)
+        except Exception:
+            logger.debug("session_presence: wake dropped", exc_info=True)
 
     @staticmethod
     def _on_done(task: asyncio.Task) -> None:
@@ -343,6 +676,7 @@ class PresenceWriter:
             self._bus.unsubscribe(queue)
 
     async def _run(self) -> None:
+        self._loop = asyncio.get_running_loop()
         listener = asyncio.create_task(self._listen())
         try:
             await self._reconcile("startup")
