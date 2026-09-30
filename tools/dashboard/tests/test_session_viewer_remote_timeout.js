@@ -1,6 +1,7 @@
 // A remote session's tail that ran out of time: the
 // viewer keeps what it shows, says the machine did not answer in time, and
-// retries with backoff -- never "unreachable" with 0 entries.
+// fetches the tail again only when something shows the machine answering --
+// never on a timer, never "unreachable" with 0 entries (auto-gv73v).
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -89,33 +90,46 @@ describe('a remote tail that timed out', () => {
     viewer._applyTailPayload(store, TIMED_OUT);
     assert.equal(viewer.machineSlow, true);
     assert.equal(viewer.machineDown, false, 'entries stay visible, input stays enabled');
-    assert.equal(viewer.machineText(), 'sjc-2 did not answer in time — retrying');
+    assert.equal(viewer.machineText(), 'sjc-2 did not answer in time \u2014 retrying');
     assert.equal(store.entries.length, 1);
     assert.equal(store.isLive, true, 'a timeout says nothing about the session');
   });
 
-  it('retries the tail with backoff until the machine answers', async () => {
-    const { viewer, store, timers, fetched } = harness([TIMED_OUT, ANSWERED]);
+  it('sets no timer: nothing runs while nothing happens', () => {
+    const { viewer, store, timers, fetched } = harness([]);
     viewer._applyTailPayload(store, TIMED_OUT);
-    viewer._applyTailPayload(store, TIMED_OUT);     // one retry pending at a time
-    assert.deepEqual(timers.map((t) => t.ms), [3000]);
-    timers[0].fn();
+    assert.equal(timers.length, 0);
+    assert.equal(fetched.length, 0);
+  });
+
+  it('fetches the tail once when something shows the machine answering', async () => {
+    const { viewer, store, fetched } = harness([ANSWERED]);
+    viewer._applyTailPayload(store, TIMED_OUT);
+    viewer._refetchAfterTimeout();      // e.g. a live entry arrived
+    viewer._refetchAfterTimeout();      // and another, before the answer: still one fetch
     await settle();
     assert.equal(fetched.length, 1);
     assert.ok(fetched[0].startsWith(TAIL + '?tail_entries='));
-    assert.deepEqual(timers.map((t) => t.ms), [3000, 6000], 'the second wait doubles');
-    timers[1].fn();
-    await settle();
     assert.equal(viewer.remoteMachine.state, 'reachable');
-    assert.equal(viewer.machineSlow, false);
-    assert.equal(timers.length, 2, 'no retry once it answered');
+    viewer._refetchAfterTimeout();      // answered: nothing more to do
+    await settle();
+    assert.equal(fetched.length, 1);
   });
 
-  it('stops retrying once the viewer shows another session', async () => {
-    const { viewer, store, timers, fetched } = harness([]);
+  it('a refetch that times out again waits for the next sign, not a timer', async () => {
+    const { viewer, store, timers, fetched } = harness([TIMED_OUT]);
     viewer._applyTailPayload(store, TIMED_OUT);
-    viewer.sessionKey = 'auto-1';
-    timers[0].fn();
+    viewer._refetchAfterTimeout();
+    await settle();
+    assert.equal(fetched.length, 1);
+    assert.equal(viewer.machineSlow, true);
+    assert.equal(timers.length, 0);
+    assert.equal(store.entries.length, 1);
+  });
+
+  it('does nothing when the machine is answering', async () => {
+    const { viewer, fetched } = harness([]);
+    viewer._refetchAfterTimeout();
     await settle();
     assert.equal(fetched.length, 0);
   });

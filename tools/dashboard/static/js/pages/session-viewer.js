@@ -994,8 +994,7 @@
       // A session on another fleet machine (<name>@<machine>, auto-mje3g):
       // {name, state: 'reachable'|'timeout'|'unreachable'|'not_enabled', since, reason}.
       remoteMachine: null,
-      _remoteRetryTimer: null,
-      _remoteRetryDelay: 0,
+      _timeoutRefetch: null,
 
       // ── State machine ───────────────────────────────────────────
       // Source of truth: store.loaded, store.isLive, store.resolved
@@ -1834,7 +1833,6 @@
 
       destroy() {
         this._approvalDestroyed = true;
-        if (this._remoteRetryTimer) { clearTimeout(this._remoteRetryTimer); this._remoteRetryTimer = null; }
         this._approvalGeneration++;
         window.removeEventListener('central:refreshed', this._centralApprovalHandler);
         // Do NOT unregister SSE — store keeps accumulating outside component lifecycle
@@ -1956,6 +1954,8 @@
           },
           function() {
             self._syncDisplayNow();
+            // A live entry arrived: the machine is answering again.
+            self._refetchAfterTimeout();
             if (self.autoScroll) {
               self._scrollToBottom();
             } else {
@@ -2275,14 +2275,14 @@
       _applyMachine(data) {
         if (!data || !data.machine) return;
         if (data.machine_timed_out) {
-          // One request ran out of time: keep what is shown, say so, retry.
+          // One request ran out of time: keep what is shown and say so. The
+          // tail is fetched again when something shows the machine answering
+          // (_refetchAfterTimeout); nothing runs while nothing happens.
           this.remoteMachine = {name: data.machine, state: 'timeout',
                                 reason: data.machine_timed_out.reason || null,
                                 detail: data.machine_timed_out.detail || null};
-          this._retryRemoteTail();
           return;
         }
-        this._remoteRetryDelay = 0;
         if (data.machine_unreachable) {
           this.remoteMachine = {name: data.machine, state: 'unreachable',
                                 since: data.machine_unreachable.since || null};
@@ -2312,20 +2312,18 @@
         return !!(this.remoteMachine && this.remoteMachine.state === 'timeout');
       },
 
-      // Fetch the tail again after a timed-out answer, backing off 3 s to
-      // 30 s, while this viewer still shows the same session.
-      _retryRemoteTail() {
-        if (this._remoteRetryTimer) return;
-        var delay = Math.min((this._remoteRetryDelay || 1500) * 2, 30000);
-        this._remoteRetryDelay = delay;
-        var key = this.sessionKey;
+      // After a timed-out answer, fetch the tail ONCE when something shows
+      // the machine answering again: a live event for this session, or a
+      // message sent from this view. (Regaining focus already fetches,
+      // through _recoverSessionSync.) Never on a timer.
+      _refetchAfterTimeout() {
+        if (!this.machineSlow || this._timeoutRefetch) return;
+        var store = Alpine.store('sessions')[this.sessionKey];
+        if (!store) return;
         var self = this;
-        this._remoteRetryTimer = setTimeout(function () {
-          self._remoteRetryTimer = null;
-          if (self.sessionKey !== key || !self.machineSlow) return;
-          var store = Alpine.store('sessions')[key];
-          if (store) self._fetchBacklog(store).catch(function () {});
-        }, delay);
+        this._timeoutRefetch = this._fetchBacklog(store)
+          .catch(function () {})
+          .then(function () { self._timeoutRefetch = null; });
       },
 
       machineText() {
@@ -2727,6 +2725,7 @@
           el.blur();
 
           var ok = await sendPromise;
+          if (ok) this._refetchAfterTimeout();
 
           // Substrate write fires only after a tmux-accepted send — so the
           // viewer tile only appears for attachments actually sent.
