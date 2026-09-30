@@ -2481,10 +2481,15 @@ class MutationCatalog:
         # this code: before the envelope-unreadable reason existed, a receiver
         # behind the writer's encoder filed valid rows under the final reason
         # (SJC-2, 2026-09-29). A row still invalid after that is final.
+        # settings_unsigned rows with retries=0 likewise: personal rows were
+        # refused as unsigned for five hours on 2026-09-29/30 (the flag judged
+        # the store by its genesis); on a personal store they now land, on an
+        # organization store they are refused again and count their retry.
         rows = self.conn.execute(
             "SELECT address,frame,origin,transaction_id,operation_index "
             "FROM fleet_sync_quarantine WHERE (reason='settings_signature_pending' "
             "OR reason=? OR (reason='settings_signature_invalid' AND retries=0) "
+            "OR (reason='settings_unsigned' AND retries=0) "
             "OR (reason LIKE ? AND reason!='settings_signer_stale')) "
             "AND frame IS NOT NULL AND origin IS NOT NULL "
             "AND transaction_id IS NOT NULL AND operation_index IS NOT NULL",

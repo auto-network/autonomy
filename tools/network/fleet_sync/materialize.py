@@ -656,6 +656,25 @@ ENVELOPE_UNREADABLE_REASON = "settings_envelope_unreadable"
 REQUIRE_SIGNED_ORG_ROWS = True
 
 
+def store_is_organization(conn: sqlite3.Connection) -> bool:
+    """Whether *conn*'s store is an ORGANIZATION store: the only kind whose
+    settings rows are signed (design of record graph://21a0da9e-1c2, "What
+    is signed": personal crosses only the operator's own fleet and the
+    machine store crosses nothing, so neither is). The rule the write side
+    uses (settings_ops.prepare_signer: ``org in LOCAL_STORE_KEYS`` writes
+    unsigned), applied to the store's own name. A genesis in the store is
+    NOT the test: the personal store carries the persona's own ledger-event
+    rows and so has one — judging by it refused every unsigned personal row
+    in both directions from 2026-09-29 19:39Z (auto-qrmlg.6 S4's flag) until
+    01:14Z the next day, cursors advancing, nothing reporting it."""
+    from tools.data_paths import LOCAL_STORE_KEYS
+
+    for _seq, name, path in conn.execute("PRAGMA database_list"):
+        if name == "main":
+            return Path(str(path)).stem not in LOCAL_STORE_KEYS if path else False
+    return False   # pragma: no cover
+
+
 def _verify_settings_row(row: dict[str, object], genesis: str | None) -> str | None:
     """Step 1 only: None when the row's envelope verifies against its own
     signing key; otherwise the quarantine reason. Steps 2 to 6 are
@@ -733,6 +752,8 @@ def materialize(
     """
     if require_signed is None:
         require_signed = REQUIRE_SIGNED_ORG_ROWS
+    if require_signed and not store_is_organization(conn):
+        require_signed = False   # personal and machine rows are unsigned by design
 
     grouped: dict[str, list[Mutation]] = {table: [] for table in _TABLE_ORDER}
     for mutation in mutations:

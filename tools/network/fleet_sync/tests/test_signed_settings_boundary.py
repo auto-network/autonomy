@@ -492,3 +492,82 @@ def test_an_already_parked_invalid_row_is_re_judged_exactly_once(pair, monkeypat
     assert _quarantine(b_db) == [("settings_signature_invalid", 1)]   # ... the forgery counted its one retry
     assert b.drain_pending_signatures() == 0          # and is never re-judged again
     assert _quarantine(b_db) == [("settings_signature_invalid", 1)]
+
+
+def test_the_unsigned_refusal_never_applies_to_a_personal_store(tmp_path, monkeypatch):
+    """2026-09-29 19:39Z to 2026-09-30 01:14Z: with REQUIRE_SIGNED_ORG_ROWS
+    on, every unsigned settings row arriving at a PERSONAL store was parked
+    as settings_unsigned, because the store held the persona's own
+    ledger-event rows and so 'had a genesis'. Personal and machine rows are
+    unsigned by design; the refusal is for organization stores only."""
+    monkeypatch.setattr(materialize_module, "REQUIRE_SIGNED_ORG_ROWS", True)
+    a_db, a = _open(tmp_path / "personal-a.db", "a" * 64)
+    b_db, b = _open(tmp_path / "personal.db", "b" * 64)      # named as the personal store is
+    try:
+        sim = Sim()
+        _member(sim, "member")
+        _write_ledger(a_db, a, 10, sim)      # the persona's own ledger events ride in the personal scope
+        _write_ledger(b_db, b, 11, sim)
+        with a.transaction(100, "unsigned-personal"):
+            a_db.conn.execute(
+                "INSERT INTO settings (id,set_id,schema_revision,key,payload,publication_state)"
+                " VALUES (?,?,1,?,?,'raw')", (str(uuid.uuid4()), "autonomy.vault.audited", "acct", json.dumps({"v": "token"})),
+            )
+        _exchange(a, "a" * 64, b)
+        assert _rows(b_db, "autonomy.vault.audited", "acct") == [(None, "token")]
+        assert _quarantine(b_db) == []
+        assert materialize_module.store_is_organization(b_db.conn) is False
+        assert materialize_module.store_is_organization(a_db.conn) is True   # 'personal-a' is not a local store key
+    finally:
+        a_db.close()
+        b_db.close()
+
+
+def test_rows_parked_as_unsigned_on_a_personal_store_land_on_the_next_drain(tmp_path, monkeypatch):
+    monkeypatch.setattr(materialize_module, "REQUIRE_SIGNED_ORG_ROWS", True)
+    a_db, a = _open(tmp_path / "personal-a.db", "a" * 64)
+    b_db, b = _open(tmp_path / "personal.db", "b" * 64)
+    try:
+        sim = Sim()
+        _member(sim, "member")
+        _write_ledger(a_db, a, 10, sim)
+        _write_ledger(b_db, b, 11, sim)
+        with a.transaction(100, "unsigned-personal"):
+            a_db.conn.execute(
+                "INSERT INTO settings (id,set_id,schema_revision,key,payload,publication_state)"
+                " VALUES (?,?,1,?,?,'raw')", (str(uuid.uuid4()), "dashboard.harness.usage", "u1", json.dumps({"v": "usage"})),
+            )
+        # The code of the evening: the store judged by its genesis.
+        monkeypatch.setattr(materialize_module, "store_is_organization", lambda conn: True)
+        _exchange(a, "a" * 64, b)
+        assert _rows(b_db, "dashboard.harness.usage", "u1") == []
+        assert _quarantine(b_db) == [("settings_unsigned", 0)]
+        # The fix lands; the next drain re-judges the parked row once and it lands.
+        monkeypatch.undo()
+        monkeypatch.setattr(materialize_module, "REQUIRE_SIGNED_ORG_ROWS", True)
+        assert b.drain_pending_signatures() == 1
+        assert _rows(b_db, "dashboard.harness.usage", "u1") == [(None, "usage")]
+        assert _quarantine(b_db) == []
+    finally:
+        a_db.close()
+        b_db.close()
+
+
+def test_an_unsigned_row_parked_on_an_organization_store_is_re_judged_once_then_final(pair, monkeypatch):
+    monkeypatch.setattr(materialize_module, "REQUIRE_SIGNED_ORG_ROWS", True)
+    a_db, a, b_db, b = pair
+    sim = Sim()
+    _member(sim, "member")
+    _write_ledger(a_db, a, 10, sim)
+    _write_ledger(b_db, b, 11, sim)
+    with a.transaction(100, "unsigned-org"):
+        a_db.conn.execute(
+            "INSERT INTO settings (id,set_id,schema_revision,key,payload,publication_state)"
+            " VALUES (?,?,1,?,?,'raw')", (str(uuid.uuid4()), SET_ID, "k", json.dumps({"v": "x"})),
+        )
+    _exchange(a, "a" * 64, b)
+    assert _quarantine(b_db) == [("settings_unsigned", 0)]
+    assert b.drain_pending_signatures() == 0
+    assert _quarantine(b_db) == [("settings_unsigned", 1)]
+    assert b.drain_pending_signatures() == 0
+    assert _quarantine(b_db) == [("settings_unsigned", 1)]
