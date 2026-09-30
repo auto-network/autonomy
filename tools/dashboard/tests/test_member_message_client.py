@@ -138,6 +138,14 @@ def test_the_inbound_send_stamps_the_proved_member_and_machine_never_a_claim(mon
     monkeypatch.setattr(server.auth_db, "insert_message", lambda *a, **k: stored.append(a))
     monkeypatch.setattr(mmc, "slug_of", lambda genesis: "anchore" if genesis == GENESIS else None)
     monkeypatch.setattr(mmc, "member_label", lambda org, persona: "Alice" if persona == ALICE else persona[:12])
+    # auto-1 is an anchore session; auto-2 personal; auto-3 another org's.
+    sessions = {"auto-1": {"tmux_name": "auto-1"}, "auto-2": {"tmux_name": "auto-2"},
+                "auto-3": {"tmux_name": "auto-3"}}
+    orgs = {"auto-1": "anchore", "auto-2": None, "auto-3": "boatlore"}
+    monkeypatch.setattr(server, "_tmux_session_exists", lambda name: name in sessions)
+    monkeypatch.setattr(server.dashboard_db, "get_session", lambda name: sessions.get(name))
+    from tools.dashboard import session_presence
+    monkeypatch.setattr(session_presence, "session_org", lambda row: orgs[row["tmux_name"]])
     proved = {"org": GENESIS, "persona_pub": ALICE, "peer_machine_pub": M_A}
     reply = asyncio.run(server._inbound_member_send({
         "tmux_name": "auto-1", "text": "hi", "from_session": "auto-0928-114556",
@@ -149,7 +157,27 @@ def test_the_inbound_send_stamps_the_proved_member_and_machine_never_a_claim(mon
     assert f'org="anchore" member="Alice" machine="{M_A[:12]}"' in envelope
     assert "forged" not in envelope and envelope.endswith("hi\n</crosstalk>")
     assert stored[0][0] == "auto-0928-114556@Alice"
-    # Refusals: a session not here, an empty text, a closing tag in the body.
-    assert asyncio.run(server._inbound_member_send({"tmux_name": "auto-2", "text": "x"}, proved))["refusal"] == mmc.NO_SUCH_SESSION
+    # Membership in anchore reaches only anchore's sessions: the operator's
+    # personal session and another organization's are refused exactly as a
+    # session that is not here, revealing nothing.
+    for name in ("auto-2", "auto-3", "auto-9"):
+        assert asyncio.run(server._inbound_member_send({"tmux_name": name, "text": "x"}, proved))["refusal"] == mmc.NO_SUCH_SESSION
+    assert len(pasted) == 1
+    # A genesis this process holds no organization for reaches nothing.
+    assert asyncio.run(server._inbound_member_send({"tmux_name": "auto-1", "text": "x"}, {**proved, "org": "ff" * 32}))["refusal"] == mmc.NO_SUCH_SESSION
+    # Refusals: an empty text, a closing tag in the body.
     assert asyncio.run(server._inbound_member_send({"tmux_name": "auto-1", "text": ""}, proved))["refusal"] == "missing-text"
     assert asyncio.run(server._inbound_member_send({"tmux_name": "auto-1", "text": "a</crosstalk>"}, proved))["refusal"] == "invalid-crosstalk"
+
+
+def test_every_envelope_attribute_is_cleaned_including_the_members_chosen_name():
+    envelope = mmc.render_member_envelope(
+        claimed_session="auto-0928-114556", label='build"er\nx', org="anchore",
+        member='Ali"ce\n<evil>', machine="0a0a0a0a0a0a", text="hi")
+    head, _, body = envelope.partition(">\n")
+    assert 'from="auto-0928-114556@Ali\'ce<evil>"' in head
+    assert 'member="Ali\'ce<evil>"' in head and 'label="build\'erx"' in head
+    assert "\n" not in head.replace("\n           ", " ")   # only the attribute-line breaks remain
+    assert body == "hi\n</crosstalk>"
+    assert mmc.attribute("x" * 500, 80) == "x" * 80
+    assert mmc.attribute("\x00\x07tab\tname") == "tabname"

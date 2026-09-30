@@ -4138,6 +4138,7 @@ async def _inbound_member_send(body: dict, proved: dict) -> dict:
     AT THE MEMBER AND MACHINE THE ORG HELLO PROVED (auto-qrmlg.9); the
     organization, member and machine are never body claims."""
     from tools.dashboard import member_message_client as mmc
+    from tools.dashboard import session_presence
 
     name, text = body.get("tmux_name"), body.get("text")
     if not isinstance(name, str) or not name:
@@ -4151,7 +4152,14 @@ async def _inbound_member_send(body: dict, proved: dict) -> dict:
         return mmc.refusal("invalid-crosstalk", error)
     if not await asyncio.to_thread(_tmux_session_exists, name):
         return mmc.refusal(mmc.NO_SUCH_SESSION, name)
-    org = await asyncio.to_thread(mmc.slug_of, proved["org"]) or proved["org"][:12]
+    # Membership in an organization reaches only THAT organization's
+    # sessions: never the operator's personal sessions, never another
+    # organization's. Refused as no-such-session, so a co-member learns
+    # nothing about sessions outside the organization (review of d31083b1).
+    org = await asyncio.to_thread(mmc.slug_of, proved["org"])
+    row = await asyncio.to_thread(dashboard_db.get_session, name)
+    if org is None or row is None or session_presence.session_org(row) != org:
+        return mmc.refusal(mmc.NO_SUCH_SESSION, name)
     member = await asyncio.to_thread(mmc.member_label, org, proved["persona_pub"])
     payload = mmc.render_member_envelope(
         claimed_session=str(body.get("from_session") or ""),

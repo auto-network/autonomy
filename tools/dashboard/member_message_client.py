@@ -224,10 +224,19 @@ def member_label(org: str, persona_pub: str) -> str:
     try:
         for row in member_directory.rows(org):
             if row.get("persona_pub") == persona_pub and row.get("display_name"):
-                return str(row["display_name"])[:80].replace('"', "'")
+                return attribute(row["display_name"], 80) or persona_pub[:12]
     except Exception:
         pass
     return persona_pub[:12]
+
+
+def attribute(value: object, limit: int = 200) -> str:
+    """One envelope attribute value: control characters and newlines
+    removed, quotes replaced, length capped. Every value that reaches an
+    attribute passes through here, the member's own display name included
+    (a chosen name must not break out of the attribute)."""
+    text = "".join(ch for ch in str(value or "") if ch.isprintable())
+    return text.replace('"', "'").strip()[:limit]
 
 
 def render_member_envelope(*, claimed_session: str, label: str, org: str,
@@ -238,7 +247,8 @@ def render_member_envelope(*, claimed_session: str, label: str, org: str,
     from tools.graph.schemas.personal_session_presence import is_tmux_name
 
     claimed = claimed_session if is_tmux_name(claimed_session) else "unknown"
-    label = str(label or claimed)[:200].replace('"', "'")
+    label = attribute(label or claimed)
+    member, org, machine = attribute(member, 80), attribute(org, 80), attribute(machine, 80)
     iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return (
         f'<crosstalk from="{claimed}@{member}"\n'
