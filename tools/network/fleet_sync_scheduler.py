@@ -1956,6 +1956,28 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def organization_genesis(self) -> tuple[str | None, str | None]:
+        """``(genesis id, its org label)`` of the organization ledger this
+        store holds, ``(None, None)`` before any genesis has landed."""
+        from tools.network.fleet_sync.materialize import store_genesis_id
+        from tools.network.ledger.settings_bridge import read_event_wires
+
+        conn, _catalog = self._open()
+        try:
+            genesis = store_genesis_id(conn)
+            if genesis is None:
+                return None, None
+            wire = read_event_wires(conn).get(genesis)
+        finally:
+            conn.close()
+        label = None
+        if wire:
+            try:
+                label = json.loads(wire).get("payload", {}).get("org")
+            except (ValueError, AttributeError):
+                label = None
+        return genesis, label
+
     def serve_snapshot(self) -> tuple[dict[str, int], dict[str, dict]]:
         """One snapshot for one serve, read before the first page: this
         store's cursor per origin, the bound on everything the serve says
@@ -2678,6 +2700,38 @@ class FleetSyncScheduler:
         return SQLiteFleetSyncStore(path)
 
     # -- org channels (auto-coea3) -----------------------------------------
+
+    def _scope_org_from_store(self, scope: str, store: "SQLiteFleetSyncStore") -> str | None:
+        """The organization (ledger genesis id) an org scope's store holds,
+        for a scope this node has no channel for: the genesis, once landed,
+        whose org label is the org id the store's own bootstrap row names
+        for the slug (org_ops.list_orgs). Refuses a genesis with another
+        label; answers None, and the floor is held back for the round, when
+        no genesis has landed, its label cannot be read, the stores cannot
+        be listed, or no row names the slug: the organization a floor is
+        verified against is always one this node's roster named (review of
+        599cc7a1: no fail-open path)."""
+        genesis, label = store.organization_genesis()
+        if genesis is None or label is None:
+            return None   # no genesis, or one whose org label cannot be read
+        try:
+            from tools.graph import org_ops
+
+            expected = {ref.slug: str(ref.id) for ref in org_ops.list_orgs()}.get(scope)
+        except Exception:
+            logger.warning(
+                "fleet sync scope %r: organization stores could not be listed; "
+                "the persona write floor is held back", scope, exc_info=True,
+            )
+            return None
+        if expected is None:
+            return None   # no bootstrap row names this slug: nothing to check against
+        if str(label) != expected:
+            raise WriteFloorError(
+                f"scope {scope!r} holds a genesis for organization {label!r}; "
+                f"the roster names {expected!r}"
+            )
+        return genesis
 
     def _org_channels(self) -> dict[str, "OrgFleetAuthenticator"]:
         """scope slug -> org hello authenticator, for the scopes that have
@@ -5344,9 +5398,34 @@ class FleetSyncScheduler:
                                 await asyncio.to_thread(store.adopt_machine_write_floor, control)
                             else:
                                 if scope_org is None:
-                                    raise WriteFloorError(
-                                        "persona.write_floor on a scope with no organization"
+                                    # No org channel names this scope's
+                                    # organization (a store this node created
+                                    # from the fleet org roster and has not
+                                    # joined): the organization is the genesis
+                                    # the store holds, once the ledger events
+                                    # have landed — the rows before this frame
+                                    # were flushed above, so a genesis served
+                                    # in this very pull counts. Its org label
+                                    # must be the roster's org id for the
+                                    # slug, or the floor is for another
+                                    # organization.
+                                    scope_org = await asyncio.to_thread(
+                                        self._scope_org_from_store, scope, store,
                                     )
+                                if scope_org is None:
+                                    # Nothing to verify against yet: the genesis
+                                    # has not landed. Skip the floor this round;
+                                    # the server re-sends its floors on every
+                                    # pull. Failing the scope here left a
+                                    # roster-created stub unable to take its
+                                    # first pull at all (SJC-2, boatlore,
+                                    # 2026-09-30 01:21Z).
+                                    logger.info(
+                                        "fleet sync pull %s scope %r: persona write floor "
+                                        "held back, the store holds no organization "
+                                        "genesis yet", machine_pub[:12], scope,
+                                    )
+                                    continue
                                 moved = await asyncio.to_thread(
                                     store.adopt_persona_write_floor, control, scope_org,
                                     int(time.time()),

@@ -527,3 +527,129 @@ def test_other_decline_reasons_warn_when_they_appear_or_change_then_repeat_slowl
         "fleet sync scope 'beta'", "fleet sync scope 'beta'", "fleet sync scope 'beta'", "fleet sync scope 'gamma'"]
     assert warned[0].endswith("no position held for roster machine(s) 571d62ab69c5")
     assert warned[1].endswith("no org sync channel: neither installed")
+
+
+# ── a roster-created stub verifies a persona floor against the genesis it holds ──
+# (2026-09-30 01:21Z: SJC-2's boatlore stub, created from the fleet org roster,
+# failed every pull with "persona.write_floor on a scope with no organization":
+# it had no org channel, and the genesis that names its organization was
+# arriving in the very pull being refused.)
+
+def _ledger_rows(db, catalog, ts: int, sim) -> None:
+    import json as _json
+    import uuid as _uuid
+    from tools.network.fleet_sync.materialize import LEDGER_EVENT_SET_ID
+    with catalog.transaction(ts, f"ledger-{ts}"):
+        for event in sim.ledger.events():
+            db.conn.execute(
+                "INSERT INTO settings (id,set_id,schema_revision,key,payload,publication_state)"
+                " VALUES (?,?,?,?,?,?)",
+                (str(_uuid.uuid4()), LEDGER_EVENT_SET_ID, 1, event.event_id,
+                 _json.dumps({"wire": event.to_json().decode("utf-8")}), "published"),
+            )
+
+
+def test_a_stores_organization_is_the_genesis_it_holds_and_its_roster_label(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tools.graph import org_ops
+    from tools.network.ledger.tests.conftest import Sim
+
+    key = KeyPair.generate()
+    path = tmp_path / "acme.db"
+    _prepare(path, key)
+    store = SQLiteFleetSyncStore(path)
+    assert store.organization_genesis() == (None, None)
+    sim = Sim(org="44444444-4444-4444-8444-444444444444")
+    db = GraphDB(path)
+    try:
+        catalog = db.conn._fleet_sync_functions_owner
+        _ledger_rows(db, catalog, 100, sim)
+    finally:
+        db.close()
+    assert store.organization_genesis() == (sim.genesis_id, "44444444-4444-4444-8444-444444444444")
+    root = KeyPair.generate()
+    scheduler = _scheduler(key, root, [enroll(root, machine_pub=key.public_hex)], tmp_path / "personal.db")
+    # No bootstrap row names the slug: nothing to check against, held back.
+    monkeypatch.setattr(org_ops, "list_orgs", lambda **kw: [])
+    assert scheduler._scope_org_from_store("acme", store) is None
+    # The stores cannot be listed: held back, never accepted unchecked.
+    def boom(**kw):
+        raise RuntimeError("orgs dir unreadable")
+    monkeypatch.setattr(org_ops, "list_orgs", boom)
+    assert scheduler._scope_org_from_store("acme", store) is None
+    # The roster names the same organization: accepted.
+    monkeypatch.setattr(org_ops, "list_orgs", lambda **kw: [SimpleNamespace(slug="acme", id="44444444-4444-4444-8444-444444444444")])
+    assert scheduler._scope_org_from_store("acme", store) == sim.genesis_id
+    # The roster names another organization for this slug: refused.
+    monkeypatch.setattr(org_ops, "list_orgs", lambda **kw: [SimpleNamespace(slug="acme", id="55555555-5555-4555-8555-555555555555")])
+    with pytest.raises(write_floors.WriteFloorError, match="the roster names"):
+        scheduler._scope_org_from_store("acme", store)
+    # A genesis whose wire carries no readable org label: held back.
+    monkeypatch.setattr(org_ops, "list_orgs", lambda **kw: [SimpleNamespace(slug="acme", id="44444444-4444-4444-8444-444444444444")])
+    monkeypatch.setattr(SQLiteFleetSyncStore, "organization_genesis", lambda self: (sim.genesis_id, None))
+    assert scheduler._scope_org_from_store("acme", store) is None
+
+
+def test_a_roster_created_stub_takes_its_first_pull_and_adopts_the_persona_floor_once_the_genesis_landed(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from tools.graph import org_ops
+    from tools.network.ledger.tests.conftest import Sim
+
+    label = "66666666-6666-4666-8666-666666666666"
+    sim = Sim(org=label)
+    genesis = sim.genesis_id
+
+    async def run() -> None:
+        root = KeyPair.generate()
+        a_key, c_key = KeyPair.generate(), KeyPair.generate()
+        a_personal, c_personal = tmp_path / "a.db", tmp_path / "c.db"
+        a_acme, c_acme = tmp_path / "a-acme.db", tmp_path / "c-acme.db"
+        for path, key in ((a_personal, a_key), (c_personal, c_key), (a_acme, a_key)):
+            _prepare(path, key)
+        # A: the organization's ledger as settings rows, and a persona floor
+        # for that organization sealed by A.
+        db = GraphDB(a_acme)
+        try:
+            catalog = db.conn._fleet_sync_functions_owner
+            _ledger_rows(db, catalog, 100, sim)
+            persona = KeyPair.generate()
+            record = write_floors.seal_persona_write_floor(
+                db.conn, signer=a_key, persona_cert=_persona_cert(persona, a_key, org=genesis),
+                org=genesis, roster_machines={a_key.public_hex},
+                positions={a_key.public_hex: 100},
+            )
+            assert record is not None
+            db.conn.commit()
+        finally:
+            db.close()
+        # C: a stub for the slug, created from the roster with the org's label,
+        # no genesis, no org channel.
+        GraphDB.create_org_db("acme", org_id=label, path=c_acme).close()
+        monkeypatch.setattr(org_ops, "list_orgs", lambda **kw: [SimpleNamespace(slug="acme", id=label)])
+        entries = [enroll(root, machine_pub=a_key.public_hex, seq=0), enroll(root, machine_pub=c_key.public_hex, seq=1)]
+        a = _scheduler(a_key, root, entries, a_personal, sync_scopes=lambda: {"acme": a_acme})
+        await a.start()
+        c = _scheduler(c_key, root, entries, c_personal,
+                       peers={a_key.public_hex: [f"ws://127.0.0.1:{a.port}"]},
+                       sync_scopes=lambda: {"acme": c_acme})
+        await c.start()
+        try:
+            def genesis_landed() -> bool:
+                from tools.network.fleet_sync.materialize import store_genesis_id
+                conn = sqlite3.connect(c_acme)
+                try:
+                    return store_genesis_id(conn) == genesis
+                finally:
+                    conn.close()
+            await _eventually(genesis_landed, timeout=10)
+            def floor_adopted() -> bool:
+                conn = sqlite3.connect(c_acme)
+                try:
+                    return persona.public_hex in write_floors.persona_write_floors(conn)
+                finally:
+                    conn.close()
+            await _eventually(floor_adopted, timeout=15)
+        finally:
+            await c.stop(); await a.stop()
+
+    asyncio.run(run())
