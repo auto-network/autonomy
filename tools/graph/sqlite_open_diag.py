@@ -6,8 +6,11 @@ not stop it. Rather than infer the leaking site, this records it:
 :func:`install` wraps ``sqlite3.connect`` for the whole process, and every
 file-backed open is counted under its opener — a deduplicated stack of the
 repository frames that called it. :func:`snapshot` reports, per database
-file and opener, how many connections were opened and how many are still
-open now. The site whose ``open_now`` grows with load is the leak.
+file, opening thread and opener, how many connections were opened and how
+many are still open now. The site whose ``open_now`` grows with load is the
+leak. The thread is recorded because a per-thread pooled handle reopens
+whenever a new thread reads, and the opener frames stop before the thread's
+entry point: the name says which threads churn.
 
 A connection is "open now" while it is neither closed nor garbage
 collected. The base ``sqlite3.Connection`` takes no weak reference, so a
@@ -19,6 +22,7 @@ changes.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -32,10 +36,12 @@ _THIS_FILE = "tools/graph/sqlite_open_diag.py"
 
 _lock = threading.RLock()
 _original_connect = None
-#: (database file name, opener signature) -> connections opened
-_opened: dict[tuple[str, str], int] = {}
+#: (database file name, thread label, opener signature) -> connections opened
+_opened: dict[tuple[str, str, str], int] = {}
 #: id(connection) -> (weak reference, key)
-_live: dict[int, tuple["weakref.ref", tuple[str, str]]] = {}
+_live: dict[int, tuple["weakref.ref", tuple[str, str, str]]] = {}
+#: Pool numbering in a thread name: ``asyncio_12``, ``Thread-7 (serve)``.
+_POOL_NUMBER_RE = re.compile(r"[-_]\d+")
 _factories: dict[type, type] = {}
 
 
@@ -141,6 +147,12 @@ def _drain_collected() -> None:
             _names.pop(conn_id, None)
 
 
+def _thread_label() -> str:
+    """The opening thread's name with pool numbering stripped, so every
+    thread of one pool counts under one label."""
+    return _POOL_NUMBER_RE.sub("", threading.current_thread().name)[:64]
+
+
 def _connect(database, *args, **kwargs):
     name = _database_name(database)
     if name is None:
@@ -157,7 +169,7 @@ def _connect(database, *args, **kwargs):
     from tools.graph import sqlite_defaults
 
     sqlite_defaults.apply(conn)
-    key = (name, _opener())
+    key = (name, _thread_label(), _opener())
     conn_id = id(conn)
     _names[conn_id] = name
     ref = weakref.ref(conn, lambda r, conn_id=conn_id: _forget(conn_id, r))
@@ -187,21 +199,22 @@ def _is_open(conn) -> bool:
 
 
 def snapshot(database: str | None = None) -> list[dict]:
-    """Per database file and opener: opened, and still open now. Sorted by
-    ``open_now``, largest first. *database* filters by file name."""
+    """Per database file, opening thread and opener: opened, and still open
+    now. Sorted by ``open_now``, largest first. *database* filters by file
+    name."""
     with _lock:
         _drain_collected()
         opened = dict(_opened)
         live = list(_live.values())
-    open_now: dict[tuple[str, str], int] = {}
+    open_now: dict[tuple[str, str, str], int] = {}
     for ref, key in live:
         conn = ref()
         if conn is not None and _is_open(conn):
             open_now[key] = open_now.get(key, 0) + 1
     rows = [
-        {"database": name, "opener": opener, "opened": count,
-         "open_now": open_now.get((name, opener), 0)}
-        for (name, opener), count in opened.items()
+        {"database": name, "thread": thread, "opener": opener, "opened": count,
+         "open_now": open_now.get((name, thread, opener), 0)}
+        for (name, thread, opener), count in opened.items()
         if database is None or name == database
     ]
     rows.sort(key=lambda row: (-row["open_now"], -row["opened"]))

@@ -2,6 +2,7 @@
 
 import gc
 import sqlite3
+import threading
 import weakref
 
 from tools.graph import sqlite_open_diag
@@ -27,6 +28,7 @@ def test_counts_opens_by_opener_and_what_stays_open(tmp_path):
     assert rows["_open_here"]["open_now"] == 3
     assert rows["test_counts_opens_by_opener_and_what_stays_open"] == {
         "database": "counted.db",
+        "thread": "MainThread",
         "opener": rows["test_counts_opens_by_opener_and_what_stays_open"]["opener"],
         "opened": 1,
         "open_now": 0,
@@ -77,3 +79,15 @@ def test_a_reused_id_does_not_drop_the_live_connection(tmp_path):
     sqlite_open_diag._forget(id(conn), stale)
     assert [row["open_now"] for row in sqlite_open_diag.snapshot("reused.db")] == [1]
     conn.close()
+
+
+def test_names_the_opening_thread_without_pool_numbering(tmp_path):
+    sqlite_open_diag.install()
+    path = str(tmp_path / "threaded.db")
+    conns = []
+    for name in ("asyncio_3", "asyncio_12"):
+        worker = threading.Thread(target=lambda: conns.append(_open_here(path)), name=name)
+        worker.start()
+        worker.join()
+    rows = sqlite_open_diag.snapshot("threaded.db")
+    assert [(row["thread"], row["opened"], row["open_now"]) for row in rows] == [("asyncio", 2, 2)]

@@ -15465,9 +15465,10 @@ async def api_diag_settings(request):
 
 
 async def api_diag_sqlite_opens(request):
-    """SQLite connections this process opened, by database file and opener
-    (a deduplicated stack of repository frames), with how many are still
-    open. ``?database=autonomy.db`` filters by file name (auto-bkv3p)."""
+    """SQLite connections this process opened, by database file, opening
+    thread (pool numbering stripped) and opener (a deduplicated stack of
+    repository frames), with how many are still open.
+    ``?database=autonomy.db`` filters by file name (auto-bkv3p)."""
     auth_error = api_auth.require_authenticated_api_caller(request)
     if auth_error is not None:
         return auth_error
