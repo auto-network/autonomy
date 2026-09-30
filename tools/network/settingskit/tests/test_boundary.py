@@ -133,3 +133,31 @@ def test_the_persona_strategy_requires_the_row_persona_and_makes_no_scope_check(
     other = check_signer(fold, signing_key=narrowed.public_hex, set_id=SET_B, key_strategy="persona", row_key="someone-else")
     assert not other.ok and other.reason == "signer_is_not_row_persona"
     assert check_signer(fold, signing_key=narrowed.public_hex, set_id=SET_A, key_strategy="bogus", row_key="x").reason == "unknown_key_strategy"
+
+
+def test_the_persona_prefix_strategy_lets_a_persona_hold_many_keys_and_only_its_own():
+    """``<persona>:<rest>``: the signer must be the key's first segment, and
+    the rest of the key is free, so one persona holds any number of rows."""
+    sim = Sim()
+    member = _member(sim, "editor")
+    other = _member(sim, "editor")
+    fold = sim.fold()
+    for rest in ("machine-a", "machine-b", "a:b:c"):
+        own = check_signer(fold, signing_key=member.public_hex, set_id=SET_A,
+                           key_strategy="persona_prefix", row_key=f"{member.public_hex}:{rest}")
+        assert own.ok and own.persona == member.public_hex
+    theirs = check_signer(fold, signing_key=member.public_hex, set_id=SET_A,
+                          key_strategy="persona_prefix", row_key=f"{other.public_hex}:machine-a")
+    assert (theirs.ok, theirs.reason) == (False, "signer_is_not_row_persona")
+    bare = check_signer(fold, signing_key=member.public_hex, set_id=SET_A,
+                        key_strategy="persona_prefix", row_key="machine-a")
+    assert bare.ok is False
+
+
+def test_a_persona_prefixed_set_declares_the_prefix_strategy():
+    from tools.graph import schemas  # noqa: F401 -- registers the sets
+    from tools.graph.schemas.org_session_runner import (
+        ORG_SESSION_RUNNER_REVISION, ORG_SESSION_RUNNER_SET_ID)
+    from tools.network.settingskit.authority import signing_key_strategy
+
+    assert signing_key_strategy(ORG_SESSION_RUNNER_SET_ID, ORG_SESSION_RUNNER_REVISION) == "persona_prefix"

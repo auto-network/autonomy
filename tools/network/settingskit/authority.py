@@ -29,6 +29,10 @@ LEDGER_EVENT_SET_ID = "autonomy.org.ledger-event"
 PERSONA_KEY_STRATEGIES = frozenset({
     "member_public_key", "persona", "persona_pub", "member_persona",
 })
+#: Key strategies whose row key STARTS with the member persona
+#: (``persona_pub:<rest>``): the signer must be that persona, and the rest of
+#: the key is the set's own dimensions, so a persona holds many rows.
+PERSONA_PREFIX_KEY_STRATEGIES = frozenset({"persona_pub:*"})
 
 #: (store path) -> (depth key, FoldState | None)
 _FOLD_CACHE: dict[str, tuple[tuple, object]] = {}
@@ -45,7 +49,11 @@ def signing_key_strategy(set_id: str, schema_revision: int) -> str:
         return "delegate"
     cls = SCHEMAS.get(f"{set_id}#{int(schema_revision)}")
     strategy = getattr(cls, "_key_strategy", None) if cls is not None else None
-    return "persona" if strategy in PERSONA_KEY_STRATEGIES else "delegate"
+    if strategy in PERSONA_KEY_STRATEGIES:
+        return "persona"
+    if strategy in PERSONA_PREFIX_KEY_STRATEGIES:
+        return "persona_prefix"
+    return "delegate"
 
 
 def _store_path(conn: sqlite3.Connection) -> str:

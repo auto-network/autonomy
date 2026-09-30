@@ -2,18 +2,18 @@
 organization's members' sessions (Thrust 5, bead auto-a51qv; design
 graph://7eb29bc8-31a §9.8).
 
-One row per offering machine, keyed by its per-organization serving key and
+One row per offering machine, keyed ``<owner persona>:<serving key>`` and
 written by that machine alone: turning the org profile's "Allow organization
 members to remotely launch Workspaces on this machine" on writes it, turning
 it off deprecates it (operator ruling 2026-09-29). A turned-off offer refuses
 NEW launches only; running sessions are untouched.
 
-The row is self-certified exactly as ``autonomy.org.fleet-reachability`` is:
-the member persona's certificate to the machine key and the machine key's
-signature over the row. The settings envelope proves which member wrote a
-row, but not that the member owns the machine its key names, and a read
-resolves one winner per key; so a reader keeps only a row whose own evidence
-verifies (tools/network/org_session_runner.verify_row).
+The key strategy ``persona_pub:*`` makes the boundary refuse any signer but
+the key's persona, so each key has one eligible slot and the normal read is
+correct. The row also carries the persona's certificate to the machine key
+and the machine key's signature, as ``autonomy.org.fleet-reachability`` does:
+that proves the persona owns the machine the key names
+(tools/network/org_session_runner.verify_row).
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 @publication_band(min="raw", max="published")
 @home("organization")
-@keyed_per_entity(key_strategy="machine_pub")
+@keyed_per_entity(key_strategy="persona_pub:*")
 class OrgSessionRunnerV1(SettingSchema):
     """One machine's offer to run members' sessions, self-certified."""
 
@@ -92,7 +92,7 @@ class OrgSessionRunnerV1(SettingSchema):
             raise SchemaValidationError(f"{name}: payload must be a dict")
         if "machine_pub" in payload:
             raise SchemaValidationError(
-                f"{name}: 'machine_pub' is the row key and must not be repeated")
+                f"{name}: 'machine_pub' is in the row key and must not be repeated")
         if payload.get("v") != ROW_VERSION:
             raise SchemaValidationError(f"{name}: 'v' must be {ROW_VERSION}")
         if not isinstance(payload.get("persona_pub"), str) \
@@ -125,6 +125,11 @@ class OrgSessionRunnerV1(SettingSchema):
 
     @classmethod
     def validate_member_key(cls, key: str) -> None:
-        if not _HEX64_RE.match(key or ""):
+        persona, _, machine = (key or "").partition(":")
+        if not _HEX64_RE.match(persona) or not _HEX64_RE.match(machine):
             raise SchemaValidationError(
-                f"{cls.__name__}: keys are machine public keys (64 lowercase hex), got {key!r}")
+                f"{cls.__name__}: keys are <persona>:<machine key> (64 hex each), got {key!r}")
+
+
+def runner_key(persona_pub: str, machine_pub: str) -> str:
+    return f"{persona_pub}:{machine_pub}"

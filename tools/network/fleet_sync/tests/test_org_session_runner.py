@@ -27,15 +27,17 @@ def test_row_roundtrip_and_every_refusal(tmp_path: Path) -> None:
     a = Member(tmp_path, "a", pa, [pa.public_hex])
     now = int(time.time())
     row = _offer(a, now)
-    key = a.machine.public_hex
+    key = f"{pa.public_hex}:{a.machine.public_hex}"
     offer = runner.verify_row(key, row, org=ORG, now=now, is_member=lambda p: p == pa.public_hex)
     assert (offer["label"], offer["capacity"], offer["images"]) == ("SJC-2", 4, ["alpha/dev"])
-    assert offer["persona_pub"] == pa.public_hex and offer["machine_pub"] == key
+    assert offer["persona_pub"] == pa.public_hex and offer["machine_pub"] == a.machine.public_hex
+    # The key's persona is not the row's.
+    assert runner.verify_row(f"{px.public_hex}:{a.machine.public_hex}", row, org=ORG, now=now) is None
     # Tampered capacity: the machine signature no longer covers it.
     tampered = copy.deepcopy(row); tampered["capacity"] = 64
     assert runner.verify_row(key, tampered, org=ORG, now=now) is None
     # The key names another machine.
-    assert runner.verify_row("00" * 32, row, org=ORG, now=now) is None
+    assert runner.verify_row(f"{pa.public_hex}:{'00' * 32}", row, org=ORG, now=now) is None
     # Another organization.
     assert runner.verify_row(key, row, org=OTHER_ORG, now=now) is None
     # A persona outside the member set.
@@ -56,7 +58,7 @@ def test_a_reachability_signature_is_not_a_runner_offer(tmp_path: Path) -> None:
     body = {**row, "machine_pub": a.machine.public_hex}
     body["sig"] = reach.sign_certified(a.machine, body, reach.ROW_DOMAIN)
     del body["machine_pub"]
-    assert runner.verify_row(a.machine.public_hex, body, org=ORG, now=now) is None
+    assert runner.verify_row(f"{pa.public_hex}:{a.machine.public_hex}", body, org=ORG, now=now) is None
 
 
 def _dashboard(monkeypatch, member, slots):
@@ -65,7 +67,7 @@ def _dashboard(monkeypatch, member, slots):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(member.orgs_dir))
     channel = SimpleNamespace(
         machine_key=member.machine, persona_cert=member.persona_cert,
-        machine_pub=member.machine.public_hex, org=ORG,
+        machine_pub=member.machine.public_hex, persona_pub=member.persona.public_hex, org=ORG,
         is_member=lambda p: p in member.members)
     monkeypatch.setattr(org_runners, "_channel", lambda slug: channel if slug == "alpha" else None)
     monkeypatch.setattr(org_runners, "_label", lambda: "SJC-2")
@@ -98,50 +100,6 @@ def test_a_runner_not_in_the_relay_slots_is_not_live(tmp_path: Path, monkeypatch
     org_runners.offer("alpha", capacity=3)
     (listed,) = org_runners.runners("alpha")["runners"]
     assert (listed["capacity"], listed["live"]) == (3, False)
-
-
-def test_a_row_naming_another_members_machine_is_never_listed(tmp_path: Path, monkeypatch) -> None:
-    """A member cannot offer someone else's machine: the row's evidence must be
-    that machine's own signature under its owner's certificate."""
-    from tools.graph import settings_ops
-    from tools.graph.schemas.org_session_runner import (
-        ORG_SESSION_RUNNER_REVISION, ORG_SESSION_RUNNER_SET_ID)
-
-    pa, pb = KeyPair.generate(), KeyPair.generate()
-    a = Member(tmp_path, "a", pa, [pa.public_hex, pb.public_hex])
-    victim = KeyPair.generate()
-    org_runners = _dashboard(monkeypatch, a, [{"machine": victim.public_hex}])
-    forged = runner.build_row(a.machine, a.persona_cert, label="not mine", capacity=64,
-                              harnesses=["claude"], images=[])
-    settings_ops.upsert_by_key(ORG_SESSION_RUNNER_SET_ID, ORG_SESSION_RUNNER_REVISION,
-                               victim.public_hex, forged, org="alpha", state="published")
-    assert org_runners.runners("alpha")["runners"] == []
-
-
-def test_a_forged_row_under_a_members_key_does_not_hide_the_real_offer(
-        tmp_path: Path, monkeypatch) -> None:
-    from tools.graph import settings_ops
-    from tools.graph.schemas.org_session_runner import (
-        ORG_SESSION_RUNNER_REVISION, ORG_SESSION_RUNNER_SET_ID)
-
-    pa, pb = KeyPair.generate(), KeyPair.generate()
-    a = Member(tmp_path, "a", pa, [pa.public_hex, pb.public_hex])
-    org_runners = _dashboard(monkeypatch, a, [{"machine": a.machine.public_hex}])
-    org_runners.offer("alpha")
-    # Another member writes a later row under this machine's key.
-    intruder = KeyPair.generate()
-    forged = runner.build_row(intruder, _cert(pb, intruder), label="hijack", capacity=64,
-                              harnesses=["claude"], images=[])
-    # In a signed store each signer has its own slot under a key; this
-    # unsigned test store keys slots by publication state, so the second row
-    # takes the other state to sit beside the real offer.
-    settings_ops.add_setting(ORG_SESSION_RUNNER_SET_ID, ORG_SESSION_RUNNER_REVISION,
-                             a.machine.public_hex, forged, org="alpha", state="raw")
-    (listed,) = org_runners.runners("alpha")["runners"]
-    assert (listed["label"], listed["machine_pub"]) == ("SJC-2", a.machine.public_hex)
-    # And withdraw acts on this machine's own row, never the forged one.
-    assert org_runners.withdraw("alpha")["withdrawn"] == 1
-    assert org_runners.runners("alpha")["runners"] == []
 
 
 def test_an_unconfirmed_persona_is_not_listed(tmp_path: Path, monkeypatch) -> None:

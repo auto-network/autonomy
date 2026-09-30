@@ -16,7 +16,6 @@ on this machine" toggle, and ``graph runner offer|withdraw|list``, drive:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import subprocess
 
@@ -29,6 +28,7 @@ from tools.graph.schemas.org_session_runner import (
     HARNESSES,
     ORG_SESSION_RUNNER_REVISION as REVISION,
     ORG_SESSION_RUNNER_SET_ID as SET_ID,
+    runner_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,36 +68,18 @@ def local_images(slug: str) -> list[str]:
     return sorted({line.strip() for line in out.splitlines() if line.startswith(prefix)})
 
 
-def _verified(slug: str, channel) -> dict[str, dict]:
-    """machine_pub -> the newest offer row under that key whose own evidence
-    verifies from a confirmed member, with its setting ``id``.
-
-    Every live base row is read, not one resolved winner per key: another
-    member's forged row under a machine's key must neither hide that
-    machine's real offer nor be the row a withdraw acts on."""
+def _offers(slug: str, channel) -> dict[str, dict]:
+    """machine_pub -> offer, for every row that verifies from a confirmed
+    member. The key strategy lets only a key's persona sign under it, so
+    the normal read resolves each key to its owner's row."""
     from tools.network.org_session_runner import verify_row
 
-    db = settings_ops._open(slug, SET_ID, for_read=True)
-    try:
-        rows = db.conn.execute(
-            'SELECT id, "key", payload FROM settings WHERE set_id = ? '
-            "AND schema_revision = ? AND supersedes IS NULL AND excludes IS NULL "
-            "AND deprecated = 0", (SET_ID, REVISION)).fetchall()
-    finally:
-        db.close()
     out: dict[str, dict] = {}
-    for setting_id, key, payload in rows:
-        try:
-            value = json.loads(payload) if isinstance(payload, str) else payload
-        except ValueError:
-            continue
-        offer_row = verify_row(key, value, org=channel.org,
+    for member in settings_ops.read_owned_set(SET_ID, org=slug).members:
+        offer_row = verify_row(member.key, member.payload, org=channel.org,
                                is_member=lambda p: channel.is_member(p) is True)
-        if offer_row is None:
-            continue
-        held = out.get(key)
-        if held is None or offer_row["updated_at"] > held["updated_at"]:
-            out[key] = {**offer_row, "id": setting_id}
+        if offer_row is not None:
+            out[offer_row["machine_pub"]] = {**offer_row, "id": member.id}
     return out
 
 
@@ -112,8 +94,9 @@ def offer(slug: str, capacity: int | None = None) -> dict:
         channel.machine_key, channel.persona_cert, label=_label(),
         capacity=_default_capacity() if capacity is None else int(capacity),
         harnesses=list(HARNESSES), images=local_images(slug))
-    settings_ops.upsert_by_key(SET_ID, REVISION, channel.machine_pub, row,
-                               org=slug, state="published")
+    settings_ops.upsert_by_key(SET_ID, REVISION,
+                               runner_key(channel.persona_pub, channel.machine_pub),
+                               row, org=slug, state="published")
     return {"ok": True, "machine_pub": channel.machine_pub, "offer": row}
 
 
@@ -122,7 +105,7 @@ def withdraw(slug: str) -> dict:
     channel = _channel(slug)
     if channel is None:
         return {"ok": False, "error": NOT_SERVING}
-    own = _verified(slug, channel).get(channel.machine_pub)
+    own = _offers(slug, channel).get(channel.machine_pub)
     if own is not None:
         settings_ops.deprecate_setting(own["id"], org=slug)
     return {"ok": True, "machine_pub": channel.machine_pub,
@@ -144,7 +127,7 @@ def runners(slug: str) -> dict:
         "harnesses": offer_row["harnesses"], "images": offer_row["images"],
         "updated_at": offer_row["updated_at"], "live": key in live,
         "this_machine": key == channel.machine_pub,
-    } for key, offer_row in _verified(slug, channel).items()]
+    } for key, offer_row in _offers(slug, channel).items()]
     return {"ok": True, "runners": sorted(out, key=lambda r: r["label"])}
 
 
@@ -153,7 +136,7 @@ def offered_here(slug: str) -> bool:
     channel = _channel(slug)
     if channel is None:
         return False
-    return channel.machine_pub in _verified(slug, channel)
+    return channel.machine_pub in _offers(slug, channel)
 
 
 # ── routes (global operator authority) ──────────────────────────────────────

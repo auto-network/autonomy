@@ -40,7 +40,9 @@ from tools.network.ledger.scopes import (
     settings_sign_scope,
 )
 
-KEY_STRATEGIES = ("delegate", "persona")
+#: ``persona_prefix``: the row key's first ``:``-separated segment is the
+#: signer's persona and the rest is the set's own (a persona holds many rows).
+KEY_STRATEGIES = ("delegate", "persona", "persona_prefix")
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,10 @@ def check_signer(
     if fold.persona_for_key(signing_key) is not None and signing_key != member.current_key:
         return SignerVerdict(False, persona, "signer_key_superseded")
     # Step 4.
+    if key_strategy == "persona_prefix":
+        if row_key.split(":", 1)[0] != persona:
+            return SignerVerdict(False, persona, "signer_is_not_row_persona")
+        return SignerVerdict(True, persona)
     if key_strategy == "persona":
         if persona != row_key:
             return SignerVerdict(False, persona, "signer_is_not_row_persona")

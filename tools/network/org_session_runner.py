@@ -51,13 +51,18 @@ def build_row(machine_key: KeyPair, persona_cert: DelegationCert, *, label: str,
 
 def verify_row(key: str, payload: Any, *, org: str, now: int | None = None,
                is_member: Callable[[str], bool | None] | None = None) -> dict | None:
-    """The offer (with ``machine_pub``) when the row verifies, else None."""
+    """The offer (with ``machine_pub``) when the row verifies, else None.
+    *key* is ``<persona>:<machine key>``: the row's persona must be the
+    key's, and its certificate must end at the key's machine."""
     try:
         OrgSessionRunnerV1.validate(payload)
     except Exception:
         return None
-    payload = {**dict(payload), "machine_pub": key}
-    persona = verify_certified(key, payload, org=org, domain=ROW_DOMAIN, now=now)
+    key_persona, _, machine = str(key).partition(":")
+    if key_persona != payload.get("persona_pub"):
+        return None
+    payload = {**dict(payload), "machine_pub": machine}
+    persona = verify_certified(machine, payload, org=org, domain=ROW_DOMAIN, now=now)
     if persona is None:
         return None
     if is_member is not None and is_member(persona) is False:
