@@ -327,6 +327,125 @@ def render_window(counts, seconds: int, limit: int = 15) -> list[str]:
     return lines
 
 
+
+# ── executor job accounting ──────────────────────────────────────────────
+
+
+def job_key(fn) -> str:
+    """A bounded name for one executor job: the module and qualified name of
+    the function asyncio.to_thread / run_in_executor was given (partials and
+    the contextvars ``Context.run`` wrapper unwrapped)."""
+    import functools
+    seen = 0
+    while seen < 5:
+        seen += 1
+        if isinstance(fn, functools.partial):
+            inner = fn.func
+            if getattr(inner, "__name__", "") == "run" and fn.args and callable(fn.args[0]):
+                fn = fn.args[0]      # to_thread: partial(ctx.run, func, *args)
+            else:
+                fn = inner
+            continue
+        break
+    module = getattr(fn, "__module__", None) or type(fn).__module__
+    name = getattr(fn, "__qualname__", None) or getattr(fn, "__name__", None) or type(fn).__name__
+    return f"{module}.{name}"[:120]
+
+
+class JobStats:
+    """Per job key: calls, CPU seconds (thread_time), wall seconds, max wall;
+    plus a per-second ring of CPU by key for spike dumps."""
+
+    def __init__(self, window_s: int = STACK_WINDOW_S) -> None:
+        from collections import Counter, deque
+        self._Counter = Counter
+        self._lock = threading.Lock()
+        self.calls: dict[str, int] = {}
+        self.cpu: dict[str, float] = {}
+        self.wall: dict[str, float] = {}
+        self.max_wall: dict[str, float] = {}
+        self.in_flight: dict[str, int] = {}
+        self.ring = deque(maxlen=window_s)   # (second, Counter[key] cpu, Counter[key] calls)
+
+    def begin(self, key: str) -> None:
+        with self._lock:
+            self.in_flight[key] = self.in_flight.get(key, 0) + 1
+
+    def end(self, key: str, cpu_s: float, wall_s: float, *, now: float | None = None) -> None:
+        second = int(now if now is not None else time.time())
+        with self._lock:
+            self.in_flight[key] = max(0, self.in_flight.get(key, 1) - 1)
+            self.calls[key] = self.calls.get(key, 0) + 1
+            self.cpu[key] = self.cpu.get(key, 0.0) + cpu_s
+            self.wall[key] = self.wall.get(key, 0.0) + wall_s
+            if wall_s > self.max_wall.get(key, 0.0):
+                self.max_wall[key] = wall_s
+            if not self.ring or self.ring[-1][0] != second:
+                self.ring.append((second, self._Counter(), self._Counter()))
+            self.ring[-1][1][key] += cpu_s
+            self.ring[-1][2][key] += 1
+
+    def window(self, seconds: int, *, now: float | None = None):
+        cutoff = int(now if now is not None else time.time()) - seconds
+        cpu, calls = self._Counter(), self._Counter()
+        with self._lock:
+            for second, c, n in self.ring:
+                if second > cutoff:
+                    cpu.update(c)
+                    calls.update(n)
+        return cpu, calls
+
+    def exposition(self) -> list[str]:
+        with self._lock:
+            calls, cpu, wall, inflight = dict(self.calls), dict(self.cpu), dict(self.wall), dict(self.in_flight)
+        out = []
+        for name, kind, help_text, data in (
+                ("dashboard_executor_job_calls_total", "counter", "Default-executor jobs completed, by function.", calls),
+                ("dashboard_executor_job_cpu_seconds_total", "counter", "CPU seconds used by default-executor jobs, by function.", cpu),
+                ("dashboard_executor_job_wall_seconds_total", "counter", "Wall seconds of default-executor jobs, by function.", wall),
+                ("dashboard_executor_jobs_in_flight", "gauge", "Default-executor jobs running now, by function.", inflight)):
+            out.append(f"# HELP {name} {help_text}")
+            out.append(f"# TYPE {name} {kind}")
+            for key, value in sorted(data.items()):
+                out.append(f'{name}{{fn="{_escape(key)}"}} {value:.6g}')
+        return out
+
+
+def render_jobs(stats: JobStats, seconds: int, limit: int = 12) -> list[str]:
+    cpu, calls = stats.window(seconds)
+    if not cpu:
+        return [f"  executor jobs over the last {seconds}s: none finished"]
+    total = sum(cpu.values())
+    lines = [f"  executor jobs over the last {seconds}s by CPU ({total:.2f} CPU-seconds, "
+             f"{sum(calls.values())} jobs):"]
+    for key, cpu_s in cpu.most_common(limit):
+        lines.append(f"    {cpu_s:6.2f}s {cpu_s / total * 100:4.0f}%  {calls[key]:>5} jobs  "
+                     f"max {stats.max_wall.get(key, 0.0):5.2f}s wall  {key}")
+    return lines
+
+
+def instrumented_executor(stats: JobStats, max_workers: int | None = None):
+    """A ThreadPoolExecutor that times every job's CPU (thread_time) and wall
+    time under :func:`job_key`. Used as the event loop's default executor,
+    so every asyncio.to_thread is measured, however short."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    class InstrumentedExecutor(ThreadPoolExecutor):
+        def submit(self, fn, /, *args, **kwargs):
+            key = job_key(fn)
+
+            def timed():
+                stats.begin(key)
+                c0, w0 = time.thread_time(), time.monotonic()
+                try:
+                    return fn(*args, **kwargs)
+                finally:
+                    stats.end(key, time.thread_time() - c0, time.monotonic() - w0)
+
+            return super().submit(timed)
+
+    return InstrumentedExecutor(max_workers=max_workers, thread_name_prefix="asyncio")
+
 # ── the live state: metrics + spike dumps ────────────────────────────────
 
 
@@ -334,9 +453,10 @@ class Telemetry:
     def __init__(self, *, sampler: Sampler, dump_path: Path | None,
                  heartbeat_age: Callable[[], float] | None = None,
                  loop_thread_ident: Callable[[], int | None] | None = None,
-                 stacks: "StackSampler | None" = None) -> None:
+                 stacks: "StackSampler | None" = None, jobs: "JobStats | None" = None) -> None:
         self.sampler = sampler
         self.stacks = stacks
+        self.jobs = jobs
         self.dump_path = dump_path
         self.heartbeat_age = heartbeat_age or (lambda: 0.0)
         self.loop_thread_ident = loop_thread_ident or (lambda: None)
@@ -437,6 +557,9 @@ class Telemetry:
             # First dump of an episode covers the lead-in too; later ones the last 2 s.
             span = 5 if self._episode_dumps == 1 else 2
             lines[2:2] = render_window(self.stacks.window(span), span)
+        if self.jobs is not None:
+            span = 5 if self._episode_dumps == 1 else 2
+            lines[2:2] = render_jobs(self.jobs, span)
         lines.extend(self._recent_lock_events())
         self._write(lines)
 
@@ -533,6 +656,8 @@ class Telemetry:
         metric("dashboard_worker_start_time_seconds", "gauge",
                "Unix time this dashboard worker started (a change marks a restart or hot reload).",
                [({}, _WORKER_STARTED)])
+        if self.jobs is not None:
+            out.extend(self.jobs.exposition())
         try:
             from tools.graph import write_lock_stats
             out.extend(write_lock_stats.exposition())
@@ -699,9 +824,18 @@ def start(*, heartbeat_age: Callable[[], float], loop_thread_ident: Callable[[],
         return _telemetry
     _started = True
     stacks = StackSampler() if STACK_HZ > 0 else None
+    jobs = JobStats()
     _telemetry = Telemetry(sampler=Sampler(), dump_path=Path(log_dir) / "perf-spikes.log",
                            heartbeat_age=heartbeat_age, loop_thread_ident=loop_thread_ident,
-                           stacks=stacks)
+                           stacks=stacks, jobs=jobs)
+    # Every asyncio.to_thread in the worker runs on this executor, so each job
+    # is timed (CPU and wall, by function). Same pool size as asyncio's default.
+    try:
+        import asyncio
+        asyncio.get_running_loop().set_default_executor(
+            instrumented_executor(jobs, max_workers=min(32, (os.cpu_count() or 1) + 4)))
+    except RuntimeError:
+        logger.warning("perf telemetry: no running loop; executor jobs are not timed")
     if stacks is not None:
         threading.Thread(target=stacks.run, name="perf-stack-sampler", daemon=True).start()
     threading.Thread(target=_run, args=(_telemetry,), name="perf-telemetry", daemon=True).start()

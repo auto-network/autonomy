@@ -246,3 +246,42 @@ def test_large_gauges_keep_full_precision(tmp_path):
     t.tick()
     line = next(l for l in t.exposition().splitlines() if l.startswith("dashboard_worker_start_time_seconds "))
     assert abs(float(line.split()[1]) - pt._WORKER_STARTED) < 0.01
+
+
+def _spin(seconds):
+    end = time.thread_time() + seconds
+    while time.thread_time() < end:
+        pass
+    return "done"
+
+
+def test_every_to_thread_job_is_timed_by_function():
+    import asyncio
+    stats = pt.JobStats()
+
+    async def main():
+        asyncio.get_running_loop().set_default_executor(pt.instrumented_executor(stats, max_workers=4))
+        results = await asyncio.gather(*[asyncio.to_thread(_spin, 0.02) for _ in range(5)],
+                                       asyncio.to_thread(time.sleep, 0.05))
+        return results
+
+    results = asyncio.run(main())
+    assert results[:5] == ["done"] * 5
+    key = "tests.test_perf_telemetry._spin" if "tests.test_perf_telemetry._spin" in stats.calls else \
+        next(k for k in stats.calls if k.endswith("test_perf_telemetry._spin"))
+    assert stats.calls[key] == 5
+    assert stats.cpu[key] >= 0.09
+    sleep_key = next(k for k in stats.calls if k.endswith("sleep"))
+    assert stats.cpu[sleep_key] < 0.02 and stats.wall[sleep_key] >= 0.04
+    text = "\n".join(pt.render_jobs(stats, 5))
+    assert "6 jobs" in text and "_spin" in text
+    expo = "\n".join(stats.exposition())
+    assert "dashboard_executor_job_cpu_seconds_total{fn=" in expo and "_spin" in expo
+
+
+def test_job_key_unwraps_partials():
+    import contextvars
+    import functools
+    ctx = contextvars.copy_context()
+    assert pt.job_key(functools.partial(ctx.run, _spin, 1)).endswith("test_perf_telemetry._spin")
+    assert pt.job_key(functools.partial(_spin, 1)).endswith("test_perf_telemetry._spin")
