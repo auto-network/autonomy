@@ -2437,7 +2437,10 @@ def main() -> None:
     # process (pull succeeded, journal pruned, attach/reconcile/backfill
     # progress); third-party loggers stay at WARNING.
     for name in ("tools.network.fleet_sync", "tools.network.fleet_relay_sync",
-                 "tools.network.fleet_sync_scheduler"):
+                 "tools.network.fleet_sync_scheduler",
+                 # session-control: one line per request made and served,
+                 # the split of a remote call's time.
+                 "fleet.session_control"):
         logging.getLogger(name).setLevel(logging.INFO)
     _start_cpu_stack_sampler()
     # `kill -USR1 <pid>` dumps every thread's Python stack into this log —
