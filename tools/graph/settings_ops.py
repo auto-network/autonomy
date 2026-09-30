@@ -3354,6 +3354,9 @@ def upsert_by_key(
     payload_json = json.dumps(payload)
     db = _open(org, set_id)
     try:
+        # Signed before the write lock, once: the envelope covers only what
+        # this call already holds, and the lock is kept for the write alone.
+        envelope = _envelope_columns(db, org, set_id, schema_revision, key, state, payload)
         db.conn.execute("BEGIN IMMEDIATE")
         existing = db.conn.execute(
             "SELECT id FROM settings "
@@ -3364,7 +3367,6 @@ def upsert_by_key(
         ).fetchone()
         if existing is None:
             sid = str(uuid4())
-            envelope = _envelope_columns(db, org, set_id, schema_revision, key, state, payload)
             db.conn.execute(
                 "INSERT INTO settings(id, set_id, schema_revision, key, "
                 "payload, publication_state, created_at, updated_at, "
@@ -3375,7 +3377,6 @@ def upsert_by_key(
             )
         else:
             sid = existing["id"]
-            envelope = _envelope_columns(db, org, set_id, schema_revision, key, state, payload)
             current = db.conn.execute(
                 "SELECT signing_key FROM settings WHERE id = ?", (sid,)
             ).fetchone()
@@ -3993,8 +3994,12 @@ def override_setting(
         expires_at = schemas.cache_expires_at(
             target["set_id"], int(target["schema_revision"]), now,
         )
+        # The signer is prepared (its fold read) before the write lock; the
+        # deprecations signed below, inside it, reuse it.
+        prepared = prepare_signer(db, org)
         envelope = _envelope_columns(
-            db, org, target["set_id"], target["schema_revision"], target["key"], state, stored_payload,
+            db, org, target["set_id"], target["schema_revision"], target["key"], state,
+            stored_payload, prepared=prepared,
         )
         db.conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
@@ -4039,6 +4044,7 @@ def override_setting(
                 re_signed = _envelope_columns(
                     db, org, target["set_id"], target["schema_revision"], target["key"],
                     old_state, old_payload_obj, deprecated=True, successor_id=sid,
+                    prepared=prepared,
                 )
                 if re_signed[1] is None:
                     continue
