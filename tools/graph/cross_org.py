@@ -42,6 +42,7 @@ from .db import (
     GraphDBNotReady,
     is_org_slug,
     resolve_caller_db_path,
+    _pooled_read_handle,
 )
 
 
@@ -176,8 +177,11 @@ def _read_peer_subscription(caller_slug: str) -> list[str] | None:
     if not Path(path).exists():
         return None
     try:
-        db = GraphDB(path, mode="ro")
-    except sqlite3.Error:
+        # A borrowed pooled handle: this runs on every organization read
+        # (resolve_peers), and a fresh connection per call was 3,703 opens of
+        # personal.db in ten minutes on Home (2026-09-30, auto-dvdzl).
+        db = _pooled_read_handle(path)
+    except (sqlite3.Error, GraphDBNotReady):
         return None
     try:
         try:

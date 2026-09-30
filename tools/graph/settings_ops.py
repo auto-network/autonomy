@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Generic, Iterable, Iterator, TypeVar
 from uuid import uuid4
 
-from .db import GraphDB, GraphDBNotReady, _org_db_path, resolve_caller_db_path
+from .db import GraphDB, GraphDBNotReady, _org_db_path, _pooled_read_handle, resolve_caller_db_path
 from . import schemas
 
 
@@ -2413,60 +2413,6 @@ def _open(
 
         assert_org_writable(org)
     return GraphDB(_db_path(org), create=org in _CREATED_ON_DEMAND)
-
-
-_READ_POOL_LOCK = threading.Lock()
-
-
-class _BorrowedReadHandle:
-    """A pooled read-only :class:`GraphDB`, lent to one read.
-
-    Every settings read used to build a new read-only GraphDB and close it
-    when done: a connection open (with its per-connection pragmas) and a
-    close per read_set, the largest remaining Settings cost in the
-    dashboard's spike stacks after the ledger read went (2026-09-30,
-    auto-dvdzl). The handle is now pooled per database path with one
-    connection per thread, the way peer stores already are
-    (``cross_org.open_peer_db``). Callers keep calling ``close()``; on a
-    borrowed handle it returns the handle to the pool instead of closing it.
-    """
-
-    def __init__(self, db: GraphDB) -> None:
-        self._db = db
-
-    def __getattr__(self, name):
-        # Only reached for names this borrow has not set itself: an attribute
-        # assigned on the borrow (a test wrapping ``conn``) stays on the
-        # borrow and never touches the pooled handle other readers share.
-        return getattr(self.__dict__["_db"], name)
-
-    def close(self) -> None:
-        return None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args) -> None:
-        return None
-
-
-def _pooled_read_handle(path) -> "GraphDB":
-    """The process's pooled read-only handle for the database at *path*.
-    Pool entries share ``GraphDB``'s pool, so ``GraphDB.close_all_pooled()``
-    (dashboard shutdown, test teardown) closes them too."""
-    from .db import _CONNECTION_POOL
-
-    key = (str(Path(path).resolve()), "ro-path")
-    db = _CONNECTION_POOL.get(key)
-    if db is None:
-        with _READ_POOL_LOCK:
-            db = _CONNECTION_POOL.get(key)
-            if db is None:
-                db = GraphDB(path, mode="ro")
-                db._pooled = True
-                db._share_per_thread()
-                _CONNECTION_POOL[key] = db
-    return _BorrowedReadHandle(db)  # type: ignore[return-value]
 
 
 def _open_read(org: str | None, set_id: str | None = None) -> GraphDB:
