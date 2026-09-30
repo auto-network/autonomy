@@ -24,8 +24,6 @@ export interface BackupConfigV1 {
   keep_hourly?: number;
   /** Capture directories retained on the daily tier */
   keep_daily?: number;
-  /** Scheduled restore-drill cadence; 0 disables scheduled drills (on-demand still works) */
-  drill_cadence_days?: number;
   /** A drill running longer is killed and recorded as timeout */
   drill_timeout_minutes?: number;
   /** Whether captures push to the offsite restic repo */
@@ -34,9 +32,7 @@ export interface BackupConfigV1 {
   offsite_provider?: '' | 'b2' | 'r2' | 's3';
   /** Offsite bucket/repository name (configuration, not a secret) */
   offsite_bucket?: string;
-  /** Who triggers captures on this machine: the host crontab, or the plugin's background loop (stakeholder decision 3, graph://7c45a180-345) */
-  schedule_owner?: 'cron' | 'plugin';
-  /** backup.run rows kept per tier by the reconciler; Settings must stay bounded */
+  /** backup.run rows kept per tier; Settings must stay bounded */
   run_retention?: number;
   /** backup.drill rows kept */
   drill_retention?: number;
@@ -84,13 +80,13 @@ export interface BackupRunV1 {
  * Access pattern: keyed_per_entity (key strategy: stamp)
  */
 export interface BackupDrillV1 {
-  /** running while in flight; pass only when every check is ok; timeout when the subprocess was killed */
-  verdict: 'running' | 'pass' | 'fail' | 'timeout';
-  /** Operator-initiated or cadence-initiated */
+  /** pass only when every check is ok; timeout when the subprocess was killed */
+  verdict: 'pass' | 'fail' | 'timeout';
+  /** Operator-initiated; scheduled marks drills from the retired drill schedule */
   trigger?: 'manual' | 'scheduled';
   /** ISO-8601 start */
   started_at: string;
-  /** ISO-8601 end; empty while running */
+  /** ISO-8601 end */
   finished_at?: string;
   /** Wall-clock drill duration */
   duration_seconds?: number;
