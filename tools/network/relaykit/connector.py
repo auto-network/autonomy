@@ -73,7 +73,7 @@ from .frames import (
 from .stream_adapter import StreamAdapter
 from .stream_wire import CAP_TLS_STREAM
 from .fleet_stream import FleetStreamAdapter
-from .fleet_stream_wire import CAP_FLEET_DIRECTED_STREAM, CAP_SESSION_CONTROL
+from .fleet_stream_wire import CAP_FLEET_DIRECTED_STREAM, CAP_MEMBER_MESSAGE, CAP_SESSION_CONTROL
 from .hello import (
     HELLO_VERSION_2,
     HELLO_VERSION_3,
@@ -521,6 +521,7 @@ class TunnelConnector:
         fleet_stream_window=None,
         fleet_stream_offer=None,
         session_control_offer=None,
+        member_message_offer=None,
     ):
         self._url = f"{relay_url.rstrip('/')}/t/{org}"
         #: The relay ORIGIN and org this connector actually dialed. Kept
@@ -590,10 +591,15 @@ class TunnelConnector:
         #: async (FleetStreamEndpoint) -> bool for an inbound session-control/1
         #: offer (graph://7eb29bc8-31a §9.1); None refuses every offer.
         self._session_control_offer = session_control_offer
+        #: async (FleetStreamEndpoint) -> bool for an inbound member-message/1
+        #: pair (auto-qrmlg.9); served only on an organization tunnel.
+        self._member_message_offer = member_message_offer
         #: The live tunnel's session-control/1 adapter, or None between
         #: tunnels / when the relay did not negotiate the capability (an old
         #: relay): callers then refuse with a typed reason.
         self.session_streams: "FleetStreamAdapter | None" = None
+        #: The live tunnel's member-message/1 adapter, or None between tunnels.
+        self.member_streams: "FleetStreamAdapter | None" = None
         #: capability intersection the registry accepted on the live tunnel
         self.accepted_caps: tuple = ()
         #: reservation -> hostname this connector wants leased; re-registered
@@ -1166,7 +1172,15 @@ class TunnelConnector:
                 capability=CAP_SESSION_CONTROL,
             )
         self.session_streams = session
-        directed = tuple(a for a in (fleet, session) if a is not None)
+        # member-message/1: a third adapter over the same frames, same rule.
+        member = None
+        if CAP_MEMBER_MESSAGE in self.accepted_caps:
+            member = FleetStreamAdapter(
+                send_frame, self.control, on_offer=self._member_message_offer,
+                capability=CAP_MEMBER_MESSAGE,
+            )
+        self.member_streams = member
+        directed = tuple(a for a in (fleet, session, member) if a is not None)
         open_tasks: set = set()
 
         def drop(channel_id: bytes) -> None:
@@ -1209,6 +1223,15 @@ class TunnelConnector:
                             and meta.get("kind") == "session-control"
                         ):
                             if session is None or not session.dispatch_open(
+                                frame.channel_id, meta
+                            ):
+                                await send_frame(FRAME_CLOSE, frame.channel_id)
+                            continue
+                        if (
+                            isinstance(meta, dict)
+                            and meta.get("kind") == "member-message"
+                        ):
+                            if member is None or not member.dispatch_open(
                                 frame.channel_id, meta
                             ):
                                 await send_frame(FRAME_CLOSE, frame.channel_id)
@@ -1294,6 +1317,7 @@ class TunnelConnector:
         finally:
             self.fleet_streams = None
             self.session_streams = None
+            self.member_streams = None
             for directed_adapter in directed:
                 await directed_adapter.shutdown()
             if adapter is not None:

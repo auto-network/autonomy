@@ -64,6 +64,7 @@ from tools.network.relaykit.stream_wire import (
 )
 from tools.network.relaykit.fleet_stream_wire import (
     CAP_FLEET_DIRECTED_STREAM,
+    CAP_MEMBER_MESSAGE,
     CAP_SESSION_CONTROL,
 )
 from tools.network.relaykit.hello import (
@@ -1065,7 +1066,7 @@ CAP_DNS01 = "dns-01/1"
 #: intersection with what the connector offered.
 REGISTRY_CAPS = frozenset({
     CAP_HOST_LEASE, CAP_TLS_STREAM, CAP_DNS01, CAP_FLEET_DIRECTED_STREAM,
-    CAP_SESSION_CONTROL,
+    CAP_SESSION_CONTROL, CAP_MEMBER_MESSAGE,
 })
 
 #: serve:dns-01 op signature domain (auto-bhs3c).
@@ -2179,6 +2180,22 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
             try:
                 result = await directed_streams.open(
                     tunnel, args, capability=CAP_SESSION_CONTROL)
+            except DirectedStreamError as exc:
+                raise _CtrlError(str(exc)) from exc
+        elif op == "member-open":
+            # member-message/1 (graph://bace7454-c77, auto-qrmlg.9): one
+            # member's sealed message to a co-member's session, the same
+            # broker and credit contract, under its own capability, FRAME_OPEN
+            # kind and caps. The relay forwards ciphertext; the ORG hello
+            # inside the pair decides who.
+            if directed_streams is None:
+                raise _CtrlError("directed streams are not enabled on this relay")
+            if CAP_MEMBER_MESSAGE not in tunnel.caps:
+                raise _CtrlError("member-message/1 was not negotiated")
+            from .directed_stream import DirectedStreamError
+            try:
+                result = await directed_streams.open(
+                    tunnel, args, capability=CAP_MEMBER_MESSAGE)
             except DirectedStreamError as exc:
                 raise _CtrlError(str(exc)) from exc
         else:

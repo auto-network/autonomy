@@ -61,15 +61,26 @@ FLEET_STREAM_KIND = "fleet-stream"
 #: competes with sync for a pair.
 CAP_SESSION_CONTROL = "session-control/1"
 SESSION_CONTROL_KIND = "session-control"
+#: member-message/1 (graph://bace7454-c77 "The seam", bead auto-qrmlg.9):
+#: one member's dashboard sends one sealed message to a co-member's session
+#: on the machine that runs it. The same directed pair, brokered by the same
+#: relay code under the same credit contract, under its OWN capability,
+#: FRAME_OPEN kind and caps, so messaging never competes with sync or with
+#: the operator's own session control. Inside the pair the ORG hello proves
+#: who; the relay forwards ciphertext.
+CAP_MEMBER_MESSAGE = "member-message/1"
+MEMBER_MESSAGE_KIND = "member-message"
 #: The source's control op for each directed capability.
 OPEN_OP_FOR_CAPABILITY = {
     CAP_FLEET_DIRECTED_STREAM: "fleet-open",
     CAP_SESSION_CONTROL: "session-open",
+    CAP_MEMBER_MESSAGE: "member-open",
 }
 #: The FRAME_OPEN kind each directed capability's legs receive.
 KIND_FOR_CAPABILITY = {
     CAP_FLEET_DIRECTED_STREAM: FLEET_STREAM_KIND,
     CAP_SESSION_CONTROL: SESSION_CONTROL_KIND,
+    CAP_MEMBER_MESSAGE: MEMBER_MESSAGE_KIND,
 }
 
 #: The limits below are the contract's (graph://76721e75-73c, "Limits"),
@@ -106,9 +117,14 @@ FLEET_PAIRS_PER_PROCESS = 256
 SESSION_PAIRS_PER_TUNNEL = 24
 SESSION_PAIRS_PER_PROCESS = 128
 #: Per-capability (per tunnel, per process) admission caps.
+#: member-message/1: one short pair per message; the same ceilings as
+#: session control, counted separately.
+MEMBER_PAIRS_PER_TUNNEL = 24
+MEMBER_PAIRS_PER_PROCESS = 128
 PAIR_CAPS_FOR_CAPABILITY = {
     CAP_FLEET_DIRECTED_STREAM: (FLEET_PAIRS_PER_TUNNEL, FLEET_PAIRS_PER_PROCESS),
     CAP_SESSION_CONTROL: (SESSION_PAIRS_PER_TUNNEL, SESSION_PAIRS_PER_PROCESS),
+    CAP_MEMBER_MESSAGE: (MEMBER_PAIRS_PER_TUNNEL, MEMBER_PAIRS_PER_PROCESS),
 }
 #: Seconds the relay waits for both open-oks before resetting the offer.
 FLEET_OPEN_DEADLINE_S = 10.0

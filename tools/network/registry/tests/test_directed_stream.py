@@ -520,3 +520,51 @@ async def test_session_control_and_sync_caps_are_counted_separately(hub):
     assert broker.snapshot()["pairs"] == 2
     assert sorted(p.capability for p in broker._pairs.values()) == [
         CAP, CAP_SESSION_CONTROL]
+
+
+# -- member-message/1 (graph://bace7454-c77, auto-qrmlg.9) ---------------------------
+
+from tools.network.relaykit.fleet_stream_wire import (  # noqa: E402
+    CAP_MEMBER_MESSAGE,
+    MEMBER_MESSAGE_KIND,
+)
+
+
+@pytest.mark.asyncio
+async def test_member_message_needs_its_own_capability_on_both_legs(hub, broker):
+    a = tunnel(hub, MACHINE_A, caps=(CAP, CAP_MEMBER_MESSAGE))
+    tunnel(hub, MACHINE_B, caps=(CAP, CAP_SESSION_CONTROL))   # a node without the op
+    with pytest.raises(ds.DirectedStreamError, match=PAIR_DESTINATION_CAPABILITY):
+        await broker.open(a, args(), capability=CAP_MEMBER_MESSAGE)
+    assert broker.snapshot()["pairs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_member_message_legs_receive_the_member_message_kind(hub, broker):
+    a = tunnel(hub, MACHINE_A, caps=(CAP, CAP_MEMBER_MESSAGE))
+    b = tunnel(hub, MACHINE_B, caps=(CAP, CAP_MEMBER_MESSAGE))
+    await broker.open(a, args(), capability=CAP_MEMBER_MESSAGE)
+    for t in (a, b):
+        (frame,) = t.ws.of(FRAME_OPEN)
+        meta = json.loads(frame.payload)
+        assert meta["kind"] == MEMBER_MESSAGE_KIND
+        parse_fleet_open(meta, kind=MEMBER_MESSAGE_KIND)
+        with pytest.raises(Exception):
+            parse_fleet_open(meta, kind=SESSION_CONTROL_KIND)   # not a session-control OPEN
+    assert [p.capability for p in broker._pairs.values()] == [CAP_MEMBER_MESSAGE]
+
+
+@pytest.mark.asyncio
+async def test_member_message_caps_are_counted_apart_from_sync_and_control(hub):
+    broker = ds.DirectedStreamBroker(hub, pairs_per_tunnel=1, pairs_per_process=1)
+    a = tunnel(hub, MACHINE_A, caps=(CAP, CAP_SESSION_CONTROL, CAP_MEMBER_MESSAGE))
+    tunnel(hub, MACHINE_B, caps=(CAP, CAP_SESSION_CONTROL, CAP_MEMBER_MESSAGE))
+    await broker.open(a, args(op="01" * 16))                                     # sync at its cap
+    await broker.open(a, args(op="02" * 16), capability=CAP_SESSION_CONTROL)     # control at its cap
+    with pytest.raises(ds.DirectedStreamError, match=ds.PAIR_CAP_PROCESS):
+        await broker.open(a, args(op="03" * 16))
+    # neither blocks a message pair
+    await broker.open(a, args(op="04" * 16), capability=CAP_MEMBER_MESSAGE)
+    assert broker.snapshot()["pairs"] == 3
+    assert sorted(p.capability for p in broker._pairs.values()) == sorted(
+        [CAP, CAP_SESSION_CONTROL, CAP_MEMBER_MESSAGE])

@@ -241,3 +241,20 @@ def test_an_empty_message_is_a_valid_frame_of_four_bytes():
     asm = fw.MessageAssembler()
     asm.feed(fw.encode_message(b""))
     assert asm.next_message() == (b"", 1, 4)
+
+
+def test_every_directed_capability_names_its_open_op_kind_and_caps():
+    """The three directed capabilities are looked up by the same tables on the
+    relay (open op → capability, capability → FRAME_OPEN kind, capability →
+    caps); a capability missing from any table is a pair that can never open."""
+    from tools.network.relaykit.fleet_stream_wire import (
+        CAP_FLEET_DIRECTED_STREAM, CAP_MEMBER_MESSAGE, CAP_SESSION_CONTROL,
+        KIND_FOR_CAPABILITY, OPEN_OP_FOR_CAPABILITY, PAIR_CAPS_FOR_CAPABILITY,
+    )
+    caps = {CAP_FLEET_DIRECTED_STREAM, CAP_SESSION_CONTROL, CAP_MEMBER_MESSAGE}
+    assert set(OPEN_OP_FOR_CAPABILITY) == caps == set(KIND_FOR_CAPABILITY) == set(PAIR_CAPS_FOR_CAPABILITY)
+    assert OPEN_OP_FOR_CAPABILITY[CAP_MEMBER_MESSAGE] == "member-open"
+    assert KIND_FOR_CAPABILITY[CAP_MEMBER_MESSAGE] == "member-message"
+    assert len(set(OPEN_OP_FOR_CAPABILITY.values())) == 3 and len(set(KIND_FOR_CAPABILITY.values())) == 3
+    per_tunnel, per_process = PAIR_CAPS_FOR_CAPABILITY[CAP_MEMBER_MESSAGE]
+    assert 0 < per_tunnel <= per_process
