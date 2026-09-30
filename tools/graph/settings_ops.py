@@ -109,106 +109,6 @@ def _row_col(row, name):
         return None
 
 
-#: THE fold cache — the single one (graph://21a0da9e-1c2 "The fold";
-#: auto-7c7po warns against a second ever existing). Keyed on the ledger's
-#: current HEADS, so any number of resolutions against an unchanged ledger
-#: build nothing and a ledger advancement invalidates by key inequality,
-#: never by a sweep. The cached value is the whole FoldState, so every
-#: time-independent query — membership, backward key resolution
-#: (persona_for_key), key revocation — is served from one cache by every
-#: consumer (resolution here; the boundary, auto-wah16, next). Delegation
-#: authority is ref_ts-dependent and MUST NOT be read from a cached view —
-#: a cached view silently extends an expired delegation. Owned by
-#: resolution (auto-y2ubq) because it is the first consumer.
-_FOLD_VIEW_CACHE: dict[str, tuple[tuple, Any]] = {}
-_fold_builds = 0  # how many times a fold was actually constructed
-
-
-def _ledger_event_ids(slug: str) -> "tuple | None":
-    """The ids of every event the org ledger holds, without hydrating it.
-
-    An event IS its Settings row (design graph://53b5bb04-bc0): the rows of
-    ``autonomy.org.ledger-event`` in the org's own DB are the whole ledger,
-    whether this node appended them or replication delivered a co-member's.
-    Their sorted ids are the cache KEY, read per lookup; building the FOLD is
-    what the key exists to avoid. Any event that lands changes the key, so
-    the fold is rebuilt exactly once per ledger advancement. ``None`` means
-    no ledger at all; an empty tuple means a store with no events.
-    """
-    from tools.network.ledger import org_ledger_db_path
-    from tools.network.ledger.settings_bridge import SET_ID as _LEDGER_EVENT_SET_ID
-
-    path = org_ledger_db_path(slug)
-    if not path.exists():
-        return None
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
-        return tuple(sorted(
-            r[0] for r in conn.execute(
-                'SELECT "key" FROM settings WHERE set_id=?',
-                (_LEDGER_EVENT_SET_ID,),
-            )
-        ))
-    except sqlite3.Error:
-        # No ledger tables, or a database that cannot be read at all (a
-        # corrupt file raises DatabaseError, not OperationalError). Either
-        # way the answer is "no usable ledger": the org's signed rows fail
-        # eligibility closed rather than the whole read failing open.
-        return None
-    finally:
-        conn.close()
-
-
-def _org_fold_view(slug: "str | None"):
-    """The current FoldState for org *slug*, or ``None``.
-
-    Built ONCE PER LEDGER ADVANCEMENT: the cache above, keyed by the ids of
-    the ledger's event rows, serves every call whose key matches, so resolution cost does not scale
-    with reads and a per-row fold read cannot creep back in. Callers may
-    read only the time-independent surface from the returned view —
-    ``members``, ``persona_for_key``, ``key_revoked`` — never delegation
-    authority (see the cache comment).
-
-    Fail-closed: no founded ledger, no ledger tables, or a fold that cannot
-    be built all yield ``None``.
-    """
-    if not slug:
-        return None
-    event_ids = _ledger_event_ids(slug)
-    if event_ids is None or not event_ids:
-        return None
-    cached = _FOLD_VIEW_CACHE.get(slug)
-    if cached is not None and cached[0] == event_ids:
-        return cached[1]
-    try:
-        from tools.network.ledger import LedgerStore, org_ledger_db_path
-
-        global _fold_builds
-        _fold_builds += 1
-        store = LedgerStore(org_ledger_db_path(slug))
-        try:
-            if not store.ledger.genesis_id:
-                return None
-            state = store.fold()
-        finally:
-            store.close()
-    except Exception:
-        logger.warning(
-            "eligibility: fold for org %r unavailable; its signed rows "
-            "will not resolve", slug, exc_info=True,
-        )
-        return None
-    _FOLD_VIEW_CACHE[slug] = (event_ids, state)
-    return state
-
-
-def _org_fold_members(slug: "str | None") -> frozenset:
-    """The current fold's member personas for org *slug* (empty when the
-    fold is unavailable — a signed row then fails eligibility, fail-closed)."""
-    state = _org_fold_view(slug)
-    return frozenset(state.members) if state is not None else frozenset()
-
-
 def _resolution_peers(set_id: str, resolved_org: "str | None",
                       peers: "list[str] | None") -> list[str]:
     """THE candidate-store selection, shared by every resolution-shaped
@@ -259,11 +159,17 @@ def _rank_candidates(
 ):
     """Filter and order candidate base rows by the six-step slot ordering.
 
-    Steps: 1 eligibility (a signed row's terminal persona must be in the
-    OWNING org's current fold), then the plausibility window (a row whose
-    ``signed_at`` is beyond the reader's window is stored and ignored, not
-    refused); 2 rung; 3 store; 4 schema revision; 5 ``signed_at``; 6 the
-    persona hash. Unsigned rows take no eligibility test, carry no
+    Steps: 1 the plausibility window (a signed row whose ``signed_at`` is
+    beyond the reader's window is stored and ignored, not refused); 2 rung;
+    3 store; 4 schema revision; 5 ``signed_at``; 6 the persona hash.
+
+    No ledger or fold state is read here (operator ruling 2026-09-30,
+    graph://21a0da9e-1c2 comment 52fb6d84): a signed row was validated at the
+    write and sync boundaries, and a member leaving the organization does not
+    un-resolve the rows they wrote. Membership used to be checked here per
+    signed row, and every check opened the organization database to read the
+    ledger's event ids — the largest Settings cost in the dashboard's spike
+    stacks. Unsigned rows take no eligibility test, carry no
     ``signed_at``, and fall back to the legacy created_at/rowid tiebreak —
     they have a single writer, so that value is not cross-store state.
 
@@ -284,10 +190,6 @@ def _rank_candidates(
         # after the pass, an unsigned row in a founded org store must not
         # resolve. Ratified 2026-08-19 (crypto pillar).
         if persona is not None:
-            if persona not in _org_fold_members(src_org):
-                if dropped is not None:
-                    dropped.ineligible_signer += 1
-                continue
             signed_at = _row_col(row, "signed_at")
             if signed_at is not None and not clock.settings_signed_at_is_plausible(
                 signed_at, now=now
@@ -1315,9 +1217,6 @@ class DropAccounting:
     above_target_no_downgrade: int = 0
     schema_invalid: int = 0
     deprecated_filtered: int = 0
-    #: Signed slots whose terminal persona is not in the owning org's
-    #: current fold — a departed member's rows, dropped at eligibility.
-    ineligible_signer: int = 0
     #: Signed slots whose ``signed_at`` is beyond the reader's plausibility
     #: window — stored and ignored until the clock reaches them.
     beyond_window: int = 0

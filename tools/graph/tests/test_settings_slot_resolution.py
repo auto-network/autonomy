@@ -367,9 +367,12 @@ def test_a_future_dated_row_is_stored_ignored_then_resolves(org, orgs_env):
     assert resolve(now=future)[KEY].payload["who"] == b.public_hex[:8]
 
 
-# ── eligibility: the roster is the ledger's answer ───────────
+# ── no ledger read: a departed member's rows still count ────
 
-def test_a_departed_members_slot_stops_resolving(orgs_env):
+def test_a_departed_members_slot_keeps_resolving(orgs_env):
+    """Operator ruling 2026-09-30 (graph://21a0da9e-1c2 comment 52fb6d84):
+    a signed row was validated when it was written or synced, and removing
+    a member does not un-resolve what they wrote. The latest write wins."""
     org = OrgEvents()
     a, b = org.personas
     root = orgs_env("departed")
@@ -388,25 +391,26 @@ def test_a_departed_members_slot_stops_resolving(orgs_env):
 
     resolved = settings_ops.read_set(SET_ID, org="signedorg", now=NOW_MS)
     by_key = {m.key: m for m in resolved.members}
-    assert by_key[KEY].payload["who"] == a.public_hex[:8]
-    assert resolved.dropped.ineligible_signer == 1
-    # Nothing swept: the row is retained and re-admission needs no rule.
-    conn = sqlite3.connect(path)
-    try:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM settings WHERE terminal_persona = ?",
-            (b.public_hex,),
-        ).fetchone()[0] == 1
-    finally:
-        conn.close()
+    assert by_key[KEY].payload["who"] == b.public_hex[:8]
 
-    # A store that has NOT folded the revocation still resolves b —
-    # governed by what it knows, which is the convergence property working.
-    stale_root = orgs_env("departed-stale")
-    stale_path = make_store(stale_root, org, events=org.events[:-1])
-    deliver(stale_path, slot_row(a, NOW_MS - 2 * MIN_MS))
-    deliver(stale_path, slot_row(b, NOW_MS - MIN_MS))
-    assert resolve()[KEY].payload["who"] == b.public_hex[:8]
+
+def test_a_settings_read_never_opens_the_ledger(orgs_env, monkeypatch):
+    """Resolution reads rows only: no fold, no ledger store, no event ids."""
+    import tools.network.ledger as ledger_pkg
+
+    org = OrgEvents()
+    a, b = org.personas
+    root = orgs_env("no-ledger-read")
+    path = make_store(root, org)
+    deliver(path, slot_row(a, NOW_MS - 2 * MIN_MS))
+    deliver(path, slot_row(b, NOW_MS - MIN_MS))
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a settings read opened the ledger")
+
+    monkeypatch.setattr(ledger_pkg, "LedgerStore", refuse)
+    for _ in range(3):
+        assert resolve()[KEY].payload["who"] == b.public_hex[:8]
 
 
 # ── contention is visible ────────────────────────────────────
@@ -443,77 +447,6 @@ def test_contested_keys_reports_the_winning_rung_and_store_only(
         conn.close()
     GraphDB.close_all_pooled()
     assert settings_ops.contested_keys(SET_ID, org="signedorg", now=NOW_MS) == []
-
-
-# ── the fold is built once per ledger advancement ────────────
-
-def test_the_fold_builds_once_per_ledger_advancement_not_once_per_call(
-    orgs_env,
-):
-    org = OrgEvents()
-    a, b = org.personas
-    root = orgs_env("fold-cache")
-    path = make_store(root, org)
-    deliver(path, slot_row(a, NOW_MS - MIN_MS))
-    deliver(path, slot_row(b, NOW_MS - 2 * MIN_MS))
-
-    settings_ops._FOLD_VIEW_CACHE.clear()
-    settings_ops._fold_builds = 0
-    for _ in range(5):
-        resolve()
-    assert settings_ops._fold_builds == 1, (
-        "five resolutions against an unchanged ledger must build one fold"
-    )
-
-    org.revoke_claim(1)
-    store = LedgerStore(path)
-    try:
-        store.append(org.events[-1])
-    finally:
-        store.close()
-    GraphDB.close_all_pooled()
-    for _ in range(3):
-        resolve()
-    assert settings_ops._fold_builds == 2, (
-        "a ledger advancement invalidates by heads inequality, exactly once"
-    )
-
-
-def test_a_replicated_event_row_rebuilds_the_fold(orgs_env):
-    """A co-member's event arrives as a replicated Settings row, never
-    through this node's ``append``. The resolver keys its fold cache on the
-    event rows themselves (design graph://53b5bb04-bc0), so the arrival
-    alone rebuilds the fold, exactly once."""
-    from tools.network.ledger.settings_bridge import _insert
-
-    org = OrgEvents()
-    a, b = org.personas
-    root = orgs_env("fold-replicated")
-    path = make_store(root, org)
-    deliver(path, slot_row(a, NOW_MS - MIN_MS))
-    deliver(path, slot_row(b, NOW_MS - 2 * MIN_MS))
-
-    settings_ops._FOLD_VIEW_CACHE.clear()
-    settings_ops._fold_builds = 0
-    resolve()
-    assert settings_ops._fold_builds == 1
-
-    # The revocation lands the way replication delivers it: a bare row on
-    # its own connection, no store, no append.
-    org.revoke_claim(1)
-    event = org.events[-1]
-    raw = sqlite3.connect(path)
-    try:
-        with raw:
-            assert _insert(raw, event.event_id, event.to_json().decode("utf-8"))
-    finally:
-        raw.close()
-    GraphDB.close_all_pooled()
-    for _ in range(3):
-        resolve()
-    assert settings_ops._fold_builds == 2, (
-        "an event row that arrived by replication is a ledger advancement"
-    )
 
 
 # ── the store ladder: most local wins ────────────────────────
