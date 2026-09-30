@@ -109,8 +109,16 @@ async def forward(bus, sub_id: str, *, control=None) -> None:
                 control, "session-control-publish",
                 {"sub_id": sub_id, "record": {"topic": topic, "data": payload}})
             if not reply.get("ok"):
-                # An event is never dropped: a subscription this event cannot
-                # cross ends, and its subscriber subscribes again.
+                if reply.get("error_kind") == "event-too-large":
+                    # This one event never reaches the subscriber, even though
+                    # the subscription restarts: say which, so it is visible.
+                    logger.warning(
+                        "remote sessions: %s for %s is too large to forward; "
+                        "ending subscription %s", topic,
+                        payload.get("session_id") or payload.get("id")
+                        if isinstance(payload, dict) else "the registry", sub_id[:8])
+                # A subscription this event cannot cross ends, and its
+                # subscriber subscribes again.
                 if reply.get("error_kind") not in (
                         "subscription-not-found", "subscription-behind"):
                     await _end(control, sub_id)
