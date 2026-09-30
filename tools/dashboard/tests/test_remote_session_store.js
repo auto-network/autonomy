@@ -111,3 +111,17 @@ describe('what people read for a remote session', () => {
   });
 });
 
+describe('the machine subscription state', () => {
+  it('shows a machine\'s sessions unreachable while its subscription is down, and back when live', async () => {
+    const h = makeStore(() => [PRESENCE]);
+    h.handlers['session:remote-rows']({ rows: [ROW] });
+    h.handlers['session:remote-machines']({ [PUB]: false });
+    assert.equal(h.sessions()[KEY].machineReachable, false);
+    // A presence re-read never turns it back on by itself.
+    await h.win.loadRemotePresence();
+    assert.equal(h.sessions()[KEY].machineReachable, false);
+    h.handlers['session:remote-machines']({ [PUB]: true });
+    assert.equal(h.sessions()[KEY].machineReachable, true);
+  });
+});
+

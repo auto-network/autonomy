@@ -1262,6 +1262,23 @@ window.ensureSessionMessages = function() {
     _emitSessionStoreChanged('registry');
   });
 
+  // Whether each machine's live subscription is up (remote_sessions
+  // .Subscriptions): its sessions read unreachable while it is not, so a
+  // dead or reconnecting channel never shows a frozen state as current.
+  var _remoteMachines = {};   // machine_pub -> subscription live
+  window.registerHandler('session:remote-machines', function(machines) {
+    _remoteMachines = machines || {};
+    var all = Alpine.store('sessions');
+    var changed = false;
+    for (var id in all) {
+      var pub = all[id].machinePub;
+      if (!pub || !(pub in (machines || {}))) continue;
+      var reachable = !!machines[pub];
+      if (all[id].machineReachable !== reachable) { all[id].machineReachable = reachable; changed = true; }
+    }
+    if (changed) _emitSessionStoreChanged('registry');
+  });
+
   window.registerHandler('session:ended', function(data) {
     var id = data && data.id;
     if (!id || String(id).indexOf('@') === -1) return;   // this machine: the registry
@@ -1279,7 +1296,8 @@ window.ensureSessionMessages = function() {
     store._presence = true;
     store.machine = r.machine;
     store.machinePub = r.machine_pub;
-    store.machineReachable = r.machine_reachable !== false;
+    // Reachability is the live subscription's, never sync recency.
+    store.machineReachable = _remoteMachines[r.machine_pub] !== false;
     store.project = r.project || store.project || '';
     store.sessionType = r.type || store.sessionType || '';
     if (r.label) store.label = r.label;

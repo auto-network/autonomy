@@ -81,7 +81,7 @@ def test_forwarded_rows_are_keyed_by_machine_pub_and_named_for_display():
             "data": [{"session_id": "auto-7", "startup_state": "harness_starting"}]}}, "p")
 
     asyncio.run(run())
-    (topic, data), = bus.events
+    (topic, data), = [e for e in bus.events if e[0] == remote_sessions.REMOTE_ROWS_TOPIC]
     assert topic == remote_sessions.REMOTE_ROWS_TOPIC
     (row,) = data["rows"]
     assert (row["session_id"], row["machine"], row["machine_pub"], row["startup_state"]) == (
@@ -151,3 +151,57 @@ def test_presence_rows_are_keyed_by_machine_pub(monkeypatch):
     (row,) = fleet_machines.presence_rows()
     assert (row["session_id"], row["machine"], row["machine_pub"], row["label"]) == (
         f"auto-9@{SJC}", "sjc-2", SJC, "Sweep")
+
+
+
+def test_a_forwarding_failure_ends_the_subscription_instead_of_leaving_it_open():
+    """Live 2026-09-30 04:03:44Z on SJC-2: one control-socket error stopped the
+    forwarder and left Home's subscription open with nothing feeding it."""
+    async def run():
+        bus = EventBus()
+        calls = []
+
+        def control(op, args, **_kw):
+            calls.append(op)
+            if op == "session-control-publish":
+                raise RuntimeError("serving connector closed the control connection")
+            return {"ok": True}
+
+        task = asyncio.create_task(remote_sessions.forward(bus, "sub", control=control))
+        await asyncio.sleep(0)
+        await bus.broadcast("session:ended", {"id": "auto-9"})
+        await asyncio.wait_for(task, 5)
+        assert calls == ["session-control-publish", "session-control-end"]
+
+    asyncio.run(run())
+
+
+def test_a_refused_event_ends_the_subscription_rather_than_being_dropped():
+    async def run():
+        bus = EventBus()
+        calls = []
+
+        def control(op, args, **_kw):
+            calls.append(op)
+            return {"ok": False, "error_kind": "event-too-large"} \
+                if op == "session-control-publish" else {"ok": True}
+
+        task = asyncio.create_task(remote_sessions.forward(bus, "sub", control=control))
+        await asyncio.sleep(0)
+        await bus.broadcast("session:ended", {"id": "auto-9"})
+        await asyncio.wait_for(task, 5)
+        assert calls == ["session-control-publish", "session-control-end"]
+
+    asyncio.run(run())
+
+
+def test_each_machines_subscription_state_is_published_as_it_changes():
+    subs, bus = _subscriptions()
+
+    async def run():
+        await subs._apply({"machine_pub": SJC, "subscribed": True}, "p")
+        await subs._apply({"machine_pub": SJC, "end": "subscription-lost", "refused": True}, "p")
+
+    asyncio.run(run())
+    states = [d for t, d in bus.events if t == remote_sessions.REMOTE_MACHINES_TOPIC]
+    assert states == [{SJC: True}, {SJC: False}]

@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 TOPICS = ("session:registry", "session:messages", "session:ended")
 REMOTE_ROWS_TOPIC = "session:remote-rows"
+#: {machine_pub: connected}: whether each machine's subscription is live.
+REMOTE_MACHINES_TOPIC = "session:remote-machines"
 #: The event proxy's bound: a bus queue this far behind drops events.
 MAX_PENDING = 256
 #: ctl long-poll for received events.
@@ -67,6 +69,24 @@ def _project(topic: str, data):
     return data if isinstance(data, dict) else None
 
 
+#: Attempts to end a subscription whose forwarding failed, one second apart.
+END_ATTEMPTS = 3
+
+
+async def _end(control, sub_id: str) -> None:
+    """End subscription *sub_id* so its subscriber sees it lost and
+    subscribes again. A connector that never answers ends the channel itself
+    (its process or tunnel is gone)."""
+    for attempt in range(END_ATTEMPTS):
+        try:
+            await asyncio.to_thread(control, "session-control-end", {"sub_id": sub_id})
+            return
+        except Exception:
+            if attempt + 1 < END_ATTEMPTS:
+                await asyncio.sleep(1.0)
+    logger.warning("remote sessions: could not end subscription %s", sub_id[:8])
+
+
 async def forward(bus, sub_id: str, *, control=None) -> None:
     """Publish this machine's session events on subscription *sub_id* until
     the connector says it has ended."""
@@ -80,8 +100,7 @@ async def forward(bus, sub_id: str, *, control=None) -> None:
             if queue.qsize() > MAX_PENDING:
                 # Never drop an event: end the subscription, and the
                 # subscriber subscribes again.
-                await asyncio.to_thread(control, "session-control-end",
-                                        {"sub_id": sub_id})
+                await _end(control, sub_id)
                 return
             payload = _project(topic, data)
             if payload is None:
@@ -89,12 +108,20 @@ async def forward(bus, sub_id: str, *, control=None) -> None:
             reply = await asyncio.to_thread(
                 control, "session-control-publish",
                 {"sub_id": sub_id, "record": {"topic": topic, "data": payload}})
-            if not reply.get("ok") and reply.get("error_kind") in (
-                    "subscription-not-found", "subscription-behind"):
+            if not reply.get("ok"):
+                # An event is never dropped: a subscription this event cannot
+                # cross ends, and its subscriber subscribes again.
+                if reply.get("error_kind") not in (
+                        "subscription-not-found", "subscription-behind"):
+                    await _end(control, sub_id)
                 return
+    except asyncio.CancelledError:
+        raise
     except Exception:
-        logger.warning("remote sessions: forwarding on %s stopped", sub_id[:8],
-                       exc_info=True)
+        # Never a subscription left open with nothing forwarding on it.
+        logger.warning("remote sessions: forwarding on %s failed; ending it",
+                       sub_id[:8], exc_info=True)
+        await _end(control, sub_id)
     finally:
         bus.unsubscribe(queue)
 
@@ -174,6 +201,7 @@ class Subscriptions:
             return
         self._names = {pub: fleet_machines._label(pub, roster, names)
                        for pub in roster if pub != local.machine_pub}
+        self._publish_machines()
         # The connector holds the channels. Until it answers -- at startup,
         # and after it restarted, which ended every channel without a word --
         # nothing is subscribed; on its first answer, subscribe to everyone.
@@ -196,6 +224,7 @@ class Subscriptions:
                     logger.info("remote sessions: the connector is not answering; "
                                 "resubscribing when it does")
                     self._live.clear()
+                    self._publish_machines()
                 stale = True
                 await asyncio.sleep(RESUBSCRIBE_INITIAL_S)
                 continue
@@ -205,6 +234,12 @@ class Subscriptions:
                 continue
             for item in reply.get("items") or []:
                 await self._apply(item, persona)
+
+    def _publish_machines(self) -> None:
+        """Each machine's subscription state: its sessions are shown
+        reachable exactly while it is live."""
+        self._bus.broadcast_sync(REMOTE_MACHINES_TOPIC,
+                                 {pub: pub in self._live for pub in self._names})
 
     async def _subscribe(self, pub: str, persona: str) -> None:
         await asyncio.to_thread(self._control, "session-control-subscribe",
@@ -225,11 +260,13 @@ class Subscriptions:
             return
         if item.get("subscribed"):
             self._live.add(pub)
+            self._publish_machines()
             self._retry.pop(pub, None)
             logger.info("remote sessions: subscribed to %s", self._names[pub])
             return
         if "end" in item:
             self._live.discard(pub)
+            self._publish_machines()
             logger.info("remote sessions: subscription to %s ended: %s %s",
                         self._names[pub], item.get("end"), item.get("detail", ""))
             if not item.get("refused"):
