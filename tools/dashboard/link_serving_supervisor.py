@@ -755,34 +755,52 @@ class TunnelUnavailable(RuntimeError):
         self.kind = kind
 
 
-def control(org: str, op: str, args: dict, *, timeout: float = 12.0) -> dict:
-    """Drive one D19 control op on *org*'s serving tunnel (register §3/§4).
+#: scope -> its connector's ``.ctl`` descriptor path. Deriving it runs
+#: serve_cert_state(), SQLite and the Settings ledger: ~125 ms of CPU per
+#: control call on SJC-2 (2026-09-30), paid by every session-control poll and
+#: reply. The path is resolved once and again only when it stops working;
+#: the descriptor itself is read on every call, so a new port is seen at once.
+_ctl_paths: dict[str, str] = {}
 
-    Reads the connector's ``.ctl`` descriptor, opens the loopback control
-    listener, and returns the connector's reply. Raises
-    :class:`TunnelUnavailable` when no connector/tunnel is up — the caller
-    (the publish executor) turns that into ``ensure(org)`` + a retry."""
-    _require_scope(org)
+
+def _resolve_ctl_path(org: str) -> str:
     state = serve_cert_state(org)
     work_base = state.get("work_base")
     if not work_base:
+        _ctl_paths.pop(org, None)
         raise TunnelUnavailable(
             "no serving delegate is provisioned for this org — provision "
             "serving, then retry", kind="no-delegate")
-    ctl_path = _control_path_for(work_base)
+    path = _ctl_paths[org] = _control_path_for(work_base)
+    return path
+
+
+class _NotDelivered(TunnelUnavailable):
+    """The op never reached a connector: no readable descriptor at the path,
+    or nothing accepted the connection. Safe to resolve the path again and
+    retry; a failure after the op was sent never is (it may have run)."""
+
+
+def _control_exchange(ctl_path: str, op: str, args: dict, timeout: float) -> bytes:
     try:
         with open(ctl_path) as fh:
             descriptor = json.load(fh)
         port = int(descriptor["port"])
         auth = descriptor["auth"]
     except (OSError, ValueError, KeyError) as exc:
-        raise TunnelUnavailable(
+        raise _NotDelivered(
             "the serving connector is not running (no control listener) — "
             f"start serving and retry ({exc})", kind="no-listener") from exc
 
     request = json.dumps({"auth": auth, "op": op, "args": args}) + "\n"
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    except OSError as exc:
+        raise _NotDelivered(
+            f"could not reach the serving connector's control listener ({exc})",
+            kind="unreachable") from exc
+    try:
+        with sock:
             sock.sendall(request.encode("utf-8"))
             sock.settimeout(timeout)
             buf = b""
@@ -795,6 +813,28 @@ def control(org: str, op: str, args: dict, *, timeout: float = 12.0) -> dict:
         raise TunnelUnavailable(
             f"could not reach the serving connector's control listener ({exc})",
             kind="unreachable") from exc
+    return buf
+
+
+def control(org: str, op: str, args: dict, *, timeout: float = 12.0) -> dict:
+    """Drive one D19 control op on *org*'s serving tunnel (register §3/§4).
+
+    Reads the connector's ``.ctl`` descriptor, opens the loopback control
+    listener, and returns the connector's reply. Raises
+    :class:`TunnelUnavailable` when no connector/tunnel is up — the caller
+    (the publish executor) turns that into ``ensure(org)`` + a retry."""
+    _require_scope(org)
+    cached = _ctl_paths.get(org)
+    if cached is None:
+        buf = _control_exchange(_resolve_ctl_path(org), op, args, timeout)
+    else:
+        try:
+            buf = _control_exchange(cached, op, args, timeout)
+        except _NotDelivered:
+            # The connector moved (a new serving key, a new working
+            # directory) or is gone, and the op never reached it: resolve
+            # the path once more and try there.
+            buf = _control_exchange(_resolve_ctl_path(org), op, args, timeout)
     if b"\n" not in buf:
         raise TunnelUnavailable("serving connector closed the control connection",
                                kind="closed")
@@ -1868,6 +1908,9 @@ class ServingSupervisor:
                 ctl_path=ctl_path,
             )
             _link_connector_log(org, _log_path_for(work_base))
+            # A new connector (possibly a new serving key, so a new working
+            # directory): control() resolves its descriptor afresh.
+            _ctl_paths.pop(org, None)
         except Exception:
             self._release_lock(org)
             raise

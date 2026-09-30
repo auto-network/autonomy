@@ -1764,3 +1764,154 @@ def test_a_log_dir_that_cannot_be_written_never_stops_a_launch(tmp_path):
     blocked = tmp_path / "file"
     blocked.write_text("")
     sup._link_connector_log("personal", str(tmp_path / "x.log"), logs_dir=blocked / "logs")
+
+
+# ── control(): the .ctl path is resolved once, not per call (auto-aoty7) ──
+
+
+class _CtlListener:
+    """A loopback control listener answering each line with {"ok": true}
+    after *delay* seconds."""
+
+    def __init__(self, delay: float = 0.0):
+        import socket as _socket
+        import threading
+
+        self.sock = _socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        self.ops = []
+        self.delay = delay
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        import json as _json
+
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                data = b""
+                while b"\n" not in data:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                if not data:
+                    continue
+                self.ops.append(_json.loads(data)["op"])
+                time.sleep(self.delay)
+                with contextlib.suppress(OSError):
+                    conn.sendall(b'{"ok": true}\n')
+
+    def close(self):
+        import socket as _socket
+
+        # close() alone does not stop a socket another thread is blocked in
+        # accept() on: it keeps listening.
+        with contextlib.suppress(OSError):
+            self.sock.shutdown(_socket.SHUT_RDWR)
+        self.sock.close()
+
+
+def _ctl_scope(tmp_path, monkeypatch, name="w1"):
+    import json as _json
+
+    listener = _CtlListener()
+    work_base = str(tmp_path / f"{name}.key")
+    Path(sup._control_path_for(work_base)).write_text(
+        _json.dumps({"port": listener.port, "auth": "a"}))
+    resolved = []
+
+    def state(org):
+        resolved.append(org)
+        return {"status": "ok", "work_base": work_base}
+
+    monkeypatch.setattr(sup, "serve_cert_state", state)
+    monkeypatch.setattr(sup, "_ctl_paths", {})
+    return listener, work_base, resolved
+
+
+def test_control_resolves_the_descriptor_path_once(tmp_path, monkeypatch):
+    """serve_cert_state (SQLite + the Settings ledger) cost ~125 ms of CPU
+    per control call on SJC-2, paid by every session-control poll and reply."""
+    listener, _wb, resolved = _ctl_scope(tmp_path, monkeypatch)
+    try:
+        for _ in range(3):
+            assert sup.control("personal", "connector-status", {}) == {"ok": True}
+        assert resolved == ["personal"]
+        assert listener.ops == ["connector-status"] * 3
+    finally:
+        listener.close()
+
+
+def test_a_connector_that_moved_is_found_again_once(tmp_path, monkeypatch):
+    import json as _json
+
+    old, _wb, resolved = _ctl_scope(tmp_path, monkeypatch, "old")
+    sup.control("personal", "connector-status", {})
+    old.close()
+    # A new serving key: a new working directory, the old descriptor gone.
+    Path(sup._control_path_for(str(tmp_path / "old.key"))).unlink()
+    new = _CtlListener()
+    new_base = str(tmp_path / "new.key")
+    Path(sup._control_path_for(new_base)).write_text(
+        _json.dumps({"port": new.port, "auth": "a"}))
+    monkeypatch.setattr(sup, "serve_cert_state",
+                        lambda org: resolved.append(org) or {"work_base": new_base})
+    try:
+        assert sup.control("personal", "connector-status", {}) == {"ok": True}
+        assert resolved == ["personal", "personal"]
+        assert new.ops == ["connector-status"]
+    finally:
+        new.close()
+
+
+def test_a_refused_connection_on_the_cached_path_is_resolved_again(tmp_path, monkeypatch):
+    import json as _json
+
+    listener, work_base, resolved = _ctl_scope(tmp_path, monkeypatch)
+    sup.control("personal", "connector-status", {})
+    listener.close()     # the descriptor still names a port nothing listens on
+    replacement = _CtlListener()
+    moved = []
+
+    def state(org):
+        moved.append(org)
+        Path(sup._control_path_for(work_base)).write_text(
+            _json.dumps({"port": replacement.port, "auth": "a"}))
+        return {"work_base": work_base}
+
+    monkeypatch.setattr(sup, "serve_cert_state", state)
+    try:
+        assert sup.control("personal", "connector-status", {}) == {"ok": True}
+        assert moved == ["personal"]
+    finally:
+        replacement.close()
+
+
+def test_an_op_that_was_sent_is_never_sent_twice(tmp_path, monkeypatch):
+    """A timeout after sending may mean the op ran: no re-resolve, no retry."""
+    listener, _wb, resolved = _ctl_scope(tmp_path, monkeypatch)
+    sup.control("personal", "connector-status", {})
+    listener.delay = 1.0
+    try:
+        with pytest.raises(sup.TunnelUnavailable) as err:
+            sup.control("personal", "session-control-publish", {}, timeout=0.2)
+        assert err.value.kind == "unreachable"
+        time.sleep(1.2)
+        assert listener.ops.count("session-control-publish") == 1
+        assert resolved == ["personal"]
+    finally:
+        listener.close()
+
+
+def test_a_scope_with_no_delegate_still_says_so(monkeypatch):
+    monkeypatch.setattr(sup, "_ctl_paths", {})
+    monkeypatch.setattr(sup, "serve_cert_state", lambda org: {"status": "missing"})
+    with pytest.raises(sup.TunnelUnavailable) as err:
+        sup.control("personal", "connector-status", {})
+    assert err.value.kind == "no-delegate"
