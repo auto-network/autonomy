@@ -336,8 +336,10 @@ class InboundBroker:
         self._limit = limit
         self._reply_timeout = reply_timeout
 
-    async def submit(self, op: str, body: dict, *, peer_machine_pub: str) -> dict:
-        """Park one request and wait for the dashboard's reply."""
+    async def submit(self, op: str, body: dict, *, peer_machine_pub: str, **proved) -> dict:
+        """Park one request and wait for the dashboard's reply. *proved*
+        carries what the pair's hello proved beyond the machine (a
+        member-message pair adds ``org`` and ``persona_pub``)."""
         if len(self._waiting) >= self._limit:
             return refusal(BUSY, "too many requests waiting for the dashboard")
         request_id = secrets.token_hex(16)
@@ -346,6 +348,7 @@ class InboundBroker:
         self._queue.put_nowait({
             "id": request_id, "op": op, "body": body,
             "peer_machine_pub": peer_machine_pub, "received_at": time.time(),
+            **proved,
         })
         try:
             return await asyncio.wait_for(future, self._reply_timeout)
@@ -585,12 +588,15 @@ def _decode_reply(raw: bytes) -> dict:
 
 class _RefusalAwareTransport:
     """The pair as the handshake's transport, recognising the typed refusal
-    a target sends in place of its hello (see ``_send_refusal``)."""
+    a target sends in place of its hello (see ``_send_refusal``). *codes*
+    are the peer refusals recognised as such (session control's by
+    default); any other folds to peer-refused."""
 
-    def __init__(self, endpoint: FleetStreamEndpoint):
+    def __init__(self, endpoint: FleetStreamEndpoint, codes: frozenset | None = None):
         self._endpoint = endpoint
         self.session = endpoint.session
         self._first = True
+        self._codes = PEER_REFUSAL_CODES if codes is None else (codes | HANDSHAKE_REFUSALS)
 
     async def send(self, message: bytes) -> None:
         await self._endpoint.send(message)
@@ -610,7 +616,7 @@ class _RefusalAwareTransport:
             if _is_refusal_record(data):
                 code = data["refusal"]
                 detail = str(data.get("detail", ""))[:300]
-                if code not in PEER_REFUSAL_CODES:
+                if code not in self._codes:
                     detail = f"unrecognised peer refusal {code[:64]!r}"
                     code = PEER_REFUSED
                 raise _PeerRefusal(code, detail)

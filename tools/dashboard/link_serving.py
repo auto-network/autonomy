@@ -1727,6 +1727,15 @@ def _make_ice_serving_connector(
             stream_kwargs["caps"] = caps + ("session-control/1",)
             stream_kwargs["session_control_offer"] = (
                 session_control_offer_handler(_fleet_rt))
+        else:
+            # member-message/1 (graph://bace7454-c77, auto-qrmlg.9): one
+            # member's sealed message to a co-member's session rides the
+            # ORGANIZATION tunnel, admitted by the org hello inside the pair.
+            from tools.network.member_message import member_message_offer_handler
+
+            stream_kwargs["caps"] = caps + ("member-message/1",)
+            stream_kwargs["member_message_offer"] = (
+                member_message_offer_handler(_fleet_rt))
     # Per-link serving (graph://807b4e11-3e9): resolve the link's channel
     # signing key from the vault so the handshake is authenticated by that key
     # instead of the org-root serve cert. A link with no channel key (legacy,
@@ -2217,6 +2226,26 @@ async def _serve_control_listener(connector, ctl_path: str,
                     else:
                         try:
                             reply = await session_control.handle_ctl(
+                                connector, connector_runtime, request["op"],
+                                request.get("args") or {})
+                        except Exception as exc:
+                            reply = {"ok": False,
+                                     "error": f"{type(exc).__name__}: {exc}"}
+                elif isinstance(request.get("op"), str) and request.get(
+                    "op", "").startswith("member-message-"):
+                    # member-message/1 (auto-qrmlg.9): the dashboard's outbound
+                    # requests and its long-poll for inbound ones, on the ORG
+                    # connector whose tunnel the pair rides.
+                    from tools.network import member_message
+                    from tools.network.fleet_relay_sync import connector_runtime
+
+                    if "member-message/1" not in getattr(connector, "_caps", ()):
+                        reply = {"ok": False, "error_kind": "not-offered",
+                                 "error": "member messages are served by an "
+                                          "organization connector only"}
+                    else:
+                        try:
+                            reply = await member_message.handle_ctl(
                                 connector, connector_runtime, request["op"],
                                 request.get("args") or {})
                         except Exception as exc:
