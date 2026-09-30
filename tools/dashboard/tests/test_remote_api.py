@@ -12,7 +12,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
 from starlette.testclient import TestClient
 
 from tools.dashboard import api_auth, remote_api, route_policy
@@ -47,7 +47,18 @@ async def plain(request: Request):
     return JSONResponse({"ran": "plain"})
 
 
+async def plugin_plain(request: Request):
+    return JSONResponse({"ran": "plugin"})
+
+
+@remote_api.remote("fleet")
+async def plugin_remote(request: Request):
+    return JSONResponse({"ran": "plugin remote"})
+
+
 APP = Starlette(routes=[
+    Mount("/api/plugins/demo", routes=[Route("/plain", plugin_plain),
+                                       Route("/remote", plugin_remote)]),
     Route("/api/limits", fleet_only),
     Route("/api/terminal/{id}/kill", stop, methods=["POST"]),
     Route("/api/session/send", send, methods=["POST"]),
@@ -139,7 +150,7 @@ def test_the_caller_forwards_to_the_named_machine_and_relays_the_reply(monkeypat
             "status": 200, "headers": {"content-type": "application/json"},
             "body": base64.b64encode(b'{"there": true}').decode()}}
 
-    monkeypatch.setattr(remote_api, "target_of", lambda request: MACHINE)
+    monkeypatch.setattr(remote_api, "target_of", lambda request: ("fleet", MACHINE))
     monkeypatch.setattr(scc, "request", fake_request)
     with TestClient(APP) as client:
         response = client.get("/api/limits?_machine=sjc-2&x=1")
@@ -179,3 +190,74 @@ def test_the_identity_middleware_classifies_the_proved_caller():
     member, member_org = classify(MEMBER)
     assert member.org_bound and not member.global_authority
     assert (member_org, member.persona_id) == ("alpha", PERSONA)
+
+
+def test_an_org_runner_target_forwards_over_member_message(monkeypatch):
+    from tools.dashboard import member_message_client as mmc
+
+    runner = {"org": "alpha", "persona_pub": PERSONA, "machine_pub": MACHINE}
+    sent = []
+
+    async def fake_request(target, op, body=None, *, timeout=15.0):
+        sent.append((target, op, body["method"], body["path"]))
+        return {"v": 1, "ok": True, "result": {
+            "status": 200, "headers": {"content-type": "application/json"},
+            "body": base64.b64encode(b'{"runner": true}').decode()}}
+
+    monkeypatch.setattr(remote_api, "target_of", lambda request: ("org", runner))
+    monkeypatch.setattr(mmc, "request", fake_request)
+    with TestClient(APP) as client:
+        response = client.post("/api/terminal/auto-9/kill", headers={"X-Autonomy-Machine": MACHINE})
+    assert response.json() == {"runner": True}
+    assert sent == [(runner, "api", "POST", "/api/terminal/auto-9/kill")]
+
+
+def test_a_name_that_is_neither_a_machine_nor_a_runner_is_refused(monkeypatch):
+    monkeypatch.setattr(remote_api, "target_of", lambda request: ("unknown", "nowhere"))
+    with TestClient(APP) as client:
+        response = client.get("/api/limits", headers={"X-Autonomy-Machine": "nowhere"})
+    assert response.status_code == 404
+
+
+def test_the_org_op_runs_as_the_member_the_hello_proved(monkeypatch):
+    from tools.dashboard import member_message_client as mmc
+
+    monkeypatch.setattr(mmc, "slug_of", lambda genesis: "alpha" if genesis == "g" else None)
+    _sessions(monkeypatch, {"auto-theirs": {"org": "alpha", "owner_persona": OTHER}})
+    op = remote_api.org_op(APP)
+    proved = {"org": "g", "persona_pub": PERSONA, "peer_machine_pub": MACHINE}
+    payload = {"method": "POST", "path": "/api/terminal/auto-theirs/kill", "query": "",
+               "headers": {}, "body": ""}
+    reply = asyncio.run(op(payload, proved))
+    assert _result(reply)[1]["refusal"] == remote_api.NOT_OWNER
+    # A fleet-only route is not open to a member.
+    reply = asyncio.run(op({**payload, "method": "GET", "path": "/api/limits"}, proved))
+    assert reply["refusal"] == remote_api.SCOPE_REFUSED
+    assert asyncio.run(op(payload, {**proved, "org": "unknown"}))["refusal"] == "unknown-organization"
+
+
+def _sessions(monkeypatch, rows):  # noqa: F811 -- same helper, visible above
+    from tools.dashboard import session_presence
+    from tools.dashboard.dao import dashboard_db
+
+    monkeypatch.setattr(dashboard_db, "get_session", lambda name: rows.get(name))
+    monkeypatch.setattr(session_presence, "session_org", lambda row: row.get("org"))
+
+
+def test_a_mounted_plugin_route_is_refused_unless_decorated(monkeypatch):
+    with TestClient(APP) as client:
+        refused = client.get("/api/plugins/demo/plain?_machine=sjc-2")
+        assert (refused.status_code, refused.json()["refusal"]) == (404, remote_api.ROUTE_NOT_REMOTE)
+        # Nothing matched at all: refused too, never run here.
+        assert client.get("/api/nothing?_machine=sjc-2").status_code == 404
+    # A decorated mounted route is found through the Mount on the receiver.
+    assert _result(_dispatch("GET", "/api/plugins/demo/remote", FLEET)) == (200, {"ran": "plugin remote"})
+
+
+def test_only_the_exact_machine_parameter_names_a_target():
+    def names(query):
+        return remote_api._names_target({"headers": [], "query_string": query.encode()})
+
+    assert names("_machine=sjc-2") and names("a=1&_machine=x")
+    assert not names("foo_machine=x") and not names("sub_machine=y&z=1")
+

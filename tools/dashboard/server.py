@@ -4042,6 +4042,7 @@ async def api_terminals(request):
             result.append({"id": name, "alive": True, **info})
     return JSONResponse(result)
 
+@remote_api.remote("fleet", "org", session_field="id", check_is_owner=True)
 async def api_terminal_kill(request):
     """Stop a terminal session via the lifecycle worker.
 
@@ -6982,6 +6983,7 @@ async def _inbound_session_tail(body: dict, peer: str) -> dict:
     return scc.ok({"stream_file": str(staged), "stream_delete": True})
 
 
+@remote_api.remote("fleet", "org", session_field="session_id")
 async def api_session_tail(request):
     """Tail JSONL entries for any session by project/session_id.
 
@@ -7391,6 +7393,7 @@ async def api_session_tail(request):
     return _finish(resp)
 
 
+@remote_api.remote("fleet", "org", session_field="tmux_session")
 async def api_session_send(request):
     """Send a message to a tmux-managed session via paste-buffer injection.
 
@@ -23695,7 +23698,9 @@ async def _activate_worker(reason: str) -> None:
             from tools.dashboard import member_message_client
             global _member_message_pumps
             _member_message_pumps = member_message_client.install(
-                {"send": _inbound_member_send})
+                {"send": _inbound_member_send,
+                 # The remote API for organization members (remote_api).
+                 "api": remote_api.org_op(app)})
         except Exception:
             logger.exception("member-message inbound pumps failed to start")
 

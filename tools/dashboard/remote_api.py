@@ -85,7 +85,7 @@ class RemoteCaller:
 
 
 def rule_of(endpoint) -> RemoteRule | None:
-    return getattr(endpoint, "__remote__", None)
+    return getattr(endpoint, "__remote__", None) if endpoint is not None else None
 
 
 def _refuse(code: str, status: int, detail: str = "") -> JSONResponse:
@@ -102,25 +102,45 @@ def _local_pub() -> str | None:
     return local.machine_pub if local else None
 
 
-def target_of(request: Request) -> str | None:
-    """The machine_pub the request names, or None to run here."""
+def _org_runner(named: str) -> dict | None:
+    """A verified runner offer in one of this machine's organizations whose
+    serving key is *named* (full, or a unique prefix of 8+ hex)."""
+    from tools.dashboard import org_runners, org_sync_channels
+
+    hits = []
+    for slug, channel in org_sync_channels.provider()().items():
+        for machine_pub, offer in org_runners._offers(slug, channel).items():
+            if machine_pub == named or (len(named) >= 8 and machine_pub.startswith(named)):
+                hits.append({"org": slug, "persona_pub": offer["persona_pub"],
+                             "machine_pub": machine_pub})
+    return hits[0] if len(hits) == 1 else None
+
+
+def target_of(request: Request) -> tuple[str, object] | None:
+    """Where the request runs: None (here), ("fleet", machine_pub), ("org",
+    runner target) or ("unknown", name)."""
     from tools.dashboard import session_control_client
 
     named = request.headers.get(TARGET_HEADER) or request.query_params.get(TARGET_PARAM)
     if not named:
         return None
     machine = session_control_client.resolve_machine(named)
-    if machine is None or machine == _local_pub():
-        return None if machine is not None else f"unknown:{named}"
-    return machine
+    if machine is not None:
+        return None if machine == _local_pub() else (FLEET, machine)
+    runner = _org_runner(named)
+    if runner is not None:
+        return ORG, runner
+    return "unknown", named
 
 
-async def forward(request: Request, machine_pub: str) -> Response:
-    from tools.dashboard import session_control_client
+async def forward(request: Request, target: tuple[str, object]) -> Response:
+    from tools.dashboard import member_message_client, session_control_client
 
-    if machine_pub.startswith("unknown:"):
+    kind, where = target
+    if kind == "unknown":
         return _refuse("unknown-machine", 404,
-                       f"{machine_pub[8:]!r} is not an active machine of this fleet")
+                       f"{where!r} is neither a machine of this fleet nor an "
+                       "organization's runner")
     body = await request.body()
     if len(body) > MAX_BODY_BYTES:
         return _refuse(BODY_TOO_LARGE, 413)
@@ -131,8 +151,12 @@ async def forward(request: Request, machine_pub: str) -> Response:
         "headers": {k: v for k, v in request.headers.items() if k in REQUEST_HEADERS},
         "body": base64.b64encode(body).decode("ascii"),
     }
-    reply = await session_control_client.request(machine_pub, "api", payload,
-                                                 timeout=DISPATCH_TIMEOUT_S + 5)
+    if kind == FLEET:
+        reply = await session_control_client.request(where, "api", payload,
+                                                     timeout=DISPATCH_TIMEOUT_S + 5)
+    else:
+        reply = await member_message_client.request(where, "api", payload,
+                                                    timeout=DISPATCH_TIMEOUT_S + 5)
     if not reply.get("ok"):
         status = 404 if reply.get("refusal") == ROUTE_NOT_REMOTE else 502
         return JSONResponse({"error": reply.get("detail") or reply.get("refusal"),
@@ -145,16 +169,17 @@ async def forward(request: Request, machine_pub: str) -> Response:
 
 
 class RemoteTargetGuard:
-    """Refuses a remote target on a route that is not ``@remote``: without
-    this, such a request would silently run HERE."""
+    """Refuses a remote target on anything but an ``@remote`` route. It fails
+    closed: a named target with no decorated endpoint matched -- an
+    undecorated route, a mounted plugin route, or no route at all -- is
+    refused rather than run HERE."""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http" and SCOPE_KEY not in scope and _names_target(scope):
-            endpoint = _matched_endpoint(scope)
-            if endpoint is not None and rule_of(endpoint) is None:
+            if rule_of(_matched_endpoint(scope)) is None:
                 await _refuse(ROUTE_NOT_REMOTE, 404,
                               "this route cannot run on another machine")(scope, receive, send)
                 return
@@ -165,19 +190,25 @@ def _names_target(scope) -> bool:
     for name, _value in scope.get("headers") or []:
         if name == TARGET_HEADER.encode():
             return True
-    return (TARGET_PARAM + "=").encode() in (scope.get("query_string") or b"")
+    query = (scope.get("query_string") or b"").decode("latin-1")
+    return any(key == TARGET_PARAM for key, _ in parse_qsl(query, keep_blank_values=True))
 
 
-def _matched_endpoint(scope):
-    app = scope.get("app")
-    router = getattr(app, "router", None)
-    for route in getattr(router, "routes", []) or []:
+def _matched_endpoint(scope, routes=None):
+    """The endpoint a request would reach, through Mounts; None if none."""
+    if routes is None:
+        routes = getattr(getattr(scope.get("app"), "router", None), "routes", None) or []
+    for route in routes:
         try:
-            match, _child = route.matches(scope)
+            match, child = route.matches(scope)
         except Exception:
             continue
-        if match == Match.FULL:
-            return getattr(route, "endpoint", None)
+        if match != Match.FULL:
+            continue
+        inner = getattr(route, "routes", None)
+        if inner is not None and not hasattr(route, "endpoint"):
+            return _matched_endpoint({**scope, **child}, inner)
+        return getattr(route, "endpoint", None)
     return None
 
 
@@ -195,11 +226,13 @@ def remote(*kinds: str, session_field: str | None = None,
     def decorate(fn):
         @functools.wraps(fn)
         async def endpoint(request: Request):
-            caller = request.scope.get(SCOPE_KEY)
+            caller = (getattr(request, "scope", None) or {}).get(SCOPE_KEY)
             if caller is None:
-                machine = await asyncio.to_thread(target_of, request)
-                if machine is not None:
-                    return await forward(request, machine)
+                if not (hasattr(request, "headers") and hasattr(request, "query_params")):
+                    return await fn(request)    # a direct call, not an HTTP request
+                target = await asyncio.to_thread(target_of, request)
+                if target is not None:
+                    return await forward(request, target)
                 return await fn(request)
             refused = await enforce(rule, request, caller)
             return refused if refused is not None else await fn(request)
@@ -324,3 +357,20 @@ def fleet_op(app):
         return await dispatch(app, body, RemoteCaller(FLEET, machine_pub=peer))
 
     return op
+
+
+def org_op(app):
+    """The member-message ``api`` op: the caller is the organization member
+    the org hello proved (a confirmed member; the connector refuses others)."""
+    from tools.dashboard import member_message_client as mmc
+
+    async def op(body: dict, proved: dict) -> dict:
+        slug = await asyncio.to_thread(mmc.slug_of, proved["org"])
+        if slug is None:
+            return mmc.refusal("unknown-organization", "no local store for that organization")
+        return await dispatch(app, body, RemoteCaller(
+            ORG, machine_pub=proved["peer_machine_pub"],
+            persona=proved["persona_pub"], org=slug))
+
+    return op
+
