@@ -1,6 +1,6 @@
 // Real claim creation and independent later-sign-in derivation; no crypto fakes.
 import assert from 'node:assert/strict';
-import { makeCeremony, makeRootCeremony } from '../ceremony.js';
+import { makeCeremony, makeRootCeremony, makeRootIdentityCeremony } from '../ceremony.js';
 import { deriveKemSeed } from '../../ceremony/founding.js';
 import { deriveEncapsulationKeypair } from '../../ceremony/primitives.js';
 
@@ -26,6 +26,15 @@ assert.equal(first.kemPrivateKey, later.privateKeyHex);
 const again = await run(args);
 assert.equal(again.kemCredential.kem_public_key, first.kemCredential.kem_public_key);
 assert.equal(again.kemPrivateKey, first.kemPrivateKey);
+assert.ok(opened.every(seed => seed.every(byte => byte === 0)));
+// The identity-only ceremony (a member finishing a join whose page was closed)
+// lands on the SAME persona, claim key and KEM key without minting a claim.
+const identity = await makeRootIdentityCeremony({ openRoot: open })({ genesisId: genesis, inviteRef: inputs.inviteRef });
+assert.equal(identity.personaPub, first.personaPub, 'identity ceremony must re-derive the claimed persona');
+assert.equal(identity.claimKey, first.claimKey);
+assert.equal(identity.kemPrivateKey, first.kemPrivateKey);
+assert.equal(identity.kemCredential.kem_public_key, first.kemCredential.kem_public_key);
+assert.equal(identity.event, undefined, 'identity ceremony signs nothing');
 assert.ok(opened.every(seed => seed.every(byte => byte === 0)));
 root.fill(0);
 // Private TEST material is captured on a pipe for Python's real grant-open test.

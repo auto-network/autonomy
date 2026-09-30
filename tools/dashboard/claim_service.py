@@ -92,7 +92,16 @@ def context(org: str, invite_ref: str) -> dict:
                 reason = "invite-already-claimed"
             else:
                 reason = "invite-not-found"
-            return {"status": "gone", "reason": reason}
+            # A consumed invitation still names its ledger: the genesis id is
+            # in every event the joiner will fold, so it reveals nothing, and
+            # it is what a member who was admitted but whose join page never
+            # installed the organization needs to re-derive their persona and
+            # finish over the same link (``status`` then ``bootstrap``).
+            return {
+                "status": "gone",
+                "reason": reason,
+                "genesis_id": store.ledger.genesis_id,
+            }
         return {
             "status": "ok",
             "genesis_id": store.ledger.genesis_id,

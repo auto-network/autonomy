@@ -346,3 +346,103 @@ console.log('accept-controller: all assertions passed');
   session.channel = channel;
   assert.equal((await session.bootstrap()).checkpoint, null);
 }
+
+// R1. A consumed invitation that still names its ledger is a resumable close:
+// the channel stays open, resume() re-derives the persona through the identity
+// seam (no claim minted, no submit), asks the ledger for THIS persona's
+// standing, and 'admitted' comes back exactly as after a live poll.
+{
+  const gone = { v: 1, status: 'gone', reason: 'invite-already-claimed', genesis_id: GENESIS };
+  const ch = new ScriptedChannel((req) => {
+    if (req.op === 'context') return gone;
+    if (req.op === 'status') {
+      assert.equal(req.persona_pub, PERSONA);
+      return { v: 1, status: 'admitted' };
+    }
+    throw new Error(`unexpected op ${req.op}`);
+  });
+  let identityCalls = 0;
+  const identity = async ({ genesisId, inviteRef }) => {
+    identityCalls += 1;
+    assert.equal(genesisId, GENESIS);
+    assert.equal(inviteRef, INVITE);
+    return { personaPub: PERSONA, claimKey: CLAIMKEY,
+      kemPrivateKey: { secret: 'per-org-kem-private' }, kemCredential: { pub: 'per-org-kem-public' } };
+  };
+  const s = new JoinSession({ inputs: INPUTS, openChannel: async () => ch, runIdentityCeremony: identity });
+  const closed = await s.connect();
+  assert.equal(closed.state, 'closed');
+  assert.equal(closed.reason, 'invite-already-claimed');
+  assert.equal(closed.resumable, true);
+  assert.equal(s.ready(), false);
+  assert.deepEqual(s.resumable, { genesisId: GENESIS });
+  const result = await s.resume();
+  assert.equal(identityCalls, 1);
+  assert.equal(result.state, 'admitted');
+  assert.equal(s.personaPub, PERSONA);
+  assert.equal(s.claimKey, CLAIMKEY);
+  assert.equal(s.context.genesisId, GENESIS);
+  assert.equal(ch.calls.submit, 0, 'resume never submits a claim');
+  assert.deepEqual(ch.sent.map((m) => m.op), ['context', 'status']);
+  // bootstrap() is reachable from the resumed session, as after a live poll.
+  assert.equal(typeof s.bootstrap, 'function');
+}
+
+// R2. Without a genesis id (an org whose code does not name it) the close is
+// NOT resumable and resume() refuses rather than guessing a persona.
+{
+  const ch = new ScriptedChannel((req) => (req.op === 'context'
+    ? { v: 1, status: 'gone', reason: 'invite-already-claimed' } : {}));
+  const s = new JoinSession({ inputs: INPUTS, openChannel: async () => ch, runIdentityCeremony: async () => ({}) });
+  const closed = await s.connect();
+  assert.equal(closed.state, 'closed');
+  assert.equal(closed.resumable, undefined);
+  assert.equal(s.resumable, null);
+  await assert.rejects(() => s.resume(), /consumed invitation/);
+}
+
+// R3. Only a used-up invitation resumes: expired or unknown ones stay closed.
+for (const reason of ['invite-expired', 'invite-not-found']) {
+  const ch = new ScriptedChannel((req) => (req.op === 'context'
+    ? { v: 1, status: 'gone', reason, genesis_id: GENESIS } : {}));
+  const s = new JoinSession({ inputs: INPUTS, openChannel: async () => ch, runIdentityCeremony: async () => ({}) });
+  const closed = await s.connect();
+  assert.equal(closed.reason, reason);
+  assert.equal(closed.resumable, undefined);
+}
+
+// R4. The invitation was someone else's: the ledger answers 'absent' for this
+// persona and the resume is an authoritative close, carried verbatim.
+{
+  const ch = new ScriptedChannel((req) => {
+    if (req.op === 'context') return { v: 1, status: 'gone', reason: 'invite-exhausted', genesis_id: GENESIS };
+    if (req.op === 'status') return { v: 1, status: 'absent' };
+    throw new Error(`unexpected op ${req.op}`);
+  });
+  const identity = async () => ({ personaPub: PERSONA, claimKey: CLAIMKEY });
+  const s = new JoinSession({ inputs: INPUTS, openChannel: async () => ch, runIdentityCeremony: identity });
+  assert.equal((await s.connect()).resumable, true);
+  const result = await s.resume();
+  assert.equal(result.state, 'closed');
+  assert.equal(result.reason, 'absent');
+}
+
+// R5. Cancelling the unlock is not an error: resume() reports null and the
+// session is untouched, so the control can be offered again.
+{
+  const ch = new ScriptedChannel((req) => (req.op === 'context'
+    ? { v: 1, status: 'gone', reason: 'invite-already-claimed', genesis_id: GENESIS } : {}));
+  const s = new JoinSession({ inputs: INPUTS, openChannel: async () => ch, runIdentityCeremony: async () => null });
+  await s.connect();
+  assert.equal(await s.resume(), null);
+  assert.equal(s.personaPub, null);
+  assert.equal(ch.calls.status, 0);
+}
+
+// R6. No identity seam wired: resume() refuses up front.
+{
+  const s = new JoinSession({ inputs: INPUTS });
+  s.resumable = { genesisId: GENESIS };
+  s.transport = {};
+  await assert.rejects(() => s.resume(), /identity ceremony is not enabled/);
+}

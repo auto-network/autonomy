@@ -640,3 +640,42 @@ def test_context_never_falls_back_to_generated_uuid_label(world):
     assert ctx["org_name"] == "Claim Org"
     assert ctx["org_name"] not in (ORG, ORG_ID)
     assert ORG_ID not in ctx.values()
+
+
+def test_context_after_admission_is_gone_but_names_the_ledger(world):
+    """A member whose join page was closed before the install can come back
+    on the same link: context refuses a new claim (the invitation is used
+    up) but carries the genesis id, so the page re-derives the persona and
+    finishes with status + bootstrap. Nothing here admits anyone."""
+    context = world.channel({"v": 1, "op": "context"})
+    claim = world.mint(context)
+    world.channel({"v": 1, "op": "submit", "event": claim.to_json().decode("utf-8")})
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        claim_key = store.claim_key(world.invite_ref, world.persona.public_hex)
+        body = store.get_pending_claim(claim_key)["body"]
+    ready = claim_service.countersign(
+        ORG, world.invite_ref, world.persona.public_hex,
+        sign_approval(world.admin, "member.claim", body),
+    )
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        heads = list(store.heads())
+        max_ts = max(store.get(h).hlc.ts for h in heads)
+    admission = make_admission(
+        world.admin, dict(ready["admission"], parents=heads), HLC(max_ts + 1_000))
+    assert claim_service.admit(ORG, admission.to_json())["status"] == "admitted"
+
+    after = world.channel({"v": 1, "op": "context"})
+    assert after["status"] == "gone"
+    assert after["reason"] in ("invite-already-claimed", "invite-exhausted")
+    assert after["genesis_id"] == world.founded.genesis_id
+    # The gone reply carries nothing else a fresh joiner could mint against.
+    assert "heads" not in after and "max_hlc" not in after
+    # And the admitted persona still finishes over the same channel.
+    assert world.channel({
+        "v": 1, "op": "status", "persona_pub": world.persona.public_hex,
+    })["status"] == "admitted"
+    material = world.channel({
+        "v": 1, "op": "bootstrap", "persona_pub": world.persona.public_hex, "after": 0,
+    })
+    assert material["status"] == "ok"
+    assert material["events"]

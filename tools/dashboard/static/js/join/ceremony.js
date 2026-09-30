@@ -16,8 +16,10 @@
  * primitives themselves are covered by ceremony/claim.js's own tests.
  */
 import { openArmorWithPassword as realOpenArmor } from '../ceremony/root-factor-policy.js';
-import { mintMemberClaim as realMint } from '../ceremony/claim.js';
+import { mintMemberClaim as realMint, claimKey as realClaimKey } from '../ceremony/claim.js';
 import { deriveKemSeed as realDeriveKemSeed } from '../ceremony/founding.js';
+import { derivePersona as realDerivePersona } from '../ceremony/ledger-event.js';
+import { deriveEncapsulationKeypair as realDeriveEncapsulationKeypair } from '../ceremony/primitives.js';
 
 async function defaultFetchPersonal() {
   const resp = await fetch('/api/identity/personal', {
@@ -124,6 +126,52 @@ export function makeRootCeremony({
         claimKey: minted.claimKey,
         kemPrivateKey: minted.kemPrivateKey,
         kemCredential: minted.kemCredential,
+      };
+    } finally {
+      if (opened && opened.seed) opened.seed.fill(0);
+      if (kemSeed) kemSeed.fill(0);
+    }
+  };
+}
+
+/* The identity half of the ceremony, with NO claim: the persona and the
+ * per-org KEM key are pure derivations of the personal root and the org's
+ * genesis id (the same derivations mintMemberClaim performs), so a member
+ * who was already admitted can re-derive them on a later visit and finish
+ * joining over the same link -- ``status`` then ``bootstrap`` -- without a
+ * second claim, which the ledger would refuse (persona exists) or could not
+ * take (single-use invitation consumed). Nothing is signed and nothing is
+ * sent; the root seed and the KEM seed are zeroed on every path.
+ */
+export function makeRootIdentityCeremony({
+  openRoot,
+  deriveKemSeed = realDeriveKemSeed,
+  derivePersona = realDerivePersona,
+  deriveEncapsulationKeypair = realDeriveEncapsulationKeypair,
+  claimKey = realClaimKey,
+}) {
+  if (typeof openRoot !== 'function') {
+    throw new Error('makeRootIdentityCeremony needs the openRoot control');
+  }
+  return async function runIdentityCeremony({ genesisId, inviteRef, title, detail }) {
+    if (typeof genesisId !== 'string' || !/^[0-9a-f]{64}$/.test(genesisId)) {
+      throw new Error('genesisId must be 64 lowercase hex characters');
+    }
+    const opened = await openRoot({
+      title: title || 'Finish joining',
+      detail: detail || 'Unlock your identity to continue your approved request to join.',
+    });
+    if (!opened) return null;
+    let kemSeed = null;
+    try {
+      kemSeed = await deriveKemSeed(opened.seed, 0);
+      const persona = await derivePersona(opened.seed, genesisId);
+      const kem = await deriveEncapsulationKeypair(kemSeed, 'autonomy/persona-kem/v1/' + genesisId);
+      return {
+        personaPub: persona.publicHex,
+        claimKey: await claimKey(inviteRef, persona.publicHex),
+        kemPrivateKey: kem.privateKeyHex,
+        kemCredential: { kem_public_key: kem.publicKeyHex },
       };
     } finally {
       if (opened && opened.seed) opened.seed.fill(0);

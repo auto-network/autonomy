@@ -236,3 +236,25 @@ def test_recovery_adoption_fires_only_when_install_did_not_adopt_and_once():
     guard = js.rindex("if (", 0, call)
     assert "installed.checkpoint.ok === false" in js[guard:call]
     assert ".catch(function () { return null; })" in js[call:call + 400]
+
+
+def test_a_used_invitation_can_be_finished_by_the_member_it_admitted():
+    # Operator ruling 2026-09-30: closing the join window after the request
+    # went in must not strand an approved member. The page keeps its single
+    # control: on a resumable close it becomes "Finish joining" and continues
+    # from the ledger's answer; no second request is signed, and a page that
+    # cannot re-derive the persona (no genesis id) offers nothing.
+    terminal = PAGE_JS[PAGE_JS.index("function reportTerminal"):
+                       PAGE_JS.index("function wireAccept")]
+    assert "state.resumable" in terminal
+    assert "function offerResume" in terminal
+    assert '"Finish joining"' in terminal
+    assert "session.resume()" in terminal
+    assert "runIdentityCeremony: makeRootIdentityCeremony(" in PAGE_JS
+    assert "async resume()" in CONTROLLER_JS
+    assert "RESUMABLE_REASONS" in CONTROLLER_JS
+    assert "submitClaim" not in CONTROLLER_JS[CONTROLLER_JS.index("async resume()"):
+                                               CONTROLLER_JS.index("async pollOnce()")]
+    org_step = TEMPLATE[TEMPLATE.index('id="step-org"'):
+                        TEMPLATE.index('id="step-broken"')]
+    assert org_step.lower().count("<button") == 1

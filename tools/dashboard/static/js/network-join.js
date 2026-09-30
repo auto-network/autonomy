@@ -411,11 +411,13 @@
       var JoinSession = mods[0].JoinSession;
       var openChannel = mods[1].openChannel;
       var makeRootCeremony = mods[2].makeRootCeremony;
+      var makeRootIdentityCeremony = mods[2].makeRootIdentityCeremony;
       openRootControl = mods[3].openRoot;
       session = new JoinSession({
         inputs: inputs,
         openChannel: openChannel,
         runCeremony: makeRootCeremony({ openRoot: openRootHeld }),
+        runIdentityCeremony: makeRootIdentityCeremony({ openRoot: openRootHeld }),
       });
       return session.connect();
     });
@@ -485,6 +487,39 @@
     show("accept-block", true);
     var button = $("accept");
     if (button) button.classList.add("hidden");
+    // A used-up invitation is not a closed door for the person it admitted:
+    // when the organization still names its ledger, the one control on this
+    // step becomes "Finish joining" and continues from the approved request
+    // (status, then install) -- no second request is ever signed.
+    if (state && state.resumable && session) offerResume(button);
+  }
+
+  function offerResume(button) {
+    say("accept-hint", "This invitation has already been used. If that was you and "
+      + "the organization has approved your request, you can finish joining "
+      + "from here.");
+    say("joins-line", "");
+    if (!button) return;
+    button.textContent = "Finish joining";
+    button.classList.remove("hidden");
+    button.disabled = false;
+    button.onclick = function () {
+      button.disabled = true;
+      say("accept-hint", "");
+      var brandName = ($("org-name") && $("org-name").textContent) || "";
+      session.resume()
+        .then(function (result) {
+          if (result === null) { button.disabled = false; return null; }
+          if (result.state === "pending") { zeroHeld(); showWaiting(brandName); return poll(brandName, null); }
+          if (result.state === "admitted") { return installAdmitted(brandName, null); }
+          reportTerminal(result);
+          return null;
+        })
+        .catch(function (error) {
+          button.disabled = false;
+          say("accept-hint", (error && error.message) || String(error));
+        });
+    };
   }
 
   function wireAccept(inputs) {

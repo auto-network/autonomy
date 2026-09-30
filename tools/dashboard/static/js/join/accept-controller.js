@@ -23,6 +23,10 @@ import { makeChannelTransport } from './channel-transport.js';
 import { submitClaim, getClaimStatus } from '../ceremony/claim.js';
 
 const DEFAULT_POLL_MS = 2000;
+// The ledger closures a returning member may continue past: the invitation
+// is used up, which is exactly what their own admitted claim did to it.
+const RESUMABLE_REASONS = new Set(['invite-already-claimed', 'invite-exhausted']);
+const HEX_64 = /^[0-9a-f]{64}$/;
 const DEFAULT_MAX_POLLS = 600; // ~20 min ceiling at the default cadence
 
 function defaultDelay() {
@@ -64,10 +68,19 @@ function claimProfile(profile) {
 }
 
 export class JoinSession {
-  constructor({ inputs, openChannel, runCeremony = null }) {
+  constructor({ inputs, openChannel, runCeremony = null, runIdentityCeremony = null }) {
     this.inputs = inputs;
     this.openChannel = openChannel;
     this.runCeremony = runCeremony;
+    // The identity-only seam (persona + KEM re-derivation, no claim) that a
+    // returning member uses to finish a join whose page was closed after the
+    // claim went in: see resume().
+    this.runIdentityCeremony = runIdentityCeremony;
+    // Set by connect() when the invitation is consumed but the org still
+    // named its ledger: {genesisId}. Null means resume() has nothing to work
+    // with (an org running code that does not carry it, or an invitation
+    // that was never in this ledger).
+    this.resumable = null;
     this.channel = null;
     this.transport = null;
     this.context = null;
@@ -104,11 +117,26 @@ export class JoinSession {
       return { state: 'link-lost', reason: 'link-failed' };
     }
     if (!reply || reply.status !== 'ok') {
-      return {
+      const closed = {
         state: 'closed',
         ledgerStatus: (reply && reply.status) || 'gone',
         reason: (reply && reply.reason) || 'invite-not-found',
       };
+      // A consumed invitation is a closed door for a NEW claim, but not for
+      // the member it already admitted: if the org named its ledger, keep
+      // the channel and let resume() re-derive the persona and ask the
+      // ledger where that member stands (status -> bootstrap -> install).
+      if (
+        reply && reply.status === 'gone'
+        && RESUMABLE_REASONS.has(reply.reason)
+        && typeof reply.genesis_id === 'string'
+        && HEX_64.test(reply.genesis_id)
+      ) {
+        this.transport = makeChannelTransport(this.channel);
+        this.resumable = { genesisId: reply.genesis_id };
+        closed.resumable = true;
+      }
+      return closed;
     }
     this.transport = makeChannelTransport(this.channel);
     this.context = {
@@ -213,6 +241,46 @@ export class JoinSession {
       return { state: 'link-lost', reason: 'submit-failed' };
     }
     return this._fromLedger(reply);
+  }
+
+  // Rung 2', for a member whose claim already went in: re-derive the persona
+  // (no claim is minted or sent -- the ledger refuses a second one), then
+  // read this persona's standing on the ledger. 'admitted' means the page
+  // can install exactly as after a live poll; 'pending' means the approver
+  // has not admitted yet and the page keeps waiting; anything else is an
+  // authoritative close (the invitation was used by someone else).
+  async resume() {
+    if (typeof this.runIdentityCeremony !== 'function') {
+      throw new Error('identity ceremony is not enabled');
+    }
+    if (!this.resumable || !this.transport) {
+      throw new Error('resume() needs a consumed invitation that named its ledger');
+    }
+    const derived = await this.runIdentityCeremony({
+      genesisId: this.resumable.genesisId,
+      inviteRef: this.inputs.inviteRef,
+    });
+    // null is the operator cancelling the unlock: nothing happened.
+    if (!derived) return null;
+    this.context = {
+      transport: this.transport,
+      orgSlug: this.inputs.org,
+      genesisId: this.resumable.genesisId,
+      // The status and bootstrap ops need no ledger position; the fields are
+      // shaped to satisfy the shared context validator only.
+      heads: [this.resumable.genesisId],
+      maxHlc: [0, 0],
+      grantedRole: null,
+      inviteExpiry: null,
+      binding: null,
+      approvalPolicy: null,
+      presentation: null,
+    };
+    this.claimKey = derived.claimKey;
+    this.personaPub = derived.personaPub;
+    this.kemPrivateKey = derived.kemPrivateKey || null;
+    this.kemCredential = derived.kemCredential || null;
+    return this.pollOnce();
   }
 
   async pollOnce() {
