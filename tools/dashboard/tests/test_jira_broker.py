@@ -201,7 +201,7 @@ def test_wrapped_lines_flow_into_one_paragraph_as_commonmark_reads_them():
 def test_a_wrapped_blockquote_is_one_flowing_quote():
     doc = adf.markdown_to_adf(
         "> Installed, not healthy: a broken executor is still truthy, so this returns\n"
-        "> one until something notices.\n>\n> Second paragraph.\nAfter."
+        "> one until something notices.\n>\n> Second paragraph.\n\nAfter."
     )
     quote, after = doc["content"]
     assert quote["type"] == "blockquote"
@@ -211,6 +211,37 @@ def test_a_wrapped_blockquote_is_one_flowing_quote():
         [{"type": "text", "text": "Second paragraph."}],
     ]
     assert after["content"] == [{"type": "text", "text": "After."}]
+
+
+@pytest.mark.parametrize("md, text", [
+    # A wrapped line is a continuation unless CommonMark lets it interrupt.
+    ("Shipped in\n2024. Then more.", "Shipped in 2024. Then more."),
+    ("This fixes the crash reported in\n#4521 last week.",
+     "This fixes the crash reported in #4521 last week."),
+    ("> quoted line\nlazy continuation", None),
+])
+def test_only_what_commonmark_allows_interrupts_a_paragraph(md, text):
+    (block,) = adf.markdown_to_adf(md)["content"]
+    if text is None:
+        assert block["type"] == "blockquote"
+        assert block["content"][0]["content"] == [
+            {"type": "text", "text": "quoted line lazy continuation"}]
+    else:
+        assert block["content"] == [{"type": "text", "text": text}]
+
+
+def test_inline_marks_may_wrap_and_include_italic_and_links():
+    (para,) = adf.markdown_to_adf(
+        "This is **very\nimportant**, *quite* so; see [the doc](https://x.test).")["content"]
+    assert para["content"] == [
+        {"type": "text", "text": "This is "},
+        {"type": "text", "text": "very important", "marks": [{"type": "strong"}]},
+        {"type": "text", "text": ", "},
+        {"type": "text", "text": "quite", "marks": [{"type": "em"}]},
+        {"type": "text", "text": " so; see "},
+        {"type": "text", "text": "the doc", "marks": [{"type": "link", "attrs": {"href": "https://x.test"}}]},
+        {"type": "text", "text": "."},
+    ]
 
 
 def test_adf_round_trip_preserves_meaning():

@@ -33,40 +33,55 @@ def image_targets(markdown_text: str) -> list[str]:
     return out
 
 
-_NUMBERED = re.compile(r'^\d+\.\s+')
+_TABLE_SEPARATOR = re.compile(r'^\s*\|[\s:|\-]+\|\s*$')
+_HEADING = re.compile(r'^(#{1,6})\s+(.*)$')
+_LIST_ITEM = re.compile(r'^(?:[*-]\s|\d+\.\s)')
+_HARD_BREAK = '\x00'
 
 
-def _starts_block(line: str) -> bool:
-    """Whether *line* begins its own block rather than continuing the text above."""
+def _interrupts(lines: list[str], j: int) -> bool:
+    """Whether ``lines[j]`` ends the paragraph above it. Only what CommonMark
+    lets interrupt a paragraph does: a blank line, a fence, a heading, a quote,
+    a bullet, a numbered list starting at 1, a table header with its separator
+    row, or a block image. Anything else is a wrapped continuation."""
+    line = lines[j]
     stripped = line.strip()
-    return (not stripped or stripped.startswith(('```', '|', '#', '>'))
-            or line.startswith(('* ', '- ')) or bool(_NUMBERED.match(line))
+    return (not stripped or stripped.startswith(('```', '>'))
+            or bool(_HEADING.match(stripped))
+            or line.startswith(('* ', '- ')) or bool(re.match(r'^1\.\s', line))
+            or (stripped.startswith('|') and j + 1 < len(lines)
+                and bool(_TABLE_SEPARATOR.match(lines[j + 1])))
             or bool(_BLOCK_IMAGE.match(stripped)))
+
+
+def _continues_item(lines: list[str], j: int) -> bool:
+    """Whether ``lines[j]`` continues the list item above it."""
+    return not _interrupts(lines, j) and not _LIST_ITEM.match(lines[j])
 
 
 def _flowed(lines: list[str]) -> list[dict[str, Any]]:
     """Inline content for wrapped lines, as CommonMark reads them: a newline
     inside a paragraph is a space; only a line ending in two spaces or a
-    backslash is a hard break."""
-    nodes: list[dict[str, Any]] = []
+    backslash is a hard break. The lines are joined before inline marks are
+    parsed, so bold or a link may wrap across them."""
+    joined = ''
     for index, raw in enumerate(lines):
         hard = raw.endswith('  ') or raw.rstrip(' ').endswith('\\')
         text = raw.strip()
         if text.endswith('\\'):
             text = text[:-1].rstrip()
-        parts = _parse_inline(text)
-        if nodes and nodes[-1].get("type") != "hardBreak":
-            parts = [{"type": "text", "text": " "}] + parts
-        for part in parts:
-            last = nodes[-1] if nodes else None
-            if (last and last.get("type") == "text" and part.get("type") == "text"
-                    and not last.get("marks") and not part.get("marks")):
-                last["text"] += part["text"]
-            else:
-                nodes.append(part)
-        if hard and index < len(lines) - 1:
-            nodes.append({"type": "hardBreak"})
-    return nodes
+        joined += text
+        if index < len(lines) - 1:
+            joined += _HARD_BREAK if hard else ' '
+    nodes: list[dict[str, Any]] = []
+    for node in _parse_inline(joined):
+        pieces = node.get("text", "").split(_HARD_BREAK)
+        for n, piece in enumerate(pieces):
+            if n:
+                nodes.append({"type": "hardBreak"})
+            if piece:
+                nodes.append({**node, "text": piece})
+    return nodes or [{"type": "text", "text": ""}]
 
 
 def markdown_to_adf(markdown_text: str,
@@ -111,7 +126,7 @@ def markdown_to_adf(markdown_text: str,
             line.strip().startswith('|')
             and line.strip().endswith('|')
             and i + 1 < len(lines)
-            and re.match(r'^\s*\|[\s:|\-]+\|\s*$', lines[i + 1])
+            and _TABLE_SEPARATOR.match(lines[i + 1])
         ):
             def _split_row(raw):
                 return [c.strip() for c in raw.strip().strip('|').split('|')]
@@ -167,7 +182,12 @@ def markdown_to_adf(markdown_text: str,
         # separates its paragraphs, and wrapped lines flow as in a paragraph.
         if line.lstrip().startswith('>'):
             quoted = []
-            while i < len(lines) and lines[i].lstrip().startswith('>'):
+            while i < len(lines) and (
+                lines[i].lstrip().startswith('>')
+                # A lazy continuation: plain text right after a quoted line
+                # stays in the quote, as CommonMark reads it.
+                or (quoted and quoted[-1].strip() and not _interrupts(lines, i))
+            ):
                 quoted.append(re.sub(r'^\s*>\s?', '', lines[i]))
                 i += 1
             paragraphs, current = [], []
@@ -181,23 +201,18 @@ def markdown_to_adf(markdown_text: str,
                 content.append({"type": "blockquote", "content": paragraphs})
             continue
 
-        # Headers
-        if line.startswith('### '):
-            content.append({"type": "heading", "attrs": {"level": 3},
-                            "content": _parse_inline(line[4:])})
-        elif line.startswith('## '):
-            content.append({"type": "heading", "attrs": {"level": 2},
-                            "content": _parse_inline(line[3:])})
-        elif line.startswith('# '):
-            content.append({"type": "heading", "attrs": {"level": 1},
-                            "content": _parse_inline(line[2:])})
+        # Headings
+        heading = _HEADING.match(line)
+        if heading:
+            content.append({"type": "heading", "attrs": {"level": len(heading.group(1))},
+                            "content": _parse_inline(heading.group(2))})
         # Numbered lists
         elif re.match(r'^\d+\.\s+', line):
             list_items = []
             while i < len(lines) and re.match(r'^\d+\.\s+', lines[i]):
                 item = [re.sub(r'^\d+\.\s+', '', lines[i])]
                 i += 1
-                while i < len(lines) and not _starts_block(lines[i]):
+                while i < len(lines) and _continues_item(lines, i):
                     item.append(lines[i])
                     i += 1
                 list_items.append({
@@ -212,7 +227,7 @@ def markdown_to_adf(markdown_text: str,
             while i < len(lines) and (lines[i].startswith('* ') or lines[i].startswith('- ')):
                 item = [lines[i][2:]]
                 i += 1
-                while i < len(lines) and not _starts_block(lines[i]):
+                while i < len(lines) and _continues_item(lines, i):
                     item.append(lines[i])
                     i += 1
                 list_items.append({
@@ -241,7 +256,7 @@ def markdown_to_adf(markdown_text: str,
             else:
                 # A paragraph runs until a blank line or the next block.
                 paragraph = [line]
-                while not image and i + 1 < len(lines) and not _starts_block(lines[i + 1]):
+                while not image and i + 1 < len(lines) and not _interrupts(lines, i + 1):
                     i += 1
                     paragraph.append(lines[i])
                 content.append({"type": "paragraph", "content": _flowed(paragraph)})
@@ -252,14 +267,15 @@ def markdown_to_adf(markdown_text: str,
 
 
 def _parse_inline(text: str) -> list[dict[str, Any]]:
-    """Parse inline markdown formatting (bold, inline code)."""
+    """Parse inline markdown formatting (bold, italic, inline code, links)."""
     if not text.strip():
         return [{"type": "text", "text": ""}]
 
     nodes = []
     pos = 0
 
-    pattern = r'(\*\*(.+?)\*\*)|(`([^`]+)`)'
+    pattern = (r'(\*\*(.+?)\*\*)|(`([^`]+)`)|((?<!!)\[([^\]]+)\]\(([^)\s]+)\))'
+               r'|(?<!\*)(\*([^*\s](?:[^*]*[^*\s])?)\*)(?!\*)')
 
     for match in re.finditer(pattern, text):
         if match.start() > pos:
@@ -271,6 +287,12 @@ def _parse_inline(text: str) -> list[dict[str, Any]]:
         elif match.group(3):  # inline code
             nodes.append({"type": "text", "text": match.group(4),
                           "marks": [{"type": "code"}]})
+        elif match.group(5):  # link
+            nodes.append({"type": "text", "text": match.group(6),
+                          "marks": [{"type": "link", "attrs": {"href": match.group(7)}}]})
+        elif match.group(8):  # italic
+            nodes.append({"type": "text", "text": match.group(9),
+                          "marks": [{"type": "em"}]})
 
         pos = match.end()
 
