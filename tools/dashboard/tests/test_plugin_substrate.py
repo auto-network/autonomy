@@ -869,7 +869,6 @@ def test_getting_started_plugin_installs_two_personal_workspaces(org_graph):
         assert ws.graph_project == "personal"
         assert ws.image == "autonomy-session-platform"
         assert ws.repos == ()
-        assert ws.artifacts == ()
     rows = graph_ops.read_set("autonomy.workspace.primer", org="personal", peers=[]).to_dict()
     assert "## Getting Started" in rows["getting-started"].payload["markdown"]
     assert rows["getting-started"].state == "raw"

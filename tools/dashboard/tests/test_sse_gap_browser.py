@@ -316,6 +316,26 @@ class Harness:
             time.sleep(0.5)
         return result
 
+    def bus_seq(self):
+        """The server EventBus's global seq (``/api/diag/sessions``), or None."""
+        import urllib.request
+        try:
+            with urllib.request.urlopen(
+                f"http://localhost:{TEST_PORT}/api/diag/sessions", timeout=5,
+            ) as response:
+                return json.load(response)["bus"]["global_seq"]
+        except Exception:
+            return None
+
+    def wait_for_bus_seq(self, target, timeout=60):
+        """Poll until the server has broadcast through *target*."""
+        deadline = time.time() + timeout
+        seq = self.bus_seq()
+        while (seq is None or seq < target) and time.time() < deadline:
+            time.sleep(0.25)
+            seq = self.bus_seq()
+        return seq
+
     def prime_lastSeq(self):
         """Send a primer event so _lastSeq > 0 before disconnect.
 
@@ -452,13 +472,22 @@ class TestBufferOverflow:
 
         # Disconnect
         ab_eval("window._es.close(); return 'disconnected';")
+        seq_before = harness.bus_seq()
+        assert seq_before is not None, "server EventBus seq is unreadable"
 
         # Write large events to overflow the 32MB buffer
         # Each entry ~160KB × 250 = ~40MB > 32MB cap → eviction
         harness.write_large_events(count=250, size_per_entry=160000)
 
-        # Wait for mock event watcher to process
-        time.sleep(3)
+        # The overflow must have happened before reconnecting: under load the
+        # mock event watcher took longer than the old fixed 3s to broadcast
+        # 40MB, the browser reconnected mid-stream, saw no gap, and the
+        # banner never appeared.
+        seq_after = harness.wait_for_bus_seq(seq_before + 250)
+        assert seq_after is not None and seq_after >= seq_before + 250, (
+            f"server broadcast only through seq {seq_after}, expected "
+            f"{seq_before + 250}: the overflow never happened"
+        )
 
         # Reconnect
         ab_eval("window._connect(); return 'reconnecting';")
@@ -466,10 +495,13 @@ class TestBufferOverflow:
         # Write trigger — arrives with high seq, buffer can't cover gap → interruption
         trigger = _assistant_entry("Overflow trigger", 59)
         harness.write_gap_events([trigger])
-        time.sleep(3)
+        deadline = time.time() + 20
+        result = ab_eval("return Alpine.store('app').sseInterrupted;")
+        while not result and time.time() < deadline:
+            time.sleep(0.25)
+            result = ab_eval("return Alpine.store('app').sseInterrupted;")
 
         # Check for interruption banner
-        result = ab_eval("return Alpine.store('app').sseInterrupted;")
         assert result, (
             f"Expected sseInterrupted to be truthy after buffer overflow, got {result}"
         )

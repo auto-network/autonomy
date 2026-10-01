@@ -12,19 +12,30 @@ be among them — only invite_ref and the invitation-aligned expiry cross.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import io
 import json
 import time
 import urllib.error
 import urllib.parse
+from types import SimpleNamespace
 
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from tools.dashboard import approvals_routes
-from tools.dashboard.dao import approval_requests as ar
+from tools.dashboard import api_auth, approvals_routes, attention_routes
+from tools.dashboard import link_approval_central as link_central
+from tools.dashboard.approval_http_bridge import ApprovalHttpBridge, ApprovalHttpRegistry
+from tools.dashboard.approval_kind_registry import build_production_registry
+from tools.dashboard.approval_service import (
+    ApprovalService,
+    HumanApprovalActor,
+    InMemoryApprovalStore,
+)
+from tools.dashboard import link_operations as link_ops
+from tools.dashboard.link_operations import LinkOperationError
 from tools.graph import link_cmd, settings_ops
 from tools.graph.db import GraphDB
 from tools.graph.schemas.network_identity import (
@@ -50,6 +61,22 @@ OUTSIDER_SEED = bytes(range(64, 96))
 INVITE_TOKEN = "ef" * 32
 GRANT_TOKEN = "f00dfeed" * 4  # 32 lowercase hex, matches _TOKEN_RE
 CHANNEL_PUB = "9a" * 32  # the per-link channel PUBLIC key the mint returns
+
+
+class _MemoryJournal:
+    """Link-operation journal held in memory: the machine-homed journal is
+    the executor's own concern, and writing it here would touch node state."""
+
+    rows: dict = {}
+
+    @classmethod
+    def get(cls, key):
+        row = cls.rows.get(key)
+        return dict(row) if row is not None else None
+
+    @classmethod
+    def put(cls, key, payload):
+        cls.rows[key] = dict(payload)
 
 
 def _args(invite_ref):
@@ -184,40 +211,71 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
 
     active_cert = [session_cert(founder)]
     approval_requests = []
-    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
+
+    # Central composition for the two link kinds (77c94ff1): the REAL planner,
+    # persona verifier and executor; only the machine-local journal is kept in
+    # memory, and the result destination is fixed to this machine.
+    _MemoryJournal.rows = {}
+    here = "h" * 43
+    operator_root = KeyPair.generate()
+    runtimes = {
+        kind: link_central.build_approval_runtime(
+            kind, destination_resolver=lambda: here, machine_label=lambda: "Home")
+        for kind in link_central.KINDS
+    }
+    registry = build_production_registry(runtimes=runtimes)
+    approvals = ApprovalService(
+        registry=registry,
+        store=InMemoryApprovalStore(),
+        personal_root_resolver=lambda: operator_root.public_hex,
+        session_label_resolver=lambda subject: f"{subject} · Publishing",
+    )
+    desk = link_central.LinkApprovalDesk(
+        approvals=approvals, destination_resolver=lambda: here, journal=_MemoryJournal)
+    bridge = ApprovalHttpBridge(
+        approvals=approvals,
+        registry=ApprovalHttpRegistry(
+            approvals=registry,
+            adapters={kind: link_central.build_http_adapter(kind, desk)
+                      for kind in link_central.KINDS},
+        ),
+    )
+    monkeypatch.setattr(attention_routes, "_runtime",
+                        SimpleNamespace(approval_http=bridge))
+    # The requester is this org's agent session.
+    requester = api_auth.ApiPrincipal(
+        api_auth.ApiPrincipalKind.ORG_SESSION, subject="auto-minter", org=ORG)
+    monkeypatch.setattr(api_auth, "principal_from_request", lambda request: requester)
+
+    def operate(approval_id):
+        """The operator: review the frozen registry request, grant, then sign
+        the fixed tunnel PoP bytes (worktrees.js) and carry the operation out
+        on this machine. Publish rides the org tunnel, never a registry HTTP
+        route."""
+        registry_request = desk.bootstrap(approval_id)["registry_request"]
+        # What the operator reviews: the staged org:join identity law
+        # (org == target_uuid == the binding, exact invitation expiry).
+        assert registry_request["payload"] == {
+            "org": ORG_UUID,
+            "target_uuid": ORG_UUID,
+            "target_type": "org:join",
+            "invite_ref": invite.event_id,
+            "expires_at": invite_expiry,
+            "meta": {"label": "Member invitation"},
+        }
+        approvals.decide(approval_id, HumanApprovalActor._verified(operator_root.public_hex),
+                         outcome="granted", decision={})
+        envelope = sign_request(
+            session_key,
+            "TUNNEL",
+            "/control/create-link",
+            registry_request["payload"],
+            ts=int(time.time()) + 1,
+            cert=active_cert[0],
+        )
+        return asyncio.run(desk.operate(approval_id, {"envelope": envelope}))
 
     with TestClient(Starlette(routes=approvals_routes.ROUTES)) as dashboard:
-        def decide(approval_id):
-            enriched = dashboard.get(
-                f"/api/approvals/{approval_id}"
-            ).json()
-            registry_request = enriched["registry_request"]
-            # What the operator reviews: the staged org:join identity law
-            # (org == target_uuid == the binding, exact invitation expiry).
-            assert registry_request["payload"] == {
-                "org": ORG_UUID,
-                "target_uuid": ORG_UUID,
-                "target_type": "org:join",
-                "invite_ref": invite.event_id,
-                "expires_at": invite_expiry,
-                "meta": {"label": "Member invitation"},
-            }
-            # The browser signs the fixed tunnel PoP bytes (worktrees.js):
-            # publish rides the org tunnel, never a registry HTTP route.
-            envelope = sign_request(
-                session_key,
-                "TUNNEL",
-                "/control/create-link",
-                registry_request["payload"],
-                ts=int(time.time()),
-                cert=active_cert[0],
-            )
-            response = dashboard.post(
-                f"/api/approvals/{approval_id}/decision",
-                json={"approved": True, "envelope": envelope},
-            )
-            assert response.status_code == 200
-
         def fake_api(method, route, *, body=None, timeout=None):
             if body is not None:
                 approval_requests.append(json.loads(json.dumps(body)))
@@ -232,7 +290,7 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
                 )
             result = response.json() if response.content else {}
             if method == "POST" and route == "/api/approvals":
-                decide(result["id"])
+                operate(result["id"])
             return result
 
         monkeypatch.setattr(link_cmd, "_api_request", fake_api)
@@ -245,25 +303,28 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
         assert "Traceback" not in missing_cli.err
         assert approval_requests == []
 
+        # A request that bypasses the CLI is refused by the Central planner
+        # before any approval exists. Over HTTP the requester gets only the
+        # code: the link planner raises plain ValueError, which Central keeps
+        # opaque (only ApprovalRequestRefused carries a detail, auto-gf08k).
+        # The planner's own reason is pinned at its seam.
+        missing_request = {
+            "target_uuid": ORG_UUID,
+            "target_type": "org:join",
+            "invite_ref": missing_ref,
+            "expires_at": invite_expiry,
+            "meta": {},
+        }
         missing_dashboard = dashboard.post(
             "/api/approvals",
-            json={
-                "kind": "link_publish",
-                "session": "missing-invite",
-                "request": {
-                    "org": ORG,
-                    "target_uuid": ORG_UUID,
-                    "target_type": "org:join",
-                    "invite_ref": missing_ref,
-                    "expires_at": invite_expiry,
-                    "meta": {},
-                },
-            },
+            json={"kind": "link_publish",
+                  "request": {"org_slug": ORG, **missing_request}},
         )
         assert missing_dashboard.status_code == 400
-        assert missing_dashboard.json() == {
-            "error": "invite_ref is not in the organization ledger"
-        }
+        assert missing_dashboard.json() == {"error": "invalid_request"}
+        with pytest.raises(LinkOperationError) as missing_plan:
+            link_ops.plan(link_ops.PUBLISH, {"org": ORG, **missing_request})
+        assert missing_plan.value.detail == "invite_ref is not in the organization ledger"
 
         monkeypatch.setenv("AUTONOMY_INVITE_TOKEN", "wrong-bearer")
         with pytest.raises(SystemExit):
@@ -335,15 +396,14 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
         assert grant["invite_ref"] == invite.event_id
         assert "#" not in grant["url"]
 
-        # Shortening the absolute expiry is rejected before an approval row
+        # Shortening the absolute expiry is refused before an approval row
         # is created, so no operator can accidentally sign a dead-early link.
         short = dashboard.post(
             "/api/approvals",
             json={
                 "kind": "link_publish",
-                "session": "short-expiry",
                 "request": {
-                    "org": ORG,
+                    "org_slug": ORG,
                     "target_uuid": ORG_UUID,
                     "target_type": "org:join",
                     "invite_ref": invite.event_id,
@@ -353,18 +413,35 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
             },
         )
         assert short.status_code == 400
-        assert "must equal the invitation expiry" in short.json()["error"]
+        assert short.json() == {"error": "invalid_request"}
+        with pytest.raises(LinkOperationError) as short_plan:
+            link_ops.plan(link_ops.PUBLISH, {
+                "org": ORG, "target_uuid": ORG_UUID, "target_type": "org:join",
+                "invite_ref": invite.event_id, "expires_at": invite_expiry - 1,
+                "meta": {},
+            })
+        assert "must equal the invitation expiry" in (short_plan.value.detail or "")
 
         # A non-member persona signs a perfectly valid chain to ITSELF, but
-        # the local ledger authorize(link:publish) gate refuses before any
-        # control frame is emitted.
+        # the local ledger authorize(link:publish) gate refuses the operation
+        # before any control frame is emitted. Since 77c94ff1 that refusal is
+        # the operator's (the operation step), not the requester's.
         outsider = derive_persona(OUTSIDER_SEED, founded.genesis_id)
         active_cert[0] = session_cert(outsider)
         crossed_before = len(control_calls)
-        with pytest.raises(SystemExit):
-            link_cmd.cmd_link_publish(_args(invite.event_id))
-        refused = capsys.readouterr()
-        assert "is not authorized to publish share links" in refused.err
+        created = dashboard.post(
+            "/api/approvals",
+            json={"kind": "link_publish", "request": {
+                "org_slug": ORG, "target_uuid": ORG_UUID, "target_type": "org:join",
+                "invite_ref": invite.event_id, "expires_at": invite_expiry,
+                "meta": {"label": "Member invitation"},
+            }},
+        )
+        assert created.status_code == 200
+        with pytest.raises(LinkOperationError) as refused:
+            operate(created.json()["id"])
+        assert refused.value.code == "authority_refused"
+        assert "is not authorized to publish share links" in (refused.value.detail or "")
         assert len(control_calls) == crossed_before
 
     GraphDB.close_all_pooled()
