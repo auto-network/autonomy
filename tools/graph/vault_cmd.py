@@ -89,15 +89,26 @@ def _key_matches(stored_key: str, name: str) -> bool:
 
 
 def _find_member(client, name, org):
-    """The (tier, member) a name resolves to across both tiers, or (None, None)."""
+    """The (tier, member) a name resolves to across both tiers, or (None, None).
+
+    A NAMED ``--org SLUG`` addresses exactly ``SLUG:<name>`` (auto-kx7uo), and
+    an exact key wins over a suffix match, so a bare name never resolves to
+    another namespace's row of the same name."""
+    exact = (f"{org}:{name}" if isinstance(org, str)
+             and org not in ("personal", "machine") else name)
+    fallback = None
     for tier, set_id in _TIER_SET.items():
         try:
             members = client.read_set(set_id, org=org)
         except Exception:  # noqa: BLE001 — a set the caller cannot read is "absent here"
             continue
         for m in members.members:
-            if _key_matches(m.key, name):
+            if m.key == exact:
                 return tier, m
+            if fallback is None and exact == name and _key_matches(m.key, name):
+                fallback = (tier, m)
+    if fallback is not None:
+        return fallback
     return None, None
 
 
@@ -328,7 +339,7 @@ def cmd_vault_remove(args) -> None:
         print(f"Error: no vault secret named {args.name!r}", file=sys.stderr)
         sys.exit(1)
     client.remove_vault_credential(_TIER_SET[tier], args.name, org=org)
-    print(f"  ✓ removed {args.name}  ({tier})")
+    print(f"  ✓ removed {member.key}  ({tier})")
 
 
 def cmd_vault_list(args) -> None:

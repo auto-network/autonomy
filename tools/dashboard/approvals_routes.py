@@ -56,6 +56,10 @@ from tools.graph.schemas import commit_signing_key as _sign_key_schema  # noqa: 
 SIGN_KEY_SET_ID = _sign_key_schema.SIGN_KEY_SET_ID
 
 
+
+#: Approval kinds that address a vault credential by name.
+_VAULT_NAME_KINDS = frozenset({"vault_open", "vault_seal"})
+
 def _org_for_approval(rid: str) -> str | None:
     """The organization a pending approval belongs to.
 
@@ -569,12 +573,24 @@ async def create_approval(request: Request) -> JSONResponse:
         or not body["request"]
     ):
         return _central_no_store({"error": "invalid_request"}, status_code=400)
+    principal = api_auth.principal_from_request(request)
+    operator_org = None
+    if kind in _VAULT_NAME_KINDS:
+        # A vault name the operator's terminal qualifies with --org resolves
+        # to <org>:<name>, as every other vault verb does (auto-kx7uo).
+        from tools.dashboard.vault_routes import NamedOrgRefused, operator_org_for_request
+        try:
+            operator_org = await asyncio.to_thread(
+                operator_org_for_request, request, principal)
+        except NamedOrgRefused as exc:
+            return _central_no_store({"error": str(exc)}, status_code=exc.status_code)
     try:
         approval_id = await asyncio.to_thread(
             bridge.create,
             kind,
-            api_auth.principal_from_request(request),
+            principal,
             body["request"],
+            **({"operator_org": operator_org} if operator_org else {}),
         )
     except ApprovalHttpBridgeError as exc:
         return _central_error(exc)

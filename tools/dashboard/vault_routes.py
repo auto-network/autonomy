@@ -217,6 +217,39 @@ def operator_named_org_refusal(slug: str) -> str | None:
     return None
 
 
+class NamedOrgRefused(Exception):
+    """A request named an organization it may not address."""
+
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def operator_org_for_request(request, principal) -> str | None:
+    """The organization the OPERATOR names on this request, or None.
+
+    Every vault verb that takes a name resolves it through this one answer
+    (auto-kx7uo): when the operator's terminal names ``--org SLUG`` the name
+    is ``SLUG:<name>``. None when no org is named, or when the caller is an
+    org session (its bearer already fixes the namespace). Raises
+    :class:`NamedOrgRefused` when any other caller names an org, or the slug
+    is not an organization this machine holds."""
+    requested = api_auth.organization_scope_from_request(request)
+    if not isinstance(requested, str) or requested in ("personal", "machine"):
+        return None
+    if principal.org_bound:
+        return None
+    if not is_operator_terminal(principal):
+        raise NamedOrgRefused(
+            f"cannot address organization {requested!r}: only the operator's "
+            "host terminal or dashboard, or a session of that organization, may",
+            403,
+        )
+    if (refusal := operator_named_org_refusal(requested)) is not None:
+        raise NamedOrgRefused(refusal, 400)
+    return requested
+
+
 async def seal_personal_setting(request: Request):
     """Route one submitted secret into the personal secured store.
 
@@ -247,29 +280,16 @@ async def seal_personal_setting(request: Request):
         principal = api_auth.principal_from_request(request)
         # A NAMED org lands under that org's ``<org>:`` key, never the bare
         # personal key (auto-ha7se). The operator (dashboard cookie or a host
-        # terminal: is_operator_terminal) names any organization directly
-        # (auto-kx7uo, operator ruling 2026-10-01). An org session's org comes from its bearer (the
-        # middleware has already refused a conflicting header); any other
-        # caller naming an org is refused.
-        requested_org = api_auth.organization_scope_from_request(request)
-        named_org = (requested_org
-                     if isinstance(requested_org, str)
-                     and requested_org not in ("personal", "machine") else None)
-        operator = named_org is not None and is_operator_terminal(principal)
-        if named_org is not None and not operator and not principal.org_bound:
-            return JSONResponse(
-                {"error": (
-                    f"cannot seal into organization {named_org!r}: only the "
-                    "operator's host terminal or dashboard, or a session of "
-                    "that organization, may"
-                )},
-                status_code=403,
-            )
-        if operator:
-            if (refusal := operator_named_org_refusal(named_org)) is not None:
-                return JSONResponse({"error": refusal}, status_code=400)
+        # terminal) names any organization directly (auto-kx7uo, operator
+        # ruling 2026-10-01); an org session's org comes from its bearer; any
+        # other caller naming an org is refused (operator_org_for_request).
+        try:
+            operator_org = operator_org_for_request(request, principal)
+        except NamedOrgRefused as exc:
+            return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+        if operator_org is not None:
             routed_key = schema_registry.derive_org_writeback_key(
-                VAULT_SECURED_SET_ID, named_org, key.strip(),
+                VAULT_SECURED_SET_ID, operator_org, key.strip(),
             )
         elif principal.kind in {
             api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
@@ -479,7 +499,9 @@ async def remove_vault_credential(request: Request):
     from tools.dashboard.vault_open_approvals import _setting_route
     principal = api_auth.principal_from_request(request)
     try:
-        routed_key, scope = _setting_route(principal, set_id, name)
+        routed_key, scope = _setting_route(
+            principal, set_id, name,
+            operator_org=operator_org_for_request(request, principal))
         layers = settings_ops.layers_for(set_id, routed_key, org=scope)
         base = layers.get("base") or {}
         if not base.get("id"):
@@ -499,6 +521,8 @@ async def remove_vault_credential(request: Request):
                 status_code=409,
             )
         settings_ops.remove_setting(base["id"], org=scope)
+    except NamedOrgRefused as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
     except PermissionError as exc:
         return JSONResponse({"error": str(exc)}, status_code=403)
     except LookupError as exc:
@@ -696,7 +720,11 @@ async def share_vault_credential(request: Request):
     from tools.graph.schemas.registry import derive_org_writeback_key
     principal = api_auth.principal_from_request(request)
     try:
-        source_key, _scope = _setting_route(principal, set_id, name)
+        operator_org = operator_org_for_request(request, principal)
+        source_key, _scope = _setting_route(principal, set_id, name,
+                                            operator_org=operator_org)
+    except NamedOrgRefused as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
     except PermissionError as exc:
         return JSONResponse({"error": str(exc)}, status_code=403)
     except (ValueError, LookupError, SchemaValidationError) as exc:
@@ -704,7 +732,7 @@ async def share_vault_credential(request: Request):
         if message.startswith("vault_open "):
             message = "vault_share " + message[len("vault_open "):]
         return JSONResponse({"error": message}, status_code=400)
-    if principal.org == to_org:
+    if (operator_org or principal.org) == to_org:
         return JSONResponse(
             {"error": f"{name!r} is already in the {to_org!r} namespace"}, status_code=400,
         )
@@ -801,7 +829,11 @@ async def deliver_vault_credential(request: Request):
         )
     from tools.dashboard.vault_open_approvals import _setting_route
     try:
-        routed_key, _scope = _setting_route(principal, set_id, name)
+        routed_key, _scope = _setting_route(
+            principal, set_id, name,
+            operator_org=operator_org_for_request(request, principal))
+    except NamedOrgRefused as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
     except PermissionError as exc:
         return JSONResponse({"error": str(exc)}, status_code=403)
     except (ValueError, LookupError, SchemaValidationError) as exc:

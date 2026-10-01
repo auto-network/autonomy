@@ -19529,23 +19529,13 @@ async def api_graph_setting_create(request):
         if _named_org and _schemas.declared_org_writeback_key_strategy(
             body["set_id"]
         ):
-            _principal = api_auth.principal_from_request(request)
             from tools.dashboard.vault_routes import (
-                is_operator_terminal, operator_named_org_refusal,
+                NamedOrgRefused, operator_org_for_request,
             )
-            _operator = is_operator_terminal(_principal)
-            if not _principal.org_bound and not _operator:
-                return JSONResponse(
-                    {"error": (
-                        f"cannot seal into organization {org!r}: only the "
-                        "operator's host terminal or dashboard, or a session "
-                        "of that organization, may"
-                    )},
-                    status_code=403,
-                )
-            if _operator:
-                if (_refusal := operator_named_org_refusal(org)) is not None:
-                    return JSONResponse({"error": _refusal}, status_code=400)
+            try:
+                operator_org_for_request(request, api_auth.principal_from_request(request))
+            except NamedOrgRefused as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
             # ``org`` is a non-empty slug here (checked above), so the
             # ``or CALLER_ORG`` fallback is a no-op — it is written this way to
             # keep the org-taint invariant the request-scope linter enforces

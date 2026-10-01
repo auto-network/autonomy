@@ -97,7 +97,7 @@ def test_audited_seal_from_a_non_operator_naming_an_org_is_refused(monkeypatch, 
     req = _setting_request(_audited_body(), principal=principal, organization="anchore")
     resp = asyncio.run(server.api_graph_setting_create(req))
     assert resp.status_code == 403
-    assert b"cannot seal into organization 'anchore'" in resp.body
+    assert b"cannot address organization 'anchore'" in resp.body
     # The refusal happens BEFORE any write — nothing lands in personal.
     assert called["write"] is False
 
@@ -197,7 +197,7 @@ def test_secured_seal_from_a_non_operator_naming_an_org_is_refused(monkeypatch, 
             "policy_class_id": "personal-root",
         })
     assert resp.status_code == 403, resp.text
-    assert "cannot seal into organization 'anchore'" in resp.json()["error"]
+    assert "cannot address organization 'anchore'" in resp.json()["error"]
     assert sealed["called"] is False
     # The plaintext is never echoed into the refusal body.
     assert "s3cr3t" not in resp.text

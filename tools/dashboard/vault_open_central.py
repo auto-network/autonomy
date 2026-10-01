@@ -130,7 +130,9 @@ def build_request_planner(
         if not isinstance(body, Mapping) or not set(body) <= _REQUEST_FIELDS:
             raise ValueError("vault_open accepts only set_id, key and ttl_seconds")
         principal = _principal(context)
-        request, staged = freeze(principal, dict(body))
+        request, staged = freeze(
+            principal, dict(body),
+            **({"operator_org": context.operator_org} if context.operator_org else {}))
         destination = destination_resolver()
         if not isinstance(destination, str) or len(destination) != 43:
             raise ValueError("this Dashboard cannot deliver a vault release right now")

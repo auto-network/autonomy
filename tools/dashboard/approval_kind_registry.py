@@ -178,6 +178,10 @@ class ApprovalPlanningContext:
     producer_id: str | None = None
     requester_principal_kind: str | None = None
     requester_org: str | None = None
+    #: The organization the OPERATOR's terminal named for a vault verb
+    #: (vault_routes.operator_org_for_request: authorized and validated at
+    #: the HTTP boundary). Names resolve to ``<operator_org>:<name>``.
+    operator_org: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

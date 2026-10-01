@@ -53,6 +53,8 @@ def _setting_route(
     principal: api_auth.ApiPrincipal,
     set_id: str,
     key: str,
+    *,
+    operator_org: str | None = None,
 ) -> tuple[str, str | None]:
     """Resolve a request suffix to its exact store key and database scope.
 
@@ -60,7 +62,17 @@ def _setting_route(
     personal-homed schema may opt into this one mediated shape, in which the
     request carries a suffix and the server derives the bearer organization
     prefix.  The same derivation is used by the seal route.
+
+    ``operator_org`` is the organization the OPERATOR's terminal named
+    (``vault_routes.operator_org_for_request``, already authorized and
+    validated): the suffix resolves to ``<operator_org>:<key>`` in the
+    operator's store, the row ``graph vault seal --org`` wrote (auto-kx7uo).
     """
+    if operator_org is not None and schemas.declared_home(set_id) == "personal":
+        try:
+            return schemas.derive_org_writeback_key(set_id, operator_org, key), None
+        except ValueError as exc:
+            raise ValueError(f"vault_open {exc}") from exc
     if (
         principal.kind is api_auth.ApiPrincipalKind.ORG_SESSION
         and principal.org != "personal"
@@ -235,7 +247,9 @@ def _ceremony_bootstrap(class_snapshot: dict, org: str | None) -> dict:
     }
 
 
-def freeze_request(principal: api_auth.ApiPrincipal, request: dict) -> tuple[dict, dict]:
+def freeze_request(
+    principal: api_auth.ApiPrincipal, request: dict, *, operator_org: str | None = None,
+) -> tuple[dict, dict]:
     """Freeze a release of one secured Setting for an authenticated session.
 
     ``principal`` is the requesting session, proven by the caller from its
@@ -277,7 +291,8 @@ def freeze_request(principal: api_auth.ApiPrincipal, request: dict) -> tuple[dic
     if not workspace:
         raise PermissionError("the authenticated session has no workspace binding")
 
-    routed_key, read_org = _setting_route(principal, set_id, key)
+    routed_key, read_org = _setting_route(principal, set_id, key,
+                                          operator_org=operator_org)
     members = settings_ops.read_set(set_id, org=read_org, peers=[]).members
     member = next(
         (candidate for candidate in members if candidate.key == routed_key), None,

@@ -500,6 +500,8 @@ class ApprovalService:
         kind: str,
         principal: api_auth.ApiPrincipal,
         body: Mapping[str, Any],
+        *,
+        operator_org: str | None = None,
     ) -> ApprovalRecord:
         registration = self._registration(kind)
         safe_body = self._validate_outer(body)
@@ -512,6 +514,7 @@ class ApprovalService:
             producer_id=None, stable_retry=False,
             requester_principal_kind=principal.kind.value,
             requester_org=principal.org,
+            operator_org=operator_org,
         )
 
     def create_from_producer(
@@ -667,6 +670,7 @@ class ApprovalService:
         stable_retry: bool,
         requester_principal_kind: str | None,
         requester_org: str | None,
+        operator_org: str | None = None,
     ) -> ApprovalRecord:
         lock = _ApprovalLocks.for_id(approval_id)
         with lock:
@@ -689,6 +693,7 @@ class ApprovalService:
                 producer_id=producer_id,
                 requester_principal_kind=requester_principal_kind,
                 requester_org=requester_org,
+                operator_org=operator_org,
             )
             assert registration.runtime is not None
             try:

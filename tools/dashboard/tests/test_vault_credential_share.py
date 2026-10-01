@@ -23,7 +23,7 @@ def _client(monkeypatch, principal, *, members=(), existing=None, written=None):
     monkeypatch.setattr(vault_routes.api_auth, "require_authenticated_api_caller", lambda request: None)
     monkeypatch.setattr(vault_routes.api_auth, "principal_from_request", lambda request: principal)
     import tools.dashboard.vault_open_approvals as voa
-    monkeypatch.setattr(voa, "_setting_route", lambda p, set_id, name: (f"{p.org}:{name}" if p.org else name, None))
+    monkeypatch.setattr(voa, "_setting_route", lambda p, set_id, name, operator_org=None: (f"{operator_org or p.org}:{name}" if (operator_org or p.org) else name, None))
     monkeypatch.setattr(vault_routes.settings_ops, "read_set", lambda set_id, *, org, peers=None: SimpleNamespace(members=list(members)))
     monkeypatch.setattr(vault_routes.settings_ops, "layers_for", lambda set_id, key, *, org: {"base": {"id": existing} if existing else None})
 

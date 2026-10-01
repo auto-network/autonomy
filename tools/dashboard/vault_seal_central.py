@@ -114,9 +114,14 @@ def routed_key(context: ApprovalPlanningContext, set_id: str, name: str) -> str:
 
     An organization session writes under its bearer-derived ``<org>:`` prefix
     into the operator's personal store (the same derivation ``graph vault
-    seal`` and ``vault_open`` use); a local or personal session names the
-    operator's own bare key. The requester supplies a suffix only.
+    seal`` and ``vault_open`` use); the operator's terminal naming an
+    organization writes under that one (``context.operator_org``); a local or
+    personal session otherwise names the operator's own bare key. The
+    requester supplies a suffix only.
     """
+    if context.operator_org:
+        # The operator's terminal named the organization (auto-kx7uo).
+        return schemas.derive_org_writeback_key(set_id, context.operator_org, name)
     kind = context.requester_principal_kind
     org = context.requester_org
     if kind == api_auth.ApiPrincipalKind.ORG_SESSION.value and org not in (None, "", "personal"):

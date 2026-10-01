@@ -282,12 +282,16 @@ class ApprovalHttpBridge:
         kind: str,
         principal: api_auth.ApiPrincipal,
         request_payload: Mapping[str, Any],
+        *,
+        operator_org: str | None = None,
     ) -> str:
         adapter = self.registry.adapter_for_create(kind)
         if adapter is None:
             raise ApprovalHttpBridgeError("kind_disabled")
         try:
-            row = self.approvals.create_from_principal(kind, principal, request_payload)
+            row = self.approvals.create_from_principal(
+                kind, principal, request_payload,
+                **({"operator_org": operator_org} if operator_org else {}))
         except ApprovalServiceError as exc:
             raise ApprovalHttpBridgeError(
                 exc.code, public_detail=getattr(exc, "public_detail", None)) from exc
