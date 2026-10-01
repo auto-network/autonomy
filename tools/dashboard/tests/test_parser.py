@@ -1367,3 +1367,43 @@ def test_replayed_prefix_never_builds_sender_links(monkeypatch):
     with session_harness.semantic_enrichment_disabled():
         assert session_harness._sender_href({"from": "host-a"}) == ""
     assert session_harness._sender_href({"from": "x", "href": "/mission/q"}) == "/mission/q"
+
+
+def test_sender_link_map_rebuilds_once_however_many_threads_ask(monkeypatch):
+    """2026-10-01: 13 concurrent parses rebuilt the map 13 times at once.
+    Now one thread rebuilds; a cold start's other callers wait and share it,
+    and a warm map keeps serving while a stale one is rebuilt."""
+    import threading
+    from tools.dashboard import session_harness
+    monkeypatch.setattr(session_harness, "_SENDER_HREF_CACHE",
+                        {"at": None, "map": {}, "built": False})
+    release, started, builds = threading.Event(), threading.Event(), []
+
+    def slow_rows():
+        builds.append(1)
+        started.set()
+        release.wait(2)
+        return [{"tmux_session": "host-a", "project": "host"}]
+    monkeypatch.setattr(session_harness, "_sender_href_rows", slow_rows)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(
+        session_harness._sender_href({"from": "host-a"}))) for _ in range(8)]
+    for t in threads:
+        t.start()
+    started.wait(2)
+    release.set()
+    for t in threads:
+        t.join(3)
+    assert len(builds) == 1
+    assert results == ["/session/host/host-a?tmux=host-a"] * 8
+
+    # warm: a stale map keeps serving while one thread rebuilds
+    release.clear(); started.clear()
+    session_harness.invalidate_sender_hrefs()
+    rebuilder = threading.Thread(target=lambda: session_harness._sender_href({"from": "host-a"}))
+    rebuilder.start()
+    started.wait(2)
+    assert session_harness._sender_href({"from": "host-a"}) == "/session/host/host-a?tmux=host-a"
+    release.set()
+    rebuilder.join(3)
+    assert len(builds) == 2

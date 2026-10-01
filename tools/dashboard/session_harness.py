@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import threading
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -611,8 +612,9 @@ def _graph_db_path() -> str | None:
 #: map on every registry change (``invalidate_sender_hrefs``); the TTL is a
 #: safety net, not the refresh mechanism. It was 5 s, which made every busy
 #: parse rebuild constantly (load test 2026-10-01).
-_SENDER_HREF_CACHE: dict = {"at": None, "map": {}}
+_SENDER_HREF_CACHE: dict = {"at": None, "map": {}, "built": False}
 _SENDER_HREF_TTL_S = 60.0
+_SENDER_HREF_LOCK = threading.Lock()
 
 
 def invalidate_sender_hrefs() -> None:
@@ -659,31 +661,50 @@ def _sender_href(ct: dict) -> str:
     tmux = ct.get("from") or ""
     if not tmux or ":" in tmux:
         return ""
+    from urllib.parse import quote as _q
+    return _sender_href_map().get(tmux) or f"/session/{_q(tmux, safe='')}"
+
+
+def _sender_href_map() -> dict:
+    """The current tmux→href map, rebuilding it when stale. At most one
+    rebuild runs at a time: while it does, other threads keep using the map
+    they have, and only a cold start (no map yet) waits for the one rebuild
+    and shares its result. Every concurrent parse used to rebuild at once.
+    """
     import time as _t
     from urllib.parse import quote as _q
-    at = _SENDER_HREF_CACHE["at"]
-    if at is None or _t.monotonic() - at > _SENDER_HREF_TTL_S:
-        # Measured (2026-10-01): the suspected cause of the post-restart
-        # viewer stalls is this refresh running in every concurrent parse.
+    cache = _SENDER_HREF_CACHE
+    at = cache["at"]
+    if at is not None and _t.monotonic() - at <= _SENDER_HREF_TTL_S:
+        return cache["map"]
+    if not _SENDER_HREF_LOCK.acquire(blocking=not cache.get("built")):
+        return cache["map"]
+    try:
+        at = cache["at"]
+        if at is not None and _t.monotonic() - at <= _SENDER_HREF_TTL_S:
+            return cache["map"]          # another thread rebuilt it meanwhile
         from tools.dashboard import perf_telemetry
         with perf_telemetry.section("session_harness._sender_href.refresh", slow_log_s=1.0):
             try:
                 rows = _sender_href_rows()
             except Exception:
                 rows = []
-            _SENDER_HREF_CACHE["map"] = {
+            cache["map"] = {
                 r["tmux_session"]: (
                     f"/session/{_q(str(r.get('project') or 'session'), safe='')}"
                     f"/{_q(r['tmux_session'], safe='')}"
                     f"?tmux={_q(r['tmux_session'], safe='')}")
                 for r in rows if r.get("tmux_session")
             }
+            cache["built"] = True
             # Stamped when the rebuild FINISHES. Stamping its start meant a
-            # rebuild slower than the (then 5 s) TTL stored a map that had already
-            # expired, so every sender line in every concurrent parse rebuilt
-            # again: a herd that sustained itself (load test 2026-10-01).
-            _SENDER_HREF_CACHE["at"] = _t.monotonic()
-    return _SENDER_HREF_CACHE["map"].get(tmux) or f"/session/{_q(tmux, safe='')}"
+            # rebuild slower than the (then 5 s) TTL stored a map that had
+            # already expired, so every sender line in every concurrent parse
+            # rebuilt again: a herd that sustained itself (load test 2026-10-01).
+            cache["at"] = _t.monotonic()
+        return cache["map"]
+    finally:
+        _SENDER_HREF_LOCK.release()
 
 
 def _unwrap_pasted_content(text: str) -> str:
