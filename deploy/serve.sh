@@ -48,6 +48,10 @@ python3 -m tools.dashboard.scripts.build_relay_note_viewer >/app/data/note-viewe
 export DASHBOARD_PLAIN_PORT="${DASHBOARD_PLAIN_PORT:-8081}"
 
 # Hot-reload the code from the autonomy-code volume, same as the dev box.
+# tools/graph/cli.py is the graph command-line tool; the dashboard worker never
+# imports it (only the CLI's own entry point, plugin_cli and mission_cmd do), so
+# a change to it alone must not restart the dashboard (5 of 41 landings in the
+# 24 hours to 2026-10-01 05:55Z did).
 export DASHBOARD_RESTART_TOKEN="${DASHBOARD_RESTART_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')}"
 set --
 if [ "${DASHBOARD_RELOAD:-on}" != off ]; then
@@ -59,6 +63,7 @@ if [ "${DASHBOARD_RELOAD:-on}" != off ]; then
     --reload-exclude 'tools/dashboard/tests/*' \
     --reload-exclude 'tools/graph/tests/*' \
     --reload-exclude 'agents/tests/*' \
+    --reload-exclude 'tools/graph/cli.py' \
     --reload-exclude '**/__pycache__/*'
 fi
 exec python3 -m tools.dashboard.reload_with_notice tools.dashboard.server:app \
