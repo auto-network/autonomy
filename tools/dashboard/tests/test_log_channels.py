@@ -17,6 +17,12 @@ def channels(tmp_path, monkeypatch):
     monkeypatch.delenv("DASHBOARD_LOG_STDOUT_LEVEL", raising=False)
     monkeypatch.delenv("DASHBOARD_LOG_MAX_BYTES", raising=False)
     monkeypatch.delenv("DASHBOARD_LOG_BACKUPS", raising=False)
+    # An in-process uvicorn run earlier on this worker (--log-level warning)
+    # leaves uvicorn.error at WARNING, which drops the INFO lifecycle line
+    # before any handler sees it. Uvicorn sets this level in production.
+    uv = logging.getLogger("uvicorn.error")
+    monkeypatch.setattr(uv, "level", logging.INFO)
+    monkeypatch.setattr(uv, "disabled", False)
     line = lc.configure()
     yield tmp_path, line
     # Leave logging as the rest of the suite expects it: no channel handlers.

@@ -64,4 +64,8 @@ def test_short_lived_threads_leave_no_open_handles(tmp_path):
         one_thread()
     # No gc.collect(): thread exit and reference counting alone must close the
     # handle, as under load. These are real descriptors, not Python objects.
-    assert open_fds() <= before  # no growth per exited thread
+    # auth_db's path is module-global, so a background thread another test
+    # left running (auto-yzbqq) may open this store too: one connection, two
+    # descriptors. The leak guarded here is one connection per exited thread,
+    # about 80 descriptors after 40 threads.
+    assert open_fds() - before <= 4  # no growth per exited thread

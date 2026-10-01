@@ -389,6 +389,7 @@ def test_insert_launch_run_broadcasts_dispatch_immediately(
         container_name="agent-auto-rh2r5-test",
         output_dir="/workspace/output/run-rh2r5-fast-1",
     )
+    returned_at = time.monotonic()
 
     # Verify the row landed.
     rows = isolated_dispatch_db.get_currently_running()
@@ -397,10 +398,11 @@ def test_insert_launch_run_broadcasts_dispatch_immediately(
     assert len(spy.calls) == 1, f"expected one broadcast, got {spy.calls!r}"
     call = spy.calls[0]
     assert call["topic"] == "dispatch"
-    elapsed_ms = (call["ts"] - pre_call) * 1000.0
-    assert elapsed_ms < 100.0, (
-        f"broadcast must fire within 100ms of the insert; "
-        f"observed {elapsed_ms:.1f}ms"
+    # Immediate means inside the insert call, not on a later poll. A
+    # wall-clock bound (it was 100ms) failed under 8-way suite load (174ms)
+    # while the broadcast was still synchronous.
+    assert pre_call <= call["ts"] <= returned_at, (
+        "broadcast must fire inside insert_launch_run, before it returns"
     )
     # Dedup is disabled — two back-to-back launches with distinct run_ids
     # must both be observable, not silently coalesced.
