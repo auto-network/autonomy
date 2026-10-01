@@ -1,17 +1,23 @@
-"""Mint the gateway credential once per dashboard supervisor startup."""
+"""Mint the gateway credential once per dashboard supervisor startup.
+
+It lives in the ramfs key cache, never the data volume (auto-es7ja): it is
+re-minted at every start, so nothing needs it to persist. voice-gateway sees
+only that subdirectory, read-only (docker-compose.yml)."""
 import hashlib
-import os
 import secrets
-import tempfile
 import time
-from pathlib import Path
+from tools.dashboard import host_release
 from tools.dashboard.dao import auth_db
 from tools.dashboard.voice_commit_routes import PATH
 from tools.data_paths import DATA_ROOT
 
+RELEASE_SUBDIR = "voice"
+TOKEN_FILE = "token"
+#: Where the token lived before auto-es7ja: removed at provision.
+LEGACY_TOKEN_FILE = DATA_ROOT / "voice-service.token"
+
 
 def provision():
-    destination = Path(os.environ.get("VOICE_SERVICE_TOKEN_FILE", str(DATA_ROOT / "voice-service.token")))
     token = secrets.token_urlsafe(48)
     auth_db.insert_scoped_service_token(
         hashlib.sha256(token.encode()).hexdigest(), "voice-gateway",
@@ -19,15 +25,15 @@ def provision():
         application_scope="voice-sidecar", resource_audience="dashboard-local",
         source_approval_id="voice-compose-supervisor", expires_at=time.time() + 7 * 86400,
     )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(dir=destination.parent, prefix=".voice-token-")
     try:
-        with os.fdopen(fd, "w") as output:
-            output.write(token)
-        os.replace(temporary, destination)
+        with host_release.RELEASE_LOCK:
+            host_release.write_files(host_release.release_dir(RELEASE_SUBDIR),
+                                     {TOKEN_FILE: token.encode()})
     finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        try:
+            LEGACY_TOKEN_FILE.unlink()
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == "__main__":

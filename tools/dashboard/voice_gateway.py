@@ -59,7 +59,9 @@ def session_exists(bind: str) -> bool:
 
 
 async def commit_text(bind: str, text: str) -> None:
-    token_path = Path(os.environ.get("VOICE_SERVICE_TOKEN_FILE", str(DATA_ROOT / "voice-service.token")))
+    # The dashboard mints it into its ramfs key cache; this container sees
+    # only that subdirectory, read-only (docker-compose.yml, auto-es7ja).
+    token_path = Path(os.environ.get("VOICE_SERVICE_TOKEN_FILE", "/run/voice-secrets/token"))
     token = token_path.read_text().strip()
     endpoint = os.environ.get("VOICE_DASHBOARD_URL", "https://dashboard:8080").rstrip("/")
     # Trust the same node certificate used for the public endpoint. The Compose

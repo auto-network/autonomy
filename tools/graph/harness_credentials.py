@@ -51,14 +51,22 @@ from tools.graph.schemas.vault_credential import (
 
 logger = logging.getLogger(__name__)
 
-#: The dispatcher's scoped bearer, minted by the dashboard at startup and
-#: written under the data root; read per call so a rotation takes effect
-#: without restarting the dispatcher (agents/dispatcher._monitor_service_token).
-DISPATCHER_TOKEN_RELPATH = ".dispatch_token"
-#: The repository's own data directory, the token's home when no data root is named.
-REPO_DATA_ROOT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data",
-)
+#: The dispatcher's scoped bearer, minted by the dashboard at every start into
+#: its ramfs key cache -- never the data volume (auto-es7ja) -- and read per
+#: call so a rotation takes effect without restarting the dispatcher
+#: (agents/dispatcher._monitor_service_token).
+DISPATCH_TOKEN_RELEASE = ("dispatcher", "token")
+
+
+def dispatch_token_path() -> str:
+    """Where the dispatcher's token is: AUTONOMY_DISPATCH_TOKEN_FILE, else
+    <keycache>/dispatcher/token (the dashboard and the dispatcher both see
+    the key cache at the same path)."""
+    override = os.environ.get("AUTONOMY_DISPATCH_TOKEN_FILE")
+    if override:
+        return override
+    root = os.environ.get("AUTONOMY_KEYCACHE_MOUNT") or "/run/autonomy-keycache"
+    return os.path.join(root, *DISPATCH_TOKEN_RELEASE)
 
 HARNESSES = ("claude", "codex", "grok")
 
@@ -152,16 +160,13 @@ def _bearer() -> str | None:
     scoped token when this process has one under its data root, else the
     session token in the environment. Never an inherited session token
     when the scoped one exists: that one is revoked with its session."""
-    for root in (os.environ.get("AUTONOMY_DATA_ROOT"), REPO_DATA_ROOT):
-        if not root:
-            continue
-        try:
-            with open(os.path.join(root, DISPATCHER_TOKEN_RELPATH), "r", encoding="utf-8") as fh:
-                token = fh.read().strip()
-            if token:
-                return token
-        except OSError:
-            continue
+    try:
+        with open(dispatch_token_path(), "r", encoding="utf-8") as fh:
+            token = fh.read().strip()
+        if token:
+            return token
+    except OSError:
+        pass
     return os.environ.get("CROSSTALK_TOKEN") or None
 
 

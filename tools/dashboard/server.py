@@ -4367,7 +4367,8 @@ def authenticate_mcp_service(request) -> "api_auth.ApiPrincipal | None":
     )
 
 
-DISPATCHER_TOKEN_FILE = DATA_ROOT / ".dispatch_token"
+#: Where the dispatcher's token lived before auto-es7ja: removed at startup.
+_LEGACY_DISPATCHER_TOKEN_FILE = DATA_ROOT / ".dispatch_token"
 
 
 def _ensure_dispatcher_service_token() -> None:
@@ -4379,8 +4380,9 @@ def _ensure_dispatcher_service_token() -> None:
     register/deregister silently failed on every dispatch. This mints a
     scoped service token good for EXACTLY the monitor routes and the
     vault-set read the launcher needs, stores
-    only its hash (machine-local auth.db), and writes the secret to a
-    0600 file under data/ that the host-side dispatcher reads per call.
+    only its hash (machine-local auth.db), and writes the secret into the
+    ramfs key cache (0600, never the data volume: auto-es7ja), which the
+    dispatcher's read-only key-cache bind sees and reads per call.
     Re-minted on every dashboard start with a 7-day expiry, so restarts
     rotate it and superseded tokens age out.
     """
@@ -4409,21 +4411,26 @@ def _ensure_dispatcher_service_token() -> None:
         source_approval_id="dashboard-startup-provisioned",
         expires_at=time.time() + 7 * 24 * 3600,
     )
-    DISPATCHER_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    # Created 0600 atomically (house pattern, unlock_routes) — never a
-    # window where the plaintext exists with default-umask permissions.
-    fd = os.open(
-        DISPATCHER_TOKEN_FILE,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-        0o600,
-    )
+    from pathlib import Path as _Path
+
+    from tools.dashboard import host_release
+    from tools.graph.harness_credentials import dispatch_token_path
+
+    destination = _Path(dispatch_token_path())
     try:
-        os.write(fd, token.encode())
+        # Re-minted at every start, so ramfs is enough: no vault row.
+        with host_release.RELEASE_LOCK:
+            host_release.write_files(destination.parent, {destination.name: token.encode()})
+    except Exception:
+        logger.exception("dispatcher monitor token could not be written to the "
+                         "ramfs key cache; dispatcher monitor calls will 401")
+        return
     finally:
-        os.close(fd)
-    os.chmod(DISPATCHER_TOKEN_FILE, 0o600)
-    logger.info("dispatcher monitor token provisioned at %s",
-                DISPATCHER_TOKEN_FILE)
+        try:
+            _LEGACY_DISPATCHER_TOKEN_FILE.unlink()
+        except FileNotFoundError:
+            pass
+    logger.info("dispatcher monitor token provisioned at %s", destination)
 
 
 def authenticate_service(request) -> "api_auth.ApiPrincipal | None":

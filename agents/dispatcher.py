@@ -2318,14 +2318,17 @@ def _monitor_service_token() -> str | None:
     """The dashboard-provisioned scoped bearer for /api/monitor/* calls.
 
     The dashboard mints it at startup (scoped to exactly the two monitor
-    routes) and writes the secret to data/.dispatch_token;
+    routes) and writes the secret into its ramfs key cache
+    (harness_credentials.dispatch_token_path(), auto-es7ja);
     read per call so a dashboard restart's rotation takes effect without
     restarting the dispatcher. Absent file -> no header (the call then
     401s and the dashboard's in-process reconciler is the safety net).
     """
     global _monitor_token_warned
     try:
-        token = (REPO_ROOT / "data" / ".dispatch_token").read_text().strip()
+        from tools.graph.harness_credentials import dispatch_token_path
+
+        token = Path(dispatch_token_path()).read_text().strip()
         if token:
             return token
     except OSError:
@@ -2333,7 +2336,7 @@ def _monitor_service_token() -> str | None:
     if not _monitor_token_warned:
         _monitor_token_warned = True
         print(
-            "  WARNING: no dispatcher token at data/.dispatch_token — "
+            "  WARNING: no dispatcher token in the key cache — "
             "monitor calls will 401 until the dashboard (which mints it "
             "at startup) has run. NEVER fall back to ambient env tokens: "
             "CROSSTALK_TOKEN in this process is an inherited session "

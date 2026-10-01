@@ -134,9 +134,14 @@ if [ "${AUTONOMY_PROVISION_RAMFS:-1}" = "1" ]; then
     # is cold -- so the relay's read-only bind (create_host_path: false)
     # always resolves: relay.sh then waits, and the restart policy carries it
     # until the release lands, instead of docker refusing to start it at all.
-    mkdir -p /run/autonomy-keycache/mcp-relay 2>/dev/null || true
-    chown autonomy:autonomy /run/autonomy-keycache/mcp-relay 2>/dev/null || true
-    chmod 0700 /run/autonomy-keycache/mcp-relay 2>/dev/null || true
+    # Likewise the voice gateway's token (auto-es7ja), bound as only this
+    # child. The dispatcher's token (dispatcher/) needs no pre-made child: the
+    # dispatcher binds the whole key cache and the dashboard creates it.
+    for child in mcp-relay voice; do
+        mkdir -p "/run/autonomy-keycache/$child" 2>/dev/null || true
+        chown autonomy:autonomy "/run/autonomy-keycache/$child" 2>/dev/null || true
+        chmod 0700 "/run/autonomy-keycache/$child" 2>/dev/null || true
+    done
 else
     echo "entrypoint: ramfs keycache provisioning skipped (AUTONOMY_PROVISION_RAMFS=0; role has no keycache mount)" >&2
 fi

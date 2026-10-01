@@ -2436,11 +2436,16 @@ def test_accounts_migrate_pre_vault_rows_once_when_the_vault_is_empty(monkeypatc
 
 def test_dashboard_read_bearer_prefers_the_dispatcher_token_file(tmp_path, monkeypatch):
     from tools.graph import harness_credentials as hv
-    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
-    monkeypatch.setattr(hv, "REPO_DATA_ROOT", str(tmp_path / "nowhere"))
+    monkeypatch.delenv("AUTONOMY_DISPATCH_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("AUTONOMY_KEYCACHE_MOUNT", str(tmp_path / "keycache"))
     monkeypatch.setenv("CROSSTALK_TOKEN", "inherited-and-revoked")
     assert hv._bearer() == "inherited-and-revoked"
-    (tmp_path / hv.DISPATCHER_TOKEN_RELPATH).write_text("scoped-token\n")
+    # The token lives in the ramfs key cache, never under the data root.
+    (tmp_path / "keycache" / "dispatcher").mkdir(parents=True)
+    (tmp_path / "keycache" / "dispatcher" / "token").write_text("scoped-token\n")
+    assert hv._bearer() == "scoped-token"
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    (tmp_path / ".dispatch_token").write_text("stale-disk-token\n")
     assert hv._bearer() == "scoped-token"
 
 

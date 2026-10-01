@@ -5,8 +5,9 @@
 #
 # Polls for approved beads and launches session containers for them
 # (agents/dispatcher.py). Needs the same code/data/orgs volumes and Docker
-# socket as the dashboard service, but not the ramfs/keycache binds — the
-# dispatcher never decrypts a secret itself, it only shells out to
+# socket as the dashboard service, and a READ-ONLY view of the dashboard's key
+# cache for its scoped token (dispatcher/token, re-minted by the dashboard at
+# every start; auto-es7ja). It never decrypts a secret itself: it shells out to
 # agents/launch.sh, which provisions each session's own secrets independently.
 set -e
 cd /app

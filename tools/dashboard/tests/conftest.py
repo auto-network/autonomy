@@ -75,12 +75,10 @@ def _isolate_restart_state(tmp_path, monkeypatch):
         # Repoint the already-imported module too.
         if server is not None and hasattr(server, attr):
             monkeypatch.setattr(server, attr, Path(os.environ[env]))
-    # The dispatcher token has no env override; a lifespan startup REWRITES
-    # it, which on a host running tests from the live checkout rotates the
-    # running dispatcher's credential (the volume contract saw it change).
-    if server is not None and hasattr(server, "DISPATCHER_TOKEN_FILE"):
-        monkeypatch.setattr(server, "DISPATCHER_TOKEN_FILE",
-                            tmp_path / ".dispatch_token")
+    # A lifespan startup REWRITES the dispatcher token, which on a host
+    # running tests would rotate the running dispatcher's credential in the
+    # real ramfs key cache (auto-es7ja): point it at this test's tmp_path.
+    monkeypatch.setenv("AUTONOMY_DISPATCH_TOKEN_FILE", str(tmp_path / "dispatcher" / "token"))
 
 
 @pytest.fixture(autouse=True)
@@ -680,10 +678,9 @@ def test_app(test_db, mock_tmux, tmp_path):
     snapshot = _logging_snapshot()
     from tools.dashboard import server
     importlib.reload(server)
-    # The reload re-derived this from the real DATA_ROOT (it has no env
-    # override), and the lifespan REWRITES it: keep the checkout's live
-    # dispatcher token out of reach (auto-pg8d2).
-    server.DISPATCHER_TOKEN_FILE = tmp_path / ".dispatch_token"
+    # The lifespan REWRITES the dispatcher token: keep the live one in the
+    # ramfs key cache out of reach (auto-pg8d2, auto-es7ja).
+    os.environ["AUTONOMY_DISPATCH_TOKEN_FILE"] = str(tmp_path / "dispatcher" / "token")
     try:
         yield server.app
     finally:

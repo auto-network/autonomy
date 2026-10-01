@@ -33,9 +33,10 @@ def test_the_relay_release_dir_exists_after_keycache_setup_with_no_release(tmp_p
              .replace(KEYCACHE, str(keycache))
              .replace('"$(dirname "$0")/provision-secret-ramfs.sh"', "true"))
     subprocess.run(["sh", "-c", block], check=True, timeout=30)
-    relay = keycache / "mcp-relay"
-    assert relay.is_dir() and list(relay.iterdir()) == []
-    assert stat.S_IMODE(relay.stat().st_mode) == 0o700
+    for child in ("mcp-relay", "voice"):      # voice: auto-es7ja
+        made = keycache / child
+        assert made.is_dir() and list(made.iterdir()) == []
+        assert stat.S_IMODE(made.stat().st_mode) == 0o700
 
 
 def test_the_relay_binds_exactly_that_directory_read_only():

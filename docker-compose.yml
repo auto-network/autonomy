@@ -440,9 +440,10 @@ services:
       # Passed through from the host env at `up` time (not stored in the file).
       CROSSTALK_TOKEN: ${CROSSTALK_TOKEN:-}
       AUTONOMY_DATA_ROOT: /app/data   # real mount, never repo-relative (see dashboard note)
-      # The dispatcher has no keycache/ramfs mount (see deploy/dispatch.sh) — it
-      # never decrypts a secret. Skip the shared entrypoint's ramfs provisioning
-      # so it does not FATAL "not ramfs" and burn its retry budget every start.
+      # The dispatcher never decrypts a secret and provisions no ramfs of its
+      # own: skip the shared entrypoint's ramfs provisioning so it does not
+      # FATAL "not ramfs" and burn its retry budget every start. It READS the
+      # dashboard's key cache (bind below) for its scoped token only.
       AUTONOMY_PROVISION_RAMFS: "0"
     logging:
       driver: json-file
@@ -452,6 +453,22 @@ services:
       - autonomy-data:/app/data
       - autonomy-orgs:/app/orgs
       - /var/run/docker.sock:/var/run/docker.sock
+      # Its scoped dashboard token is re-minted by the dashboard at every start
+      # into the ramfs key cache (dispatcher/token), never the data volume
+      # (auto-es7ja). WHY THE WHOLE KEY CACHE, read-only, not just dispatcher/:
+      # a subdir bind's source does not exist after a host reboot until the
+      # dashboard provisions the ramfs, and docker would then refuse to start
+      # this core service at all; the root bind (create_host_path, rslave, as
+      # the dashboard binds it) always resolves and sees the ramfs once it is
+      # mounted. It adds no privilege: this container already holds
+      # /var/run/docker.sock, which is root-equivalent on the host.
+      - type: bind
+        source: /run/autonomy-keycache
+        target: /run/autonomy-keycache
+        read_only: true
+        bind:
+          propagation: rslave
+          create_host_path: true
 
   # Optional: streaming transcription for dashboard dictation (/ws/voice).
   #   COMPOSE_PROFILES=voice VOICE_SIDECAR_ENABLED=true docker compose up -d
@@ -482,9 +499,20 @@ services:
       VOICE_DASHBOARD_PUBLIC_PORT: ${VOICE_DASHBOARD_PUBLIC_PORT:-443}
       VOICE_DASHBOARD_URL: ${VOICE_DASHBOARD_URL:-https://dashboard:8080}
       VOICE_SIDECAR_ENABLED: ${VOICE_SIDECAR_ENABLED:-false}
+      VOICE_SERVICE_TOKEN_FILE: /run/voice-secrets/token
     volumes:
       - autonomy-code:/app:ro
       - autonomy-data:/app/data
+      # Its dashboard token, re-minted at every start into the ramfs key cache
+      # (auto-es7ja). ONLY this subdirectory: this container holds no Docker
+      # socket, so the rest of the key cache would be a real widening. The
+      # dashboard's entrypoint creates it at boot (empty until minted).
+      - type: bind
+        source: /run/autonomy-keycache/voice
+        target: /run/voice-secrets
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       dashboard:
         condition: service_started
