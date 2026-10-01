@@ -756,8 +756,9 @@ class TunnelUnavailable(RuntimeError):
 
 
 #: scope -> its connector's ``.ctl`` descriptor path. Deriving it runs
-#: serve_cert_state(), SQLite and the Settings ledger: ~125 ms of CPU per
-#: control call on SJC-2 (2026-09-30), paid by every session-control poll and
+#: serve_cert_state() -- six SQLite opens, 22 executes, the Settings ledger:
+#: 18-20 ms of CPU per control call on SJC-2 and 10 ms on Home (cProfile,
+#: 2026-09-30), 95% of a control call, paid by every session-control poll and
 #: reply. The path is resolved once and again only when it stops working;
 #: the descriptor itself is read on every call, so a new port is seen at once.
 _ctl_paths: dict[str, str] = {}
