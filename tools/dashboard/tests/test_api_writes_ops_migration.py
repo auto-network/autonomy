@@ -340,6 +340,25 @@ def test_api_graph_note_multipart_html_creates_rich_content(
 # ── Note update: the motivating regression (auto-co51y) ─────────
 
 
+def test_api_graph_note_attachment_keeps_its_own_filename(
+    dashboard_client, orgs_root, tmp_path,
+):
+    """An uploaded note attachment is stored under the name it was sent with,
+    not the server's tempfile name."""
+    script = tmp_path / "prewarm_document_views.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+    with script.open("rb") as handle:
+        resp = dashboard_client.post(
+            "/api/graph/note",
+            data={"content": "Script attached: ![s]({1})"},
+            files={"attachments": ("prewarm_document_views.py", handle, "text/x-python")},
+            headers={"X-Graph-Org": "autonomy"},
+        )
+    assert resp.status_code == 200, resp.text
+    files = [att for att in resp.json()["attachments"] if att.get("kind") == "file"]
+    assert [att["filename"] for att in files] == ["prewarm_document_views.py"]
+
+
 def test_api_graph_note_update_auto_derives_to_home(dashboard_client, orgs_root):
     """Scopeless POST /api/graph/note/update for an autonomy-origin note
     must auto-derive the write target to autonomy.db, not reject."""

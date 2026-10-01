@@ -17277,12 +17277,14 @@ def _cross_org_error_response(err):
     )
 
 
-async def _materialize_uploads(form, key: str = "attachments"):
+async def _materialize_uploads(form, key: str = "attachments", names: list | None = None):
     """Stream multipart uploads to tempfiles; return list of paths.
 
     Caller must pass each path to ``_safe_unlink`` after use. Returns
     ``(paths, error_response)`` — ``error_response`` is set and paths are
-    cleaned up if validation fails (e.g. size limit).
+    cleaned up if validation fails (e.g. size limit). When *names* is given,
+    each upload's own filename is appended to it, in the same order, so the
+    stored attachment keeps its real name rather than the tempfile's.
     """
     import tempfile
     tmp_paths: list[str] = []
@@ -17304,6 +17306,8 @@ async def _materialize_uploads(form, key: str = "attachments"):
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(contents)
             tmp_paths.append(tmp.name)
+        if names is not None:
+            names.append(os.path.basename(upload.filename or "") or None)
     return tmp_paths, None
 
 
@@ -17338,7 +17342,8 @@ async def api_graph_note(request):
         auto_provenance_turn = int(form["auto_provenance_turn"]) if form.get("auto_provenance_turn") else None
         short_description = str(form["short_description"]) if form.get("short_description") else None
         keywords = str(form["keywords"]) if form.get("keywords") else None
-        tmp_paths, err = await _materialize_uploads(form)
+        upload_names: list = []
+        tmp_paths, err = await _materialize_uploads(form, names=upload_names)
         if err is not None:
             return err
         html_paths, err = await _materialize_uploads(form, key="html")
@@ -17366,6 +17371,7 @@ async def api_graph_note(request):
         short_description = body.get("short_description")
         keywords = body.get("keywords")
         tmp_paths = []
+        upload_names = []
         html_path = None
         force = bool(body.get("force"))
 
@@ -17381,6 +17387,7 @@ async def api_graph_note(request):
             auto_provenance_source_id=auto_provenance_source_id,
             auto_provenance_turn=auto_provenance_turn,
             attachments=tmp_paths or None,
+            attachment_names=upload_names or None,
             html_path=html_path,
             short_description=short_description,
             keywords=keywords,
@@ -17566,7 +17573,8 @@ async def api_graph_note_update(request):
                 integrate_ids = []
         short_description = str(form["short_description"]) if form.get("short_description") is not None else None
         keywords = str(form["keywords"]) if form.get("keywords") is not None else None
-        tmp_paths, err = await _materialize_uploads(form)
+        upload_names: list = []
+        tmp_paths, err = await _materialize_uploads(form, names=upload_names)
         if err is not None:
             return err
         html_paths, err = await _materialize_uploads(form, key="html")
@@ -17601,6 +17609,7 @@ async def api_graph_note_update(request):
         short_description = body.get("short_description")
         keywords = body.get("keywords")
         tmp_paths = []
+        upload_names = []
         html_path = None
 
     try:
@@ -17611,6 +17620,7 @@ async def api_graph_note_update(request):
             title=title,
             integrate_comments=integrate_ids,
             attachments=tmp_paths or None,
+            attachment_names=upload_names or None,
             html_path=html_path,
             short_description=short_description,
             keywords=keywords,

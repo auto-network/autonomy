@@ -3148,6 +3148,7 @@ def create_note(
     author: str | None = None,
     session_hint: str | None = None,
     attachments: list[str] | None = None,
+    attachment_names: list[str | None] | None = None,
     html_path: str | None = None,
     auto_provenance_source_id: str | None = None,
     auto_provenance_turn: int | None = None,
@@ -3236,8 +3237,10 @@ def create_note(
 
         if attachments:
             att_ids = []
-            for fp in attachments:
-                att = _store_attachment_db(db, fp, source_id=source.id, persona_id=persona_id, session_id=session_id)
+            names = list(attachment_names or [])
+            for index, fp in enumerate(attachments):
+                att = _store_attachment_db(db, fp, source_id=source.id, persona_id=persona_id, session_id=session_id,
+                                           original_filename=names[index] if index < len(names) else None)
                 att_ids.append(att.id)
                 att_records.append({
                     "id": att.id, "filename": att.filename,
@@ -3313,6 +3316,7 @@ def update_note(
     title: str | None = None,
     integrate_comments: list[str] | None = None,
     attachments: list[str] | None = None,
+    attachment_names: list[str | None] | None = None,
     html_path: str | None = None,
     short_description: str | None = None,
     keywords: str | None = None,
@@ -3516,8 +3520,10 @@ def update_note(
                         "--attach list"
                     )
                 att_ids = []
-                for fp in attachments:
-                    att = _store_attachment_db(db, fp, source_id=src_id, persona_id=persona_id, session_id=session_id)
+                names = list(attachment_names or [])
+                for index, fp in enumerate(attachments):
+                    att = _store_attachment_db(db, fp, source_id=src_id, persona_id=persona_id, session_id=session_id,
+                                               original_filename=names[index] if index < len(names) else None)
                     att_ids.append(att.id)
                     att_records.append({
                         "id": att.id, "filename": att.filename,
