@@ -6595,6 +6595,39 @@ def _reconstruct_read_state(
     upto_file: str,
     upto_off: int,
 ) -> dict:
+    """Counted wrapper (2026-10-01): suspected cause of the bad restarts is
+    several concurrent FULL replays of a large, actively-written transcript
+    right after a hot reload. ``section:tail.reconstruct`` records calls, CPU,
+    wall and how many replays run at once; a replay over 0.5 s logs one
+    TAIL-REPLAY line with its mode and the bytes it re-read."""
+    t = perf_telemetry.telemetry()
+    jobs = t.jobs if t is not None else None
+    concurrent = (jobs.in_flight.get("section:tail.reconstruct", 0) + 1) if jobs else 0
+    c0, w0 = time.thread_time(), time.monotonic()
+    with perf_telemetry.section("tail.reconstruct"):
+        state = _reconstruct_read_state_uncounted(
+            chain, harness, upto_file=upto_file, upto_off=upto_off)
+    wall_s = time.monotonic() - w0
+    if wall_s >= TAIL_REPLAY_LOG_S:
+        info = getattr(_recon_last, "info", {})
+        logger.warning(
+            "TAIL-REPLAY mode=%s bytes=%d files=%d wall=%.2fs cpu=%.2fs thread=%s in_flight=%d file=%s",
+            info.get("mode"), info.get("bytes", 0), info.get("files", 0), wall_s,
+            time.thread_time() - c0, threading.current_thread().name, concurrent, upto_file)
+    return state
+
+
+_recon_last = threading.local()
+TAIL_REPLAY_LOG_S = 0.5
+
+
+def _reconstruct_read_state_uncounted(
+    chain: list[tuple[str, Path]],
+    harness,
+    *,
+    upto_file: str,
+    upto_off: int,
+) -> dict:
     """Replay the chain prefix THROUGH the cursor and return the stream
     state exactly as it stood there (review B3/B4).
 
@@ -6677,6 +6710,7 @@ def _reconstruct_read_state(
 
     # Prefix entries are discarded, so the per-tile graph lookups are pure
     # cost here; parse state does not depend on them.
+    replayed_bytes = replayed_files = 0
     with session_harness.semantic_enrichment_disabled():
         for stem, path, limit in limits:
             begin = 0
@@ -6692,6 +6726,8 @@ def _reconstruct_read_state(
                     data = fh.read(limit - begin)
             except OSError:
                 data = b""
+            replayed_bytes += len(data)
+            replayed_files += 1
             reader = session_harness.resolve_harness_for_path(
                 path, ctx=state["parse_ctx"],
             )
@@ -6722,6 +6758,8 @@ def _reconstruct_read_state(
         _recon_cache.move_to_end(key)
         while len(_recon_cache) > _RECON_CACHE_MAX:
             _recon_cache.popitem(last=False)
+    _recon_last.info = {"mode": "incremental" if reused else "full",
+                        "bytes": replayed_bytes, "files": replayed_files}
     return state
 
 

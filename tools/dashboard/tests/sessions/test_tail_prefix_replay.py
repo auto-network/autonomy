@@ -319,3 +319,28 @@ def test_tail_window_over_a_multi_megabyte_line(tmp_path):
     assert end - start == len(raw) and end == path.stat().st_size
     assert server._read_jsonl_tail_window(path, n=3, before=None) == \
         _reference_tail_window(path, n=3, before=None)
+
+
+def test_replays_are_counted_with_mode_and_bytes(session_file, fresh_cache, monkeypatch, caplog):
+    """2026-10-01: concurrent full replays of a large, actively-written
+    transcript after a hot reload are the suspected cause of the bad restarts.
+    Each replay is timed under section:tail.reconstruct and a slow one logs
+    TAIL-REPLAY with its mode and the bytes it re-read."""
+    from tools.dashboard import perf_telemetry
+
+    class _T:
+        jobs = perf_telemetry.JobStats()
+    monkeypatch.setattr(perf_telemetry, "_telemetry", _T())
+    monkeypatch.setattr(server, "TAIL_REPLAY_LOG_S", 0.0)
+    chain = [("abc", session_file)]
+    mid = _line_offset(session_file, 4)
+    end = session_file.stat().st_size
+    with caplog.at_level("WARNING", logger=server.logger.name):
+        server._reconstruct_read_state(chain, server.CLAUDE_HARNESS, upto_file="abc", upto_off=mid)
+        server._reconstruct_read_state(chain, server.CLAUDE_HARNESS, upto_file="abc", upto_off=end)
+    assert _T.jobs.calls["section:tail.reconstruct"] == 2
+    assert _T.jobs.in_flight["section:tail.reconstruct"] == 0
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("TAIL-REPLAY")]
+    assert f"mode=full bytes={mid} files=1" in lines[0]
+    assert f"mode=incremental bytes={end - mid} files=1" in lines[1]
+    assert "in_flight=1" in lines[0]
