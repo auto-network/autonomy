@@ -627,3 +627,127 @@ def test_containerized_workspace_bind_emits_mount_not_v(monkeypatch, tmp_path):
         "type=bind,src=/tmp/daemon-host-source/anchore/x,dst=/opt/x,"
         "bind-propagation=rslave,readonly"]
     assert "-v" not in args
+
+
+# ── machine mounts pinned to a machine (auto-83bfo) ────────────────────────
+#
+# Operator ruling 2026-10-01: a `machine` mount names the machine it is pinned
+# to. Pinned, it is enforced on that machine and skipped elsewhere with an
+# advisory; unpinned, it keeps meaning "each machine provides its own" (a
+# workspace's working folder) and is enforced everywhere.
+
+HOME_ID = "9ca8797e76b025ce6af2d2f9b730bd9b2dd2290f25f83a0f90bd1e6c5c5147fa"
+SJC_ID = "b2" * 32
+
+
+def _pinned_rs(*, key, subpath="absent", container_path="/opt/x", kind="dir",
+               visibility="machine", machine_id=HOME_ID, required=True):
+    payload = WorkspaceMountV3(
+        subpath=subpath, container_path=container_path, kind=kind,
+        required=required, visibility=visibility, machine_id=machine_id,
+        name="Vuln diff", description="vulnerability diff corpus",
+        help="lives on Home",
+    )
+    return ResolvedSetting(
+        id=f"mock-{key}", set_id=MOUNT_SET_ID, stored_revision=2, key=key,
+        payload=payload, state="raw", supersedes=None, excludes=None,
+        deprecated=False, successor_id=None,
+        created_at="2026-10-01T00:00:00Z", updated_at="2026-10-01T00:00:00Z",
+        target_revision=None, org=ORG, upconverted=False,
+    )
+
+
+@pytest.fixture
+def on_machine(monkeypatch):
+    def set_local(machine_id):
+        monkeypatch.setattr(wm, "_local_machine_id", lambda: machine_id)
+        monkeypatch.setattr(wm, "_machine_label",
+                            lambda mid: {HOME_ID: "Home", SJC_ID: "SJC"}.get(mid, mid[:12]))
+    return set_local
+
+
+def test_a_mount_pinned_elsewhere_launches_without_it(orgs_root, tmp_path, on_machine, caplog):
+    on_machine(SJC_ID)
+    caplog.set_level("INFO", logger=wm.logger.name)
+    ws = _workspace({"widgets-ng:vuln-diff": _pinned_rs(key="widgets-ng:vuln-diff")})
+    result = _prepare(ws, tmp_path)
+    assert not any("/opt/x" in str(v) for v in result.values())
+    (line,) = [r.getMessage() for r in caplog.records if "pinned to" in r.getMessage()]
+    assert f"org {ORG} mount widgets-ng:vuln-diff is pinned to Home" in line
+
+
+def test_readiness_says_a_mount_pinned_elsewhere_is_advisory(orgs_root, on_machine):
+    on_machine(SJC_ID)
+    payload = _pinned_rs(key="widgets-ng:vuln-diff").payload.model_dump()
+    (finding,) = wm.check_org_mount_readiness(
+        key="widgets-ng:vuln-diff", payload=payload, org=ORG)
+    assert (finding.kind, finding.severity) == ("machine_mount_elsewhere", "advisory")
+    assert "pinned to Home" in finding.detail and "Vuln diff" in finding.detail
+    assert finding.remediation_params["machine_id"] == HOME_ID
+    assert finding.remediation_params["machine"] == "Home"
+    assert finding.remediation_params["help"] == "lives on Home"
+
+
+def test_on_its_pinned_machine_a_missing_required_mount_still_refuses(
+        orgs_root, tmp_path, on_machine):
+    on_machine(HOME_ID)
+    ws = _workspace({"widgets-ng:vuln-diff": _pinned_rs(key="widgets-ng:vuln-diff")})
+    with pytest.raises(WorkspaceMountMissingError):
+        _prepare(ws, tmp_path)
+    payload = _pinned_rs(key="widgets-ng:vuln-diff").payload.model_dump()
+    (finding,) = wm.check_org_mount_readiness(
+        key="widgets-ng:vuln-diff", payload=payload, org=ORG)
+    assert (finding.kind, finding.severity) == ("missing_path", "blocking")
+
+
+def test_an_unpinned_machine_mount_is_still_enforced_everywhere(
+        orgs_root, tmp_path, on_machine):
+    """Each machine provides its own copy of an unpinned machine mount (a
+    workspace's working folder); skipping it would launch without it."""
+    on_machine(SJC_ID)
+    ws = _workspace({"widgets-ng:vuln-diff": _pinned_rs(
+        key="widgets-ng:vuln-diff", machine_id=None)})
+    with pytest.raises(WorkspaceMountMissingError):
+        _prepare(ws, tmp_path)
+
+
+def test_an_organization_mount_missing_still_refuses_and_blocks(
+        orgs_root, tmp_path, on_machine):
+    on_machine(SJC_ID)
+    ws = _workspace({"widgets-ng:vuln-diff": _pinned_rs(
+        key="widgets-ng:vuln-diff", visibility="organization", machine_id=None)})
+    with pytest.raises(WorkspaceMountMissingError):
+        _prepare(ws, tmp_path)
+    payload = _pinned_rs(key="widgets-ng:vuln-diff", visibility="organization",
+                         machine_id=None).payload.model_dump()
+    (finding,) = wm.check_org_mount_readiness(
+        key="widgets-ng:vuln-diff", payload=payload, org=ORG)
+    assert finding.severity == "blocking"
+
+
+def test_a_machine_located_mount_pinned_elsewhere_is_skipped(tmp_path, monkeypatch, on_machine):
+    on_machine(SJC_ID)
+    monkeypatch.setattr(wm, "_machine_located_mount_source", lambda key, org: None)
+    payload = WorkspaceMountV3(container_path="/opt/license", kind="file",
+                               required=True, machine_id=HOME_ID)
+    rs = _machine_mount_rs(key="bench-harness:license", container_path="/opt/license",
+                           kind="file", required=True)
+    rs = rs.__class__(**{**rs.__dict__, "payload": payload})
+    result = _prepare(_dynbench_ws({"bench-harness:license": rs}), tmp_path)
+    assert not any("/opt/license" in str(v) for v in result.values())
+
+
+def test_a_machine_that_does_not_know_its_id_enforces(orgs_root, tmp_path, on_machine):
+    on_machine(None)
+    ws = _workspace({"widgets-ng:vuln-diff": _pinned_rs(key="widgets-ng:vuln-diff")})
+    with pytest.raises(WorkspaceMountMissingError):
+        _prepare(ws, tmp_path)
+
+
+@pytest.mark.parametrize("bad", [
+    {"machine_id": "not-hex"},
+    {"machine_id": HOME_ID, "visibility": "organization"},
+])
+def test_a_pin_must_be_a_machine_id_on_a_machine_mount(bad):
+    with pytest.raises(Exception):
+        WorkspaceMountV3(subpath="a", container_path="/x", kind="dir", **bad)

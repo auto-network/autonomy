@@ -1103,6 +1103,42 @@ def _mount_is_node_storage(payload) -> bool:
     return payload.kind == "dir" and payload.mode == "rw"
 
 
+def _local_machine_id() -> str | None:
+    """This machine's durable fleet machine id, or None before enrollment."""
+    try:
+        from tools.network import machine_boot
+
+        return machine_boot.machine_id()
+    except Exception:
+        logger.debug("workspace: machine id unavailable", exc_info=True)
+        return None
+
+
+def _machine_label(machine_id: str) -> str:
+    try:
+        from tools.network import fleet_machine_profile
+
+        label = fleet_machine_profile.names().get(machine_id)
+    except Exception:
+        label = None
+    return label or machine_id[:12]
+
+
+def _pinned_elsewhere(payload) -> str | None:
+    """The machine id a ``machine`` mount is pinned to when that is not this
+    machine, else None (auto-83bfo). A pinned mount is enforced only on its
+    machine; an unpinned one keeps meaning "each machine provides its own"
+    and is enforced everywhere. A machine that does not know its own id
+    (not enrolled) cannot tell, so it enforces, as before."""
+    pin = getattr(payload, "machine_id", None)
+    if not pin or getattr(payload, "visibility", "machine") != "machine":
+        return None
+    local = _local_machine_id()
+    if local is None or local == pin:
+        return None
+    return pin
+
+
 def _resolve_org_mount(key, rs, orgs_ctx, org, *, create_missing=False):
     """Resolve one rev-2 mount to ``(host_path, container_spec, node_path)``.
 
@@ -1330,6 +1366,23 @@ def check_org_mount_readiness(*, key: str, payload: dict, org: str):
     from tools.graph.schemas.mount import WorkspaceMountV3
 
     typed = WorkspaceMountV3.model_validate(payload)
+    pinned = _pinned_elsewhere(typed)
+    if pinned is not None:
+        # Its data lives on another machine; this one launches without it.
+        label = _machine_label(pinned)
+        return (VolumeMountReadinessIssue(
+            "machine_mount_elsewhere",
+            f"machine-local mount pinned to {label}; this machine launches "
+            f"without it" + (f" — {typed.name}" if typed.name else ""),
+            "machine_id",
+            key,
+            "the mount row's pinned machine",
+            "advisory",
+            frame="platform-host",
+            remediation_params={"machine_id": pinned, "machine": label,
+                                "name": typed.name, "description": typed.description,
+                                "help": typed.help},
+        ),)
     if typed.subpath is None:
         return _check_machine_located_mount_readiness(key=key, typed=typed, org=org)
     subject = f"orgs/{org}/{typed.subpath}"
@@ -1430,6 +1483,14 @@ def _apply_workspace_mount_settings(
     orgs_ctx_ready = False   # discover topology lazily — only if a subpath row needs it
     for key, rs in workspace.mounts.items():
         payload = rs.payload
+        pinned = _pinned_elsewhere(payload)
+        if pinned is not None:
+            logger.info(
+                "workspace: org %s mount %s is pinned to %s (%s); launching "
+                "without it on this machine", org, key, _machine_label(pinned),
+                pinned[:12],
+            )
+            continue
         if payload.subpath is not None:
             # Guarded path. Org identity and node topology are needed only here.
             if not org:

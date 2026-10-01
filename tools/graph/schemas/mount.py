@@ -216,6 +216,20 @@ class _WorkspaceMountSchemaAdapter(SettingSchema):
 MOUNT_SCHEMA_REVISION_2 = 2
 
 
+def _check_machine_pin(mount) -> None:
+    """``machine_id`` is a 64-hex fleet machine id, and only a ``machine``
+    mount is pinned: an organization or personal mount is not on one
+    machine, so a pin there would be a contradiction, not a narrowing."""
+    pin = mount.machine_id
+    if pin is None:
+        return
+    if len(pin) != 64 or any(c not in "0123456789abcdef" for c in pin):
+        raise ValueError(f"machine_id must be a 64-hex fleet machine id: {pin!r}")
+    if mount.visibility != "machine":
+        raise ValueError(
+            f"machine_id pins a 'machine' mount; this one is {mount.visibility!r}")
+
+
 class WorkspaceMountV2(BaseModel):
     """A workspace mount: a `subpath` in the org-partitioned autonomy-orgs
     volume (the guarded path), OR a deprecated absolute `host_path` (the rev-1
@@ -305,6 +319,19 @@ class WorkspaceMountV2(BaseModel):
         description="Access scope: who may see this mount. Not a path "
                     "convention. Absent on legacy rows means 'machine'.",
     )
+    # The machine a `machine` mount's data lives on, by the fleet's durable
+    # machine id (machine_boot.machine_id()): an identity, never a path, so
+    # the rule that an org row carries no machine path still holds. Pinned,
+    # the mount is enforced on that machine and skipped on every other one
+    # (operator ruling 2026-10-01, auto-83bfo). Unpinned keeps the old
+    # meaning -- each machine provides its own copy (a workspace's working
+    # folder) and it is enforced everywhere. Added in place, as `visibility`
+    # was: optional with a safe default, so rev-2 readers keep every row.
+    machine_id: str | None = Field(
+        default=None,
+        description="Machine this mount's data is pinned to (64-hex fleet "
+                    "machine id); only with visibility 'machine'.",
+    )
     # A SHORT title for a readiness tile — not a sentence. Capped so it can't
     # drift into being used as `description` is today (100-char sentences). The
     # UI puts `name` on top and `description` under it.
@@ -319,6 +346,11 @@ class WorkspaceMountV2(BaseModel):
     # silently drop.
     help: str | None = None
     required: bool = True
+
+    @model_validator(mode="after")
+    def machine_id_pins_a_machine_mount(self):
+        _check_machine_pin(self)
+        return self
 
     @field_validator("subpath")
     @classmethod
@@ -473,6 +505,15 @@ class _WorkspaceMountV2SchemaAdapter(SettingSchema):
                 "cannot be queried, validated or enforced."
             ),
         },
+        "machine_id": {
+            "type": "string",
+            "description": (
+                "The machine a 'machine' mount's data is pinned to, by its "
+                "64-hex fleet machine id (machine_boot.machine_id()). Pinned: "
+                "enforced on that machine, skipped elsewhere with an advisory. "
+                "Unpinned: enforced on every machine (each provides its own)."
+            ),
+        },
         "name": {
             "type": "string",
             "description": "Short display label (a title, not a sentence); max 60 chars",
@@ -571,6 +612,11 @@ class WorkspaceMountV3(BaseModel):
         description="Access scope: who may see this mount. Not a path "
                     "convention.",
     )
+    machine_id: str | None = Field(
+        default=None,
+        description="Machine this mount's data is pinned to (64-hex fleet "
+                    "machine id); only with visibility 'machine'.",
+    )
     name: str | None = Field(
         default=None, max_length=60,
         description="Short display label, e.g. 'Anchore Widgets license'",
@@ -584,6 +630,11 @@ class WorkspaceMountV3(BaseModel):
     _subpath_rule = field_validator("subpath")(
         WorkspaceMountV2.subpath_relative_and_contained.__func__
     )
+
+    @model_validator(mode="after")
+    def machine_id_pins_a_machine_mount(self):
+        _check_machine_pin(self)
+        return self
 
     @field_validator("container_path")
     @classmethod
