@@ -6931,6 +6931,75 @@ def _advance_restored_tail_state(tmux_name: str, entry: dict) -> dict | None:
     }
 
 
+def _warm_one_tail_state(row: dict) -> dict | None:
+    """State 1 for one live session at its row's file_offset, built by one
+    replay that also stores the State 2 checkpoint there. Takes the replay's
+    per-transcript lock, so a catch-up for the same transcript waits for this
+    result instead of replaying in parallel."""
+    path = Path(row["jsonl_path"])
+    offset = int(row.get("file_offset") or 0)
+    if offset <= 0 or not path.exists():
+        return None
+    chain = _session_chain_files(row, path)
+    if not chain or chain[-1][0] != path.stem:
+        return None
+    harness = session_harness.resolve_harness_for_session_row(row)
+    state = _reconstruct_read_state(chain, harness, upto_file=path.stem, upto_off=offset)
+    st = path.stat()
+    return {
+        "path": str(path), "offset": offset, "generation": (st.st_dev, st.st_ino),
+        "parse_ctx": state["parse_ctx"], "postprocess_state": state["postprocess_state"],
+        "last_enqueue_content": state["last_enqueue_content"],
+        "agent_descriptions": state["agent_descriptions"],
+        "claimed_subagents": state["claimed_subagents"],
+        "tracker": state["tracker"]._sessions.get("_reconstruct"),
+    }
+
+
+async def _cold_warm_tail_states(skip: set) -> tuple[int, int]:
+    """Cold start (no hand-off snapshot for these sessions): read each live
+    session's transcript once, one at a time on one thread, most recently
+    active first, instead of leaving the work to whichever viewer catch-ups
+    and first tail reads arrive together. Operator, 2026-10-01: "on a
+    completely cold restart, ensuring that all of these transcripts are being
+    read in a startup thread to ensure that we get the most efficient
+    processing instead of the herd". Runs beside serving; does not hold back
+    readiness. Returns (sessions warmed, bytes read)."""
+    from tools.dashboard.dao import dashboard_db
+
+    loop = asyncio.get_running_loop()
+    t0 = time.monotonic()
+
+    def run() -> tuple[int, int]:
+        warmed = read = 0
+        rows = sorted(dashboard_db.get_live_sessions(),
+                      key=lambda r: -float(r.get("last_activity") or 0))
+        for row in rows:
+            tmux_name = row.get("tmux_name")
+            if (not tmux_name or not row.get("jsonl_path") or tmux_name in skip
+                    or session_monitor.is_tail_state_warm(tmux_name)):
+                continue
+            try:
+                entry = _warm_one_tail_state(row)
+            except Exception:
+                logger.exception("cold tail warm-up failed for %s", tmux_name)
+                continue
+            if entry is None:
+                continue
+            loop.call_soon_threadsafe(session_monitor.add_restored_tail_state, tmux_name, entry)
+            warmed += 1
+            read += entry["offset"]
+        return warmed, read
+
+    warmed, read = await asyncio.to_thread(run)
+    logger.info("cold tail warm-up: %d live session(s), %.1f MB read in %.1f s",
+                warmed, read / 1e6, time.monotonic() - t0)
+    return warmed, read
+
+
+_cold_warm_task: "asyncio.Task | None" = None
+
+
 def _restore_tail_snapshot(path: Path) -> tuple[dict, int]:
     """Load the hand-off snapshot once (then delete it, so a later cold start
     can never restore state built by other code). Restores State 2 and
@@ -23690,7 +23759,15 @@ async def _on_startup():
             logger.info("tail state carried over: %d live session(s), %d catch-up checkpoint(s)",
                         len(carried), checkpoints)
         except Exception:
+            carried, checkpoints = {}, 0
             logger.exception("tail state restore failed; sessions warm up from history")
+        # A cold start — no snapshot state restored (container start, or a
+        # reload that changed the parser): read every live session once, in
+        # order, on one background thread. It runs beside serving and does not
+        # hold back readiness; await it instead of create_task to make it so.
+        if not carried and not checkpoints:
+            global _cold_warm_task
+            _cold_warm_task = asyncio.create_task(_cold_warm_tail_states(set()))
     _mark("tail_state.restore")
     await session_monitor.seed_from_filesystem()
     _mark("session_monitor.seed_from_filesystem")

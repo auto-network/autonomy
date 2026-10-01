@@ -3682,6 +3682,18 @@ class SessionMonitor:
         self._restored_tail_states = dict(states)
         self._install_restored_tracker = install_tracker
 
+    def is_tail_state_warm(self, tmux_name: str) -> bool:
+        """True once this process holds a committed or adopted tail state for
+        the session (safe to call from a worker thread: one dict read)."""
+        ts = self._tail_states.get(tmux_name)
+        return ts is not None and (ts.task_tracker_warmed or ts.state_offset is not None)
+
+    def add_restored_tail_state(self, tmux_name: str, entry: dict) -> None:
+        """Offer one state built after start-up (the cold warm-up); adopted
+        like a carried-over one, unless the session already warmed itself."""
+        if not self.is_tail_state_warm(tmux_name):
+            self._restored_tail_states[tmux_name] = entry
+
     def _adopt_restored_tail_state(self, tmux_name: str, row: dict, ts: "_TailState") -> None:
         """Before a session's first read in this process: install the restored
         state if it is exactly the state at the offset about to be read from.
