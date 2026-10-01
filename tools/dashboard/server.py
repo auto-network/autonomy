@@ -23212,21 +23212,28 @@ async def _event_loop_watchdog():
     _TICK = 0.1
     _LAG_WARN_S = 0.5
     _LAG_HANG_S = 2.0
-    while True:
-        t0 = time.monotonic()
-        await asyncio.sleep(_TICK)
-        now = time.monotonic()
-        _loop_heartbeat = now
-        lag = now - t0 - _TICK
-        perf_telemetry.note_lag(lag)
-        if lag >= _LAG_HANG_S:
-            _stall_logger.error(
-                "EVENT-LOOP STALL: loop blocked %.2fs — a sync or CPU-bound "
-                "(GIL-holding) call is not yielding; all requests hung this long",
-                lag,
-            )
-        elif lag >= _LAG_WARN_S:
-            _stall_logger.warning("EVENT-LOOP LAG: loop blocked %.2fs", lag)
+    try:
+        while True:
+            t0 = time.monotonic()
+            await asyncio.sleep(_TICK)
+            now = time.monotonic()
+            _loop_heartbeat = now
+            lag = now - t0 - _TICK
+            perf_telemetry.note_lag(lag)
+            if lag >= _LAG_HANG_S:
+                _stall_logger.error(
+                    "EVENT-LOOP STALL: loop blocked %.2fs — a sync or CPU-bound "
+                    "(GIL-holding) call is not yielding; all requests hung this long",
+                    lag,
+                )
+            elif lag >= _LAG_WARN_S:
+                _stall_logger.warning("EVENT-LOOP LAG: loop blocked %.2fs", lag)
+    finally:
+        # A loop that has shut down is not stalled. Leaving the id set made the
+        # sampler thread report a phantom stall, with stack dumps, forever
+        # after every app shutdown (each TestClient exit in the test suite).
+        if _loop_thread_id == threading.get_ident():
+            _loop_thread_id = None
 
 # Task* tile enricher — per-session taskId → subject/status map. Populated by
 # the session monitor tailer as it walks JSONL entries; also used by the HTTP

@@ -579,8 +579,13 @@ class TestActivityStateDerivation:
             await bus.wait_for_event(
                 "session:messages", session_id="auto-act-8", timeout=3.0,
             )
-
+            # Three separate appends; under load the monitor can tail them in
+            # more than one batch, so the first event may precede toolu_3.
+            deadline = time.monotonic() + 3.0
             state = _read_activity_state(db_path, "auto-act-8")
+            while state != "thinking" and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+                state = _read_activity_state(db_path, "auto-act-8")
             assert state == "thinking"
 
             ts = mon._tail_states.get("auto-act-8")

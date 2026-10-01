@@ -14,6 +14,13 @@ from tools.network.relaykit.connector import TunnelConnector
 from tools.network.relaykit.frames import decode_frame
 
 
+def _records(caplog):
+    """Only the connector's own records: caplog also collects WARNINGs from
+    other modules' background threads left running by earlier tests (the
+    dashboard's event-loop stall reporter, for one)."""
+    return [r for r in caplog.records if r.name == connector_module.__name__]
+
+
 def _connector() -> TunnelConnector:
     return TunnelConnector(
         "ws://relay.invalid", "test-org", object(), object(),
@@ -42,12 +49,12 @@ def test_lifecycle_flood_is_one_immediate_line_plus_one_aggregate(
     for index in range(99):
         connector._log_disconnect(
             ConnectionError(f"suppressed-{index}"), 0.01, 0.8)
-    assert len(caplog.records) == 1
+    assert len(_records(caplog)) == 1
 
     now[0] = 60.0
     connector._log_disconnect(_Closed("latest", "registry restart"), 0.25, 1.0)
-    assert len(caplog.records) == 2
-    aggregate = caplog.records[-1].getMessage()
+    assert len(_records(caplog)) == 2
+    aggregate = _records(caplog)[-1].getMessage()
     assert "suppressed=100" in aggregate
     assert "latest_lived=0.250s" in aggregate
     assert "latest_close_code=4406" in aggregate
@@ -65,9 +72,9 @@ def test_stable_service_reset_makes_next_exit_immediately_visible(
     connector._log_disconnect(ConnectionError("hidden"), None, 0.4)
     connector._reset_failure_log_suppression()
     connector._log_disconnect(None, connector._max_backoff, None)
-    assert len(caplog.records) == 2
-    assert "clean-exit" in caplog.records[-1].getMessage()
-    assert "retry_delay=none" in caplog.records[-1].getMessage()
+    assert len(_records(caplog)) == 2
+    assert "clean-exit" in _records(caplog)[-1].getMessage()
+    assert "retry_delay=none" in _records(caplog)[-1].getMessage()
 
 
 def test_lifecycle_log_redacts_url_address_ids_and_key_material(
@@ -88,7 +95,7 @@ def test_lifecycle_log_redacts_url_address_ids_and_key_material(
         f"{opaque_credential}"
     )
     connector._log_disconnect(_Closed(secret, secret), None, 0.2)
-    line = caplog.records[-1].getMessage()
+    line = _records(caplog)[-1].getMessage()
     for value in (
         token, key, participant, address, address_v6, opaque_credential, url,
     ):
@@ -117,7 +124,7 @@ def test_control_failures_log_only_correlation_operation_and_kind(caplog):
         assert reply["ok"] is False
 
     asyncio.run(run())
-    lines = [record.getMessage() for record in caplog.records]
+    lines = [record.getMessage() for record in _records(caplog)]
     assert any("kind=no-live-tunnel" in line for line in lines)
     assert any("kind=rejected" in line for line in lines)
     assert all(token not in line for line in lines)
@@ -145,7 +152,7 @@ def test_control_timeout_and_send_exception_are_bounded_and_secret_free(caplog):
             await connector.control("revoke-link", {"token": secret})
 
     asyncio.run(run())
-    lines = [record.getMessage() for record in caplog.records]
+    lines = [record.getMessage() for record in _records(caplog)]
     assert any("kind=timeout" in line for line in lines)
     assert any("kind=exception" in line and "err=RuntimeError" in line
                for line in lines)

@@ -27,6 +27,13 @@ class _SocketContext:
         return False
 
 
+def _records(caplog):
+    """Only the connector's own records: caplog also collects WARNINGs from
+    other modules' background threads left running by earlier tests (the
+    dashboard's event-loop stall reporter, for one)."""
+    return [r for r in caplog.records if r.name == connector_module.__name__]
+
+
 def _connector() -> TunnelConnector:
     # Handshake construction is replaced at the instance seam below, so these
     # placeholders never enter cryptographic code.
@@ -70,7 +77,7 @@ def test_immediate_post_hello_failures_reach_the_backoff_cap(monkeypatch, caplog
     asyncio.run(connector.run())
 
     assert clock.sleeps == [0.2, 0.4, 0.8, 0.8, 0.8]
-    assert "retry_delay=0.200s" in caplog.records[0].getMessage()
+    assert "retry_delay=0.200s" in _records(caplog)[0].getMessage()
 
 
 def test_useful_service_resets_the_next_reconnect_to_minimum(monkeypatch, caplog):
@@ -101,9 +108,9 @@ def test_useful_service_resets_the_next_reconnect_to_minimum(monkeypatch, caplog
     assert clock.sleeps == [0.2, 0.4, 0.8, 0.2]
     # First failure is immediate, two are suppressed, then useful service
     # clears the window and makes its own exit immediately visible.
-    assert len(caplog.records) == 2
-    assert "lived=0.800s" in caplog.records[-1].getMessage()
-    assert "retry_delay=0.200s" in caplog.records[-1].getMessage()
+    assert len(_records(caplog)) == 2
+    assert "lived=0.800s" in _records(caplog)[-1].getMessage()
+    assert "retry_delay=0.200s" in _records(caplog)[-1].getMessage()
 
 
 def test_clean_serve_return_uses_the_same_stability_gate(monkeypatch):

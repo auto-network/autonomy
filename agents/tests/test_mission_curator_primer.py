@@ -17,7 +17,7 @@ def mission(tmp_path, monkeypatch):
     path = tmp_path / "mc.db"
     monkeypatch.setattr(db, "DB_PATH", path)
     db.init_db(path)
-    m = db.create_mission("Curate Me")
+    m = db.create_mission("Curate Me", org="autonomy")
     db.create_pillar(m["mission_id"], "Alpha", "sess-a", "#aaa")
     db.create_pillar(m["mission_id"], "Beta", "sess-b", "#bbb")
     return m
