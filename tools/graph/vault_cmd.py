@@ -50,9 +50,10 @@ def _named_seal_org(args) -> "str | None":
     """The explicit ``--org SLUG`` slug, or ``None`` for ``--personal`` / bare
     ``--org``.
 
-    Only a NAMED slug is forwarded to the secured seal endpoint, so the server
-    can refuse a named org the caller cannot prove (auto-ha7se) without
-    disturbing the bearer-derived routing of the default and own-session
+    Only a NAMED slug is forwarded to the secured seal endpoint, which lands
+    the operator's write under ``<slug>:`` (auto-kx7uo) and refuses any other
+    caller that cannot prove the org (auto-ha7se), without disturbing the
+    bearer-derived routing of the default and own-session
     (``--org`` with no slug) paths — those send no ``X-Graph-Org`` and are
     scoped exactly as before.
     """
@@ -122,8 +123,8 @@ def _read_secret_text(args) -> str:
 def cmd_vault_seal(args) -> None:
     if ":" in args.name:
         print(
-            "Error: the organization namespace is derived from your session; "
-            "do not put an explicit prefix in the name",
+            "Error: name the organization with --org SLUG; do not put an "
+            "explicit prefix in the name",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -158,10 +159,10 @@ def cmd_vault_seal(args) -> None:
     value = _read_secret_text(args)
 
     # The server is the authority on whether the caller may seal into a named
-    # org: it refuses (non-2xx) rather than silently sealing personal when the
-    # bearer cannot prove the org (auto-ha7se). Surface that refusal as a clean
-    # error + non-zero exit instead of an uncaught traceback, so a mis-scoped
-    # `--org` fails LOUDLY at the CLI too.
+    # org: the operator's host terminal may name any organization (auto-kx7uo);
+    # any other caller that cannot prove the org is refused (non-2xx) rather
+    # than silently sealed personal (auto-ha7se). Surface a refusal as a clean
+    # error + non-zero exit instead of an uncaught traceback.
     try:
         if args.tier == "secured":
             policy_class = args.audience or "personal-root"
@@ -178,7 +179,9 @@ def cmd_vault_seal(args) -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     ident = sid[:11] if isinstance(sid, str) else str(sid)
-    print(f"  ✓ {args.tier} secret sealed: {args.name}  ({ident})")
+    named = _named_seal_org(args)
+    landed = f"{named}:{args.name}" if named else args.name
+    print(f"  ✓ {args.tier} secret sealed: {landed}  ({ident})")
 
 
 def cmd_vault_request(args) -> None:
@@ -193,8 +196,8 @@ def cmd_vault_request(args) -> None:
     """
     if ":" in args.name:
         print(
-            "Error: the organization namespace is derived from your session; "
-            "do not put an explicit prefix in the name",
+            "Error: name the organization with --org SLUG; do not put an "
+            "explicit prefix in the name",
             file=sys.stderr,
         )
         sys.exit(1)

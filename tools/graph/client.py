@@ -1040,12 +1040,11 @@ class HttpClient:
         public-key seals immediately.
 
         ``org`` carries a caller-NAMED organization slug (``graph vault seal
-        --org SLUG``) so the endpoint can refuse a named org the caller's
-        bearer cannot prove, rather than silently sealing into the operator's
-        personal namespace (auto-ha7se). It is sent as ``X-Graph-Org`` — for a
-        matching org session it is redundant with the bearer, and for an
-        unscoped/host caller it is the only thing that makes the mis-scope
-        visible server-side. The default/own-session paths pass ``None`` and
+        --org SLUG``), sent as ``X-Graph-Org``. For a matching org session it
+        is redundant with the bearer; from the operator's host terminal it is
+        the organization the secret lands in (``<slug>:<name>``, auto-kx7uo);
+        any other caller naming an org is refused rather than sealed into the
+        personal namespace (auto-ha7se). The default/own-session paths pass ``None`` and
         send no header, preserving the bearer-derived routing unchanged.
         """
         org = _resolve_client_org_arg(org)

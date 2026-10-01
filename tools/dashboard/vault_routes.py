@@ -186,6 +186,22 @@ def resolve_personal_root_class_id(class_id: str) -> str:
     return class_id
 
 
+def operator_named_org_refusal(slug: str) -> str | None:
+    """Why the operator cannot seal into organization *slug*, or None. The
+    slug arrives as a raw ``X-Graph-Org`` header, so it is checked as a slug
+    AND as an organization this machine holds: a typo must not mint a row
+    under a namespace no organization reads."""
+    from tools.graph import org_ops
+
+    try:
+        org_ops._validate_slug(slug)
+    except Exception as exc:  # noqa: BLE001 -- the reason is the message
+        return f"organization {slug!r}: {exc}"
+    if org_ops.get_org(slug) is None:
+        return f"no organization named {slug!r} on this machine"
+    return None
+
+
 async def seal_personal_setting(request: Request):
     """Route one submitted secret into the personal secured store.
 
@@ -214,30 +230,35 @@ async def seal_personal_setting(request: Request):
         if not isinstance(class_id, str) or not class_id:
             raise VaultError("policy_class_id must be a non-empty string")
         principal = api_auth.principal_from_request(request)
-        # A NAMED org that the caller cannot prove with its bearer is refused,
-        # not silently routed to the bare personal key (auto-ha7se). Without
-        # this, `graph vault seal --org anchore --tier secured` from a host or
-        # unscoped session answered "✓ sealed" while landing the secret in the
-        # operator's own namespace — a confidentiality mis-landing. An org
-        # session naming its OWN org is a MATCHING header (the middleware has
-        # already refused a conflicting one), so it is org_bound here and never
-        # reaches this refusal; the operator's own writes name no org at all.
+        # A NAMED org lands under that org's ``<org>:`` key, never the bare
+        # personal key (auto-ha7se). The operator (dashboard cookie or a host
+        # terminal) names any organization directly (auto-kx7uo, operator
+        # ruling 2026-10-01). An org session's org comes from its bearer (the
+        # middleware has already refused a conflicting header); any other
+        # caller naming an org is refused.
         requested_org = api_auth.organization_scope_from_request(request)
-        if (
-            isinstance(requested_org, str)
-            and requested_org not in ("personal", "machine")
-            and not principal.org_bound
-        ):
+        named_org = (requested_org
+                     if isinstance(requested_org, str)
+                     and requested_org not in ("personal", "machine") else None)
+        operator = principal.kind in {
+            api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
+            api_auth.ApiPrincipalKind.LOCAL_SESSION,
+        }
+        if named_org is not None and not operator and not principal.org_bound:
             return JSONResponse(
                 {"error": (
-                    f"cannot seal into organization {requested_org!r} from an "
-                    "unscoped or host session; run this from a session scoped to "
-                    "that organization, or move an existing secret with "
-                    "'graph vault share --to-org'"
+                    f"cannot seal into organization {named_org!r}: this caller "
+                    "is neither the operator nor a session of that organization"
                 )},
                 status_code=403,
             )
-        if principal.kind in {
+        if operator and named_org is not None:
+            if (refusal := operator_named_org_refusal(named_org)) is not None:
+                return JSONResponse({"error": refusal}, status_code=400)
+            routed_key = schema_registry.derive_org_writeback_key(
+                VAULT_SECURED_SET_ID, named_org, key.strip(),
+            )
+        elif principal.kind in {
             api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
             api_auth.ApiPrincipalKind.LOCAL_SESSION,
         } or (

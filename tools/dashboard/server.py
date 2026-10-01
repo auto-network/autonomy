@@ -19516,27 +19516,37 @@ async def api_graph_setting_create(request):
         # success. For a secret that is a confidentiality mis-landing
         # (auto-ha7se): `graph vault seal --org anchore` answered "✓ sealed" but
         # the row never reached anchore, would not sync to org members, and org
-        # readers never found it. Two rules replace the blanket None:
+        # readers never found it. Three rules replace the blanket None:
         #   * a positively org-scoped caller (its bearer IS the org, so the
         #     middleware has already refused any conflicting X-Graph-Org) keeps
-        #     its org, and the write lands under ``<org>:`` as intended; while
-        #   * a caller that NAMES an org via X-Graph-Org without a bearer proving
-        #     it — an unscoped/host/operator session — is refused LOUDLY rather
-        #     than silently demoted to the bare personal namespace.
+        #     its org, and the write lands under ``<org>:`` as intended;
+        #   * the operator (dashboard cookie or a host terminal) names any
+        #     organization directly and the write lands under ``<org>:``
+        #     (auto-kx7uo, operator ruling 2026-10-01); and
+        #   * any other caller naming an org is refused LOUDLY rather than
+        #     silently demoted to the bare personal namespace.
         _named_org = isinstance(org, str) and org not in ("personal", "machine")
         if _named_org and _schemas.declared_org_writeback_key_strategy(
             body["set_id"]
         ):
-            if not api_auth.principal_from_request(request).org_bound:
+            _principal = api_auth.principal_from_request(request)
+            _operator = _principal.kind in {
+                api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
+                api_auth.ApiPrincipalKind.LOCAL_SESSION,
+            }
+            if not _principal.org_bound and not _operator:
                 return JSONResponse(
                     {"error": (
-                        f"cannot seal into organization {org!r} from an unscoped "
-                        "or host session; run this from a session scoped to that "
-                        "organization, or move an existing secret with "
-                        "'graph vault share --to-org'"
+                        f"cannot seal into organization {org!r}: this caller "
+                        "is neither the operator nor a session of that "
+                        "organization"
                     )},
                     status_code=403,
                 )
+            if _operator:
+                from tools.dashboard.vault_routes import operator_named_org_refusal
+                if (_refusal := operator_named_org_refusal(org)) is not None:
+                    return JSONResponse({"error": _refusal}, status_code=400)
             # ``org`` is a non-empty slug here (checked above), so the
             # ``or CALLER_ORG`` fallback is a no-op — it is written this way to
             # keep the org-taint invariant the request-scope linter enforces

@@ -1,12 +1,13 @@
-"""`graph vault seal --org SLUG` must fail LOUDLY, never seal silently personal.
+"""`graph vault seal --org SLUG` lands in that org, never silently personal.
 
-Regression for auto-ha7se: a caller that NAMES an organization it cannot prove
-with its bearer (an unscoped/host session) previously had its ``--org`` slug
-discarded and its secret written to the operator's own PERSONAL namespace —
-reported as ``✓ sealed``. That is a confidentiality mis-landing: the row never
-reached the named org, never synced to org members, and org readers never found
-it. Both tiers must now refuse it with a non-2xx, and a positively org-scoped
-caller must land under its ``<org>:`` prefix rather than the bare personal key.
+auto-ha7se: a caller naming an organization once had its ``--org`` slug
+discarded and its secret written to the operator's own PERSONAL namespace,
+reported as ``✓ sealed`` -- a confidentiality mis-landing. auto-kx7uo
+(operator ruling 2026-10-01): the operator's host terminal (or dashboard
+cookie) seals DIRECTLY into any organization it names, at both tiers, as
+``<org>:<name>``; an org session lands under its own ``<org>:``; any other
+caller naming an org is refused. In no case does a named org reach the bare
+personal key.
 """
 
 from __future__ import annotations
@@ -54,7 +55,14 @@ def _audited_body() -> dict:
     }
 
 
-def test_audited_seal_from_unscoped_caller_naming_an_org_is_refused(monkeypatch):
+def _orgs(monkeypatch, *known):
+    from tools.graph import org_ops
+
+    monkeypatch.setattr(org_ops, "get_org",
+                        lambda slug, **_k: object() if slug in known else None)
+
+
+def test_audited_seal_from_a_non_operator_naming_an_org_is_refused(monkeypatch):
     called = {"write": False}
     monkeypatch.setattr(
         server.graph_ops, "write_by_key",
@@ -69,6 +77,42 @@ def test_audited_seal_from_unscoped_caller_naming_an_org_is_refused(monkeypatch)
     assert resp.status_code == 403
     assert b"cannot seal into organization 'anchore'" in resp.body
     # The refusal happens BEFORE any write — nothing lands in personal.
+    assert called["write"] is False
+
+
+@pytest.mark.parametrize("kind", [ApiPrincipalKind.LOCAL_SESSION,
+                                  ApiPrincipalKind.OPERATOR_COOKIE])
+def test_audited_seal_from_the_operator_naming_an_org_lands_in_it(monkeypatch, kind):
+    _orgs(monkeypatch, "anchore")
+    captured = {}
+
+    def write_by_key(set_id, rev, key, payload, *, org, **kw):
+        captured.update(key=key, org=org)
+        return "sid"
+
+    monkeypatch.setattr(server.graph_ops, "write_by_key", write_by_key)
+    monkeypatch.setattr(server.graph_ops, "take_shadowed_write", lambda *a: None)
+    req = _setting_request(_audited_body(), principal=ApiPrincipal(kind, subject="host"),
+                           organization="anchore")
+    resp = asyncio.run(server.api_graph_setting_create(req))
+    assert resp.status_code == 201, resp.body
+    # write_by_key derives ``anchore:`` from this org (_apply_org_writeback).
+    assert captured == {"key": "sync-proof", "org": "anchore"}
+
+
+def test_audited_seal_into_an_unknown_org_is_refused(monkeypatch):
+    _orgs(monkeypatch, "anchore")
+    called = {"write": False}
+    monkeypatch.setattr(server.graph_ops, "write_by_key",
+                        lambda *a, **k: called.__setitem__("write", True) or "sid")
+    req = _setting_request(
+        _audited_body(),
+        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host"),
+        organization="anchroe",
+    )
+    resp = asyncio.run(server.api_graph_setting_create(req))
+    assert resp.status_code == 400
+    assert b"no organization named 'anchroe'" in resp.body
     assert called["write"] is False
 
 
@@ -113,7 +157,11 @@ def _secured_app(monkeypatch, *, principal, organization):
     return Starlette(routes=vault_routes.ROUTES)
 
 
-def test_secured_seal_from_unscoped_caller_naming_an_org_is_refused(monkeypatch):
+@pytest.mark.parametrize("kind", [ApiPrincipalKind.COMPATIBILITY,
+                                  ApiPrincipalKind.MCP_SERVICE,
+                                  ApiPrincipalKind.EXTERNAL_SERVICE])
+def test_secured_seal_from_a_non_operator_naming_an_org_is_refused(monkeypatch, kind):
+    _orgs(monkeypatch, "anchore")
     sealed = {"called": False}
     monkeypatch.setattr(
         vault_routes.settings_ops, "write_by_key",
@@ -121,7 +169,7 @@ def test_secured_seal_from_unscoped_caller_naming_an_org_is_refused(monkeypatch)
     )
     app = _secured_app(
         monkeypatch,
-        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host"),
+        principal=ApiPrincipal(kind, subject="svc"),
         organization="anchore",
     )
     with TestClient(app) as client:
@@ -161,3 +209,96 @@ def test_secured_seal_with_no_named_org_is_not_refused(monkeypatch):
     # Not a 403 refusal — it proceeded into routing (which our stub then trips).
     assert resp.status_code != 403
     assert reached["routing"] is True
+
+
+@pytest.mark.parametrize("kind", [ApiPrincipalKind.LOCAL_SESSION,
+                                  ApiPrincipalKind.OPERATOR_COOKIE])
+def test_secured_seal_from_the_operator_naming_an_org_lands_in_it(monkeypatch, kind):
+    _orgs(monkeypatch, "anchore")
+    captured = {}
+
+    def write_by_key(set_id, rev, key, payload, *, org, **kw):
+        captured.update(key=key, org=org)
+        return "sid"
+
+    monkeypatch.setattr(vault_routes.settings_ops, "write_by_key", write_by_key)
+    monkeypatch.setattr(vault_routes, "resolve_personal_root_class_id", lambda c: c)
+    app = _secured_app(monkeypatch, principal=ApiPrincipal(kind, subject="host"),
+                       organization="anchore")
+    with TestClient(app) as client:
+        resp = client.post("/api/identity/vault-settings", json={
+            "key": "sync-proof", "value": "s3cr3t", "policy_class_id": "personal-root",
+        })
+    assert resp.status_code < 300, resp.text
+    assert captured == {"key": "anchore:sync-proof", "org": None}
+
+
+def test_secured_seal_into_an_unknown_org_is_refused(monkeypatch):
+    _orgs(monkeypatch, "anchore")
+    sealed = {"called": False}
+    monkeypatch.setattr(vault_routes.settings_ops, "write_by_key",
+                        lambda *a, **k: sealed.__setitem__("called", True) or "sid")
+    app = _secured_app(
+        monkeypatch,
+        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host"),
+        organization="../etc",
+    )
+    with TestClient(app) as client:
+        resp = client.post("/api/identity/vault-settings", json={
+            "key": "sync-proof", "value": "s3cr3t", "policy_class_id": "personal-root",
+        })
+    assert resp.status_code == 400, resp.text
+    assert sealed["called"] is False
+    assert "s3cr3t" not in resp.text
+
+
+@pytest.fixture
+def real_vault(tmp_path, monkeypatch):
+    """A real (cold) personal store with the audited delegate recipient
+    published, so both tiers seal for real."""
+    from tools.graph import settings_ops
+    from tools.graph.db import GraphDB
+    from tools.vault import key_holder
+    from tools.vault.personal_object import derive_delegate_audited_recipient
+    from tools.vault.store import VaultStore
+
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    personal = tmp_path / "personal.db"
+    monkeypatch.setattr(key_holder, "_scoped_db", lambda _set_id, _org: personal)
+    GraphDB(personal).close()
+    GraphDB.close_all_pooled()
+    _private, public_hex = derive_delegate_audited_recipient(bytes(range(32)))
+    with VaultStore(personal) as store:
+        store.put_delegate_audited_recipient(public_hex)
+    settings_ops.set_vault_sealer(None)
+    settings_ops.set_vault_key_holder(None)
+    settings_ops.set_personal_delegate_audited_key(None)
+    _orgs(monkeypatch, "anchore")
+    yield settings_ops
+    GraphDB.close_all_pooled()
+
+
+def _keys(settings_ops, set_id):
+    return {m.key for m in settings_ops.read_set(set_id, org=None, peers=[])}
+
+
+def test_a_host_audited_seal_lands_as_the_org_row_in_a_real_store(real_vault):
+    from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
+
+    # The real write path (no stub): write_by_key derives the ``anchore:``
+    # key from the org the route kept. The secured route derives the key
+    # itself, asserted above, before the same personal-store write.
+    req = _setting_request(
+        _audited_body(),
+        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host"),
+        organization="anchore",
+    )
+    resp = asyncio.run(server.api_graph_setting_create(req))
+    assert resp.status_code == 201, resp.body
+    keys = _keys(real_vault, VAULT_AUDITED_SET_ID)
+    assert "anchore:sync-proof" in keys
+    assert "sync-proof" not in keys
+
