@@ -17,7 +17,7 @@ from typing import Any
 from tools.graph.schemas.org_session_runner import (
     ADMIT_ALL_MEMBERS,
     ROW_VERSION,
-    OrgSessionRunnerV1,
+    OrgSessionRunnerV2,
 )
 from tools.network.fleet_org_reachability import sign_certified, verify_certified
 from tools.network.idkit import DelegationCert, KeyPair
@@ -43,25 +43,24 @@ def build_row(machine_key: KeyPair, persona_cert: DelegationCert, *, label: str,
         "updated_at": int(time.time() if now is None else now),
     }
     body["sig"] = sign_certified(machine_key, body, ROW_DOMAIN)
-    # The key carries machine_pub; verify_row puts it back before checking.
-    row = {k: v for k, v in body.items() if k != "machine_pub"}
-    OrgSessionRunnerV1.validate(row)
+    # The key carries persona_pub and machine_pub; verify_row puts both back
+    # before checking.
+    row = {k: v for k, v in body.items() if k not in ("machine_pub", "persona_pub")}
+    OrgSessionRunnerV2.validate(row)
     return row
 
 
 def verify_row(key: str, payload: Any, *, org: str, now: int | None = None,
                is_member: Callable[[str], bool | None] | None = None) -> dict | None:
-    """The offer (with ``machine_pub``) when the row verifies, else None.
-    *key* is ``<persona>:<machine key>``: the row's persona must be the
-    key's, and its certificate must end at the key's machine."""
+    """The offer (with ``persona_pub`` and ``machine_pub`` from *key*) when
+    the row verifies, else None. *key* is ``<persona>:<machine key>``: the
+    certificate must be the key's persona's and end at the key's machine."""
     try:
-        OrgSessionRunnerV1.validate(payload)
+        OrgSessionRunnerV2.validate(payload)
     except Exception:
         return None
     key_persona, _, machine = str(key).partition(":")
-    if key_persona != payload.get("persona_pub"):
-        return None
-    payload = {**dict(payload), "machine_pub": machine}
+    payload = {**dict(payload), "persona_pub": key_persona, "machine_pub": machine}
     persona = verify_certified(machine, payload, org=org, domain=ROW_DOMAIN, now=now)
     if persona is None:
         return None

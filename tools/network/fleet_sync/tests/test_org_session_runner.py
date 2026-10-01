@@ -111,3 +111,28 @@ def test_an_unconfirmed_persona_is_not_listed(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(org_runners, "_channel", lambda slug: SimpleNamespace(
         **{**vars(channel), "is_member": lambda p: None}))
     assert org_runners.runners("alpha")["runners"] == []
+
+
+def test_a_revision_1_row_upconverts_and_still_verifies(tmp_path: Path) -> None:
+    """Revision 2 drops persona_pub from the payload (auto-ctunt); the key
+    carries it. A stored revision-1 row, which repeated it, upconverts on read
+    and its signature still verifies, because the signed bytes include
+    persona_pub put back from the key either way."""
+    from tools.graph.schemas.org_session_runner import (
+        ORG_SESSION_RUNNER_REVISION, ORG_SESSION_RUNNER_SET_ID, OrgSessionRunnerV1)
+    from tools.graph.schemas.registry import upconvert_payload
+
+    pa = KeyPair.generate()
+    a = Member(tmp_path, "a", pa, [pa.public_hex])
+    now = int(time.time())
+    row = _offer(a, now)
+    assert "persona_pub" not in row
+    key = f"{pa.public_hex}:{a.machine.public_hex}"
+    v1_row = {**row, "persona_pub": pa.public_hex}
+    OrgSessionRunnerV1.validate(v1_row)
+    upgraded = upconvert_payload(ORG_SESSION_RUNNER_SET_ID, 1, ORG_SESSION_RUNNER_REVISION, v1_row)
+    assert upgraded == row
+    offer = runner.verify_row(key, upgraded, org=ORG, now=now)
+    assert offer is not None and offer["persona_pub"] == pa.public_hex
+    # A revision-2 payload that repeats the key's persona is refused.
+    assert runner.verify_row(key, v1_row, org=ORG, now=now) is None

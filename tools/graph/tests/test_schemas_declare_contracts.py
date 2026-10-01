@@ -248,6 +248,8 @@ _KEY_DUPLICATION_GRANDFATHERED = {
     # verifier already knows is not a reason to store it twice.
     ("autonomy.personal.fleet-reachability", 1, "machine_pub"),
     ("autonomy.org.fleet-reachability", 1, "machine_pub"),
+    # Revision 2 dropped persona_pub (2026-10-01, auto-ctunt).
+    ("autonomy.org.session-runner", 1, "persona_pub"),
     ("autonomy.machine.serving-connector", 1, "org_uuid"),
     ("dashboard.voice-notes.note", 1, "note_id"),
     ("autonomy.identity.passkey", 1, "credential_id"),

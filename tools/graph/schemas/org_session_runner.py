@@ -1,4 +1,4 @@
-"""``autonomy.org.session-runner#1`` — a member machine offering to run the
+"""``autonomy.org.session-runner#2`` — a member machine offering to run the
 organization's members' sessions (Thrust 5, bead auto-a51qv; design
 graph://7eb29bc8-31a §9.8).
 
@@ -14,6 +14,11 @@ correct. The row also carries the persona's certificate to the machine key
 and the machine key's signature, as ``autonomy.org.fleet-reachability`` does:
 that proves the persona owns the machine the key names
 (tools/network/org_session_runner.verify_row).
+
+Revision 2 drops ``persona_pub`` from the payload, as revision 1 already
+dropped ``machine_pub``: both are the row key. The signature is computed over
+the body WITH both fields and the verifier puts them back from the key, so
+revision-1 and revision-2 rows sign identical bytes.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from .registry import (
     home,
     keyed_per_entity,
     publication_band,
+    register_upconverter,
 )
 
 SYNOPSIS = {
@@ -41,7 +47,7 @@ SYNOPSIS = {
 }
 
 ORG_SESSION_RUNNER_SET_ID = "autonomy.org.session-runner"
-ORG_SESSION_RUNNER_REVISION = 1
+ORG_SESSION_RUNNER_REVISION = 2
 ROW_VERSION = 1
 #: Who may launch on an offered runner. The only value in this version.
 ADMIT_ALL_MEMBERS = "all-members"
@@ -57,10 +63,13 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 @home("organization")
 @keyed_per_entity(key_strategy="persona_pub:*")
 class OrgSessionRunnerV1(SettingSchema):
-    """One machine's offer to run members' sessions, self-certified."""
+    """One machine's offer to run members' sessions, self-certified.
+
+    Revision 1 kept ``persona_pub`` in the payload; revision 2 drops it. The
+    class stays registered so revision-1 rows upconvert on read."""
 
     set_id = ORG_SESSION_RUNNER_SET_ID
-    schema_revision = ORG_SESSION_RUNNER_REVISION
+    schema_revision = 1
 
     _field_metadata: dict[str, dict] = {
         "v": {"type": "integer", "required": True, "description": "Row version (1)"},
@@ -129,6 +138,44 @@ class OrgSessionRunnerV1(SettingSchema):
         if not _HEX64_RE.match(persona) or not _HEX64_RE.match(machine):
             raise SchemaValidationError(
                 f"{cls.__name__}: keys are <persona>:<machine key> (64 hex each), got {key!r}")
+
+
+@publication_band(min="raw", max="published")
+@home("organization")
+@keyed_per_entity(key_strategy="persona_pub:*")
+class OrgSessionRunnerV2(SettingSchema):
+    """One machine's offer to run members' sessions, self-certified.
+
+    The payload carries neither key segment: the persona and the machine key
+    both come from the row key."""
+
+    set_id = ORG_SESSION_RUNNER_SET_ID
+    schema_revision = ORG_SESSION_RUNNER_REVISION
+
+    _field_metadata: dict[str, dict] = {
+        key: value for key, value in OrgSessionRunnerV1._field_metadata.items()
+        if key != "persona_pub"
+    }
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if isinstance(payload, dict) and "persona_pub" in payload:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'persona_pub' is in the row key and must not be repeated")
+        probe = dict(payload) if isinstance(payload, dict) else payload
+        if isinstance(probe, dict):
+            probe["persona_pub"] = "0" * 64
+        OrgSessionRunnerV1.validate(probe)
+
+    @classmethod
+    def validate_member_key(cls, key: str) -> None:
+        OrgSessionRunnerV1.validate_member_key(key)
+
+
+register_upconverter(
+    ORG_SESSION_RUNNER_SET_ID, 1, ORG_SESSION_RUNNER_REVISION,
+    lambda payload: {k: v for k, v in dict(payload).items() if k != "persona_pub"},
+)
 
 
 def runner_key(persona_pub: str, machine_pub: str) -> str:
