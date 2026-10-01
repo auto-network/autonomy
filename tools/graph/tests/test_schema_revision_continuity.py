@@ -12,9 +12,9 @@ not see them, and their certificates ran to the edge of expiry with no error
 anywhere. The symptom surfaced weeks later, and named the wrong cause.
 
 Whether a revision can UPCONVERT is a separate and legitimately optional
-question -- ``org-key`` cannot without that organization's passphrase, and
-``secure.setting`` cannot without the plaintext. Both are fine, because both
-revisions stay registered and a row at either still parses.
+question -- ``org-key`` cannot without that organization's passphrase. That
+is fine, because both revisions stay registered and a row at either still
+parses.
 """
 
 from __future__ import annotations

@@ -15,7 +15,7 @@ REPO = Path(__file__).resolve().parents[2]
 PRE_SIGN_IN = {"dashboard_session_secret", "tls_key", "web_push_keys", "beads"}
 #: Node-secret stores the bead still moves out of the manifest (vault row or
 #: ramfs) or deletes. Each later landing removes its entry; empty = done.
-STILL_TO_MOVE = {"repl_login_key", "web_push_proof_vapid"}
+STILL_TO_MOVE = {"web_push_proof_vapid"}
 
 
 def test_exactly_the_recorded_exceptions_stay_files_and_each_says_why():

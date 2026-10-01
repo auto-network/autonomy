@@ -20,7 +20,7 @@ graph://c330323d-986; epic `auto-8q7oe`.
   download`; no operation runs caller-supplied script), `POST /abort`
   (returns once the command has stopped), `POST /expiry`. Targets are
   `{"ref"}` from `snapshot`, `{"role","name"}`, `{"label"}`, `{"text"}` or
-  `{"css"}`. Extends `BrowserController` from `tools/connectors/stealth_repl.py`.
+  `{"css"}`. Extends `BrowserController` from `tools/browser_broker/browser_controller.py`.
 - `lease_watchdog.py` — ends the container at the lease's expiry
   (`BROWSER_LEASE_EXPIRES_AT`, or the newest value from `POST /expiry`) with
   no request from the dashboard.

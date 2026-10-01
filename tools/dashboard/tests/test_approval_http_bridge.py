@@ -197,7 +197,6 @@ PRODUCTION_KIND_INVENTORY = {
     "visitor_token": (
         "session_principal", "sealed one-use delivery", ".12", False,
     ),
-    "secure_setting": ("session_principal", "terminal execution", ".13", False),
     "mcp_peer_link": (
         "registered_service", "terminal application result", ".14", False,
     ),

@@ -306,7 +306,6 @@ _HOME_UNDECLARED_GRANDFATHERED = {
     "autonomy.network.ledger-projection",
     "autonomy.network.ledger-state",
     "autonomy.org.peer-subscription",
-    "autonomy.secure.setting",
     "dashboard.feature_flags",
     "dashboard.operator-message-to-coordinator",
     "dashboard.surface.ping",

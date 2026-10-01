@@ -42,18 +42,6 @@ def test_a_workspace_needing_nothing_local_is_ready(org):
     assert workspace_readiness("docs", org="anchore").ready
 
 
-def test_a_repo_host_does_not_invent_a_secure_setting_dependency(org):
-    """Repository preparation consumes host SSH configuration, not a sealed
-    connector setting whose coincidental key resembles the remote host."""
-    _workspace("eng", repos=[{"host": "github.com", "repo": "anchore/widgets",
-                              "mount": "/workspace/repo"}])
-
-    result = workspace_readiness("eng", org="anchore")
-
-    assert result.ready
-    assert not any("secure.setting" in f.address for f in result.blocking)
-
-
 def test_an_unset_forwarded_variable_stops_it(org):
     _workspace("eng", env_from_host=["GH_TOKEN"])
 

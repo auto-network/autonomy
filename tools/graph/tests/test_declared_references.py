@@ -23,7 +23,7 @@ from tools.graph.schemas.registry import (
     keyed_per_entity,
     validate_payload,
 )
-SECRETS = "autonomy.secure.setting"
+SECRETS = "autonomy.credential-file"
 
 
 @pytest.fixture
@@ -37,22 +37,10 @@ def acme(tmp_path, monkeypatch):
 
 
 def _provision(org: str, target_key: str) -> None:
-    """Provision the secure setting a reference points at.
-
-    7f7dbcd9 deleted this helper along with the test that exercised it,
-    but left the call below, so the file raised NameError before reaching
-    its assertion.
-    """
+    """Provision the credential a reference points at."""
     settings_ops.add_setting(
-        SECRETS, 1, f"{org}:{target_key}",
-        {
-            "ciphertext_hex": "ab" * 40,
-            "key_id": "c" * 64,
-            "purpose": f"autonomy.secure-setting.v1|{org}|{target_key}|" + "d" * 64,
-            "origin": "operator",
-            "provisioned_at": 1.0,
-        },
-        org="personal",
+        SECRETS, 1, f"{org}:{target_key}", {"path": "/run/secrets/x"},
+        org="machine",
     )
 
 
@@ -110,7 +98,7 @@ def test_a_repository_is_named_one_way_or_the_other(acme):
 # ── the reference check ──────────────────────────────────────
 
 
-def test_repository_hosts_are_addresses_not_secure_setting_references(acme):
+def test_repository_hosts_are_addresses_not_credential_references(acme):
     payload = _workspace("github.com", "github-autonomy")
     settings_ops.add_setting("autonomy.workspace", 1, "w", payload, org="acme")
 

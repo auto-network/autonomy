@@ -8,6 +8,7 @@ These blocking reads belong off the dashboard event loop.
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 
 
@@ -27,6 +28,28 @@ class CapabilityRefused(RuntimeError):
         self.detail = detail
 
 
+#: How stale this process's workspace-id map may get before a rebuild.
+WORKSPACE_MAP_TTL_S = 60.0
+_workspace_map_refreshed_at = 0.0
+
+
+def _fresh_workspace(project: str):
+    """Workspace for *project*, tolerating a stale cache: on a miss (or past
+    the TTL) invalidate and retry once before refusing."""
+    from agents import workspace_settings
+
+    global _workspace_map_refreshed_at
+    now = time.monotonic()
+    if now - _workspace_map_refreshed_at <= WORKSPACE_MAP_TTL_S:
+        try:
+            return workspace_settings.get_workspace(project)
+        except KeyError:
+            pass  # maybe added since the map was built — rebuild below
+    workspace_settings.invalidate_caches()
+    _workspace_map_refreshed_at = now
+    return workspace_settings.get_workspace(project)
+
+
 def resolve_caller(authorization: str | None) -> CallerScope:
     """Resolve trusted scope without granting any capability."""
     auth = authorization or ""
@@ -36,9 +59,6 @@ def resolve_caller(authorization: str | None) -> CallerScope:
             "$CROSSTALK_TOKEN", status=401)
 
     from tools.dashboard.dao import auth_db, dashboard_db
-    # Reuse the standalone REPL's TTL/miss refresh: that process does not
-    # receive the dashboard's setting.changed cache invalidation events.
-    from tools.connectors.repl_auth import _fresh_workspace
 
     resolved = auth_db.resolve_token(hashlib.sha256(auth[7:].encode()).hexdigest())
     if resolved is None:

@@ -227,11 +227,8 @@ class WorkspaceRepoV1(SettingSchema):
     is present.
 
     The host is stored rather than parsed back out of a clone URL because it
-    is part of the remote's address and may be an SSH config alias.  It is
-    not a reference to ``autonomy.secure.setting``: repository preparation
-    uses the dashboard host's SSH configuration/agent, and pretending it
-    consumes an unrelated sealed connector secret makes a viable repository
-    fail readiness without changing what launch does.
+    is part of the remote's address and may be an SSH config alias.
+    Repository preparation uses the dashboard host's SSH configuration/agent.
 
     Declared rather than checked imperatively, so the entry's shape is
     metadata. A shape that lives only in a validate() body is invisible to

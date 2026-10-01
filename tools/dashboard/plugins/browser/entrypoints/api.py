@@ -307,30 +307,36 @@ def _secrets_pool():
     return _SECRETS
 
 
-def _stored_origin(org: str, target_key: str) -> Optional[str]:
-    """The credential's stored origin, read without decrypting anything."""
-    from tools.connectors.repl_login import SECURE_SETTING_SET_ID, SECURE_SETTING_V2_REVISION
-    from tools.graph import ops as graph_ops
+def _vault_credential(org: str, target_key: str) -> Optional[dict]:
+    """The sign-in credential from the vault, or None when none is stored.
 
-    members = graph_ops.read_set(SECURE_SETTING_SET_ID, org=org, peers=[],
-                                 min_revision=SECURE_SETTING_V2_REVISION)
-    match = next((m for m in members.members if m.key == target_key), None)
-    return (match.payload or {}).get("origin") if match is not None else None
+    The audited vault row ``<org>:<target_key>`` (``graph vault seal
+    <target_key> --org <org> --tier audited``) holds a JSON object: the
+    site's ``origin`` plus the login fields (``username``, ``password``, ...).
+    Opened in this process by the warm audited delegate; raises when the
+    vault is cold or the row is malformed."""
+    import json
 
+    from tools.graph import settings_ops
+    from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
 
-def _decrypt(org: str, workspace: str, target_key: str, stored_origin: str) -> dict:
-    from tools.connectors.repl_login import load_credentials
-    from tools.data_paths import REPO_ROOT, resolve_store
-
-    return load_credentials(autonomy_root=REPO_ROOT, key_file=resolve_store("repl_login_key"),
-                            org=org, target_key=target_key, expected_origin=stored_origin,
-                            caller_workspace=workspace)
+    key = f"{org}:{target_key}"
+    members = settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[]).members
+    match = next((m for m in members if m.key == key), None)
+    if match is None:
+        return None
+    if getattr(match, "vault_error", None) is not None:
+        raise RuntimeError("the vault is cold")
+    value = json.loads((match.payload or {}).get("value") or "")
+    if not isinstance(value, dict) or not isinstance(value.get("origin"), str) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+        raise ValueError("the vault credential is not a JSON object of strings with an origin")
+    return value
 
 
 def secure_login(authorization, lease_id: str, body) -> tuple[int, dict]:
     """Sign in with a stored credential the caller never sees (the design's
     seven steps: lock, check the page, decrypt, type, wait, clean up, unlock)."""
-    from tools.browser_broker.lease_agent import exact_origin
     from tools.dashboard.capability_gate import capability_enabled
 
     scope = _scope(authorization)
@@ -345,10 +351,27 @@ def secure_login(authorization, lease_id: str, body) -> tuple[int, dict]:
     if not isinstance(target_key, str) or not _TARGET_KEY_RE.fullmatch(target_key):
         raise _Reply(400, {"error": "target_key is invalid"})
     epoch = _epoch()
-    stored = _stored_origin(scope.org, target_key)
-    origin = exact_origin(stored or "")
-    if stored is None:
+    try:
+        credentials = _secrets_pool().submit(
+            _vault_credential, scope.org, target_key).result(timeout=30)
+    except Exception as exc:
+        logger.warning("secure-login: credential %s unavailable for %s: %s",
+                       target_key, scope.workspace, type(exc).__name__)
+        return 200, {"authenticated": False, "human_required": False,
+                     "reason": "credential-unavailable"}
+    if credentials is None:
         return 200, {"authenticated": False, "human_required": False, "reason": "not-provisioned"}
+    try:
+        return _sign_in(lease, body, epoch, credentials)
+    finally:
+        credentials.clear()
+
+
+def _sign_in(lease, body, epoch, credentials: dict) -> tuple[int, dict]:
+    from tools.browser_broker.lease_agent import exact_origin
+
+    stored = credentials.pop("origin")
+    origin = exact_origin(stored)
     if origin is None or origin[0] != "https":
         return 200, {"authenticated": False, "human_required": False, "reason": "origin-not-https"}
     page_work = {"origin": f"https://{origin[1]}:{origin[2]}", "fields": body.get("fields"),
@@ -380,23 +403,11 @@ def secure_login(authorization, lease_id: str, body) -> tuple[int, dict]:
         if status != 200 or not checked.get("ok"):
             reason = checked.get("reason", "check-failed") if status == 200 else "agent-error"
             return 200, {"authenticated": False, "human_required": False, "reason": reason}
-        # 3. Decrypt in the secrets pool; the plaintext never touches this frame's
-        #    logs, responses or audit rows.
-        try:
-            credentials = _secrets_pool().submit(
-                _decrypt, scope.org, scope.workspace, target_key, stored).result(timeout=30)
-        except Exception as exc:
-            reason = "credential-unavailable"
-            logger.warning("secure-login: credential %s unavailable for %s: %s",
-                           target_key, scope.workspace, type(exc).__name__)
-            return 200, {"authenticated": False, "human_required": False, "reason": reason}
-        # 4-6. Type, wait and clean up in the lease agent.
-        try:
-            status, outcome = containers.agent_request(
-                lease.address, lease.secret, "POST", "/login/submit",
-                {**page_work, "credentials": credentials}, timeout=95)
-        finally:
-            credentials.clear()
+        # 3-6. Type, wait and clean up in the lease agent. The credential was
+        #    opened from the vault before this call and is cleared by the caller.
+        status, outcome = containers.agent_request(
+            lease.address, lease.secret, "POST", "/login/submit",
+            {**page_work, "credentials": credentials}, timeout=95)
         if status != 200:
             reason = "agent-error"
             return 502, {"authenticated": False, "human_required": False, "reason": reason}

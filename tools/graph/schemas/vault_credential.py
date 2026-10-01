@@ -70,10 +70,8 @@ decorator, so ``vault.secured`` is not a rename of it but the same idea
 expressed once.
 
 ``autonomy.credential-file`` (a machine-scoped path to a plaintext file, which
-cannot travel by construction) and ``autonomy.secure.setting`` (HPKE sealed to
-the HOST key, so bound to a machine rather than to a person) were the stages
-before a vault existed. The three-stage lifecycle was always a migration path,
-not three permanent homes.
+cannot travel by construction) was the stage before a vault existed; a
+lifecycle of stages was always a migration path, not permanent homes.
 """
 
 from __future__ import annotations

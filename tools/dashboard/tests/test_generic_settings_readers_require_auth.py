@@ -223,7 +223,6 @@ def test_every_secret_bearing_set_is_band_pinned():
     from tools.graph import schemas
 
     for set_id in (
-        "autonomy.secure.setting",
         "autonomy.commit.signing-key",
         "autonomy.credential-file",
         "autonomy.vault.audited",

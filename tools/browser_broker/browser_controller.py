@@ -1,43 +1,21 @@
-#!/usr/bin/env python3
-"""Provider-isolated headed Scrapling browser with a compact HTTP REPL.
+"""The headed browser a lease drives: a Scrapling/Patchright Chrome with
+semantic snapshots, element refs, and role/label/text locators.
 
-This runs on the host desktop, not in an agent container.  Each instance receives
-its own profile directory and TCP port so trusted-device state is never shared
-between providers.  The command surface intentionally resembles agent-browser:
-agents can take a semantic snapshot, use temporary element refs, or locate by
-role/label/text when a provider makes a small DOM change.
-
-Reachability is not authorization: agent containers run with
-``--network=host``, so every request — driving the browser as much as the
-login action — must authenticate with the caller's per-session
-``Authorization: Bearer $CROSSTALK_TOKEN``. Identity is resolved host-side
-from that token and the launcher-stamped session row (``repl_auth.py``);
-the caller never supplies a session or workspace. Unauthenticated callers
-get a liveness-only ``/health`` with no browsing state.
+Moved here from tools/connectors/stealth_repl.py, the host-desktop REPL this
+class came from, which the browser broker superseded and which was deleted.
 """
 
 from __future__ import annotations
 
-import argparse
-import json
 import os
 import shlex
 import threading
 import time
 import traceback
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-
-# The host launches this file directly from the connector worktree (its own
-# directory on sys.path); tests import it as a package module.
-try:
-    import repl_auth
-except ImportError:  # pragma: no cover — package-import path
-    from tools.connectors import repl_auth
-
 
 INTERACTIVE_SNAPSHOT_JS = r"""
 () => {
@@ -107,14 +85,11 @@ def _tokens(value: str) -> list[str]:
 
 class BrowserController:
     def __init__(self, provider: str, profile_dir: Path, download_dir: Path,
-                 start_url: str | None, autonomy_root: Path | None = None,
-                 login_key_file: Path | None = None):
+                 start_url: str | None):
         self.provider = provider
         self.profile_dir = profile_dir.resolve()
         self.download_dir = download_dir.resolve()
         self.start_url = start_url
-        self.autonomy_root = autonomy_root
-        self.login_key_file = login_key_file
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.session = None
         self.page = None
@@ -198,103 +173,6 @@ class BrowserController:
                     "elapsed_ms": round((time.monotonic() - started) * 1000),
                     "error": str(exc),
                 }
-
-    def secure_login(self, request: dict[str, Any],
-                     caller: "repl_auth.ReplCaller") -> dict[str, Any]:
-        """Fill a bounded login form using a host-decrypted secure Setting.
-
-        ``caller`` is the authenticated identity the handler derived — its
-        workspace feeds the reconstructed HPKE label, so a credential not
-        sealed for that workspace does not decrypt.
-        """
-        with self.lock:
-            if not self.autonomy_root or not self.login_key_file:
-                raise CommandError("secure login is not configured for this REPL")
-            target_key = str(request.get("target_key") or "")
-            org = str(request.get("org") or "personal")
-            origin = str(request.get("origin") or "")
-            fields = request.get("fields")
-            submit = request.get("submit")
-            if not target_key or not origin or not isinstance(fields, dict) or not isinstance(submit, dict):
-                raise CommandError("login requires target_key, origin, fields, and submit")
-            page = self._need_page()
-            page_host = (urlparse(page.url).hostname or "").lower()
-            if page_host != origin and not page_host.endswith("." + origin):
-                raise CommandError("current page is outside the approved login origin")
-            for label in request.get("success_text") or []:
-                landmark = page.get_by_text(str(label), exact=False).first
-                if landmark.count() and landmark.is_visible():
-                    return {"authenticated": True, "already_authenticated": True,
-                            "url": page.url, "title": page.title(),
-                            "target_key": target_key}
-            try:
-                from repl_login import load_credentials
-            except ImportError:  # pragma: no cover — package-import path
-                from tools.connectors.repl_login import load_credentials
-            credentials = load_credentials(
-                autonomy_root=self.autonomy_root, key_file=self.login_key_file,
-                org=org, target_key=target_key, expected_origin=origin,
-                caller_workspace=caller.workspace_id)
-            start_url = page.url
-            password_locator = None
-            try:
-                for credential_key, locator_spec in fields.items():
-                    if credential_key not in credentials or not isinstance(locator_spec, dict):
-                        raise CommandError("login field does not match provisioned credential")
-                    kind = str(locator_spec.get("kind") or "label")
-                    name = str(locator_spec.get("name") or "")
-                    role = str(locator_spec.get("role") or "") or None
-                    if kind not in {"label", "role"} or not name:
-                        raise CommandError("login fields require a semantic label or role")
-                    locator = self._semantic_locator(page, kind, name, role)
-                    if locator.count() != 1:
-                        raise CommandError(f"login field is not unique: {credential_key}")
-                    input_type = (locator.get_attribute("type") or "text").lower()
-                    allowed_types = {"password"} if credential_key == "password" else {"text", "email"}
-                    if input_type not in allowed_types:
-                        raise CommandError(f"refusing to put {credential_key} into {input_type} field")
-                    locator.fill(credentials[credential_key])
-                    if credential_key == "password":
-                        password_locator = locator
-                submit_kind = str(submit.get("kind") or "role")
-                submit_name = str(submit.get("name") or "")
-                submit_role = str(submit.get("role") or "button")
-                if submit_kind not in {"label", "role"} or not submit_name:
-                    raise CommandError("login submit requires a semantic locator")
-                button = self._semantic_locator(page, submit_kind, submit_name, submit_role)
-                if button.count() != 1:
-                    raise CommandError("login submit is not unique")
-                button.click()
-                deadline = time.monotonic() + min(float(request.get("timeout_s") or 30), 60)
-                while time.monotonic() < deadline:
-                    page.wait_for_timeout(500)
-                    current_host = (urlparse(page.url).hostname or "").lower()
-                    if current_host != origin and not current_host.endswith("." + origin):
-                        raise CommandError("login redirected outside the approved origin")
-                    password_gone = password_locator is None or password_locator.count() == 0 \
-                        or not password_locator.is_visible()
-                    if password_gone:
-                        for label in request.get("dismiss_optional") or []:
-                            optional = page.get_by_role("button", name=str(label), exact=False).first
-                            if optional.count() and optional.is_visible():
-                                optional.click()
-                                page.wait_for_timeout(500)
-                                break
-                        for label in request.get("success_text") or []:
-                            landmark = page.get_by_text(str(label), exact=False).first
-                            if landmark.count() and landmark.is_visible():
-                                return {"authenticated": True, "url": page.url,
-                                        "title": page.title(), "target_key": target_key}
-                    if page.url != start_url and password_gone:
-                        return {"authenticated": True, "url": page.url,
-                                "title": page.title(), "target_key": target_key}
-                    body = page.locator("body").inner_text().lower()
-                    if any(term in body for term in ("verification code", "security code", "two-factor", "multi-factor")):
-                        return {"authenticated": False, "human_required": True,
-                                "reason": "verification_required", "url": page.url}
-                raise CommandError("login did not reach a verified authenticated page")
-            finally:
-                credentials.clear()
 
     def _execute(self, command: str) -> Any:
         page = self._need_page()
@@ -470,131 +348,3 @@ class BrowserController:
             "suggested_filename": suggested,
             "byte_size": destination.stat().st_size,
         }
-
-
-class ReplHandler(BaseHTTPRequestHandler):
-    controller: BrowserController
-    server_version = "FinanceStealthREPL/1"
-
-    def log_message(self, format: str, *args: Any) -> None:
-        return
-
-    def _json(self, status: int, payload: Any) -> None:
-        body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except BrokenPipeError:
-            # A caller timed out or a phone backgrounded while the bounded
-            # browser operation was still completing. The browser state is
-            # authoritative; a disconnected response is not a server fault.
-            return
-
-    def _authenticate(self) -> "repl_auth.ReplCaller | None":
-        """Resolve the caller from the bearer token, or respond with the
-        refusal and return None. Any resolution failure fails closed."""
-        try:
-            return repl_auth.authenticate(
-                autonomy_root=self.controller.autonomy_root,
-                authorization=self.headers.get("Authorization"))
-        except repl_auth.ReplAuthError as exc:
-            self._json(exc.status, {"ok": False, "error": str(exc)})
-            return None
-        except Exception as exc:
-            traceback.print_exc()
-            self._json(403, {"ok": False,
-                             "error": f"caller authentication failed: {exc}"})
-            return None
-
-    def do_GET(self) -> None:
-        if self.path in {"/", "/health"}:
-            # Liveness needs no identity, but browsing state (URL, title,
-            # profile paths) of an authenticated provider session must not
-            # leak to anyone who can merely open the socket.
-            try:
-                repl_auth.authenticate(
-                    autonomy_root=self.controller.autonomy_root,
-                    authorization=self.headers.get("Authorization"))
-            except Exception:
-                # No provider label either: naming the profile is naming the
-                # site whose cookie jar this process holds.
-                self._json(200, {
-                    "ok": True,
-                    "started_at": self.controller.started_at,
-                    "page_ready": self.controller.page is not None,
-                    "authenticated": False,
-                })
-                return
-            self._json(200, {"ok": True, "authenticated": True,
-                             **self.controller.status()})
-            return
-        self._json(404, {"ok": False, "error": "not found"})
-
-    def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length)
-        caller = self._authenticate()
-        if caller is None:
-            return
-        if self.path == "/api/login":
-            try:
-                payload = json.loads(raw or b"{}")
-                result = self.controller.secure_login(payload, caller)
-                self._json(200, {"ok": True, "result": result})
-            except Exception as exc:
-                self._json(400, {"ok": False, "error": str(exc)})
-            return
-        if self.path == "/api/command":
-            try:
-                payload = json.loads(raw or b"{}")
-                command = str(payload["command"])
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                self._json(400, {"ok": False, "error": f"invalid command payload: {exc}"})
-                return
-        elif self.path == "/":
-            command = raw.decode().strip()
-        else:
-            self._json(404, {"ok": False, "error": "not found"})
-            return
-        result = self.controller.execute(command)
-        self._json(200 if result["ok"] else 400, result)
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile-dir", required=True, type=Path)
-    parser.add_argument("--download-dir", required=True, type=Path)
-    parser.add_argument("--port", required=True, type=int)
-    parser.add_argument("--bind", default="127.0.0.1")
-    parser.add_argument("--start-url")
-    parser.add_argument("--autonomy-root", type=Path)
-    parser.add_argument("--login-key-file", type=Path)
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    controller = BrowserController(args.profile_dir.name, args.profile_dir, args.download_dir,
-                                   args.start_url, args.autonomy_root,
-                                   args.login_key_file)
-    controller.start()
-    handler = type("ProviderReplHandler", (ReplHandler,), {"controller": controller})
-    # Scrapling's synchronous Patchright page must be driven on the same thread
-    # that created it. A single-threaded server also serializes agent commands.
-    server = HTTPServer((args.bind, args.port), handler)
-    print(json.dumps({"event": "ready", "port": args.port, **controller.status()}, sort_keys=True), flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-        controller.close()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

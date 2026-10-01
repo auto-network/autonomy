@@ -680,10 +680,11 @@ def signin(ready_lease, monkeypatch):
     grants = {"browser": True, "repl_login": True}
     monkeypatch.setattr("tools.dashboard.capability_gate.capability_enabled",
                         lambda org, ws, cap: grants[cap])
-    monkeypatch.setattr(routes, "_stored_origin", lambda org, key: "login.example.com")
     decrypts = []
-    monkeypatch.setattr(routes, "_decrypt", lambda org, ws, key, origin: decrypts.append(key) or
-                        {"username": "me@example.com", "password": MARKER})
+    origin = {"value": "login.example.com"}
+    monkeypatch.setattr(routes, "_vault_credential", lambda org, key: decrypts.append(key) or
+                        {"origin": origin["value"], "username": "me@example.com",
+                         "password": MARKER})
     calls, script = [], {"check": (200, {"ok": True}),
                          "submit": (200, {"authenticated": True, "reason": "success-text"})}
 
@@ -698,7 +699,12 @@ def signin(ready_lease, monkeypatch):
         return 200, {}
 
     monkeypatch.setattr(containers, "agent_request", agent_request)
+    signin_origin[0] = origin
     return lease_id, h, grants, decrypts, calls, script
+
+
+#: The fixture's stored origin, for tests that change it.
+signin_origin = [None]
 
 
 def test_sign_in_runs_the_steps_in_order_and_unlocks(signin, caplog):
@@ -713,12 +719,12 @@ def test_sign_in_runs_the_steps_in_order_and_unlocks(signin, caplog):
     assert "secure-login" in store.get(h).audit
 
 
-def test_a_wrong_page_never_decrypts(signin):
+def test_a_wrong_page_never_receives_the_credential(signin):
     lease_id, h, _, decrypts, calls, script = signin
     script["check"] = (200, {"ok": False, "reason": "origin"})
     assert _call(routes.secure_login, "owner", lease_id, LOGIN)[1] == {
         "authenticated": False, "human_required": False, "reason": "origin"}
-    assert decrypts == [] and "/login/submit" not in [p for p, _ in calls]
+    assert "/login/submit" not in [p for p, _ in calls]
     assert store.get(h).state == "ready"
 
 
@@ -743,7 +749,7 @@ def test_sign_in_fails_closed_when_the_agent_does_not_lock(signin, monkeypatch):
     lease_id, h, _, decrypts, _, _ = signin
     monkeypatch.setattr(containers, "agent_request", lambda *a, **k: (404, {"error": "not found"}))
     status, body = _call(routes.secure_login, "owner", lease_id, LOGIN)
-    assert status == 502 and decrypts == [] and store.get(h).state == "ready"
+    assert status == 502 and store.get(h).state == "ready"
 
 
 def test_sign_in_refuses_css_locators_and_unknown_keys(signin):
@@ -751,14 +757,14 @@ def test_sign_in_refuses_css_locators_and_unknown_keys(signin):
     bad = {**LOGIN, "fields": {"password": {"kind": "css", "name": "#pw"}}}
     assert _call(routes.secure_login, "owner", lease_id, bad)[0] == 400
     assert _call(routes.secure_login, "owner", lease_id, {**LOGIN, "origin": "https://evil"})[0] == 400
-    assert decrypts == [] and calls == []
+    assert calls == []  # nothing reached the agent
 
 
 def test_an_http_credential_origin_is_refused(signin, monkeypatch):
     lease_id, _, _, decrypts, calls, _ = signin
-    monkeypatch.setattr(routes, "_stored_origin", lambda org, key: "http://login.example.com")
+    signin_origin[0]["value"] = "http://login.example.com"
     assert _call(routes.secure_login, "owner", lease_id, LOGIN)[1]["reason"] == "origin-not-https"
-    assert decrypts == [] and calls == []
+    assert calls == []  # the credential never reached the agent
 
 
 def _locked(ready_lease, holder, age_s):
@@ -825,3 +831,23 @@ def test_sign_in_keeps_the_lock_when_the_agent_unlock_is_unconfirmed(signin, mon
     monkeypatch.setattr(containers, "agent_request", no_unlock)
     _call(routes.secure_login, "owner", lease_id, LOGIN)
     assert (store.get(h).state, store.get(h).lock_holder) == ("locked", "privileged")
+
+
+def test_the_credential_is_the_audited_vault_row_for_the_org(monkeypatch):
+    """The sign-in credential is ``<org>:<target_key>`` in the audited vault:
+    a JSON object of strings with an ``origin``. Absent row -> None."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from tools.graph import settings_ops
+
+    rows = [SimpleNamespace(key="acme:site.login", vault_error=None, payload={"value": _json.dumps(
+        {"origin": "login.example.com", "username": "u", "password": "p"})})]
+    monkeypatch.setattr(settings_ops, "read_set",
+                        lambda set_id, *, org, peers=None: SimpleNamespace(members=rows))
+    assert routes._vault_credential("acme", "site.login") == {
+        "origin": "login.example.com", "username": "u", "password": "p"}
+    assert routes._vault_credential("other", "site.login") is None
+    rows[0].vault_error = object()
+    with pytest.raises(RuntimeError, match="cold"):
+        routes._vault_credential("acme", "site.login")

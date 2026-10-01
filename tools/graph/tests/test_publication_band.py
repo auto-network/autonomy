@@ -167,7 +167,6 @@ def test_promotion_within_the_band_still_works(orgs):
 
 
 SECRET_BEARING = (
-    "autonomy.secure.setting",
     "autonomy.commit.signing-key",
     "autonomy.credential-file",
     "autonomy.vault.audited",

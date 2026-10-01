@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
-from tools.connectors.stealth_repl import BrowserController, CommandError
+from tools.browser_broker.browser_controller import BrowserController, CommandError
 
 PORT = 7300
 SECRET_ENV = "BROWSER_LEASE_SECRET"

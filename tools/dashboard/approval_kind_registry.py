@@ -348,8 +348,6 @@ _PRODUCTION_ROWS = (
      ApprovalExpiryPolicy(ExpiryMode.FIXED, fixed_seconds=7200)),
     ("visitor_token", "mission_control", RequesterPolicy.SESSION_PRINCIPAL,
      AuthorityRequirement.OPERATOR_SESSION, ApprovalExpiryPolicy(ExpiryMode.NEVER)),
-    ("secure_setting", "vault", RequesterPolicy.SESSION_PRINCIPAL,
-     AuthorityRequirement.OPERATOR_SESSION, ApprovalExpiryPolicy(ExpiryMode.NEVER)),
     ("mcp_peer_link", "relay", RequesterPolicy.REGISTERED_SERVICE,
      AuthorityRequirement.OPERATOR_SESSION, ApprovalExpiryPolicy(ExpiryMode.NEVER)),
     ("mcp_crosstalk", "relay", RequesterPolicy.REGISTERED_SERVICE,

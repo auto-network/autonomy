@@ -18,10 +18,7 @@ stays there.
 
 Composite key ``<org>:<host>``: the machine store holds several
 organizations, and two of them can hold different credentials for the same
-host. The key matches the sealed credential's
-(``autonomy.secure.setting``), so the same address names the same
-credential in either, and a value can move between them without being
-renamed.
+host.
 
 The two are the same value at different stages. This row locates plaintext on
 one machine and cannot leave it; the sealed row carries ciphertext and
@@ -57,7 +54,6 @@ SYNOPSIS = {
         "operator-local secret path",
     ],
     "related_set_ids": [
-        "autonomy.secure.setting#1",
         "autonomy.org.capability.install#1",
     ],
 }

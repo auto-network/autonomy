@@ -50,7 +50,6 @@ SYNOPSIS = {
     ],
     "related_set_ids": [
         "autonomy.vault.secured#1",
-        "autonomy.secure.setting#1",
     ],
 }
 

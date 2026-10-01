@@ -183,7 +183,6 @@ def _enrich_commit_sign(row: dict) -> dict:
 
 from tools.dashboard import dashboard_access_approvals as _dashboard_access
 from tools.dashboard import mcp_peer_approvals as _mcp_peer
-from tools.dashboard import secure_setting_approvals as _secure_setting
 
 # Optional per-kind request preparation. A handler returns the normalized
 # request plus a server-frozen staged context. Kinds absent here retain the
@@ -191,12 +190,10 @@ from tools.dashboard import secure_setting_approvals as _secure_setting
 PREPARE_CREATE = {
     **_dashboard_access.PREPARE_CREATE,
     **_mcp_peer.PREPARE_CREATE,
-    **_secure_setting.PREPARE_CREATE,
 }
 AUTHORIZE_DECISION = {
     **_dashboard_access.AUTHORIZE_DECISION,
     **_mcp_peer.AUTHORIZE_DECISION,
-    **_secure_setting.AUTHORIZE_DECISION,
 }
 
 # Per-kind GET enrichment — the only kind-specific hook on the server side of
@@ -205,7 +202,6 @@ ENRICH = {
     "commit_sign": _enrich_commit_sign,
     **_dashboard_access.ENRICH,
     **_mcp_peer.ENRICH,
-    **_secure_setting.ENRICH,
 }
 
 
@@ -227,7 +223,6 @@ _decision_waiters: dict[str, asyncio.Event] = {}
 EXECUTORS: dict = {
     **_dashboard_access.EXECUTORS,
     **_mcp_peer.EXECUTORS,
-    **_secure_setting.EXECUTORS,
 }
 
 
