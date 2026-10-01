@@ -57,7 +57,8 @@ def _isolate_dashboard_browser_module(request):
     state leak across files and later modules observe the wrong page state.
     """
     module_file = getattr(request.module, "__file__", "")
-    if "tools/dashboard/tests" not in module_file:
+    # Plugin suites drive the same origin, so they need the same isolation.
+    if "tools/dashboard/tests" not in module_file and "tools/dashboard/plugins/" not in module_file:
         yield
         return
 
