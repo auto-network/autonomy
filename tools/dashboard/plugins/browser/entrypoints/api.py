@@ -307,30 +307,34 @@ def _secrets_pool():
     return _SECRETS
 
 
-def _vault_credential(org: str, target_key: str) -> Optional[dict]:
+def _vault_credential(org: str, workspace: str, target_key: str) -> Optional[dict]:
     """The sign-in credential from the vault, or None when none is stored.
 
     The audited vault row ``<org>:<target_key>`` (``graph vault seal
     <target_key> --org <org> --tier audited``) holds a JSON object: the
-    site's ``origin`` plus the login fields (``username``, ``password``, ...).
-    Opened in this process by the warm audited delegate; raises when the
-    vault is cold or the row is malformed."""
+    site's ``origin``, the ``workspaces`` allowed to use it, and the login
+    fields (``username``, ``password``, ...). Only that one row is opened, in
+    this process, by the warm audited delegate. Raises when the vault is
+    cold, the row is malformed, or *workspace* is not in its allowlist."""
     import json
 
     from tools.graph import settings_ops
     from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
 
-    key = f"{org}:{target_key}"
-    members = settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[]).members
-    match = next((m for m in members if m.key == key), None)
-    if match is None:
+    row = settings_ops.read_set_key(VAULT_AUDITED_SET_ID, f"{org}:{target_key}",
+                                    org=None, peers=[])
+    if row is None:
         return None
-    if getattr(match, "vault_error", None) is not None:
+    if row.get("vault_error") is not None:
         raise RuntimeError("the vault is cold")
-    value = json.loads((match.payload or {}).get("value") or "")
+    value = json.loads((row.get("payload") or {}).get("value") or "")
+    workspaces = value.pop("workspaces", None) if isinstance(value, dict) else None
     if not isinstance(value, dict) or not isinstance(value.get("origin"), str) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
         raise ValueError("the vault credential is not a JSON object of strings with an origin")
+    if not isinstance(workspaces, list) or workspace not in workspaces:
+        value.clear()
+        raise PermissionError(f"the credential does not allow workspace {workspace!r}")
     return value
 
 
@@ -353,7 +357,7 @@ def secure_login(authorization, lease_id: str, body) -> tuple[int, dict]:
     epoch = _epoch()
     try:
         credentials = _secrets_pool().submit(
-            _vault_credential, scope.org, target_key).result(timeout=30)
+            _vault_credential, scope.org, scope.workspace, target_key).result(timeout=30)
     except Exception as exc:
         logger.warning("secure-login: credential %s unavailable for %s: %s",
                        target_key, scope.workspace, type(exc).__name__)

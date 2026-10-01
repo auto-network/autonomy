@@ -682,7 +682,7 @@ def signin(ready_lease, monkeypatch):
                         lambda org, ws, cap: grants[cap])
     decrypts = []
     origin = {"value": "login.example.com"}
-    monkeypatch.setattr(routes, "_vault_credential", lambda org, key: decrypts.append(key) or
+    monkeypatch.setattr(routes, "_vault_credential", lambda org, ws, key: decrypts.append(key) or
                         {"origin": origin["value"], "username": "me@example.com",
                          "password": MARKER})
     calls, script = [], {"check": (200, {"ok": True}),
@@ -833,21 +833,43 @@ def test_sign_in_keeps_the_lock_when_the_agent_unlock_is_unconfirmed(signin, mon
     assert (store.get(h).state, store.get(h).lock_holder) == ("locked", "privileged")
 
 
-def test_the_credential_is_the_audited_vault_row_for_the_org(monkeypatch):
+def test_the_credential_is_one_audited_vault_row_scoped_to_its_workspaces(monkeypatch):
     """The sign-in credential is ``<org>:<target_key>`` in the audited vault:
-    a JSON object of strings with an ``origin``. Absent row -> None."""
+    a JSON object of strings with an ``origin`` and a ``workspaces``
+    allowlist. Only that row is read; another workspace is refused."""
     import json as _json
-    from types import SimpleNamespace
 
     from tools.graph import settings_ops
 
-    rows = [SimpleNamespace(key="acme:site.login", vault_error=None, payload={"value": _json.dumps(
-        {"origin": "login.example.com", "username": "u", "password": "p"})})]
+    rows = {"acme:site.login": {"vault_error": None, "payload": {"value": _json.dumps(
+        {"origin": "login.example.com", "workspaces": ["ws-a"],
+         "username": "u", "password": "p"})}}}
+    asked = []
+
+    def read_set_key(set_id, key, *, org, peers=None):
+        asked.append(key)
+        return rows.get(key)
+
+    monkeypatch.setattr(settings_ops, "read_set_key", read_set_key)
     monkeypatch.setattr(settings_ops, "read_set",
-                        lambda set_id, *, org, peers=None: SimpleNamespace(members=rows))
-    assert routes._vault_credential("acme", "site.login") == {
+                        lambda *a, **k: pytest.fail("must not open the whole vault"))
+    assert routes._vault_credential("acme", "ws-a", "site.login") == {
         "origin": "login.example.com", "username": "u", "password": "p"}
-    assert routes._vault_credential("other", "site.login") is None
-    rows[0].vault_error = object()
+    assert asked == ["acme:site.login"]
+    with pytest.raises(PermissionError, match="ws-b"):
+        routes._vault_credential("acme", "ws-b", "site.login")
+    assert routes._vault_credential("other", "ws-a", "site.login") is None
+    rows["acme:site.login"]["vault_error"] = object()
     with pytest.raises(RuntimeError, match="cold"):
-        routes._vault_credential("acme", "site.login")
+        routes._vault_credential("acme", "ws-a", "site.login")
+
+
+def test_a_credential_not_allowed_for_the_workspace_is_refused(signin, monkeypatch):
+    lease_id, _, _, _, calls, _ = signin
+
+    def refuse(org, ws, key):
+        raise PermissionError("not allowed")
+
+    monkeypatch.setattr(routes, "_vault_credential", refuse)
+    assert _call(routes.secure_login, "owner", lease_id, LOGIN)[1]["reason"] == "credential-unavailable"
+    assert calls == []
