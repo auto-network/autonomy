@@ -789,7 +789,7 @@ class TestCrosstalkParsing:
         import time
         from tools.dashboard import session_harness
         monkeypatch.setattr(session_harness, "_SENDER_HREF_CACHE", {
-            "at": time.time(), "map": {},
+            "at": time.monotonic(), "map": {},
         })
         assert session_harness._sender_href({"from": "host-old"}) == "/session/host-old"
         assert session_harness._sender_href({"from": "host/a b"}) == "/session/host%2Fa%20b"

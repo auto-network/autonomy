@@ -608,7 +608,7 @@ def _graph_db_path() -> str | None:
 
 #: tmux name -> live session-viewer path, refreshed at most every few
 #: seconds. The tail parser runs per entry; the registry read is per burst.
-_SENDER_HREF_CACHE: dict = {"at": 0.0, "map": {}}
+_SENDER_HREF_CACHE: dict = {"at": None, "map": {}}
 
 
 def _sender_href(ct: dict) -> str:
@@ -628,8 +628,8 @@ def _sender_href(ct: dict) -> str:
         return ""
     import time as _t
     from urllib.parse import quote as _q
-    now = _t.time()
-    if now - _SENDER_HREF_CACHE["at"] > 5:
+    at = _SENDER_HREF_CACHE["at"]
+    if at is None or _t.monotonic() - at > 5:
         # Measured (2026-10-01): the suspected cause of the post-restart
         # viewer stalls is this refresh running in every concurrent parse.
         from tools.dashboard import perf_telemetry
@@ -646,7 +646,11 @@ def _sender_href(ct: dict) -> str:
                     f"?tmux={_q(r['tmux_session'], safe='')}")
                 for r in rows if r.get("tmux_session")
             }
-            _SENDER_HREF_CACHE["at"] = now
+            # Stamped when the rebuild FINISHES. Stamping its start meant a
+            # rebuild slower than the 5 s window stored a map that had already
+            # expired, so every sender line in every concurrent parse rebuilt
+            # again: a herd that sustained itself (load test 2026-10-01).
+            _SENDER_HREF_CACHE["at"] = _t.monotonic()
     return _SENDER_HREF_CACHE["map"].get(tmux) or f"/session/{_q(tmux, safe='')}"
 
 
