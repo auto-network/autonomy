@@ -127,6 +127,15 @@ if [ "${AUTONOMY_PROVISION_RAMFS:-1}" = "1" ]; then
     mkdir -p /run/autonomy-keycache/service-gateway 2>/dev/null || true
     chown autonomy:autonomy /run/autonomy-keycache/service-gateway 2>/dev/null || true
     chmod 0700 /run/autonomy-keycache/service-gateway 2>/dev/null || true
+
+    # The MCP relay's credentials (auto-5gdao) are released into this child
+    # once the vault is unlocked. It exists from boot -- empty while the vault
+    # is cold -- so the relay's read-only bind (create_host_path: false)
+    # always resolves: relay.sh then waits, and the restart policy carries it
+    # until the release lands, instead of docker refusing to start it at all.
+    mkdir -p /run/autonomy-keycache/mcp-relay 2>/dev/null || true
+    chown autonomy:autonomy /run/autonomy-keycache/mcp-relay 2>/dev/null || true
+    chmod 0700 /run/autonomy-keycache/mcp-relay 2>/dev/null || true
 else
     echo "entrypoint: ramfs keycache provisioning skipped (AUTONOMY_PROVISION_RAMFS=0; role has no keycache mount)" >&2
 fi
