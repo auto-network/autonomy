@@ -2019,6 +2019,14 @@ def _org_sync_report() -> dict:
         return {}
 
 
+#: The longest control request line the listener reads. asyncio's default
+#: (64 KiB) silently dropped every session-control reply and forwarded event
+#: between 64 KiB and the 256 KiB record cap (MAX_RECORD_BYTES): the read
+#: raised, the handler closed without a word, and the requester waited out
+#: its 30 s (SJC-2, 2026-10-01: every tail of 50 entries).
+CONTROL_LINE_LIMIT = 4 * 1024 * 1024
+
+
 async def _serve_control_listener(connector, ctl_path: str,
                                   publisher=None) -> None:
     """A loopback listener the dashboard drives to run D19 control ops on
@@ -2041,9 +2049,18 @@ async def _serve_control_listener(connector, ctl_path: str,
 
     async def handle(reader, writer):
         try:
-            line = await reader.readline()
             try:
+                line = await reader.readline()
+            except ValueError:
+                # Over CONTROL_LINE_LIMIT: say so rather than close silently.
+                line = None
+            try:
+                if line is None:
+                    raise OverflowError
                 request = _json.loads(line.decode("utf-8"))
+            except OverflowError:
+                reply = {"ok": False, "error_kind": "request-too-large",
+                         "error": f"control request exceeds {CONTROL_LINE_LIMIT} bytes"}
             except (ValueError, UnicodeDecodeError):
                 reply = {"ok": False, "error": "control request is not JSON"}
             else:
@@ -2344,7 +2361,8 @@ async def _serve_control_listener(connector, ctl_path: str,
             with contextlib.suppress(Exception):
                 writer.close()
 
-    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    server = await asyncio.start_server(handle, "127.0.0.1", 0,
+                                        limit=CONTROL_LINE_LIMIT)
     port = server.sockets[0].getsockname()[1]
     tmp = ctl_path + ".tmp"
     with open(tmp, "w") as fh:

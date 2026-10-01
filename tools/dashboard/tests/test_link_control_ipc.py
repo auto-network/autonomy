@@ -242,3 +242,42 @@ def test_supervisor_control_reaches_a_live_listener(monkeypatch, tmp_path):
     reply = asyncio.run(_with_listener(connector, ctl, body))
     assert reply["ok"] is True and reply["token"] == "q" * 32
     assert connector.calls[0][0] == "create-link"
+
+
+def test_a_request_line_over_64_kib_is_read_not_dropped(tmp_path):
+    """asyncio's default 64 KiB line limit made the listener close without a
+    reply on every session-control reply or forwarded event between 64 KiB
+    and the 256 KiB record cap; the requester waited out its 30 s (SJC-2,
+    2026-10-01, every 50-entry tail)."""
+    ctl = str(tmp_path / "serve.ctl")
+    connector = _StubConnector()
+    record = {"v": 1, "ok": True, "result": {"tail": {"entries": ["x" * 1000] * 200}}}
+
+    async def body():
+        descriptor = json.loads(open(ctl).read())
+        return await asyncio.to_thread(
+            _roundtrip, descriptor["port"],
+            {"auth": descriptor["auth"], "op": "create-link",
+             "args": {"id": "r1", "reply": record}})
+
+    reply = asyncio.run(_with_listener(connector, ctl, body))
+    assert reply["ok"] is True
+    ((op, args),) = connector.calls
+    assert op == "create-link" and args["reply"] == record
+
+
+def test_a_request_line_over_the_limit_gets_a_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(link_serving, "CONTROL_LINE_LIMIT", 128 * 1024)
+    ctl = str(tmp_path / "serve.ctl")
+    connector = _StubConnector()
+
+    async def body():
+        descriptor = json.loads(open(ctl).read())
+        return await asyncio.to_thread(
+            _roundtrip, descriptor["port"],
+            {"auth": descriptor["auth"], "op": "x", "args": {"blob": "y" * (300 * 1024)}})
+
+    reply = asyncio.run(_with_listener(connector, ctl, body))
+    assert reply == {"ok": False, "error_kind": "request-too-large",
+                     "error": f"control request exceeds {128 * 1024} bytes"}
+    assert connector.calls == []
