@@ -1666,6 +1666,46 @@ def _entry_role_label(entry: dict) -> str:
 _REMOTE_TURN_LABELS = {"user": "USER", "crosstalk": "USER", "assistant_text": "ASSISTANT"}
 
 
+#: The dashboard's remote tail answers within its own 20 s request timeout
+#: (machine_timed_out); the CLI must outwait it, or it gives up first with a
+#: traceback (auto-x6iel live check, 2026-10-01).
+REMOTE_TAIL_TIMEOUT_S = 45
+
+
+def _remote_tail_get(path: str) -> dict:
+    """GET *path* from the dashboard, with REMOTE_TAIL_TIMEOUT_S. Any failure
+    is one line on stderr and exit 1, never a traceback."""
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(
+        f"{api_base}{path}", method="GET",
+        headers={"Authorization": f"Bearer {_resolve_crosstalk_token()}"})
+    try:
+        with urllib.request.urlopen(req, timeout=REMOTE_TAIL_TIMEOUT_S, context=ctx) as resp:
+            return json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+            msg = body.get("error") or body.get("refusal") or str(e)
+        except Exception:
+            msg = str(e)
+        print(f"  \u2717 {msg}", file=sys.stderr)
+    except urllib.error.URLError as e:
+        print(f"  \u2717 Cannot reach dashboard: {e.reason}", file=sys.stderr)
+    except (TimeoutError, OSError) as e:
+        print(f"  \u2717 the dashboard did not answer within {REMOTE_TAIL_TIMEOUT_S} s "
+              f"({type(e).__name__})", file=sys.stderr)
+    except ValueError:
+        print("  \u2717 the dashboard's answer is not JSON", file=sys.stderr)
+    sys.exit(1)
+
+
 def _remote_session_address(value: str) -> tuple[str, str] | None:
     """``(name, machine)`` when *value* is ``<tmux name>@<machine>``, a
     session on another fleet machine; else None. ``@`` is also the note
@@ -1712,9 +1752,9 @@ def _remote_session_tail(value: str, n: int | None, max_chars: int | None) -> bo
 
     key = row["session_id"]          # name@machine_pub: the one address form
     entries_wanted = 400 if n is None else max(100, n * 25)
-    data = _dashboard_json(
-        "GET", f"/api/session/{urllib.parse.quote(row.get('project') or 'default')}/"
-               f"{urllib.parse.quote(key)}/tail?tail_entries={entries_wanted}") or {}
+    data = _remote_tail_get(
+        f"/api/session/{urllib.parse.quote(row.get('project') or 'default')}/"
+        f"{urllib.parse.quote(key)}/tail?tail_entries={entries_wanted}") or {}
     shown = row.get("machine") or machine
     for flag, why in (("machine_unreachable", "unreachable"),
                       ("machine_timed_out", "did not answer in time"),

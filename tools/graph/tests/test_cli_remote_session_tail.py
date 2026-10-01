@@ -49,6 +49,7 @@ def dashboard(monkeypatch):
         return tail
 
     monkeypatch.setattr(cli, "_dashboard_json", fake)
+    monkeypatch.setattr(cli, "_remote_tail_get", lambda path: fake("GET", path))
     return calls, tail
 
 
@@ -118,3 +119,29 @@ def test_a_bad_last_n_is_the_local_paths_error_not_every_turn(dashboard, capsys,
     captured = capsys.readouterr()
     assert message in captured.err
     assert "first answer" not in captured.out and calls == []
+
+
+def test_the_cli_outwaits_the_dashboards_own_timeout():
+    """The dashboard answers machine_timed_out after 20 s; at 15 s the CLI
+    gave up first, with a traceback (auto-x6iel live check)."""
+    assert cli.REMOTE_TAIL_TIMEOUT_S > 20
+
+
+@pytest.mark.parametrize("exc, words", [
+    (TimeoutError("The read operation timed out"), "did not answer within 45 s (TimeoutError)"),
+    (None, "Cannot reach dashboard"),
+])
+def test_a_dashboard_that_does_not_answer_is_one_line(monkeypatch, capsys, exc, words):
+    import urllib.error
+    import urllib.request
+
+    def urlopen(*a, **k):
+        raise exc if exc is not None else urllib.error.URLError("refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(cli, "_resolve_crosstalk_token", lambda: "t")
+    with pytest.raises(SystemExit) as exit_:
+        cli._remote_tail_get("/api/session/p/x/tail")
+    assert exit_.value.code == 1
+    err = capsys.readouterr().err
+    assert words in err and "Traceback" not in err
