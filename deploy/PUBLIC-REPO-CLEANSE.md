@@ -79,42 +79,47 @@ objects is replaced. Do these in order. Each step depends on the one before.
 
 ### 1. Rewrite history on the source of truth (Home)
 
+The repository includes its public history, so every removed term must be
+replaced in every commit, not only in the tip. Three inputs drive the
+rewrite, kept OUTSIDE the repository because they hold the removed terms in
+plain form. For the 2026-10-01 cleanse they are in the output directory of
+session auto-0930-202034 on SJC-2, readable from any session or the host at
+`data/agent-runs/auto-0930-202034*/review/history-rewrite/`:
+
+- `expressions.txt`: one `old==>new` rule per line (`regex:` lines use
+  Python syntax), applied in order to every blob and every commit message.
+  Every literal the cleanse removed from the tree is in it, plus the items
+  that arrived on Home after the reviewed range.
+- `paths.txt`: files purged from every commit (the exported briefing and the
+  client design note).
+- `verify.sh`: proves the result before anything leaves the machine.
+
 Work on a fresh clone so a mistake costs nothing.
 
 ```bash
 git clone --no-local /path/to/home/repo /tmp/rewrite && cd /tmp/rewrite
 pip install git-filter-repo        # or the distribution package
+R=/path/to/history-rewrite         # the directory above
 
-# Drop the exported document from every commit that ever carried it.
-git filter-repo --invert-paths \
-  --path tools/network/registry/tests/manual/pillar-sample.html
+git filter-repo \
+  --invert-paths $(sed 's/^/--path /' "$R/paths.txt") \
+  --replace-text "$R/expressions.txt" \
+  --replace-message "$R/expressions.txt"
 
-# Reword commit messages. One file per original commit sha holds the
-# replacement body; messages not listed pass through unchanged.
-git filter-repo --commit-callback '
-import os
-d = "/path/to/messages"
-h = commit.original_id.decode()
-for name in os.listdir(d):
-    if name.endswith(".new.txt") and h.startswith(name[:-8]):
-        commit.message = open(os.path.join(d, name), "rb").read()
-'
+"$R/verify.sh"                      # must print: clean
+git rev-list --count master         # a few less than before: the commits
+                                    # that only added or deleted a purged
+                                    # file are dropped as empty
 ```
 
-For the 2026-10-01 cleanse the message set is one commit, `51749106`,
-whose body named the operator's persona label and root-key suffix. The
-replacement is in the review output directory of session auto-0930-202034
-(`review/messages/51749106.new.txt`). The 111 already-public commit
-messages that name the client as a noun are within the rule and are left
-alone.
+`--replace-message` covers commit bodies such as `51749106` (a persona
+label and root-key suffix) and the Home commit that names a client ticket.
+If a replaced blob was the only change in a commit, the commit is kept with
+the replaced content; only commits left with no change are dropped.
 
-Then verify before anything leaves the machine:
-
-```bash
-git log --all --format=%H -- tools/network/registry/tests/manual/pillar-sample.html | wc -l   # 0
-git log --all --format=%B | grep -c '<the persona label>\|<the root suffix>'                     # 0
-git rev-list --count master                                                                     # unchanged
-```
+When a future cleanse adds terms, append rules to a new expressions file in
+that session's output directory and run the same three commands; never
+commit the expressions file.
 
 ### 2. Replace master on GitHub
 
