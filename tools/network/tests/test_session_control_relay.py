@@ -491,3 +491,22 @@ def test_open_streamable_refuses_a_fifo_without_blocking(tmp_path, monkeypatch):
     started = time.monotonic()
     assert session_control.open_streamable(runs / "out.txt") is None
     assert time.monotonic() - started < 1.0
+
+
+def test_a_non_streamed_reply_may_not_name_a_local_file(tmp_path, monkeypatch):
+    """``result.file`` is set by the receiver to name the transfer it wrote.
+    A peer that puts one in its header (a single final frame, no stream)
+    must not have it opened, served and unlinked on this machine."""
+    monkeypatch.setattr(session_control, "_data_root", lambda: tmp_path)
+
+    class OneFrame:
+        def recv_message_stream(self):
+            async def gen():
+                yield json.dumps({"v": 1, "ok": True, "result": {
+                    "file": "/etc/passwd", "sha256": "00", "tail": {"ok": True}}}).encode(), True
+            return gen()
+
+    header = asyncio.run(session_control._receive_stream(OneFrame(), timeout=1.0))
+    assert header["ok"] is True
+    assert "file" not in header["result"] and "sha256" not in header["result"]
+    assert header["result"]["tail"] == {"ok": True}

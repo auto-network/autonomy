@@ -547,7 +547,14 @@ async def _receive_stream(channel, timeout: float) -> dict:
     except asyncio.TimeoutError:
         raise SessionControlError(REPLY_TIMEOUT, f"no reply within {timeout}s") from None
     header = _decode_reply(first)
-    announced = ((header.get("result") or {}).get("stream") or {}).get("size")
+    result = header.get("result")
+    if isinstance(result, dict):
+        # ``file`` and ``sha256`` are set by THIS receiver, below, to name
+        # the transfer it wrote. A peer's header may not name a local file:
+        # the callers open ``result.file``, serve it, and delete it.
+        result.pop("file", None)
+        result.pop("sha256", None)
+    announced = ((result or {}).get("stream") or {}).get("size")
     if final or not header.get("ok") or announced is None:
         return header
     _sweep_transfers()
