@@ -687,6 +687,8 @@ def test_readiness_says_a_mount_pinned_elsewhere_is_advisory(orgs_root, on_machi
     # Nothing to provision here: no remediation, so none that names the
     # wrong action or carries params its registry entry does not declare.
     assert (finding.remediation_id, finding.remediation_params) == ("", {})
+    assert (finding.name, finding.description, finding.help) == (
+        "Vuln diff", "vulnerability diff corpus", "lives on Home")
 
 
 def test_the_pinned_elsewhere_finding_reaches_readiness_without_a_remediation(

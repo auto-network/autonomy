@@ -1286,6 +1286,11 @@ class VolumeMountReadinessIssue:
     frame: str = "platform-host-volume"
     remediation_id: str = "workspace.declared-path.v1"
     remediation_params: dict = field(default_factory=dict)
+    #: The declaring row's own display text, as separate fields so a reader
+    #: (the workspace doctor, the settings cards) never parses ``detail``.
+    name: str = ""
+    description: str = ""
+    help: str = ""
 
 
 def _check_machine_located_mount_readiness(*, key: str, typed, org: str):
@@ -1386,6 +1391,9 @@ def check_org_mount_readiness(*, key: str, payload: dict, org: str):
             frame="platform-host",
             remediation_id="",
             remediation_params={},
+            name=typed.name or "",
+            description=typed.description or "",
+            help=typed.help or "",
         ),)
     if typed.subpath is None:
         return _check_machine_located_mount_readiness(key=key, typed=typed, org=org)

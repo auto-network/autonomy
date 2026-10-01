@@ -139,11 +139,18 @@ class _VaultLinkIssue:
     schema-declared readiness hook reads (settings_ops.inspect_setting)."""
 
     __slots__ = ("kind", "detail", "field", "subject", "looked_in", "severity",
-                 "frame", "remediation_id", "remediation_params")
+                 "frame", "remediation_id", "remediation_params",
+                 "name", "description", "help")
 
-    def __init__(self, *, detail, field, subject, severity):
-        self.kind = "missing_vault_credential"
+    def __init__(self, *, detail, field, subject, severity, link,
+                 kind="missing_vault_credential"):
+        self.kind = kind
         self.detail = detail
+        # The link's own display text as separate fields, so a reader never
+        # parses ``detail``.
+        self.name = str(link.get("name") or "")
+        self.description = str(link.get("description") or "")
+        self.help = str(link.get("help") or "")
         self.field = field
         self.subject = subject
         self.looked_in = "the operator's audited vault (autonomy.vault.audited)"
@@ -170,7 +177,21 @@ def vault_link_findings(links, org: str, *, exists=None) -> list:
     findings = []
     for i, link in enumerate(links or ()):
         key = vault_link_key(org, link["vault"])
-        if exists(key):
+        try:
+            present = exists(key)
+        except Exception as exc:
+            # The store could not be read: that is not "no such entry", and
+            # telling the operator to seal what may already be sealed would
+            # be wrong. Say the vault store is unreadable, by name.
+            findings.append(_VaultLinkIssue(
+                kind="unreadable_vault",
+                detail=(f"could not read the vault store to look for {key!r} "
+                        f"({type(exc).__name__}: {exc})"[:300]),
+                field=f"vault_links[{i}]", subject=key,
+                severity="blocking" if link.get("required", True) else "advisory",
+                link=link))
+            continue
+        if present:
             continue
         what = " — ".join(t for t in (link.get("name"), link.get("description")) if t)
         detail = (f"vault entry {key!r} for {link['path']} is not in the vault"
@@ -179,7 +200,8 @@ def vault_link_findings(links, org: str, *, exists=None) -> list:
             detail += f". {link['help']}"
         findings.append(_VaultLinkIssue(
             detail=detail, field=f"vault_links[{i}]", subject=key,
-            severity="blocking" if link.get("required", True) else "advisory"))
+            severity="blocking" if link.get("required", True) else "advisory",
+            link=link))
     return findings
 
 

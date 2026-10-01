@@ -102,3 +102,27 @@ def test_the_remediation_is_registered_for_the_kind_with_no_params():
     (finding,) = vault_link_findings([LINK], "anchore", exists=lambda key: False)
     assert validate_registered_ref({"id": finding.remediation_id,
                                     "params": finding.remediation_params}) == ()
+
+
+def test_findings_carry_the_links_display_text_as_fields():
+    """The doctor and the settings cards read name/description/help
+    directly, never parse detail."""
+    (finding,) = vault_link_findings([LINK], "anchore", exists=lambda key: False)
+    assert (finding.name, finding.description, finding.help) == (
+        "Docker config", "Anchore registry auth", "Ask the operator to seal it")
+
+
+def test_an_unreadable_store_is_unreadable_vault_not_missing():
+    """Failing to read the store is not "no such entry": telling the
+    operator to seal what may already be sealed would be wrong."""
+    def broken(key):
+        raise OSError("database is locked")
+
+    (finding,) = vault_link_findings([LINK], "anchore", exists=broken)
+    assert finding.kind == "unreadable_vault"
+    assert finding.subject == "anchore:docker-config"
+    assert "database is locked" in finding.detail
+    assert finding.remediation_id == "workspace.env.credential.v1"
+    from tools.graph.remediation import get_remediation
+
+    assert "unreadable_vault" in get_remediation(finding.remediation_id).supported_finding_kinds
