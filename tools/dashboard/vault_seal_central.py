@@ -100,12 +100,12 @@ _SETTING_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 
 def _clean_text(value: Any, *, label: str, maximum: int) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"vault_seal {label} must be a non-empty string")
+        raise ApprovalRequestRefused(f"vault_seal {label} must be a non-empty string")
     text = value.strip()
     if len(text) > maximum:
-        raise ValueError(f"vault_seal {label} must be at most {maximum} characters")
+        raise ApprovalRequestRefused(f"vault_seal {label} must be at most {maximum} characters")
     if any(ord(ch) < 32 and ch not in "\n\t" for ch in text) or "\x7f" in text:
-        raise ValueError(f"vault_seal {label} must not contain control characters")
+        raise ApprovalRequestRefused(f"vault_seal {label} must not contain control characters")
     return text
 
 
@@ -147,39 +147,34 @@ def _one_line(value: Any) -> Any:
 
 def build_request_planner():
     def plan(context: ApprovalPlanningContext, body: Mapping[str, Any]) -> ApprovalRequestPlan:
-        # Every refusal here is written for the requester, so it is returned
-        # to them naming the field and the reason, not a bare invalid_request.
-        try:
-            return _plan(context, body)
-        except ValueError as exc:
-            raise ApprovalRequestRefused(str(exc)) from exc
-
-    def _plan(context: ApprovalPlanningContext, body: Mapping[str, Any]) -> ApprovalRequestPlan:
+        # The planner's OWN input checks raise ApprovalRequestRefused: each is
+        # written for the requester and returned to them as the reason. What
+        # a helper raises stays an opaque invalid_request (auto-gf08k).
         if not isinstance(body, Mapping) or set(body) - _ALLOWED_REQUEST_FIELDS:
-            raise ValueError(
+            raise ApprovalRequestRefused(
                 "vault_seal request accepts only name, tier, description, and replace"
             )
         name = body.get("name")
         if not isinstance(name, str) or ":" in name:
-            raise ValueError(
+            raise ApprovalRequestRefused(
                 "vault_seal name is an unprefixed credential name; the "
                 "organization namespace is derived from your session"
             )
         if not _NAME_RE.fullmatch(name):
-            raise ValueError(
+            raise ApprovalRequestRefused(
                 "vault_seal name must be 1-128 characters of letters, digits, "
                 "'.', '_' or '-'"
             )
         tier = body.get("tier", DEFAULT_TIER)
         if tier not in TIER_SET:
-            raise ValueError("vault_seal tier must be 'secured' or 'audited'")
+            raise ApprovalRequestRefused("vault_seal tier must be 'secured' or 'audited'")
         description = _clean_text(
             _one_line(body.get("description")), label="description",
             maximum=MAX_DESCRIPTION_CHARS,
         )
         replace = body.get("replace", False)
         if not isinstance(replace, bool):
-            raise ValueError("vault_seal replace must be a boolean")
+            raise ApprovalRequestRefused("vault_seal replace must be a boolean")
         # The session name is proven from the frozen requester identity and
         # kept only to wake it; the row still stores no raw subject as identity.
         session = _requesting_session(context)
@@ -190,12 +185,12 @@ def build_request_planner():
         # accidental re-request must not overwrite a live credential.
         other_tier = "audited" if tier == "secured" else "secured"
         if existing_row_id(TIER_SET[other_tier], key) is not None:
-            raise ValueError(
+            raise ApprovalRequestRefused(
                 f"{name!r} already exists at the {other_tier} tier; remove it or "
                 f"request the {other_tier} tier"
             )
         if not replace and existing_row_id(set_id, key) is not None:
-            raise ValueError(
+            raise ApprovalRequestRefused(
                 f"{name!r} already exists at the {tier} tier; pass replace to "
                 "rotate it"
             )

@@ -471,3 +471,19 @@ def test_other_planner_failures_stay_opaque():
     body = json.loads(approvals_routes._central_error(
         ApprovalHttpBridgeError("invalid_request")).body)
     assert body == {"error": "invalid_request"}
+
+
+def test_a_helpers_error_is_not_presented_as_the_requesters_reason(personal_store, monkeypatch):
+    """Only the planner's own input checks are written for the requester; a
+    helper's ValueError (another kind's wording, a key derivation) stays an
+    opaque invalid_request."""
+    from tools.dashboard.approval_service import ApprovalServiceError
+
+    def wrong_kind(context):
+        raise ValueError("email_send is requested by a session")
+
+    monkeypatch.setattr(central, "_requesting_session", wrong_kind)
+    approvals, _bridge, _runtime = _composition()
+    with pytest.raises(ApprovalServiceError) as info:
+        approvals.create_from_principal(central.KIND, _org_principal(), dict(REQUEST))
+    assert info.value.code == "invalid_request" and info.value.public_detail is None
