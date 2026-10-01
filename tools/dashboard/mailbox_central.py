@@ -301,9 +301,11 @@ class EmailSendConsumer:
                     destination, self._destination_resolver()):
                 outcome = (status.resolution.payload.get("outcome")
                            if status.resolution is not None else None)
-                if outcome in (None, "granted"):
-                    return {"approved": outcome == "granted",
-                            "elsewhere": staged.get("machine_label") or "another machine"}
+                elsewhere = {"elsewhere": staged.get("machine_label") or "another machine"}
+                if outcome == "granted":
+                    return {"approved": True, **elsewhere}
+                if outcome is None:
+                    return elsewhere
             return None
         self.materialize(status)
         row = self.journal(status.request.approval_id) or {}
