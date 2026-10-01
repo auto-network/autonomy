@@ -130,6 +130,8 @@ def test_the_cli_outwaits_the_dashboards_own_timeout():
 @pytest.mark.parametrize("exc, words", [
     (TimeoutError("The read operation timed out"), "did not answer within 45 s (TimeoutError)"),
     (None, "Cannot reach dashboard"),
+    (ConnectionResetError("reset by peer"),
+     "Cannot reach dashboard: ConnectionResetError: reset by peer"),
 ])
 def test_a_dashboard_that_does_not_answer_is_one_line(monkeypatch, capsys, exc, words):
     import urllib.error

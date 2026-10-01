@@ -2587,9 +2587,12 @@ def _dashboard_json(method: str, path: str, payload: dict | None = None, *,
         print(f"  \u2717 {msg}", file=sys.stderr)
     except urllib.error.URLError as e:
         print(f"  \u2717 Cannot reach dashboard: {e.reason}", file=sys.stderr)
-    except (TimeoutError, OSError) as e:
+    except TimeoutError as e:
         print(f"  \u2717 the dashboard did not answer within {timeout:g} s "
               f"({type(e).__name__})", file=sys.stderr)
+    except OSError as e:
+        # A reset or TLS failure mid-read is not a timeout: say what it was.
+        print(f"  \u2717 Cannot reach dashboard: {type(e).__name__}: {e}", file=sys.stderr)
     except ValueError:
         print("  \u2717 the dashboard's answer is not JSON", file=sys.stderr)
     sys.exit(1)
