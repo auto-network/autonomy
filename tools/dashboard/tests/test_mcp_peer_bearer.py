@@ -125,7 +125,7 @@ def _body_receive(body: bytes):
 
 
 def test_unapproved_chat_cannot_drain_its_outbox(dbs, monkeypatch):
-    monkeypatch.setenv("MCP_RELAY_SERVICE_TOKEN", "svc-secret")
+    monkeypatch.setattr(mcp_relay_routes, "_expected_service_token", lambda: "svc-secret")
     _pending("chat-1")  # pending, never approved
     resp = asyncio.run(mcp_relay_routes.collect_crosstalk(
         _collect_request("chat-1", "svc-secret")))

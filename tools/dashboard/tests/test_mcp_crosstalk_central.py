@@ -69,7 +69,7 @@ def env(tmp_path, monkeypatch):
     saved = auth_db._conn
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "mcp_relay.db")
     auth_db.init_db(tmp_path / "auth.db")
-    monkeypatch.setenv(routes.SERVICE_TOKEN_ENV, TOKEN)
+    monkeypatch.setattr(routes, "_expected_service_token", lambda: TOKEN)
     clock, machine = Clock(), Machine()
     registry = build_production_registry(runtimes={central.KIND: central.build_approval_runtime(
         destination_resolver=machine, machine_label=lambda: "Home",

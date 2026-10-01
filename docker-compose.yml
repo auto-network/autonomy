@@ -547,9 +547,15 @@ services:
     command: sh /app/deploy/relay.sh
     environment:
       AUTONOMY_DATA_ROOT: /app/data   # real mount, never repo-relative (see dashboard note)
-      # No keycache mount (same as the dispatcher): without this every relay
-      # start spends ~60s failing ramfs mounts before relay.sh runs.
+      # The relay provisions no ramfs of its own (same as the dispatcher):
+      # without this every relay start spends ~60s failing ramfs mounts. Its
+      # credentials arrive through the read-only bind below instead.
       AUTONOMY_PROVISION_RAMFS: "0"
+      # Not a secret: where the gateway reaches the dashboard. Formerly in
+      # the plaintext relay.env, which is gone (auto-5gdao).
+      MCP_RELAY_DASHBOARD_URL: ${MCP_RELAY_DASHBOARD_URL:-https://dashboard:8080}
+      GRAPH_BIN: ${MCP_RELAY_GRAPH_BIN:-/usr/local/bin/graph}
+      MCP_RELAY_SECRETS_DIR: /run/mcp-relay-secrets
     # Shared image's HEALTHCHECK probes the dashboard's HTTP port; the relay
     # serves no HTTP. Same reasoning as the dispatcher's disable above.
     healthcheck:
@@ -558,11 +564,23 @@ services:
       driver: json-file
       options: { max-size: "20m", max-file: "5" }
     # Code (gateway + graph CLI) and data (binary, profiles, org DBs the
-    # graph reads). No docker socket, no keycache: the relay launches
-    # nothing and decrypts nothing.
+    # graph reads). No docker socket: the relay launches nothing and
+    # decrypts nothing. Its two credentials (auto-5gdao) are the ONLY
+    # key-cache content it sees: the dashboard releases them from the vault
+    # into /run/autonomy-keycache/mcp-relay/, bound here read-only. Never the
+    # key-cache root; never a fabricated disk-backed directory.
     volumes:
       - autonomy-code:/app
       - autonomy-data:/app/data
+      - type: bind
+        source: /run/autonomy-keycache/mcp-relay
+        target: /run/mcp-relay-secrets
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      dashboard:
+        condition: service_healthy
 
   # Optional: dolt SQL server backing the beads issue tracker. Image
   # source is operator-chosen via DOLT_IMAGE; the beads schema itself is

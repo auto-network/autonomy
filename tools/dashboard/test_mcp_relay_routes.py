@@ -51,7 +51,7 @@ class _FakeBus:
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "mcp_relay.db")
     auth_db.init_db(tmp_path / "auth.db")  # crosstalk_messages store for relay/collect
-    monkeypatch.setenv(routes.SERVICE_TOKEN_ENV, TOKEN)
+    monkeypatch.setattr(routes, "_expected_service_token", lambda: TOKEN)
     fake_ar = _FakeApprovals()
     fake_bus = _FakeBus()
     monkeypatch.setattr(routes, "ar", fake_ar)
@@ -67,31 +67,34 @@ def test_requires_service_token(client):
     assert r.status_code == 401
 
 
-def test_missing_token_env_is_fail_closed(client, monkeypatch, tmp_path):
-    monkeypatch.delenv(routes.SERVICE_TOKEN_ENV, raising=False)
-    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))  # no relay.env here
+def test_an_unreleased_token_is_fail_closed(client, monkeypatch, tmp_path):
+    """No released token (the vault is cold, or never sealed): 503."""
+    monkeypatch.undo()
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "mcp_relay.db")
+    monkeypatch.setenv("AUTONOMY_KEYCACHE_MOUNT", str(tmp_path / "keycache"))
+    monkeypatch.setenv("MCP_RELAY_SERVICE_TOKEN", TOKEN)     # no longer a source
     r = client.post("/api/mcp/session/resolve", headers=AUTH,
                     json={"openai_session": "v1/s"})
     assert r.status_code == 503
+    assert "mcp-relay.service-token" in r.json()["error"]
 
 
-def test_token_falls_back_to_relay_env_file(client, monkeypatch, tmp_path):
-    # Under Compose the dashboard has no env var; the relay's own env file is
-    # the single copy of the secret.
-    monkeypatch.delenv(routes.SERVICE_TOKEN_ENV, raising=False)
-    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
-    env_file = tmp_path / routes.RELAY_ENV_RELATIVE
-    env_file.parent.mkdir(parents=True)
-    env_file.write_text(f"CONTROL_PLANE_API_KEY=x\n{routes.SERVICE_TOKEN_ENV}={TOKEN}\n")
-    # status is the non-popping check: it proves the token is accepted
-    # without opening an approval (resolve would need an intent).
-    ok = client.post("/api/mcp/session/status", headers=AUTH,
-                     json={"openai_session": "v1/s"})
-    assert ok.status_code == 200 and ok.json()["status"] == "unknown"
-    bad = client.post("/api/mcp/session/status",
-                      headers={"Authorization": "Bearer wrong"},
-                      json={"openai_session": "v1/s"})
-    assert bad.status_code == 401
+def test_the_token_is_the_released_copy(client, monkeypatch, tmp_path):
+    monkeypatch.undo()
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "mcp_relay.db")
+    released = tmp_path / "keycache" / routes.RELAY_RELEASE_SUBDIR
+    released.mkdir(parents=True)
+    (released / routes.SERVICE_TOKEN_FILE).write_text(TOKEN + "\n")
+    monkeypatch.setenv("AUTONOMY_KEYCACHE_MOUNT", str(tmp_path / "keycache"))
+    assert routes._expected_service_token() == TOKEN
+
+
+def test_the_relay_env_file_is_never_read():
+    import inspect
+
+    source = inspect.getsource(routes)
+    assert "relay.env" not in source.replace("plaintext data/services/mcp-relay/relay.env", "")
+    assert "SERVICE_TOKEN_ENV" not in source
 
 
 def test_new_session_goes_pending_and_opens_one_approval(client):
@@ -262,3 +265,45 @@ def test_collect_unknown_session_is_empty_not_an_error(client):
     # reads as not linked, like the sibling resolve/relay routes.
     assert r.status_code == 200
     assert r.json() == {"status": "peer_not_linked"}
+
+
+# ── releasing the relay's credentials from the vault (auto-5gdao) ──────────
+
+def _vault(monkeypatch, *, warm=True, rows=None):
+    from tools.graph import settings_ops
+
+    rows = {"mcp-relay.service-token": {"payload": {"value": "svc\n"}},
+            "mcp-relay.control-plane-api-key": {"payload": {"value": "sk-x"}}} \
+        if rows is None else rows
+    monkeypatch.setattr(settings_ops, "personal_delegate_audited_is_warm", lambda: warm)
+    monkeypatch.setattr(settings_ops, "read_set_key",
+                        lambda set_id, key, *, org, peers=None: rows.get(key))
+
+
+def test_release_writes_both_values_for_the_relay(monkeypatch, tmp_path):
+    import stat
+
+    _vault(monkeypatch)
+    d = tmp_path / "mcp-relay"
+    assert routes.release_relay_credentials(directory=d, memory_check=lambda p: None) == "ok"
+    assert (d / "service-token").read_text() == "svc"
+    assert (d / "control-plane-api-key").read_text() == "sk-x"
+    assert all(stat.S_IMODE(f.stat().st_mode) == 0o600 for f in d.iterdir())
+
+
+def test_a_cold_vault_keeps_the_released_values(monkeypatch, tmp_path):
+    _vault(monkeypatch)
+    d = tmp_path / "mcp-relay"
+    routes.release_relay_credentials(directory=d, memory_check=lambda p: None)
+    _vault(monkeypatch, warm=False)
+    assert routes.release_relay_credentials(directory=d, memory_check=lambda p: None) == "vault-cold"
+    assert (d / "service-token").exists()
+
+
+def test_an_unsealed_value_clears_the_release(monkeypatch, tmp_path):
+    _vault(monkeypatch)
+    d = tmp_path / "mcp-relay"
+    routes.release_relay_credentials(directory=d, memory_check=lambda p: None)
+    _vault(monkeypatch, rows={"mcp-relay.service-token": {"payload": {"value": "svc"}}})
+    assert routes.release_relay_credentials(directory=d, memory_check=lambda p: None) == "unsealed"
+    assert list(d.iterdir()) == []

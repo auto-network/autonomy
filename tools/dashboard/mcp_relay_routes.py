@@ -23,16 +23,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import os
 import threading
 import time
-from pathlib import Path
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from tools.data_paths import resolve_data_root
 from tools.dashboard import crosstalk_delivery
 from tools.dashboard import mcp_crosstalk_central as central
 from tools.dashboard import mcp_peer_approvals as kinds
@@ -43,31 +40,69 @@ from tools.dashboard.dao import auth_db
 from tools.dashboard.dao import mcp_relay_db as db
 from tools.dashboard.event_bus import event_bus
 
-SERVICE_TOKEN_ENV = "MCP_RELAY_SERVICE_TOKEN"
-# The relay's own env file (deploy/relay.sh loads the same path). Under Compose the
-# dashboard container never received the token as an env var, so every relay call
-# answered 503 and the relay reported "dashboard unreachable" with no approval popup.
-# Reading the one canonical file keeps a single copy of the secret.
-RELAY_ENV_RELATIVE = Path("services") / "mcp-relay" / "relay.env"
+# ── the relay's credentials: only from the vault (auto-5gdao) ──────────────
+#
+# The relay's dashboard service token and its control-plane API key are
+# sealed in the operator's AUDITED vault (personal store, bare names below).
+# The relay container cannot open the vault, so the dashboard RELEASES both
+# into the host's ramfs key cache (tools.dashboard.host_release), whose
+# mcp-relay/ subdirectory compose binds read-only into the relay; and this
+# check compares against that same released copy (no decryption per call).
+# The plaintext data/services/mcp-relay/relay.env and the MCP_RELAY_SERVICE_
+# TOKEN override are gone. A reboot empties the ramfs: until the vault is
+# unlocked, the relay has no credentials and every call here is a 503.
+RELAY_RELEASE_SUBDIR = "mcp-relay"
+SERVICE_TOKEN_FILE = "service-token"
+CONTROL_PLANE_KEY_FILE = "control-plane-api-key"
+#: audited vault key -> released file name.
+RELAY_VAULT_FILES = {
+    "mcp-relay.service-token": SERVICE_TOKEN_FILE,
+    "mcp-relay.control-plane-api-key": CONTROL_PLANE_KEY_FILE,
+}
 
 
-def _relay_env_file_token() -> str:
-    root = resolve_data_root()
-    if root is None:
-        return ""
-    try:
-        text = (root / RELAY_ENV_RELATIVE).read_text()
-    except OSError:
-        return ""
-    for line in text.splitlines():
-        key, sep, value = line.strip().partition("=")
-        if sep and key.removeprefix("export ").strip() == SERVICE_TOKEN_ENV:
-            return value.strip().strip("'\"")
-    return ""
+def release_relay_credentials(*, directory=None, memory_check=None) -> str:
+    """Release both relay values from the audited vault; the status (``ok``,
+    ``vault-cold`` -- released files kept --, ``unsealed`` -- cleared --, or
+    ``release-failed``). Never raises; never logs a value. Decrypts: call
+    off the event loop."""
+    from tools.dashboard import host_release
+    from tools.graph import settings_ops
+    from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
+
+    directory = (host_release.release_dir(RELAY_RELEASE_SUBDIR)
+                 if directory is None else directory)
+    with host_release.RELEASE_LOCK:
+        try:
+            if not settings_ops.personal_delegate_audited_is_warm():
+                return "vault-cold"
+            files: dict[str, bytes] = {}
+            for key, name in RELAY_VAULT_FILES.items():
+                row = settings_ops.read_set_key(VAULT_AUDITED_SET_ID, key,
+                                                org=None, peers=[])
+                if row is not None and row.get("vault_error") is not None:
+                    return "vault-cold"
+                value = ((row or {}).get("payload") or {}).get("value") or ""
+                value = value.strip()
+                if not value:
+                    host_release.clear_files(directory, RELAY_VAULT_FILES.values())
+                    return "unsealed"
+                files[name] = value.encode("utf-8")
+            host_release.write_files(directory, files, memory_check=memory_check)
+            return "ok"
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception("mcp relay: credential release failed")
+            return "release-failed"
 
 
 def _expected_service_token() -> str:
-    return os.environ.get(SERVICE_TOKEN_ENV) or _relay_env_file_token()
+    """The relay's service token as the dashboard released it, or ""."""
+    from tools.dashboard import host_release
+
+    return host_release.read_file(
+        host_release.release_dir(RELAY_RELEASE_SUBDIR), SERVICE_TOKEN_FILE)
 
 
 def _relay_auth(request: Request) -> JSONResponse | None:
@@ -75,7 +110,8 @@ def _relay_auth(request: Request) -> JSONResponse | None:
     expected = _expected_service_token()
     if not expected:
         return JSONResponse(
-            {"error": "MCP relay service token not configured on the dashboard"},
+            {"error": "MCP relay service token not released: seal "
+                      "mcp-relay.service-token (audited) and unlock the vault"},
             status_code=503)
     header = request.headers.get("Authorization", "")
     presented = header[7:] if header.startswith("Bearer ") else ""

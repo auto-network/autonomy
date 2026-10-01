@@ -1484,12 +1484,17 @@ def _install_personal_audited_delegate(private_hex: str,
 def _schedule_vault_releases() -> None:
     """Once the audited delegate is warm, release vault values to the host
     processes that cannot open the vault themselves (auto-5gdao): the
-    backup cron run's offsite credentials. Off the unlock's own path; never
-    fails the unlock."""
+    backup cron run's offsite credentials and the MCP relay's two values.
+    Off the unlock's own path; never fails the unlock."""
     try:
+        import threading
+
+        from tools.dashboard import mcp_relay_routes
         from tools.dashboard.plugins.backup import credentials as backup_credentials
 
         backup_credentials.release_offsite_in_background()
+        threading.Thread(target=mcp_relay_routes.release_relay_credentials,
+                         name="mcp-relay-credential-release", daemon=True).start()
     except Exception:  # noqa: BLE001
         logger.warning("vault releases could not be scheduled", exc_info=True)
 
