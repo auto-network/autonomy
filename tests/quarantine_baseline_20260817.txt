@@ -1,1 +1,0 @@
-tools/dashboard/tests/test_founding_e2e_no_passphrase.py::test_browser_founding_records_which_member_this_node_is

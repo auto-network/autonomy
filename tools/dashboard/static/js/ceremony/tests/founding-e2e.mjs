@@ -53,6 +53,8 @@ const shell = await call('/api/orgs', {
 const founded = await foundExistingOrganizationShell({
   org: fixture.org,
   orgId: shell.org.id,
+  // As create-org.js passes it: the shell states the delegate's terms.
+  storageDelegatePolicy: shell.storage_delegate_policy,
   openRoot: async () => ({ seed: personalRootSeed }),
   transport: { fetch: trackedFetch },
   now: fixture.now,
