@@ -650,6 +650,12 @@ def _sender_href(ct: dict) -> str:
     """
     if ct.get("href"):
         return ct["href"]
+    if not _SEMANTIC_ENRICHMENT.get():
+        # The tail catch-up replays a transcript prefix and DISCARDS its
+        # entries (see semantic_enrichment_disabled), so a link would never
+        # be shown. Resolving them made every concurrent replay rebuild the
+        # link map at once (load test 2026-10-01).
+        return ""
     tmux = ct.get("from") or ""
     if not tmux or ":" in tmux:
         return ""

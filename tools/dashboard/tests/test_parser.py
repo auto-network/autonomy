@@ -1354,3 +1354,16 @@ def test_sender_link_rows_come_from_live_rows_without_credentials(monkeypatch):
         {"tmux_session": "host-a", "project": "host"},
         {"tmux_session": "auto-b", "project": "repo"},
     ]
+
+
+def test_replayed_prefix_never_builds_sender_links(monkeypatch):
+    """2026-10-01: the tail catch-up's prefix replay discards its entries, so
+    it must not resolve sender links (13 concurrent replays rebuilt the map
+    together)."""
+    from tools.dashboard import session_harness
+    monkeypatch.setattr(session_harness, "_SENDER_HREF_CACHE", {"at": None, "map": {}})
+    monkeypatch.setattr(session_harness, "_sender_href_rows",
+                        lambda: (_ for _ in ()).throw(AssertionError("map built during replay")))
+    with session_harness.semantic_enrichment_disabled():
+        assert session_harness._sender_href({"from": "host-a"}) == ""
+    assert session_harness._sender_href({"from": "x", "href": "/mission/q"}) == "/mission/q"
