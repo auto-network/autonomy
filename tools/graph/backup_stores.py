@@ -211,11 +211,18 @@ def cmd_report() -> int:
 def cmd_report_offsite(verdict: str, exit_code: str,
                        paths: list[str]) -> int:
     repo_bytes = None
-    if paths and paths[0].startswith("--repo-bytes="):
-        try:
-            repo_bytes = int(paths[0].split("=", 1)[1])
-        except ValueError:
-            pass
+    skip_reason = None
+    while paths and paths[0].startswith("--"):
+        option, _, value = paths[0].partition("=")
+        if option == "--repo-bytes":
+            try:
+                repo_bytes = int(value)
+            except ValueError:
+                pass
+        elif option == "--skip-reason":
+            # Why offsite was skipped (e.g. vault-cold): visible in the
+            # report, not only in the cron log (auto-5gdao).
+            skip_reason = value or None
         paths = paths[1:]
     status = 0
     for raw in paths:
@@ -226,6 +233,10 @@ def cmd_report_offsite(verdict: str, exit_code: str,
             report["exit_code"] = int(exit_code)
             if repo_bytes is not None:
                 report["offsite_repo_bytes"] = repo_bytes
+            if skip_reason is not None:
+                report["skip_reason"] = skip_reason
+            else:
+                report.pop("skip_reason", None)
             path.write_text(json.dumps(report, indent=1) + "\n")
         except (OSError, ValueError) as exc:
             print(f"report-offsite: {path}: {exc}", file=sys.stderr)

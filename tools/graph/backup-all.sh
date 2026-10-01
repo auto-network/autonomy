@@ -291,12 +291,16 @@ echo "$(date -Iseconds) ${TIER} backup complete: ${DEST} (${STORE_COUNT} stores,
 # configured), or failed.
 OFFSITE_LOG="$(mktemp)"
 if "${SCRIPT_DIR}/backup-offsite.sh" "$TIER" 2>&1 | tee "$OFFSITE_LOG"; then
-    if grep -q "skipping" "$OFFSITE_LOG"; then OFFSITE_VERDICT=skipped
+    SKIP_REASON=""
+    if grep -q "skipping" "$OFFSITE_LOG"; then
+        OFFSITE_VERDICT=skipped
+        SKIP_REASON="$(sed -n 's/.*skipping (reason=\([a-z-]*\)).*/\1/p' "$OFFSITE_LOG" | head -1)"
     else OFFSITE_VERDICT=complete; fi
     REPO_BYTES="$(sed -n 's/^offsite: repository raw size \([0-9]*\) bytes$/\1/p' "$OFFSITE_LOG" | tail -1)"
     rm -f "$OFFSITE_LOG"
     "$PYTHON" "$STORES_HELPER" report-offsite "$OFFSITE_VERDICT" 0 \
         ${REPO_BYTES:+--repo-bytes=$REPO_BYTES} \
+        ${SKIP_REASON:+--skip-reason=$SKIP_REASON} \
         "${DEST}/run-report.json" \
         "${REPORT_DIR}/${TIER}-latest.json" && record_run
 else

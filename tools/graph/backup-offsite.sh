@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Push local backups + loose-file state to an offsite restic repo.
-# One-file config: agents/backup.env.  Everything else is auto.
+# Credentials: only what the dashboard released from the vault into the host
+# ramfs key cache (backup-env.sh, auto-5gdao). None released = vault cold =
+# skip with the reason.
 #
 # Usage:   tools/graph/backup-offsite.sh [hourly|daily]
 #
@@ -12,17 +14,16 @@
 #
 # Auto-behavior on first run:
 #   - installs rclone + restic via apt (prompts for sudo)
-#   - generates agents/.restic.pw (random 32 bytes, 600 perms)
-#   - runs restic init on the remote repo
+#   - runs restic init on the remote repo (with the vault's password)
 #
-# Provider is selected by BACKUP_PROVIDER in backup.env.  rclone config is
-# injected via RCLONE_CONFIG_<REMOTE>_* env vars — no config file needed.
+# Provider and bucket come from the released offsite.env (the dashboard's
+# backup config). rclone config is injected via RCLONE_CONFIG_<REMOTE>_*
+# env vars — no config file needed.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-ENV_FILE="${REPO_ROOT}/agents/backup.env"
 PYTHON="${REPO_ROOT}/.venv/bin/python3"
 [[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
 
@@ -35,11 +36,13 @@ case "$TIER" in
     *) echo "Usage: $0 {hourly|daily}" >&2; exit 1 ;;
 esac
 
-# Configured = vault-released environment credentials (the intended
-# path, auto-uy896) OR the deprecated agents/backup.env fallback.
-# backup-all.sh greps this "skipping" line to stamp offsite=skipped.
-if [[ -z "${BACKUP_PROVIDER:-}" || -z "${BACKUP_BUCKET:-}" ]] && [[ ! -f "$ENV_FILE" ]]; then
-    echo "offsite: not configured (no vault-released environment, no $ENV_FILE) — skipping"
+# Credentials come only from what the dashboard released from the vault
+# (backup-env.sh, auto-5gdao). None released = the vault is cold (after a
+# reboot, until unlock): skip with the reason, never an alarm. backup-all.sh
+# greps "skipping" to stamp offsite=skipped and "reason=" for skip_reason.
+RELEASED="${AUTONOMY_KEYCACHE_MOUNT:-/run/autonomy-keycache}/backup"
+if [[ ! -s "$RELEASED/offsite.env" || ! -s "$RELEASED/restic-password" ]]; then
+    echo "offsite: skipping (reason=vault-cold) — no credentials released into $RELEASED"
     exit 0
 fi
 

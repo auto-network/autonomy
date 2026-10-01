@@ -14,10 +14,11 @@ per row — the vault_credential contract):
 - ``backup.b2-application-key``  → B2_APPLICATION_KEY
 
 Provider and bucket are configuration, not secrets: they come from
-``backup.config`` (offsite_provider / offsite_bucket) and ride the same
-environment the deprecated agents/backup.env used, so
-tools/graph/backup-env.sh consumes vault-released credentials without
-knowing the vault exists.
+``backup.config`` (offsite_provider / offsite_bucket). The host cron run
+cannot open the vault, so :func:`release_offsite` releases all of it into
+the host ramfs key cache, which tools/graph/backup-env.sh reads -- its only
+source since agents/backup.env and agents/.restic.pw were removed
+(auto-5gdao).
 
 Seal them once (from wherever the values live today):
 
@@ -28,6 +29,7 @@ Seal them once (from wherever the values live today):
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -141,92 +143,56 @@ RELEASE_CONFIG_FILE = "offsite.env"
 #: What a released provider or bucket may contain. The host cron run reads
 #: them into shell variables, so nothing that shell could interpret (a
 #: newline, `$(...)`, quotes) is ever released.
-_PLAIN_VALUE = __import__("re").compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
+_PLAIN_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 STATUS_RELEASE_REFUSED = "release-refused"
-#: One release at a time: unlock and a config change can each start one,
-#: and two writers must not interleave in the same temp file.
-_RELEASE_LOCK = __import__("threading").Lock()
 
 
 def release_dir():
-    import os
-    from pathlib import Path
+    from tools.dashboard import host_release
 
-    from agents.secret_ramfs import KEYCACHE_MOUNT
-
-    return Path(os.environ.get("AUTONOMY_KEYCACHE_MOUNT") or KEYCACHE_MOUNT) / RELEASE_SUBDIR
-
-
-def _write_released(directory, name: str, data: bytes) -> None:
-    import os
-
-    tmp = directory / f".{name}.tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(tmp, flags, 0o600)
-    try:
-        view = memoryview(data)
-        while view:
-            view = view[os.write(fd, view):]
-    finally:
-        os.close(fd)
-    os.replace(tmp, directory / name)
-
-
-def _clear_released(directory) -> None:
-    for name in (*RELEASE_FILES.values(), RELEASE_CONFIG_FILE):
-        try:
-            (directory / name).unlink()
-        except FileNotFoundError:
-            pass
+    return host_release.release_dir(RELEASE_SUBDIR)
 
 
 def release_offsite(config: dict | None = None, *, directory=None,
                     memory_check=None) -> str:
     """Release the offsite credentials for the host cron run; the status.
 
-    ``ok``: every file written (0600, temp-then-rename, on ramfs only).
-    ``vault-cold``: nothing to read now -- files already released are kept
-    (they are still the right values; a reboot is what empties them).
-    ``disabled`` / ``unconfigured`` / ``unsealed``: offsite cannot run with
-    what is there, so any released files are removed. Never raises; never
-    logs a value. Decrypts: call off the event loop."""
-    with _RELEASE_LOCK:
-        return _release_offsite(config, directory=directory, memory_check=memory_check)
+    ``ok``: every file written (tools.dashboard.host_release: 0600,
+    temp-then-rename, ramfs only). ``vault-cold``: nothing to read now --
+    files already released are kept (they are still the right values; a
+    reboot is what empties them). ``disabled`` / ``unconfigured`` /
+    ``unsealed`` / ``release-refused``: offsite cannot run with what is
+    there, so any released files are removed. Never raises; never logs a
+    value. Decrypts: call off the event loop."""
+    from tools.dashboard import host_release
 
-
-def _release_offsite(config, *, directory, memory_check) -> str:
-    try:
-        env, status = offsite_env(config)
-        directory = release_dir() if directory is None else directory
-        if status == STATUS_VAULT_COLD:
+    with host_release.RELEASE_LOCK:
+        try:
+            env, status = offsite_env(config)
+            directory = release_dir() if directory is None else directory
+            names = (*RELEASE_FILES.values(), RELEASE_CONFIG_FILE)
+            if status == STATUS_VAULT_COLD:
+                return status
+            if env is None:
+                host_release.clear_files(directory, names)
+                return status
+            for variable in ("BACKUP_PROVIDER", "BACKUP_BUCKET"):
+                if not _PLAIN_VALUE.fullmatch(env[variable]):
+                    logger.error("backup: %s is not a plain name; not releasing "
+                                 "the offsite credentials", variable)
+                    host_release.clear_files(directory, names)
+                    return STATUS_RELEASE_REFUSED
+            files = {name: env[CREDENTIAL_ENV[key]].encode("utf-8")
+                     for key, name in RELEASE_FILES.items()}
+            files[RELEASE_CONFIG_FILE] = (
+                f"BACKUP_PROVIDER={env['BACKUP_PROVIDER']}\n"
+                f"BACKUP_BUCKET={env['BACKUP_BUCKET']}\n").encode("utf-8")
+            host_release.write_files(directory, files, memory_check=memory_check)
+            logger.info("backup: offsite credentials released for the host run")
             return status
-        if env is None:
-            if directory.exists():
-                _clear_released(directory)
-            return status
-        for variable in ("BACKUP_PROVIDER", "BACKUP_BUCKET"):
-            if not _PLAIN_VALUE.fullmatch(env[variable]):
-                logger.error("backup: %s is not a plain name; not releasing the "
-                             "offsite credentials", variable)
-                if directory.exists():
-                    _clear_released(directory)
-                return STATUS_RELEASE_REFUSED
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if memory_check is None:
-            from tools.network.storagekit.memory_cache import assert_memory_backed
-
-            memory_check = assert_memory_backed
-        memory_check(directory)          # ramfs only: never tmpfs, never disk
-        for key, name in RELEASE_FILES.items():
-            _write_released(directory, name, env[CREDENTIAL_ENV[key]].encode("utf-8"))
-        _write_released(directory, RELEASE_CONFIG_FILE, (
-            f"BACKUP_PROVIDER={env['BACKUP_PROVIDER']}\n"
-            f"BACKUP_BUCKET={env['BACKUP_BUCKET']}\n").encode("utf-8"))
-        logger.info("backup: offsite credentials released for the host run")
-        return status
-    except Exception:
-        logger.exception("backup: offsite credential release failed")
-        return "release-failed"
+        except Exception:
+            logger.exception("backup: offsite credential release failed")
+            return "release-failed"
 
 
 def release_offsite_in_background(config: dict | None = None) -> None:
