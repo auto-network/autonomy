@@ -54,6 +54,15 @@ services:
     # zombies 2026-08-31, only in-container: natively they reparented to
     # the host init which reaps). init: true runs tini as PID 1 to reap.
     init: true
+    # Open files: each pooled read-only database handle keeps one connection
+    # (a .db and a .db-wal descriptor) per thread, so the worker's need grows
+    # with threads x stores, plus sockets and logs. Docker's default comes from
+    # the host daemon: 1,024 soft on SJC-2 (systemd LimitNOFILE), where the
+    # worker ran out on 2026-10-01, and 1,048,576 on Home. State it here.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     # Per-session CPU/RAM telemetry (resource_monitor) reads sibling session
     # containers' cgroup files directly. In its own PRIVATE cgroup namespace the
     # dashboard sees only itself, so every session card lost CPU/RAM after the
