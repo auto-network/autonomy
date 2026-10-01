@@ -48,6 +48,9 @@ HOST_PATH_FIELDS = {
 NOT_A_HOST_PATH = {
     ("autonomy.workspace.mount", "container_path"):
         "inside the container, identical on every machine",
+    ("autonomy.workspace", "vault_links[].path"):
+        "inside the container: where the launcher links a vault value it "
+        "delivered into /run/secrets (auto-2eqpb); nothing on a host",
     ("autonomy.workspace", "repos[].mount"):
         "inside the workspace, identical on every machine",
     ("autonomy.network.serve-cert", "key_path"):
