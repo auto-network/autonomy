@@ -9,9 +9,6 @@ import stat
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from cryptography.hazmat.primitives.serialization import NoEncryption, PrivateFormat
 
 from tools.dashboard.dao.web_push import (
     VapidKeyCustody,
@@ -50,7 +47,6 @@ def substrate(tmp_path):
     custody = VapidKeyCustody(
         store,
         key_dir=tmp_path / "web-push-keys",
-        legacy_key_path=tmp_path / "web-push-vapid.pem",
     )
     active = custody.ensure_active()
     return store, custody, active, tmp_path
@@ -264,11 +260,7 @@ class TestWebPushSubscriptionStore:
         store = WebPushStore(tmp_path / "web-push.db")
 
         def initialize(_index: int):
-            return VapidKeyCustody(
-                store,
-                key_dir=tmp_path / "web-push-keys",
-                legacy_key_path=tmp_path / "legacy.pem",
-            ).ensure_active()
+            return VapidKeyCustody(store, key_dir=tmp_path / "web-push-keys").ensure_active()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             records = list(executor.map(initialize, (1, 2)))
@@ -332,16 +324,10 @@ class TestWebPushSubscriptionStore:
         with pytest.raises(WebPushStoreError, match="unsupported subscription schema"):
             WebPushStore(db).initialize()
 
-    def test_legacy_subscription_and_vapid_key_migrate_without_rotation(self, tmp_path):
-        legacy_key = tmp_path / "web-push-vapid.pem"
-        private_key = ec.generate_private_key(ec.SECP256R1())
-        legacy_key.write_bytes(private_key.private_bytes(
-            Encoding.PEM, PrivateFormat.PKCS8, NoEncryption(),
-        ))
-        os.chmod(legacy_key, 0o600)
-        expected_public = _b64url(private_key.public_key().public_bytes(
-            Encoding.X962, PublicFormat.UncompressedPoint,
-        ))
+    def test_legacy_subscription_migrates_onto_the_active_key(self, tmp_path):
+        """The legacy web-push-vapid.pem key migration is gone (auto-es7ja:
+        finished on every machine); the legacy SUBSCRIPTION schema still
+        migrates and binds to the active key."""
         db = tmp_path / "web-push.db"
         connection = sqlite3.connect(db)
         connection.executescript("""
@@ -366,11 +352,8 @@ class TestWebPushSubscriptionStore:
         connection.close()
 
         store = WebPushStore(db)
-        custody = VapidKeyCustody(
-            store, key_dir=tmp_path / "web-push-keys", legacy_key_path=legacy_key,
-        )
+        custody = VapidKeyCustody(store, key_dir=tmp_path / "web-push-keys")
         active = custody.ensure_active()
-        assert active.public_key == expected_public
         connection = sqlite3.connect(db)
         try:
             row = connection.execute(

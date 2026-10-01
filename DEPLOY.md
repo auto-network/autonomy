@@ -403,7 +403,6 @@ live one.
 | `repl-login.key` | `REPL_LOGIN_KEY_FILE` | mode-0600 X25519 private key — the HPKE recipient for browser-sealed secure-setting provisioning |
 | `web-push-proof-vapid.pem` | `WEB_PUSH_PROOF_VAPID_KEY` | mode-0600 VAPID sender key for the isolated Web Push proof |
 | `web-push-keys`/ | `WEB_PUSH_KEY_DIR` | mode-0700 VAPID keyring for Dashboard Web Push (mode-0600 key files) |
-| `web-push-vapid.pem` | `WEB_PUSH_VAPID_KEY` | legacy mode-0600 Dashboard VAPID key (migration source only) |
 | `tls.crt` | `AUTONOMY_TLS_CERT` | TLS certificate (self-signed by default) |
 | `tls.key` | `AUTONOMY_TLS_KEY` | TLS private key |
 | `.beads`/ | `BEADS_DIR` | beads tracker config — per-org Dolt SQL credentials (mode-0600 `credentials.env`), `config.yaml`, `metadata.json`; backed up as config files only, never Dolt data |
@@ -416,8 +415,8 @@ live one.
 operator ruling 2026-10-01, auto-es7ja): only those needed *before* the
 operator signs in, since sign-in is what warms the vault after a reboot —
 `tls.key` (serves the unlock page), `dashboard-session.secret` (signs the
-sign-in cookie), the VAPID keyring `web-push-keys/` and its legacy
-`web-push-vapid.pem` (pushes are signed from dashboard start), and the beads
+sign-in cookie), the VAPID keyring `web-push-keys/` (pushes are signed from
+dashboard start), and the beads
 `credentials.env` files (the dispatcher and the backup reach Dolt while the
 vault is cold). Every other node-generated secret is a vault row or a ramfs
 file re-minted at start.

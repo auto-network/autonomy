@@ -46,7 +46,6 @@ def _subscription(host: str = "web.push.apple.com", token: str = "one") -> dict:
 def transport(tmp_path, monkeypatch):
     db_path = tmp_path / "web-push.db"
     monkeypatch.setattr(web_push, "DB_PATH", db_path)
-    monkeypatch.setattr(web_push, "VAPID_PATH", tmp_path / "web-push-vapid.pem")
     monkeypatch.setattr(web_push, "VAPID_DIR", tmp_path / "web-push-keys")
     web_push._vapid.clear()
     monkeypatch.setattr(web_push, "_stable_owner_id", lambda: "a" * 64)
@@ -64,9 +63,7 @@ def _enroll(*, owner="a" * 64, installation="install_1234567890", token="one"):
     """Enroll a device the way the live device route does: through the store."""
     subscription = web_push._validate_subscription(_subscription(token=token))
     store = web_push_dao.WebPushStore(web_push.DB_PATH)
-    key = web_push_dao.VapidKeyCustody(
-        store, key_dir=web_push.VAPID_DIR, legacy_key_path=web_push.VAPID_PATH,
-    ).ensure_active()
+    key = web_push_dao.VapidKeyCustody(store, key_dir=web_push.VAPID_DIR).ensure_active()
     store.enroll(
         operator_subject=owner, device_id=installation,
         endpoint=subscription["endpoint"],

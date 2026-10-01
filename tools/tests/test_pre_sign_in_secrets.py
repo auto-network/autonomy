@@ -12,8 +12,7 @@ from tools.data_paths import STORE_MANIFEST, STORES_BY_KEY
 REPO = Path(__file__).resolve().parents[2]
 
 #: The deliberate exceptions: needed before the operator signs in.
-PRE_SIGN_IN = {"dashboard_session_secret", "tls_key", "web_push_keys",
-               "web_push_vapid", "beads"}
+PRE_SIGN_IN = {"dashboard_session_secret", "tls_key", "web_push_keys", "beads"}
 #: Node-secret stores the bead still moves out of the manifest (vault row or
 #: ramfs) or deletes. Each later landing removes its entry; empty = done.
 STILL_TO_MOVE = {"repl_login_key", "web_push_proof_vapid"}

@@ -135,9 +135,6 @@ STORE_MANIFEST: tuple = (
           "mode-0700 VAPID keyring for Dashboard Web Push (mode-0600 key files)",
           pre_sign_in="the push worker signs pending-approval pushes from dashboard "
                       "start, before sign-in; every subscription is pinned to the key"),
-    Store("web_push_vapid", "web-push-vapid.pem", "WEB_PUSH_VAPID_KEY", "file",
-          "legacy mode-0600 Dashboard VAPID key (migration source only)",
-          pre_sign_in="read by the keyring migration at dashboard start"),
     Store("tls_cert", "tls.crt", "AUTONOMY_TLS_CERT", "file",
           "TLS certificate (self-signed by default)"),
     Store("tls_key", "tls.key", "AUTONOMY_TLS_KEY", "file",

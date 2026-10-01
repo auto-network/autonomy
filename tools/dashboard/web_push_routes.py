@@ -27,7 +27,6 @@ from tools.dashboard.identity_routes import (
 
 DB_PATH = web_push_dao.DB_PATH
 KEY_DIR = web_push_dao.KEY_DIR
-LEGACY_KEY_PATH = web_push_dao.LEGACY_KEY_PATH
 MAX_BODY_BYTES = 12 * 1024
 PAYLOAD_LIMIT = 2048
 _OWNER_DOMAIN = b"autonomy:web-push-owner:v1\0"
@@ -38,9 +37,7 @@ def _store() -> web_push_dao.WebPushStore:
 
 
 def _custody(store: web_push_dao.WebPushStore) -> web_push_dao.VapidKeyCustody:
-    return web_push_dao.VapidKeyCustody(
-        store, key_dir=KEY_DIR, legacy_key_path=LEGACY_KEY_PATH,
-    )
+    return web_push_dao.VapidKeyCustody(store, key_dir=KEY_DIR)
 
 
 def stable_operator_subject() -> str:

@@ -38,7 +38,6 @@ from tools.data_paths import resolve_store
 
 DB_PATH = resolve_store("web_push")
 KEY_DIR = resolve_store("web_push_keys")
-LEGACY_KEY_PATH = resolve_store("web_push_vapid")
 
 SCHEMA_VERSION = 3
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
@@ -645,13 +644,9 @@ class VapidKeyCustody:
         store: WebPushStore,
         *,
         key_dir: Path | str | None = None,
-        legacy_key_path: Path | str | None = None,
     ):
         self.store = store
         self.key_dir = Path(key_dir) if key_dir is not None else KEY_DIR
-        self.legacy_key_path = (
-            Path(legacy_key_path) if legacy_key_path is not None else LEGACY_KEY_PATH
-        )
 
     def _secure_directory(self) -> None:
         self.key_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -744,27 +739,9 @@ class VapidKeyCustody:
                 connection.commit()
                 return record
 
-            legacy = self.legacy_key_path
-            if legacy.exists():
-                legacy_info = os.lstat(legacy)
-                if stat.S_ISLNK(legacy_info.st_mode) or not stat.S_ISREG(legacy_info.st_mode):
-                    raise WebPushStoreError("legacy_vapid_key_unsafe")
-                if legacy_info.st_uid != os.geteuid():
-                    raise WebPushStoreError("legacy_vapid_key_owner_mismatch")
-                os.chmod(legacy, 0o600)
-                try:
-                    private_key = load_pem_private_key(
-                        legacy.read_bytes(), password=None,
-                    )
-                except Exception as exc:
-                    raise WebPushStoreError("legacy_vapid_key_invalid") from exc
-                if (
-                    not isinstance(private_key, ec.EllipticCurvePrivateKey)
-                    or not isinstance(private_key.curve, ec.SECP256R1)
-                ):
-                    raise WebPushStoreError("legacy_vapid_key_invalid")
-            else:
-                private_key = ec.generate_private_key(ec.SECP256R1())
+            # No active key: a fresh install. (The legacy web-push-vapid.pem
+            # migration is finished on every machine and gone, auto-es7ja.)
+            private_key = ec.generate_private_key(ec.SECP256R1())
             key_id = uuid.uuid4().hex
             basename = f"{key_id}.pem"
             path = self._path(basename)
@@ -906,7 +883,6 @@ __all__ = [
     "DEVICE_ID_RE",
     "EnrollmentResult",
     "KEY_DIR",
-    "LEGACY_KEY_PATH",
     "VapidKeyCustody",
     "VapidKeyRecord",
     "WebPushStore",

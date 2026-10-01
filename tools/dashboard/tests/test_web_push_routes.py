@@ -74,14 +74,11 @@ def _app() -> Starlette:
 def client(tmp_path, monkeypatch):
     db = tmp_path / "web-push.db"
     keys = tmp_path / "web-push-keys"
-    legacy = tmp_path / "web-push-vapid.pem"
     monkeypatch.setattr(web_push_routes, "DB_PATH", db)
     monkeypatch.setattr(web_push_routes, "KEY_DIR", keys)
-    monkeypatch.setattr(web_push_routes, "LEGACY_KEY_PATH", legacy)
     monkeypatch.setattr(web_push_routes, "resolve_stable_personal_root_public_key", lambda: ROOT)
     monkeypatch.setattr(web_push, "DB_PATH", db)
     monkeypatch.setattr(web_push, "VAPID_DIR", keys)
-    monkeypatch.setattr(web_push, "VAPID_PATH", legacy)
     web_push._vapid.clear()
     with TestClient(_app(), base_url="https://dashboard.test") as test_client:
         test_client.cookies.set(COOKIE, "valid")

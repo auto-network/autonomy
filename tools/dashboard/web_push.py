@@ -36,7 +36,6 @@ from tools.data_paths import resolve_store
 logger = logging.getLogger(__name__)
 
 DB_PATH = resolve_store("web_push")
-VAPID_PATH = resolve_store("web_push_vapid")
 VAPID_DIR = resolve_store("web_push_keys")
 
 _MAX_BODY_BYTES = 12 * 1024
@@ -181,9 +180,7 @@ def _load_vapid(key_id: str | None = None):
 
     with _vapid_lock:
         store = web_push_dao.WebPushStore(DB_PATH)
-        custody = web_push_dao.VapidKeyCustody(
-            store, key_dir=VAPID_DIR, legacy_key_path=VAPID_PATH,
-        )
+        custody = web_push_dao.VapidKeyCustody(store, key_dir=VAPID_DIR)
         record, _private_key = custody.load(key_id)
         cached = _vapid.get(record.key_id)
         if cached is not None:
@@ -201,9 +198,7 @@ def _load_vapid(key_id: str | None = None):
 
 def _application_server_key() -> str:
     store = web_push_dao.WebPushStore(DB_PATH)
-    return web_push_dao.VapidKeyCustody(
-        store, key_dir=VAPID_DIR, legacy_key_path=VAPID_PATH,
-    ).ensure_active().public_key
+    return web_push_dao.VapidKeyCustody(store, key_dir=VAPID_DIR).ensure_active().public_key
 
 
 def _stable_owner_id() -> str:
