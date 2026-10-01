@@ -22,10 +22,6 @@ from pathlib import Path
 import pytest
 
 from tools.graph.db import GraphDB
-from tools.graph.migrations.migrate_artifacts_yaml import (
-    apply_migration as apply_artifacts_migration,
-    build_plan as build_artifacts_plan,
-)
 from tools.graph.migrations.migrate_workspaces_yaml import (
     apply_migration as apply_workspaces_migration,
     build_plan as build_workspaces_plan,
@@ -43,7 +39,7 @@ def populate_workspaces_from_yaml(
     *,
     org_slugs: tuple[str, ...] = ("autonomy", "anchore", "personal"),
 ) -> None:
-    """Bootstrap per-org DBs and migrate workspace + artifact Settings from *yaml_path*.
+    """Bootstrap per-org DBs and migrate workspace Settings from *yaml_path*.
 
     Mirrors the production bootstrap chain (auto-9iq2s + auto-raycq + auto-hhi23)
     for test use. Idempotent — re-invoking is a no-op.
@@ -57,9 +53,6 @@ def populate_workspaces_from_yaml(
 
     plan = build_workspaces_plan(yaml_path, orgs_dir)
     apply_workspaces_migration(plan, log=lambda *_a, **_kw: None)
-
-    artifact_plan = build_artifacts_plan(yaml_path, orgs_root=orgs_dir)
-    apply_artifacts_migration(artifact_plan)
 
 
 @pytest.fixture
