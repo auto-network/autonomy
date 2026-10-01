@@ -244,6 +244,16 @@ def test_inline_marks_may_wrap_and_include_italic_and_links():
     ]
 
 
+def test_only_http_https_and_mailto_become_links_and_parentheses_balance():
+    (para,) = adf.markdown_to_adf(
+        "[wiki](https://x.test/Foo_(bar)) [x](javascript:alert(1)) [rel](/path)")["content"]
+    links = [n for n in para["content"] if n.get("marks")]
+    assert links == [{"type": "text", "text": "wiki", "marks": [
+        {"type": "link", "attrs": {"href": "https://x.test/Foo_(bar)"}}]}]
+    literal = "".join(n["text"] for n in para["content"] if not n.get("marks"))
+    assert "[x](javascript:alert(1))" in literal and "[rel](/path)" in literal
+
+
 def test_adf_round_trip_preserves_meaning():
     md = "## Steps\n1. run `psql`\n2. check output\nplain line"
     back = adf.adf_to_markdown(adf.markdown_to_adf(md))

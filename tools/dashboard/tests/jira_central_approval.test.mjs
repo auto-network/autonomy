@@ -133,3 +133,15 @@ test('Markdown renders, and raw HTML shows as the text Jira will post', async ()
   assert.match(body.textContent, /<!-- hidden note -->/);
   assert.equal(body.querySelector('[style]'), null);
 });
+
+test('a link shows its address, and anything but http, https or mailto stays literal', async () => {
+  await withMarkdown();
+  const lines = ['See [the fix](https://x.test/wiki/Foo_(bar)) and [x](javascript:alert(1)).'];
+  await openJiraCentralApproval(item({op: 'comment', target: 'PLAT-42', content: {complete: true, lines}}));
+  const body = q('#request-detail .markdown');
+  const link = body.querySelector('a');
+  assert.equal(link.getAttribute('href'), 'https://x.test/wiki/Foo_(bar)');
+  assert.match(body.textContent, /the fix \(https:\/\/x\.test\/wiki\/Foo_\(bar\)\)/);
+  assert.match(body.textContent, /\[x\]\(javascript:alert\(1\)\)/);
+  assert.equal(body.querySelectorAll('a').length, 1);
+});

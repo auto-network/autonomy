@@ -274,7 +274,7 @@ def _parse_inline(text: str) -> list[dict[str, Any]]:
     nodes = []
     pos = 0
 
-    pattern = (r'(\*\*(.+?)\*\*)|(`([^`]+)`)|((?<!!)\[([^\]]+)\]\(([^)\s]+)\))'
+    pattern = (r'(\*\*(.+?)\*\*)|(`([^`]+)`)|((?<!!)\[([^\]]+)\]\(((?:https?://|mailto:)(?:[^()\s]|\([^()\s]*\))+)\))'
                r'|(?<!\*)(\*([^*\s](?:[^*]*[^*\s])?)\*)(?!\*)')
 
     for match in re.finditer(pattern, text):
