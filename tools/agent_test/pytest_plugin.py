@@ -84,7 +84,10 @@ def _write_passing_output(report) -> None:
     interleave inside one.
     """
     events = _events_path()
-    sections = [(name, text) for name, text in report.sections if text]
+    # A report carries the sections of earlier phases too ("Captured log
+    # setup" reappears on the call and teardown reports); keep each once.
+    sections = [(name, text) for name, text in report.sections
+                if text and name.endswith(f" {report.when}")]
     if events is None or not sections:
         return
     parts = [f"{'_' * 20} {report.nodeid} [{report.when}] {'_' * 20}\n"]
