@@ -228,14 +228,14 @@ class MockEventBus:
 
 
 @pytest.fixture
-def setup_env(tmp_path):
+def setup_env(tmp_path, monkeypatch):
     """Set up a test environment with DB."""
     db_path = tmp_path / "dashboard.db"
     _init_test_db(db_path)
-    os.environ["DASHBOARD_DB"] = str(db_path)
+    monkeypatch.setenv("DASHBOARD_DB", str(db_path))
     # Redirect EventBus snapshot path so the TestClient lifespan never
     # reads or writes the real repo's data/event_bus.state.
-    os.environ["DASHBOARD_EVENT_BUS_STATE"] = str(tmp_path / "event_bus.state")
+    monkeypatch.setenv("DASHBOARD_EVENT_BUS_STATE", str(tmp_path / "event_bus.state"))
 
     # Reload DAO to pick up test DB
     import importlib
@@ -243,10 +243,6 @@ def setup_env(tmp_path):
     importlib.reload(db_mod)
 
     yield tmp_path, db_path
-
-    # Cleanup
-    os.environ.pop("DASHBOARD_DB", None)
-    os.environ.pop("DASHBOARD_EVENT_BUS_STATE", None)
 
 
 async def _start_monitor(bus, entry_parser=None):

@@ -34,6 +34,14 @@ _ISOLATED_TEST_ENVS = (
     "AUTONOMY_ORGS_DIR",
     "DASHBOARD_AGENT_RUNS_DIR",
     "DASHBOARD_DB",
+    # The lifespan's state files: a teardown that deleted one of these
+    # (instead of restoring it) sent every later server import on the worker
+    # to the checkout's data/ (auto-fus3y).
+    "DASHBOARD_EVENT_BUS_STATE",
+    "DASHBOARD_TAIL_STATE",
+    "DASHBOARD_RESTART_NOTICE_STATE",
+    "DASHBOARD_RESOURCE_MONITOR_STATE",
+    "DASHBOARD_WORKTREE_ROW_CACHE_STATE",
     "DASHBOARD_MOCK",
     "DASHBOARD_MOCK_EVENTS",
     "DISPATCH_DB",
@@ -66,8 +74,9 @@ def _isolate_restart_state(tmp_path, monkeypatch):
         ("DASHBOARD_WORKTREE_ROW_CACHE_STATE", "worktree_row_cache.state",
          "WORKTREE_ROW_CACHE_PATH"),
     ):
-        if not os.environ.get(env):
-            monkeypatch.setenv(env, str(tmp_path / name))
+        # Always per test: the import-time default is per worker, and a
+        # stale restart notice from an earlier test is what this prevents.
+        monkeypatch.setenv(env, str(tmp_path / name))
         # A module that imported the server at collection time fixed these
         # paths BEFORE this fixture ran -- at the checkout's real data/. A
         # lifespan then consumed and unlinked the operator's own
@@ -202,6 +211,10 @@ def _configure_hermetic_stores():
         else:
             dst.parent.mkdir(parents=True, exist_ok=True)
         _os.environ[store.env] = str(dst)
+    # The design store reads its own variable, outside the store manifest;
+    # without this every app boot created data/experiments.db (auto-fus3y).
+    if not _os.environ.get("EXPERIMENTS_DB", "").startswith(str(root)):
+        _os.environ["EXPERIMENTS_DB"] = str(root / "experiments.db")
     # The API pointer routes graph writes to the live dashboard; tests never
     # want that (suites that test the HTTP contract boot their own app).
     _os.environ.pop("GRAPH_API", None)
@@ -225,12 +238,23 @@ _configure_hermetic_stores()
 # Per-fixture redirects (e.g. test_app, setup_env) override this with a
 # tmp_path-scoped value where stricter isolation is needed.
 def _set_default_event_bus_state_path():
-    if _os.environ.get("DASHBOARD_EVENT_BUS_STATE"):
-        return
+    # All of the lifespan's state files, not only the EventBus snapshot:
+    # mock servers that browser modules start once per module run before
+    # the per-test _isolate_restart_state fixture, so they inherit only
+    # these defaults, and wrote restart_notice.state and
+    # resource_monitor.state into data/ at shutdown (auto-fus3y).
     worker = _os.environ.get("PYTEST_XDIST_WORKER", "master")
     tmp = _Path(_tempfile.gettempdir()) / f"pytest-event-bus-state-{_os.getpid()}-{worker}"
     tmp.mkdir(parents=True, exist_ok=True)
-    _os.environ["DASHBOARD_EVENT_BUS_STATE"] = str(tmp / "event_bus.state")
+    for env, name in (
+        ("DASHBOARD_EVENT_BUS_STATE", "event_bus.state"),
+        ("DASHBOARD_TAIL_STATE", "tail_state.snapshot"),
+        ("DASHBOARD_RESTART_NOTICE_STATE", "restart_notice.state"),
+        ("DASHBOARD_RESOURCE_MONITOR_STATE", "resource_monitor.state"),
+        ("DASHBOARD_WORKTREE_ROW_CACHE_STATE", "worktree_row_cache.state"),
+    ):
+        if not _os.environ.get(env):
+            _os.environ[env] = str(tmp / name)
 
 
 _set_default_event_bus_state_path()

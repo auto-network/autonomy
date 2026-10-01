@@ -185,6 +185,11 @@ def stack(tmp_path, monkeypatch):
     orgs_dir.mkdir(exist_ok=True)
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     monkeypatch.delenv("GRAPH_DB", raising=False)
+    # Org identity is cached by slug, not by orgs directory: an earlier test
+    # on this worker that bootstrapped its own "personal" org ("Personal",
+    # #A0A0A0) would otherwise be served as this store's branding.
+    from tools.dashboard import org_identity
+    org_identity._identity_cached.cache_clear()
     GraphDB.create_org_db(ORG).close()
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     monkeypatch.setattr(design_db, "DB_PATH", tmp_path / "designs.db")

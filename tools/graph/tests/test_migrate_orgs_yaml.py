@@ -129,6 +129,7 @@ def test_migration_creates_per_org_dbs(yaml_path, orgs_dir):
         )
 
 
+@pytest.mark.usefixtures("no_orgs_dir_env")
 def test_migration_payload_shape(yaml_path, orgs_dir):
     apply_migration(build_plan(yaml_path, orgs_dir))
 
@@ -385,6 +386,7 @@ def test_cli_dry_run(yaml_path, orgs_dir, capsys):
     assert list(orgs_dir.glob("*.db")) == []
 
 
+@pytest.mark.usefixtures("no_orgs_dir_env")
 def test_cli_apply(yaml_path, orgs_dir, capsys):
     rc = migrate_main([
         "--projects-yaml", str(yaml_path),

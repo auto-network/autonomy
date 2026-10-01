@@ -3504,8 +3504,13 @@ def _open_dispatch_db():
     standard dispatch_db helpers; this handle is used only for the
     SELECT step.
     """
-    db_path = DATA_ROOT / "dispatch.db"
-    conn = sqlite3.connect(str(db_path))
+    # The same path the dispatch_db helpers write (DISPATCH_DB, else
+    # data/dispatch.db). A hard-coded DATA_ROOT join read a different
+    # database wherever DISPATCH_DB is set, and in tests created the
+    # checkout's data/dispatch.db (auto-fus3y).
+    from agents import dispatch_db as _dispatch_db
+
+    conn = sqlite3.connect(str(_dispatch_db.DB_PATH))
     conn.row_factory = sqlite3.Row
     return conn
 

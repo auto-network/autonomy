@@ -526,6 +526,7 @@ def test_join_url_refuses_bearer_only_when_channel_key_absent(capsys):
     assert "channel" in err and "Re-mint" in err
 
 
+@pytest.mark.usefixtures("no_orgs_dir_env")
 def test_link_list_hides_peer_published_grant(tmp_path, monkeypatch, capsys):
     """`graph link list` shows only THIS org's own grants — another org's
     grant row must never appear (owning-scope read, P2). The grant set's

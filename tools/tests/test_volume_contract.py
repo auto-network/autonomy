@@ -35,6 +35,16 @@ from tools.data_paths import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_store_paths(monkeypatch):
+    """These tests pin the resolver's precedence, so they start with no store
+    variable set. Several used to pass only because an earlier test in this
+    file popped DASHBOARD_DB for good; restored per test instead."""
+    for store in STORE_MANIFEST:
+        if store.env:
+            monkeypatch.delenv(store.env, raising=False)
+
+
 def _tree_manifest(root: Path) -> dict:
     """path -> content hash for every file under *root* (missing → {})."""
     if not root.exists():
@@ -80,19 +90,18 @@ def test_every_store_is_env_rooted():
             )
 
 
-def test_resolver_precedence_is_env_then_root():
+def test_resolver_precedence_is_env_then_root(monkeypatch):
     """The writer that is handed a root and the reader that only knows the
     env must agree, or state lands where nothing looks for it."""
     from tools.data_paths import STORES_BY_KEY
 
     store = STORES_BY_KEY["dashboard"]
-    os.environ.pop(store.env, None)
+    # monkeypatch restores the suite's own redirect afterwards; popping it
+    # left later tests on the worker resolving data/dashboard.db.
+    monkeypatch.delenv(store.env, raising=False)
     assert resolve_store(store.key, root=Path("/vol")) == Path("/vol") / store.relative
-    os.environ[store.env] = "/elsewhere/dashboard.db"
-    try:
-        assert resolve_store(store.key, root=Path("/vol")) == Path("/elsewhere/dashboard.db")
-    finally:
-        os.environ.pop(store.env, None)
+    monkeypatch.setenv(store.env, "/elsewhere/dashboard.db")
+    assert resolve_store(store.key, root=Path("/vol")) == Path("/elsewhere/dashboard.db")
 
 
 def test_serving_key_store_has_portable_env_root_and_historical_default(

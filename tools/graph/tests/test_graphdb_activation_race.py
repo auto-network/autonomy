@@ -41,6 +41,7 @@ def _no_pool_leak():
     GraphDB.close_all_pooled()
 
 
+@pytest.mark.usefixtures("no_orgs_dir_env")
 def test_pooled_org_handle_captures_after_activation_by_another_connection(tmp_path):
     path = tmp_path / "race-org.db"
     GraphDB(path).close()                   # the org's file exists, inactive

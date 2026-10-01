@@ -24,7 +24,7 @@ def bus():
 
 
 @pytest.fixture
-def setup_env(tmp_path):
+def setup_env(tmp_path, monkeypatch):
     """Minimal env so server module can load (needs DASHBOARD_DB).
 
     Also redirects EVENT_BUS_STATE_PATH at the tmp dir so the TestClient
@@ -50,11 +50,10 @@ def setup_env(tmp_path):
     )
     conn.commit()
     conn.close()
-    os.environ["DASHBOARD_DB"] = str(db_path)
-    os.environ["DASHBOARD_EVENT_BUS_STATE"] = str(tmp_path / "event_bus.state")
+    monkeypatch.setenv("DASHBOARD_DB", str(db_path))
+    monkeypatch.setenv("DASHBOARD_EVENT_BUS_STATE", str(tmp_path / "event_bus.state"))
     yield
-    os.environ.pop("DASHBOARD_DB", None)
-    os.environ.pop("DASHBOARD_EVENT_BUS_STATE", None)
+
 
 
 async def _broadcast_n(bus, n, topic="test"):

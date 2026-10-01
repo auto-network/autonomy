@@ -13,7 +13,7 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolate_graph_env(monkeypatch):
+def _isolate_graph_env(monkeypatch, tmp_path):
     """Clear live shell routing env and pin host-direct dispatch so tests
     opt into HTTP routing explicitly.
 
@@ -36,9 +36,16 @@ def _isolate_graph_env(monkeypatch):
         "GRAPH_DB",
         "GRAPH_ORG",
         "GRAPH_SCOPE",
-        "AUTONOMY_ORGS_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
+    # A per-test orgs directory instead of none: the personal and machine
+    # stores sit beside it, and with it unset any test reaching them created
+    # the checkout's data/personal.db and data/machine.db (auto-fus3y).
+    # Tests that need it unset delete it themselves. Not "orgs": many tests
+    # create tmp_path/orgs for their own stores.
+    orgs = tmp_path / "default-orgs"
+    orgs.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
     monkeypatch.setattr(_client_mod, "_FORCE_HOST_DIRECT", True)
 
 
@@ -72,3 +79,10 @@ def _isolate_schema_registry_global():
         _reg.SCHEMAS.update(schemas_snap)
         _reg.UPCONVERTERS.clear()
         _reg.UPCONVERTERS.update(upcon_snap)
+
+
+@pytest.fixture
+def no_orgs_dir_env(monkeypatch):
+    """For tests that pass an explicit root and assert it is used: the
+    AUTONOMY_ORGS_DIR variable outranks a root argument (data_paths)."""
+    monkeypatch.delenv("AUTONOMY_ORGS_DIR", raising=False)

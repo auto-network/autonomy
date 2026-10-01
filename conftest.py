@@ -10,7 +10,114 @@ from pathlib import Path
 
 import pytest
 
-from tools.dashboard.tests._xdist import worker_index
+
+
+def _hermetic_store_defaults() -> None:
+    """Per-worker paths for every store a test could fall through to.
+
+    Each store resolves its own variable first and the checkout's data/ last
+    (tools/data_paths.py). Only the dashboard suite's conftest set those
+    variables, so suites run without it (graph, agents, network, plugins)
+    created dashboard, dispatch, commit-workflow and design stores in data/,
+    and any of them could read another test's leftovers (auto-fus3y). Set at
+    import, before any test module imports a DAO that fixes its path; the
+    dashboard conftest's own redirect is unchanged and still wins for it.
+    The main graph store stays unpinned, as there: a pin collapses org
+    resolution to one database. Escape hatch for deliberate live runs:
+    AUTONOMY_TESTS_USE_AMBIENT_STORES=1.
+    """
+    if os.environ.get("AUTONOMY_TESTS_USE_AMBIENT_STORES") == "1":
+        return
+    import tempfile
+
+    from tools.data_paths import STORE_MANIFEST
+
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    root = Path(tempfile.gettempdir()) / f"pytest-root-stores-{os.getpid()}-{worker}"
+    root.mkdir(parents=True, exist_ok=True)
+    for store in STORE_MANIFEST:
+        if store.env is None or store.key == "graph":
+            continue
+        target = root / store.relative
+        (target if store.kind == "dir" else target.parent).mkdir(parents=True, exist_ok=True)
+        os.environ[store.env] = str(target)
+    # Read outside the store manifest: the design store and the dashboard
+    # lifespan's state files (mock servers inherit these at spawn).
+    for env, name in (
+        ("EXPERIMENTS_DB", "experiments.db"),
+        ("DASHBOARD_EVENT_BUS_STATE", "event_bus.state"),
+        ("DASHBOARD_TAIL_STATE", "tail_state.snapshot"),
+        ("DASHBOARD_RESTART_NOTICE_STATE", "restart_notice.state"),
+        ("DASHBOARD_RESOURCE_MONITOR_STATE", "resource_monitor.state"),
+        ("DASHBOARD_WORKTREE_ROW_CACHE_STATE", "worktree_row_cache.state"),
+    ):
+        os.environ[env] = str(root / name)
+    # Graph calls must never reach the live dashboard from a test.
+    os.environ.pop("GRAPH_API", None)
+    os.environ.pop("GRAPH_ORG", None)
+
+
+_hermetic_store_defaults()
+
+from tools.dashboard.tests._xdist import worker_index  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_local_stores(request, monkeypatch):
+    """The personal and machine stores live beside the orgs directory, which
+    falls back to the checkout's data/ when AUTONOMY_ORGS_DIR is unset.
+    Give each test its own unless it (or its suite) already chose one."""
+    if os.environ.get("AUTONOMY_ORGS_DIR") or os.environ.get("AUTONOMY_TESTS_USE_AMBIENT_STORES") == "1":
+        return
+    orgs = request.getfixturevalue("tmp_path") / "orgs"
+    orgs.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+
+_CHECKOUT_DATA = Path(__file__).resolve().parent / "data"
+_data_before: set[str] | None = None
+
+
+def _data_entries() -> set[str]:
+    try:
+        return {entry.name for entry in _CHECKOUT_DATA.iterdir()}
+    except OSError:
+        return set()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session):
+    """Snapshot the checkout's data/ so the run can prove it left it alone."""
+    global _data_before
+    if os.environ.get("PYTEST_XDIST_WORKER") is None:
+        _data_before = _data_entries()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionfinish(session, exitstatus):
+    """Fail the run if any test created a file in the checkout's data/.
+
+    Tests that fall through to the repository's stores create them there,
+    and the next test that reads them sees another test's state: an enrolled
+    identity in data/personal.db made two suites fail in every later run
+    (auto-fus3y). Redirect the store instead (see the conftests' store
+    isolation). Skipped for deliberate live runs
+    (AUTONOMY_TESTS_USE_AMBIENT_STORES=1) and in xdist workers.
+    """
+    if _data_before is None or os.environ.get("AUTONOMY_TESTS_USE_AMBIENT_STORES") == "1":
+        return
+    created = sorted(_data_entries() - _data_before)
+    if not created:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    message = (
+        "tests created files in the checkout's data/ (a store was not "
+        "redirected): " + ", ".join(created)
+    )
+    if reporter is not None:
+        reporter.write_sep("=", "data/ was written", red=True)
+        reporter.write_line(message)
+    if session.exitstatus == 0:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 def pytest_configure(config):

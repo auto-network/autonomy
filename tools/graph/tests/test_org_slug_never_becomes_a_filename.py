@@ -19,6 +19,7 @@ import pytest
 from tools.graph.db import _org_db_path
 
 
+@pytest.mark.usefixtures("no_orgs_dir_env")
 def test_a_real_slug_still_resolves(tmp_path):
     """The guard runs before both branches, so both are pinned here.
 
