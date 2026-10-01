@@ -1905,12 +1905,19 @@ class GraphDB:
         cached = _CONNECTION_POOL.get(key)
         if cached is not None:
             return cached
+        if mode == "ro":
+            # The same per-file handle Settings reads use (see _shared_read_db),
+            # also filed under this slot. close() evicts every slot that points
+            # at it.
+            path = _org_db_path(slug, root)
+            if not path.exists():
+                raise FileNotFoundError(f"per-org DB not found: {path}")
+            db = _shared_read_db(path)
+            _CONNECTION_POOL[key] = db
+            return db
         db = cls.open_org_db(slug, mode=mode, root=root)
         db._pooled = True
-        if mode == "ro":
-            db._share_per_thread()
-        else:
-            db._owner_thread = threading.get_ident()
+        db._owner_thread = threading.get_ident()
         _CONNECTION_POOL[key] = db
         return db
 
@@ -3568,10 +3575,17 @@ class _BorrowedReadHandle:
         return None
 
 
-def _pooled_read_handle(path) -> "GraphDB":
-    """The process's pooled read-only handle for the database at *path*.
-    Pool entries share ``GraphDB``'s pool, so ``GraphDB.close_all_pooled()``
-    (dashboard shutdown, test teardown) closes them too."""
+def _shared_read_db(path) -> "GraphDB":
+    """The process's ONE pooled read-only GraphDB for the database file at
+    *path*, with one connection per thread. Every read-only pool lookup of a
+    file resolves here — Settings reads (``_pooled_read_handle``) and
+    ``GraphDB.for_org(slug, mode="ro")`` (peer reads, ``cross_org.open_peer_db``)
+    alike. They used to hold separate handles for the same file, so every
+    executor thread kept TWO connections to every store: about 64 per store
+    with 42 threads, which took SJC-2's worker past its 1,024 open-file limit
+    on 2026-10-01. Pool entries share ``GraphDB``'s pool, so
+    ``GraphDB.close_all_pooled()`` (dashboard shutdown, test teardown) closes
+    them too."""
     key = (str(Path(path).resolve()), "ro-path")
     db = _CONNECTION_POOL.get(key)
     if db is None:
@@ -3582,4 +3596,9 @@ def _pooled_read_handle(path) -> "GraphDB":
                 db._pooled = True
                 db._share_per_thread()
                 _CONNECTION_POOL[key] = db
-    return _BorrowedReadHandle(db)  # type: ignore[return-value]
+    return db
+
+
+def _pooled_read_handle(path) -> "GraphDB":
+    """A borrowed view of the shared read-only handle for *path*."""
+    return _BorrowedReadHandle(_shared_read_db(path))  # type: ignore[return-value]

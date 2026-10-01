@@ -79,7 +79,10 @@ def test_close_all_pooled_clears_pool(orgs_root):
     _seed("anchore")
     GraphDB.for_org("autonomy")
     GraphDB.for_org("anchore", mode="ro")
-    assert len(GraphDB.pooled_slots()) == 2
+    slots = GraphDB.pooled_slots()
+    # A read-only slot is also filed under its file path (one shared handle
+    # per file), so there are more slots than handles.
+    assert ("autonomy", "rw") in slots and ("anchore", "ro") in slots
     GraphDB.close_all_pooled()
     assert GraphDB.pooled_slots() == []
 
@@ -316,3 +319,21 @@ def test_a_live_threads_connection_is_never_reaped(orgs_root):
     release.set()
     worker.join(10)
     held["conn"].execute("SELECT 1")                   # not closed under it
+
+
+def test_settings_reads_and_peer_reads_share_one_handle_per_file(orgs_root):
+    """2026-10-01: Settings reads (_pooled_read_handle, keyed by path) and peer
+    reads (for_org ro, keyed by slug) held separate handles for the same file,
+    so every executor thread kept two connections to every store — about 64
+    per store with 42 threads, past SJC-2's 1,024 open-file limit."""
+    from tools.graph.db import _org_db_path, _pooled_read_handle
+    _seed("acme")
+    GraphDB.close_all_pooled()
+    peer = GraphDB.for_org("acme", mode="ro")
+    settings = _pooled_read_handle(_org_db_path("acme"))
+    assert settings._db is peer
+    assert settings.conn is peer.conn                     # one connection on this thread
+    peer.close()                                          # evicts every slot for the file
+    assert _pooled_read_handle(_org_db_path("acme"))._db is not peer
+    assert GraphDB.for_org("acme", mode="ro") is not peer
+    GraphDB.close_all_pooled()
