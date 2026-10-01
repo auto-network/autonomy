@@ -25,6 +25,7 @@ import subprocess
 import sys
 import termios
 import threading
+import weakref
 from collections import OrderedDict
 import time
 import uuid
@@ -6600,13 +6601,19 @@ def _reconstruct_read_state(
     right after a hot reload. ``section:tail.reconstruct`` records calls, CPU,
     wall and how many replays run at once; a replay over 0.5 s logs one
     TAIL-REPLAY line with its mode and the bytes it re-read."""
-    t = perf_telemetry.telemetry()
-    jobs = t.jobs if t is not None else None
-    concurrent = (jobs.in_flight.get("section:tail.reconstruct", 0) + 1) if jobs else 0
-    c0, w0 = time.thread_time(), time.monotonic()
-    with perf_telemetry.section("tail.reconstruct"):
-        state = _reconstruct_read_state_uncounted(
-            chain, harness, upto_file=upto_file, upto_off=upto_off)
+    # Single flight per (chain, cursor file): concurrent catch-ups of one
+    # transcript wait for the first replay, then extend its cached state by
+    # their own delta (zero bytes for the same cursor) instead of each
+    # replaying the whole prefix. 13 concurrent catch-ups of an 84 MB
+    # transcript ran 13 full replays at once (load test 2026-10-01).
+    with _recon_key_lock((tuple(stem for stem, _ in chain), upto_file)):
+        t = perf_telemetry.telemetry()
+        jobs = t.jobs if t is not None else None
+        concurrent = (jobs.in_flight.get("section:tail.reconstruct", 0) + 1) if jobs else 0
+        c0, w0 = time.thread_time(), time.monotonic()
+        with perf_telemetry.section("tail.reconstruct"):
+            state = _reconstruct_read_state_uncounted(
+                chain, harness, upto_file=upto_file, upto_off=upto_off)
     wall_s = time.monotonic() - w0
     if wall_s >= TAIL_REPLAY_LOG_S:
         info = getattr(_recon_last, "info", {})
@@ -6619,6 +6626,33 @@ def _reconstruct_read_state(
 
 _recon_last = threading.local()
 TAIL_REPLAY_LOG_S = 0.5
+class _ReconKeyLock:
+    """A lock that can be weakly referenced (a bare threading.Lock cannot)."""
+    __slots__ = ("_lock", "__weakref__")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def __enter__(self) -> "_ReconKeyLock":
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._lock.release()
+
+
+_recon_key_locks: "weakref.WeakValueDictionary[tuple, _ReconKeyLock]" = weakref.WeakValueDictionary()
+_recon_key_locks_guard = threading.Lock()
+
+
+def _recon_key_lock(key: tuple) -> _ReconKeyLock:
+    """The one lock for a replay key, alive while anyone holds or waits on it."""
+    with _recon_key_locks_guard:
+        lock = _recon_key_locks.get(key)
+        if lock is None:
+            lock = _ReconKeyLock()
+            _recon_key_locks[key] = lock
+        return lock
 
 
 def _reconstruct_read_state_uncounted(

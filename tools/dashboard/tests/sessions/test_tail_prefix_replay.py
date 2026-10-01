@@ -344,3 +344,33 @@ def test_replays_are_counted_with_mode_and_bytes(session_file, fresh_cache, monk
     assert f"mode=full bytes={mid} files=1" in lines[0]
     assert f"mode=incremental bytes={end - mid} files=1" in lines[1]
     assert "in_flight=1" in lines[0]
+
+
+def test_concurrent_catch_ups_share_one_full_replay(session_file, fresh_cache, monkeypatch):
+    """2026-10-01: 13 concurrent catch-ups of one transcript ran 13 full
+    replays at once. Now the first replays and the rest extend its cached
+    state by their own (here empty) delta."""
+    import threading
+    started, release = threading.Event(), threading.Event()
+    real = server._reconstruct_read_state_uncounted
+
+    def slow_first(*args, **kwargs):
+        if not started.is_set():
+            started.set()
+            release.wait(2)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(server, "_reconstruct_read_state_uncounted", slow_first)
+    chain = [("abc", session_file)]
+    end = session_file.stat().st_size
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(server._reconstruct_read_state(
+        chain, server.CLAUDE_HARNESS, upto_file="abc", upto_off=end))) for _ in range(6)]
+    for t in threads:
+        t.start()
+    started.wait(2)
+    release.set()
+    for t in threads:
+        t.join(5)
+    assert len(results) == 6
+    assert server._recon_stats == {"full": 1, "incremental": 5}
+    assert len({repr(_signature(r)) for r in results}) == 1
