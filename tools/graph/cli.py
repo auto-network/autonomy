@@ -1672,40 +1672,6 @@ _REMOTE_TURN_LABELS = {"user": "USER", "crosstalk": "USER", "assistant_text": "A
 REMOTE_TAIL_TIMEOUT_S = 45
 
 
-def _remote_tail_get(path: str) -> dict:
-    """GET *path* from the dashboard, with REMOTE_TAIL_TIMEOUT_S. Any failure
-    is one line on stderr and exit 1, never a traceback."""
-    import ssl
-    import urllib.error
-    import urllib.request
-
-    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    req = urllib.request.Request(
-        f"{api_base}{path}", method="GET",
-        headers={"Authorization": f"Bearer {_resolve_crosstalk_token()}"})
-    try:
-        with urllib.request.urlopen(req, timeout=REMOTE_TAIL_TIMEOUT_S, context=ctx) as resp:
-            return json.loads(resp.read() or b"{}")
-    except urllib.error.HTTPError as e:
-        try:
-            body = json.loads(e.read())
-            msg = body.get("error") or body.get("refusal") or str(e)
-        except Exception:
-            msg = str(e)
-        print(f"  \u2717 {msg}", file=sys.stderr)
-    except urllib.error.URLError as e:
-        print(f"  \u2717 Cannot reach dashboard: {e.reason}", file=sys.stderr)
-    except (TimeoutError, OSError) as e:
-        print(f"  \u2717 the dashboard did not answer within {REMOTE_TAIL_TIMEOUT_S} s "
-              f"({type(e).__name__})", file=sys.stderr)
-    except ValueError:
-        print("  \u2717 the dashboard's answer is not JSON", file=sys.stderr)
-    sys.exit(1)
-
-
 def _remote_session_address(value: str) -> tuple[str, str] | None:
     """``(name, machine)`` when *value* is ``<tmux name>@<machine>``, a
     session on another fleet machine; else None. ``@`` is also the note
@@ -1752,9 +1718,10 @@ def _remote_session_tail(value: str, n: int | None, max_chars: int | None) -> bo
 
     key = row["session_id"]          # name@machine_pub: the one address form
     entries_wanted = 400 if n is None else max(100, n * 25)
-    data = _remote_tail_get(
-        f"/api/session/{urllib.parse.quote(row.get('project') or 'default')}/"
-        f"{urllib.parse.quote(key)}/tail?tail_entries={entries_wanted}") or {}
+    data = _dashboard_json(
+        "GET", f"/api/session/{urllib.parse.quote(row.get('project') or 'default')}/"
+               f"{urllib.parse.quote(key)}/tail?tail_entries={entries_wanted}",
+        timeout=REMOTE_TAIL_TIMEOUT_S) or {}
     shown = row.get("machine") or machine
     for flag, why in (("machine_unreachable", "unreachable"),
                       ("machine_timed_out", "did not answer in time"),
@@ -2588,8 +2555,11 @@ def cmd_crosstalk_send(args):
 
 # ── Session groups (Session Board columns) ───────────────────────────────
 
-def _dashboard_json(method: str, path: str, payload: dict | None = None):
-    """Authenticated JSON call to the dashboard; prints the API's error sentence on failure."""
+def _dashboard_json(method: str, path: str, payload: dict | None = None, *,
+                    timeout: float = 15):
+    """Authenticated JSON call to the dashboard. Every failure -- the API's
+    error sentence, an unreachable dashboard, a timeout, an answer that is
+    not JSON -- is one line on stderr and exit 1, never a traceback."""
     import ssl
     import urllib.error
     import urllib.request
@@ -2606,18 +2576,23 @@ def _dashboard_json(method: str, path: str, payload: dict | None = None):
                  "Authorization": f"Bearer {_resolve_crosstalk_token()}"},
     )
     try:
-        resp = urllib.request.urlopen(req, timeout=15, context=ctx)
-        return json.loads(resp.read() or b"{}")
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         try:
-            msg = json.loads(e.read()).get("error", str(e))
+            body = json.loads(e.read())
+            msg = body.get("error") or body.get("refusal") or str(e)
         except Exception:
             msg = str(e)
         print(f"  \u2717 {msg}", file=sys.stderr)
-        sys.exit(1)
     except urllib.error.URLError as e:
         print(f"  \u2717 Cannot reach dashboard: {e.reason}", file=sys.stderr)
-        sys.exit(1)
+    except (TimeoutError, OSError) as e:
+        print(f"  \u2717 the dashboard did not answer within {timeout:g} s "
+              f"({type(e).__name__})", file=sys.stderr)
+    except ValueError:
+        print("  \u2717 the dashboard's answer is not JSON", file=sys.stderr)
+    sys.exit(1)
 
 
 def _group_slugify(text: str) -> str:

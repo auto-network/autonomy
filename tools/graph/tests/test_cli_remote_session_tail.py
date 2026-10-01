@@ -48,8 +48,8 @@ def dashboard(monkeypatch):
             return {"sessions": [ROW, {**ROW, "session_id": f"auto-1@{PUB}"}]}
         return tail
 
-    monkeypatch.setattr(cli, "_dashboard_json", fake)
-    monkeypatch.setattr(cli, "_remote_tail_get", lambda path: fake("GET", path))
+    monkeypatch.setattr(cli, "_dashboard_json",
+                        lambda method, path, payload=None, **kw: fake(method, path, payload))
     return calls, tail
 
 
@@ -141,7 +141,22 @@ def test_a_dashboard_that_does_not_answer_is_one_line(monkeypatch, capsys, exc, 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(cli, "_resolve_crosstalk_token", lambda: "t")
     with pytest.raises(SystemExit) as exit_:
-        cli._remote_tail_get("/api/session/p/x/tail")
+        cli._dashboard_json("GET", "/api/session/p/x/tail", timeout=cli.REMOTE_TAIL_TIMEOUT_S)
     assert exit_.value.code == 1
     err = capsys.readouterr().err
     assert words in err and "Traceback" not in err
+
+
+def test_the_remote_tail_call_carries_the_longer_timeout(monkeypatch, capsys):
+    seen = []
+
+    def fake(method, path, payload=None, **kw):
+        seen.append((path, kw.get("timeout")))
+        if path == "/api/sessions/presence":
+            return {"sessions": [ROW]}
+        return {"entries": ENTRIES}
+
+    monkeypatch.setattr(cli, "_dashboard_json", fake)
+    cli.cmd_tail(argparse.Namespace(source="auto-0930-202034@SJC", n=1, max_chars=0,
+                                    turn=None, window=0))
+    assert seen[-1][1] == cli.REMOTE_TAIL_TIMEOUT_S
