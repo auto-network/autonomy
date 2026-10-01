@@ -67,7 +67,7 @@ _personal_db_init_lock = threading.Lock()
 
 
 def _store_rank(src_org: "str | None", reading_org: "str | None") -> int:
-    """Resolution step 3 — most local wins.
+    """Most local wins: machine, personal, the org being read, other orgs.
 
     The machine store replicates nowhere, personal crosses only this
     operator's fleet, an organization's rows reach its members. When the
@@ -83,6 +83,13 @@ def _store_rank(src_org: "str | None", reading_org: "str | None") -> int:
     if reading_org is not None and src_org == reading_org:
         return 2
     return 3
+
+
+def _local_tier(src_org: "str | None") -> int:
+    """The operator's own stores above every organization: machine 0,
+    personal 1, any organization 2 (most significant ranking key)."""
+    rank = _store_rank(src_org, None)
+    return rank if rank < 2 else 2
 
 
 def _slot_tiebreak_hash(row) -> str:
@@ -160,8 +167,10 @@ def _rank_candidates(
     """Filter and order candidate base rows by the six-step slot ordering.
 
     Steps: 1 the plausibility window (a signed row whose ``signed_at`` is
-    beyond the reader's window is stored and ignored, not refused); 2 rung;
-    3 store; 4 schema revision; 5 ``signed_at``; 6 the persona hash.
+    beyond the reader's window is stored and ignored, not refused); 2 the
+    operator's own stores first (machine, then personal, then every
+    organization); 3 rung; 4 store among organizations (the one being read,
+    then others); 5 schema revision; 6 ``signed_at``; 7 the persona hash.
 
     No ledger or fold state is read here (operator ruling 2026-09-30,
     graph://21a0da9e-1c2 comment 52fb6d84): a signed row was validated at the
@@ -220,6 +229,17 @@ def _rank_candidates(
     eligible.sort(key=lambda om: -int(om[1]["schema_revision"]))
     eligible.sort(key=lambda om: _store_rank(om[0], reading_org))
     eligible.sort(key=lambda om: PRECEDENCE.get(om[1]["publication_state"], 99))
+    # The operator's own stores come first, whatever state an organization
+    # row is in: machine, then personal, then every organization (operator
+    # ruling 2026-09-30, graph://21a0da9e-1c2 comment 52fb6d84). With rung
+    # above everything, an organization row at `canonical` beat the
+    # operator's own `published` row on the operator's machine — the
+    # sovereignty defect auto-vk9gp section 5b measured. Among organization
+    # rows the order is unchanged (rung, then the organization being read
+    # before other organizations): whether a peer organization's published
+    # row should outrank the reading organization's own row is auto-vk9gp's
+    # open question, not this ruling.
+    eligible.sort(key=lambda om: _local_tier(om[0]))
     return eligible
 
 

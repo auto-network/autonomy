@@ -494,6 +494,31 @@ def test_personal_outranks_the_organization_at_the_same_rung(org, orgs_env):
     assert resolve()[KEY].payload == {"from": "personal"}
 
 
+def test_personal_outranks_an_organization_row_at_a_higher_rung(org, orgs_env):
+    """Operator ruling 2026-09-30: machine and personal always outrank the
+    organization. An org row at `canonical` used to beat the operator's own
+    `published` row (auto-vk9gp section 5b); store now sits above rung."""
+    root = orgs_env("ladder-canonical")
+    path = make_store(root, org)
+    deliver(path, slot_row(org.personas[0], NOW_MS - MIN_MS, state="canonical",
+                           payload={"from": "org"}))
+    personal = make_plain_store(root, "personal")
+    deliver_unsigned(personal, state="published", payload={"from": "personal"})
+
+    assert resolve()[KEY].payload == {"from": "personal"}
+
+
+def test_the_machine_store_outranks_an_org_canonical_row(org, orgs_env):
+    root = orgs_env("ladder-machine-canonical")
+    path = make_store(root, org)
+    deliver(path, slot_row(org.personas[0], NOW_MS - MIN_MS, state="canonical",
+                           payload={"from": "org"}))
+    machine = make_plain_store(root, "machine")
+    deliver_unsigned(machine, state="published", payload={"from": "machine"})
+
+    assert resolve()[KEY].payload == {"from": "machine"}
+
+
 def test_the_machine_store_outranks_personal(org, orgs_env):
     root = orgs_env("ladder-machine")
     make_store(root, org)
