@@ -1370,18 +1370,22 @@ def check_org_mount_readiness(*, key: str, payload: dict, org: str):
     if pinned is not None:
         # Its data lives on another machine; this one launches without it.
         label = _machine_label(pinned)
+        # No remediation: nothing is to be provisioned HERE -- the data is
+        # on the pinned machine (sharing it is a later design). The default
+        # workspace.declared-path.v1 ("provision the path") would be wrong,
+        # and it supports neither this kind nor any params.
+        what = " — ".join(t for t in (typed.name, typed.description) if t)
         return (VolumeMountReadinessIssue(
             "machine_mount_elsewhere",
-            f"machine-local mount pinned to {label}; this machine launches "
-            f"without it" + (f" — {typed.name}" if typed.name else ""),
+            f"machine-local mount pinned to {label} ({pinned[:12]}); this "
+            f"machine launches without it" + (f" ({what})" if what else ""),
             "machine_id",
             key,
             "the mount row's pinned machine",
             "advisory",
             frame="platform-host",
-            remediation_params={"machine_id": pinned, "machine": label,
-                                "name": typed.name, "description": typed.description,
-                                "help": typed.help},
+            remediation_id="",
+            remediation_params={},
         ),)
     if typed.subpath is None:
         return _check_machine_located_mount_readiness(key=key, typed=typed, org=org)

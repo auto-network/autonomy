@@ -682,10 +682,24 @@ def test_readiness_says_a_mount_pinned_elsewhere_is_advisory(orgs_root, on_machi
     (finding,) = wm.check_org_mount_readiness(
         key="widgets-ng:vuln-diff", payload=payload, org=ORG)
     assert (finding.kind, finding.severity) == ("machine_mount_elsewhere", "advisory")
-    assert "pinned to Home" in finding.detail and "Vuln diff" in finding.detail
-    assert finding.remediation_params["machine_id"] == HOME_ID
-    assert finding.remediation_params["machine"] == "Home"
-    assert finding.remediation_params["help"] == "lives on Home"
+    assert f"pinned to Home ({HOME_ID[:12]})" in finding.detail
+    assert "Vuln diff — vulnerability diff corpus" in finding.detail
+    # Nothing to provision here: no remediation, so none that names the
+    # wrong action or carries params its registry entry does not declare.
+    assert (finding.remediation_id, finding.remediation_params) == ("", {})
+
+
+def test_the_pinned_elsewhere_finding_reaches_readiness_without_a_remediation(
+        orgs_root, on_machine):
+    from tools.graph import settings_ops
+    from tools.graph.schemas.mount import _WorkspaceMountV3SchemaAdapter as Adapter
+
+    on_machine(SJC_ID)
+    payload = _pinned_rs(key="widgets-ng:vuln-diff").payload.model_dump()
+    issues = Adapter.readiness_findings(key="widgets-ng:vuln-diff", payload=payload,
+                                        org=ORG, read=None)
+    assert [i.kind for i in issues] == ["machine_mount_elsewhere"]
+    assert getattr(issues[0], "remediation_id") == ""
 
 
 def test_on_its_pinned_machine_a_missing_required_mount_still_refuses(
