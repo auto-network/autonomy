@@ -56,6 +56,15 @@ def _default_fixture() -> dict:
 
 
 def _is_process_alive(pid: int) -> bool:
+    # When start and stop run in one process (the tests), the server is our
+    # own child: once it exits it stays a zombie until reaped, and kill(pid,
+    # 0) succeeds on a zombie, so stop waited its full 5s and then SIGKILLed.
+    try:
+        reaped, _status = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return False
+    except ChildProcessError:
+        pass  # not our child: the CLI's start has exited and init reaps it
     try:
         os.kill(pid, 0)
         return True

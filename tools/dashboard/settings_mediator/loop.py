@@ -364,10 +364,8 @@ async def _loop_main(
 ) -> None:
     """Subscribe to the bus and dispatch ``setting.changed`` events.
 
-    The 1-second ``wait_for`` timeout is a polling-shutdown shape, not a
-    polling-for-events shape — it only exists so ``stop_event`` can fire
-    promptly during shutdown. Real events arrive on the bus queue with
-    no polling delay.
+    The 1-second timeout only refreshes ``HEALTH.last_tick_at``; events
+    and ``stop_event`` both wake the loop immediately.
     """
     queue = event_bus.subscribe()
     HEALTH.loop_started_at = time.time()
@@ -375,15 +373,24 @@ async def _loop_main(
         "settings_mediator: loop started — %d set(s) registered",
         len(_HANDLERS),
     )
+    # Wait on the queue and the stop event together, so shutdown does not
+    # sit out the rest of a 1s tick (it did, on every dashboard stop and
+    # every TestClient exit). A handler already dispatched still completes:
+    # only the idle queue read is cancelled, which asyncio.Queue does
+    # without losing an item.
+    stop_wait = asyncio.ensure_future(stop_event.wait())
     try:
         while not stop_event.is_set():
-            try:
-                topic, data, seq = await asyncio.wait_for(
-                    queue.get(), timeout=1.0,
-                )
-            except asyncio.TimeoutError:
+            get = asyncio.ensure_future(queue.get())
+            done, _pending = await asyncio.wait(
+                {get, stop_wait}, timeout=1.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if get not in done:
+                get.cancel()
                 HEALTH.last_tick_at = time.time()
                 continue
+            topic, data, seq = get.result()
             HEALTH.last_tick_at = time.time()
             if topic != "setting.changed":
                 continue
@@ -393,6 +400,7 @@ async def _loop_main(
             HEALTH.events_received_count += 1
             await _dispatch_event(data, services)
     finally:
+        stop_wait.cancel()
         try:
             event_bus.unsubscribe(queue)
         except Exception:
@@ -428,8 +436,8 @@ def start_action_loop(
 async def stop_action_loop(*, drain_timeout: float = 30.0) -> None:
     """Signal stop and await the loop task.
 
-    The loop observes ``stop_event`` at the next 1s wakeup boundary so
-    any handler currently awaiting completes naturally. ``drain_timeout``
+    The loop wakes on ``stop_event`` at once when idle; a handler that is
+    currently awaiting completes naturally first. ``drain_timeout``
     cancels the task if a handler hangs past the deadline.
     """
     global _loop_task, _stop_event

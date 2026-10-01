@@ -25,6 +25,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const unrefTimer = (arm) => (...args) => { const t = arm(...args); t.unref?.(); return t; };
 
 const REPO_ROOT = process.env.REPO_ROOT || path.resolve(__dirname, '../../..');
 const CAPTURE_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/voice-capture.js');
@@ -73,7 +74,9 @@ function makeHarness() {
   stores.flags = { isLoaded: true, get() { return false; } };
 
   const sandbox = {
-    console, setTimeout, clearTimeout, setInterval, clearInterval, Promise, JSON, Math, Date,
+    // Unref'd: the capture code arms long watchdog timers the tests never
+    // wait for, which otherwise held the process open for seconds afterwards.
+    console, setTimeout: unrefTimer(setTimeout), clearTimeout, setInterval: unrefTimer(setInterval), clearInterval, Promise, JSON, Math, Date,
     Object, Array, String, ArrayBuffer, Uint8Array,
     WebSocket: FakeWS, AudioContext: FakeAudioContext, AudioWorkletNode: FakeWorkletNode,
     location: { protocol: 'https:', host: 'localhost:8080' },

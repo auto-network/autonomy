@@ -17,6 +17,12 @@ import {
 } from '../static/js/factor-management.js';
 import { policyWithFactorGranted } from '../static/js/ceremony/root-factor-policy.js';
 import { applyOps } from './factor_test_helpers.mjs';
+// factor-management.js arms multi-second toast and warning timers that the
+// tests never wait for; unref them so the process exits when the tests end.
+for (const name of ['setTimeout', 'setInterval']) {
+  const arm = globalThis[name];
+  globalThis[name] = (...args) => { const t = arm(...args); t?.unref?.(); return t; };
+}
 
 const HEXA = 'a'.repeat(64);
 const HEXB = 'b'.repeat(64);

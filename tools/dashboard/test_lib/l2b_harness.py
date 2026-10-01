@@ -283,6 +283,18 @@ def _ab_eval_batch(js: str) -> Any:
     return None
 
 
+# Wrap window.fetch (idempotently) to count in-flight requests.
+_INSTRUMENT_JS = (
+    "if (!window.__l2bNet) {"
+    " window.__l2bNet = true; window.__l2bInflight = 0;"
+    " try { var of = window.fetch; window.fetch = function(){"
+    "   window.__l2bInflight++;"
+    "   return of.apply(this, arguments).finally(function(){"
+    "     window.__l2bInflight = Math.max(0, window.__l2bInflight - 1); }); };"
+    " } catch(e) {} }"
+)
+
+
 def instrument_network() -> None:
     """Wrap window.fetch (idempotently) to track in-flight requests, so
     :func:`wait_dom_idle` can wait for network-idle. Must run BEFORE the
@@ -358,10 +370,15 @@ def _navigate_and_check(
     # Instrument fetch BEFORE navigating so wait_dom_idle can see the route's
     # own data fetch in-flight — a DOM-idle-only wait fires in the gap between
     # Alpine init and the fetch's render, which is what made several checks flap.
-    instrument_network()
-    nav_js = f"navigateTo('{path}')"
+    # Instrumenting fetch and navigating share one eval (navigateTo is a
+    # client-side route, so the page context survives), saving one
+    # agent-browser round trip (~0.2-0.3s) per navigation. The idle wait and
+    # the checks stay separate calls: folding them into the navigation eval
+    # removed the slack some pages need for data that arrives outside fetch
+    # (the coordinator canvas question did not render in time).
     subprocess.run(
-        ["agent-browser", "eval", nav_js],
+        ["agent-browser", "eval",
+         f"(() => {{ {_INSTRUMENT_JS} navigateTo({json.dumps(path)}); }})()"],
         capture_output=True, timeout=10,
     )
     # Wait for the DOM to stop mutating (the page has finished rendering,

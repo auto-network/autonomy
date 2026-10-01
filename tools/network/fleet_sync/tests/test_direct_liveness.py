@@ -267,7 +267,9 @@ def test_a_backlog_pull_survives_puller_loop_stalls_longer_than_the_ping_timeout
     under the GIL). The pull completes in ONE round: zero retries, no 1011."""
     monkeypatch.setattr(channel_mod, "DIRECT_PING_INTERVAL_S", 0.2)
     monkeypatch.setattr(channel_mod, "DIRECT_PING_TIMEOUT_S", 0.2)
-    backlog = 600
+    # ~4 frames per source: 200 sources stream ~800 frames, well past the
+    # three stalls at frames 40/80/120 that this test is about.
+    backlog = 200
     root, server, server_key, puller_key, server_db, puller_db, entries = _pair(tmp_path, backlog=backlog)
     stalls = {"n": 0, "frames": 0}
     real_stream = scheduler_mod.bounded_stream_frames

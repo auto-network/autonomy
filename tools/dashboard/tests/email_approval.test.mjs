@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {openEmailApproval} from '../static/js/components/email-approval.js';
+import {setCachedConfirmDelayForTest} from '../static/js/components/approval-experiment.js';
+// The 1.5s green-Authorize cancel window is exercised in approval_dialog.test.mjs.
+setCachedConfirmDelayForTest(1);
 const {JSDOM}=createRequire(import.meta.url)('jsdom');
 let dom,calls,result;
 const q=s=>document.querySelector('[data-testid=approval-dialog]')?.shadowRoot.querySelector(s);

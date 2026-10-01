@@ -195,18 +195,24 @@ def _make_fetch_window(port: int, token: str, _root_pub: str, *, drop=None, requ
             link_pub=_link_key(token).public_hex, org=ORG_UUID)
 
         async def gen():
+            dropped = False
             try:
                 await channel.send_message(canonical_json(request))
                 async for message, final in channel.recv_message_stream():
                     if drop is not None:
                         drop["seen"] += 1
                         if drop["seen"] == drop["at"] and not drop["done"]:
-                            drop["done"] = True
+                            drop["done"] = dropped = True
                             raise ConnectionError("forced mid-window drop")
                     yield message
                     if final:
                         return
             finally:
+                if dropped:
+                    # A network drop has no closing handshake. A graceful
+                    # close here waited out websockets' 10s close_timeout
+                    # while the relay was still streaming the window.
+                    channel._ws.transport.abort()
                 await channel.close()
 
         return gen()

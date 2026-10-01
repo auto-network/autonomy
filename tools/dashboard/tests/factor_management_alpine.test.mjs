@@ -794,6 +794,12 @@ import {
 import {
   recoveryRecipientPublicKey, recoverySlot, openRootWithRecovery,
 } from '../static/js/ceremony/root-factor-policy.js';
+// factor-management.js arms multi-second toast and warning timers that the
+// tests never wait for; unref them so the process exits when the tests end.
+for (const name of ['setTimeout', 'setInterval']) {
+  const arm = globalThis[name];
+  globalThis[name] = (...args) => { const t = arm(...args); t?.unref?.(); return t; };
+}
 
 test('walk: enrol a recovery code through the real commit flow, then it opens root', async () => {
   // a clean password-only armor with a KNOWN password, so the enrol ceremony

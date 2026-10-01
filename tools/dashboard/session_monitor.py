@@ -2112,16 +2112,11 @@ class SessionMonitor:
             logger.info("session_monitor: inotify_simple not available, using polling")
             return
         try:
-            # nonblocking=True hardens the inotify fd: the tailer runs read() in
-            # a to_thread worker, and when that task is cancelled at stop() the
-            # worker can be orphaned mid-read. On a blocking fd a concurrent-
-            # reader race makes the underlying os.read block forever ignoring its
-            # timeout (inotify_simple's own documented warning), which can wedge
-            # the event loop's shutdown_default_executor() at teardown. Non-
-            # blocking makes that racy read raise EAGAIN instead of blocking. Per
-            # inotify_simple's docs this does NOT change normal read() behaviour
-            # (read() is FIONREAD+poll gated), so the live single-reader monitor
-            # is unaffected and events deliver identically.
+            # nonblocking=True: the tailer waits for readability in the event
+            # loop (_read_inotify) and then reads with timeout=0, so a read
+            # with nothing pending must raise EAGAIN rather than block the
+            # loop. Per inotify_simple's docs this does not change normal
+            # read() behaviour (read() is FIONREAD+poll gated).
             self._inotify = INotify(nonblocking=True)
             self._use_inotify = True
             # Add watches for sessions already in the DB
@@ -4515,6 +4510,29 @@ class SessionMonitor:
 
     # ── inotify tailer ────────────────────────────────────────────
 
+    async def _read_inotify(self, timeout: float) -> list:
+        """Wait on the inotify fd in the event loop, then read what is ready.
+
+        A ``to_thread`` read kept blocking for up to its 1 s timeout after
+        the tailer was cancelled, and loop teardown
+        (``shutdown_default_executor``) waited for it on every stop. The fd
+        is non-blocking, so once the loop reports it readable a zero-timeout
+        read returns at once; cancellation leaves no thread behind.
+        """
+        loop = asyncio.get_running_loop()
+        fd = self._inotify.fileno()
+        ready = loop.create_future()
+        loop.add_reader(fd, lambda: ready.done() or ready.set_result(None))
+        try:
+            await asyncio.wait({ready}, timeout=timeout)
+        finally:
+            loop.remove_reader(fd)
+            ready.cancel()
+        try:
+            return list(self._inotify.read(timeout=0))
+        except BlockingIOError:
+            return []
+
     async def _inotify_tailer_loop(self) -> None:
         """inotify-driven tailer — instant delivery on IN_MODIFY, 1s fallback tick.
 
@@ -4526,8 +4544,8 @@ class SessionMonitor:
         """
         while True:
             try:
-                # Block up to 1 s waiting for inotify events
-                events = await asyncio.to_thread(self._inotify.read, timeout=1000)
+                # Wait up to 1 s for inotify events
+                events = await self._read_inotify(1.0)
 
                 # Collect sessions whose JSONLs were modified
                 modified: set[str] = set()

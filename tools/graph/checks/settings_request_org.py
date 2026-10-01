@@ -132,6 +132,14 @@ class Violation:
 
 def find_violations_in_source(source: str, path: str = "<source>") -> list[Violation]:
     """Scan a single Python source string and return any violations."""
+    # A violation needs a call through a settings module name and the
+    # caller-org resolver, and both are identifiers that must appear
+    # literally. Skipping the parse for the ~99% of files with neither is
+    # what keeps the repo-wide scan fast; it cannot hide a violation.
+    if _CALLER_ORG_NAME not in source or not any(
+        name in source for name in _SETTINGS_MODULE_NAMES
+    ):
+        return []
     try:
         tree = ast.parse(source, filename=path)
     except SyntaxError:

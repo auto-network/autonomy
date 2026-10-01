@@ -44,6 +44,10 @@ def test_primer_includes_comments(monkeypatch):
         ],
     }
     monkeypatch.setattr(dao_beads, "get_bead", lambda _id: bead)
+    # Related-bead discovery shells out to `bd find-duplicates` against the
+    # live tracker (16s, and not hermetic); comment rendering does not use it.
+    from tools.graph import primer as primer_mod
+    monkeypatch.setattr(primer_mod, "_run_bd", lambda *_a, **_k: "")
 
     primer = generate_primer("auto-1v0o")
     assert "Coordination channel" in primer, \

@@ -145,13 +145,16 @@ def test_an_origin_missing_from_the_map_is_replayed_whole_on_every_pull(tmp_path
     try:
         for i in range(5):
             _write_local(db, catalog, BASE + 10**9 + i * 1_000, f"local:{i:032x}")
-        third = _remote_origin(db, tmp_path, "third", 1_500, BASE)
+        # 450 spans three SERVE_PAGE_TRANSACTIONS (200) pages; the count is
+        # exact, so a larger origin proves nothing more and costs ~3 ms per
+        # transaction group served.
+        third = _remote_origin(db, tmp_path, "third", 450, BASE)
         store = SQLiteFleetSyncStore(tmp_path / "serve.db")
         bounds, _floors = store.serve_snapshot()
         watermarks = {me: BASE + 10**9 + 2 * 1_000}     # the puller needs 2 of mine; it never names `third`
         first = serve_counts(store, _OriginPager(store, watermarks, None, bounds=bounds))
         again = serve_counts(store, _OriginPager(store, watermarks, None, bounds=bounds))
-        assert first["walked"] == 2 + 1_500 and first["sent_frames"] == 2 + 1_500
+        assert first["walked"] == 2 + 450 and first["sent_frames"] == 2 + 450
         assert again == first, "the same pull costs the same again: nothing the serve does advances it"
     finally:
         db.close()
@@ -163,15 +166,15 @@ def test_a_follower_whose_cursor_does_not_advance_is_re_served_everything(tmp_pa
     span each time."""
     db, catalog, me = _store(tmp_path)
     try:
-        _remote_origin(db, tmp_path, "fourth", 2_000, BASE)
+        _remote_origin(db, tmp_path, "fourth", 600, BASE)    # > 2 pages above the cursor
         for i in range(100):
             _write_local(db, catalog, BASE + 5 * 10**6 + i * 1_000, f"local:{i:032x}")
         store = SQLiteFleetSyncStore(tmp_path / "serve.db")
         bounds, _floors = store.serve_snapshot()
         frontier = BASE + 5 * 10**6 + 99 * 1_000
-        stale_cursor = BASE + 1_000 * 1_000        # a thousand transactions in
+        stale_cursor = BASE + 300 * 1_000          # three hundred transactions in
         counts = serve_counts(store, _FollowPager(store, stale_cursor, frontier, bounds=bounds))
-        assert counts["walked"] == 999 + 100 and counts["sent_frames"] == 999 + 100   # strictly above the cursor
+        assert counts["walked"] == 299 + 100 and counts["sent_frames"] == 299 + 100   # strictly above the cursor
         again = serve_counts(store, _FollowPager(store, stale_cursor, frontier, bounds=bounds))
         assert again == counts
     finally:

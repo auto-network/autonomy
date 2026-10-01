@@ -5,6 +5,9 @@ const { JSDOM } = createRequire(import.meta.url)('jsdom');
 import { mintPasswordArmor } from '../static/js/ceremony/root-factor-policy.js';
 import { bytesToHex } from '../static/js/ceremony/primitives.js';
 import { openLinkCentralApproval, linkReviewState, operateLinkDirectly } from '../static/js/components/link-central-approval.js';
+import {setCachedConfirmDelayForTest} from '../static/js/components/approval-experiment.js';
+// The 1.5s green-Authorize cancel window is exercised in approval_dialog.test.mjs.
+setCachedConfirmDelayForTest(1);
 
 // Ported from the retired Worktrees link-sheet tests in approval_adapters.test.mjs
 // (auto-fkhq0.10a). Same authority and signing; the Central order is Grant

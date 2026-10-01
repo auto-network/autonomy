@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {openExternalServiceCentralApproval, serviceReviewState} from '../static/js/components/external-service-central-approval.js';
+import {setCachedConfirmDelayForTest} from '../static/js/components/approval-experiment.js';
+// The 1.5s green-Authorize cancel window is exercised in approval_dialog.test.mjs.
+setCachedConfirmDelayForTest(1);
 const {JSDOM}=createRequire(import.meta.url)('jsdom');
 // Ported from the retired service_approval.test.mjs (auto-fkhq0.26).
 let dom,calls,result;
@@ -33,7 +36,7 @@ test('review and cancel use no authenticator or decision; the green grace can be
   assert.doesNotMatch(q('#review').textContent,/global_operator_dropbox|\/api\/dropbox/);
   q('#primary').click();assert.ok(q('#primary').classList.contains('pending'));
   q('#primary').click();assert.equal(q('#primary').textContent,'Authorize');
-  q('#close').click();await new Promise(r=>setTimeout(r,1550));assert.equal(posts().length,0);
+  q('#close').click();await new Promise(r=>setTimeout(r,50));assert.equal(posts().length,0);
 });
 
 for(const value of ['86400','604800','2592000','31536000','315360000',''])test('duration '+(value||'Never')+' reaches the Grant and the receipt',async()=>{

@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from tools.dashboard.tests import fixtures
+from tools.dashboard.test_lib.polling import wait_until
 from tools.dashboard.tests._xdist import bind_free_port, worker_test_port
 
 
@@ -170,7 +171,8 @@ class ViewerTestHarness:
         ab_raw("close")
         ab_raw("open", f"http://localhost:{TEST_PORT}/design/{self.exp_id}",
                "--ignore-https-errors")
-        time.sleep(2)
+        wait_until(lambda: ab_eval("return !!document.getElementById('sidebar');"),
+                   lambda ready: ready is True)
         ab_raw("set", "viewport", "390", "844")
         time.sleep(0.5)
         # Hide sidebar for mobile-style experiment view
@@ -191,7 +193,14 @@ class ViewerTestHarness:
             }
             return 'not found';
         """)
-        time.sleep(1)
+        wait_until(lambda: ab_eval("""
+            var els = document.querySelectorAll('[x-data]');
+            for (var i=0; i<els.length; i++) {
+                var d = els[i]._x_dataStack && els[i]._x_dataStack[0];
+                if (d && d.chatSessions && d.chatSessions.length) return true;
+            }
+            return false;
+        """), lambda ready: ready is True, timeout=10)
 
     def connect_session(self, session_id=None):
         """Connect to a session in the experiment chat panel."""
@@ -217,7 +226,6 @@ class ViewerTestHarness:
                 if (d && d.disconnectSession) { d.disconnectSession(); return; }
             }
         """)
-        time.sleep(0.5)
 
     def visible_text(self):
         """Get all visible text on the page.
@@ -403,8 +411,7 @@ class TestSessionDetailPage:
     def test_entries_visible(self, h):
         """Session detail page shows parsed conversation entries."""
         h.open_session_page("autonomy", "auto-test-live")
-        time.sleep(2)
-        text = h.visible_text()
+        text = wait_until(h.visible_text, lambda t: "help" in t.lower())
         # The mock entries include user text "Hello, can you help me with this task?"
         # and assistant text "Of course! I'd be happy to help."
         assert "help" in text.lower(), (
@@ -441,7 +448,8 @@ class TestSessionDetailPage:
         by auto-vl46's integration tests against the real registry.
         """
         h.open_session_page("autonomy", "auto-test-dead")
-        time.sleep(2)
+        wait_until(lambda: h.session_store_state("auto-test-dead"),
+                   lambda st: st is None or st.get("loaded") is True)
         # Verify the page loads and shows content
         text = h.visible_text()
         assert len(text) > 20, f"Dead session page should show content. Visible: {text[:200]}"
@@ -467,8 +475,7 @@ class TestExperimentPanel:
         session_id = h.connect_session("auto-test-live")
         assert session_id, "Failed to connect to session"
         # SSE-populated state needs time to load entries
-        time.sleep(5)
-        result = h.chat_entry_count()
+        result = wait_until(h.chat_entry_count, lambda r: r["count"] > 0)
         assert result["count"] > 0, (
             f"Experiment panel should show entries after connecting. "
             f"Status: {result['status']}. "
@@ -478,8 +485,7 @@ class TestExperimentPanel:
     def test_disconnect_returns_to_picker(self, h):
         """Disconnect → picker visible again."""
         h.disconnect()
-        time.sleep(1)
-        picker_visible = h.is_picker_visible()
+        picker_visible = wait_until(h.is_picker_visible, lambda v: v is True, timeout=10)
         assert picker_visible is True, (
             "After disconnect, session picker should be visible"
         )
@@ -488,11 +494,10 @@ class TestExperimentPanel:
         """Connected session shows prime icon or button."""
         h.open_picker()
         h.connect_session("auto-test-live")
-        time.sleep(3)
+        result = wait_until(h.chat_entry_count, lambda r: r["count"] > 0)
         text = h.visible_text()
         # The primer button may be a small icon — check for any primer-related text
         # or just verify the panel is in connected state with entries
-        result = h.chat_entry_count()
         # This is a soft check — primer button may not have visible text
         assert result["count"] > 0 or "prime" in text.lower() or len(text) > 50, (
             "Connected panel should show content or primer affordance"
@@ -522,7 +527,8 @@ class TestOverlayPanel:
         ab_raw("close")
         ab_raw("open", f"http://localhost:{TEST_PORT}/dispatch",
                "--ignore-https-errors")
-        time.sleep(3)
+        wait_until(lambda: ab_eval("return typeof window._livePanelLoad === 'function';"),
+                   lambda ready: ready is True)
 
     def test_overlay_opens_from_dispatch(self, h):
         """Click Live Trace → unified-viewer overlay appears with entries.
@@ -544,10 +550,10 @@ class TestOverlayPanel:
             "Overlay globals not registered on /dispatch page."
         )
 
-        # Give overlay ~6s to resolve runDir → sessionId → fetch entries
-        time.sleep(6)
-
-        state = h.overlay_state()
+        # The overlay resolves runDir → sessionId → fetches entries.
+        state = wait_until(h.overlay_state,
+                           lambda st: isinstance(st, dict) and st.get("rendered")
+                           and st.get("hasConfigure") is True and st.get("entries", 0) > 0)
         assert isinstance(state, dict) and state.get("rendered"), (
             f"Overlay did not render a .session-viewer panel; got {state!r}."
         )
@@ -577,9 +583,9 @@ class TestOverlayPanel:
         assert opened == "called", (
             f"window._livePanelLoad missing; got {opened!r}."
         )
-        time.sleep(6)
-
-        state = h.overlay_state()
+        state = wait_until(h.overlay_state,
+                           lambda st: isinstance(st, dict) and st.get("rendered")
+                           and st.get("hasConfigure") is True and st.get("entries", 0) > 0)
         assert isinstance(state, dict) and state.get("rendered"), (
             f"Overlay did not render; got {state!r}."
         )
@@ -604,10 +610,10 @@ class TestOverlayPanel:
 
         opened = h.open_overlay(_OVERLAY_LIVE_RUN_DIR, is_live=True)
         assert opened == "called", f"open_overlay failed: {opened!r}"
-        time.sleep(3)
 
         # Sanity: overlay is rendered
-        before = h.overlay_state()
+        before = wait_until(h.overlay_state,
+                            lambda st: isinstance(st, dict) and st.get("rendered"))
         assert before.get("rendered"), f"Overlay never opened; state={before!r}"
 
         # Close it
@@ -616,10 +622,8 @@ class TestOverlayPanel:
             f"No overlay close hook available; got {closed!r}. "
             "Expected window._livePanelReset or a clickable close button."
         )
-        time.sleep(2)
-
         # After close: overlay panel should no longer be visible
-        after = ab_eval("""
+        after = wait_until(lambda: ab_eval("""
             var viewers = document.querySelectorAll('.session-viewer');
             var visible = 0;
             for (var i = 0; i < viewers.length; i++) {
@@ -631,7 +635,7 @@ class TestOverlayPanel:
                 }
             }
             return visible;
-        """)
+        """), lambda n: n == 0, timeout=10)
         assert after == 0, (
             f"After close, {after} overlay-mode viewer(s) still visible. "
             "Close hook did not hide/remove the overlay. "

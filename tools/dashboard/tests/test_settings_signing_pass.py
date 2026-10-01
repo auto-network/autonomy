@@ -188,10 +188,10 @@ def test_the_pass_does_not_hold_up_a_concurrent_reader_on_the_pooled_connection(
     # the pass takes long enough to overlap the reader.
     signer = settings_ops._SIGNER_PROVIDER
     settings_ops.install_signer_provider(lambda org: None)
-    for i in range(1500):
+    for i in range(800):
         settings_ops.add_setting(SET_ID, 1, f"bulk{i}", {"label": str(i)}, org=ORG)
     settings_ops.install_signer_provider(signer)
-    monkeypatch.setattr(pass_module, "CHUNK_ROWS", 100)
+    monkeypatch.setattr(pass_module, "CHUNK_ROWS", 50)
     reads: list[float] = []
     stop = threading.Event()
 
@@ -206,11 +206,13 @@ def test_the_pass_does_not_hold_up_a_concurrent_reader_on_the_pooled_connection(
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
     try:
-        report = pass_module.sign_org_store(ORG, apply=True, chunk_rows=100, pause_s=0.001)
+        report = pass_module.sign_org_store(ORG, apply=True, chunk_rows=50, pause_s=0.001)
     finally:
         stop.set()
         thread.join(timeout=5)
-    assert report["signed"] >= 1500 and report["transactions"] >= 15
+    # 800 rows in 50-row chunks: the same 16 commits for the reader to
+    # overlap as 1500 in 100s, at half the rows to write and sign.
+    assert report["signed"] >= 800 and report["transactions"] >= 16
     assert reads, "the reader never ran"
     # No single read waited on the pass for more than a chunk's write.
     assert max(reads) < 0.25, f"slowest concurrent read {max(reads):.3f}s over {len(reads)} reads"

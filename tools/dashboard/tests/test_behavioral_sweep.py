@@ -48,6 +48,7 @@ from tools.dashboard.test_lib.l2b_harness import (
     start_mock_server,
     stop_mock_server,
 )
+from tools.dashboard.test_lib.polling import wait_until
 from tools.dashboard.tests._xdist import worker_test_port
 from tools.network.idkit import (
     DelegationCert,
@@ -2239,7 +2240,7 @@ def browser(sweep_server):
         }}) + "\n")
 
     # Give Alpine + HTTP fallback + SSE events time to propagate
-    time.sleep(1.5)
+    _await_seeded_sse()
     yield sweep_server
     close_browser()
 
@@ -2313,8 +2314,13 @@ def _hard_reset_sweep(sweep_server: dict) -> None:
     new server reuses the same per-worker port — uvicorn opens its
     socket with ``SO_REUSEADDR``, so the rebind succeeds even if the
     OS hasn't finished tearing down the prior listener.
+
+    The browser is NOT closed: ``open_browser`` on the running daemon is a
+    full page navigation to the new server, which discards the tab's JS
+    state, Alpine listeners and EventSource just as a close would, without
+    paying a Chromium cold start (~1.3s) on each of the sweep's resets. A
+    daemon too degraded to navigate still rotates to a fresh one below.
     """
-    close_browser()
     stop_mock_server(sweep_server)
 
     # The previous uvicorn snapshotted its EventBus state to
@@ -2354,7 +2360,20 @@ def _hard_reset_sweep(sweep_server: dict) -> None:
         f.write(json.dumps({"topic": "nav", "data": {
             "open_beads": 3, "running_agents": 1, "approved_waiting": 1,
         }}) + "\n")
-    time.sleep(1.5)
+    _await_seeded_sse()
+
+
+def _await_seeded_sse() -> None:
+    """Wait for the seeded dispatch + nav topics to reach the page's SSE
+    cache, then for Alpine's render pass to go quiet. Replaces a fixed 1.5s
+    sleep; the mock event watcher polls every 0.5s."""
+    wait_until(
+        lambda: _ab_eval_batch(
+            "return !!(window._sseCache && window._sseCache.dispatch"
+            " && window._sseCache.nav);"),
+        lambda ready: ready is True, timeout=10,
+    )
+    wait_dom_idle(ceiling_ms=1500)
 
 
 # ── Sessions page JS check bundle ────────────────────────────────────

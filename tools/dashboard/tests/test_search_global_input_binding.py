@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from tools.dashboard.test_lib.l2b_harness import wait_dom_idle
+from tools.dashboard.test_lib.polling import wait_until
 from tools.dashboard.tests._xdist import spawn_mock_uvicorn, worker_test_port
 
 
@@ -160,9 +162,16 @@ def _open(path):
         f"http://localhost:{TEST_PORT}{path}",
         "--ignore-https-errors",
     )
-    time.sleep(2.5)
+    # Wait until the shell has rendered and the DOM has gone quiet (never
+    # longer than the fixed 2.5s this replaced), then re-settle after the
+    # viewport change.
+    wait_until(lambda: ab_eval(
+        "return !!(window.Alpine && document.getElementById('global-search')"
+        " && document.querySelector('header[data-app-chrome]'));"),
+        lambda ready: ready is True, timeout=10)
+    wait_dom_idle(ceiling_ms=2500)
     ab_raw("set", "viewport", "390", "844")
-    time.sleep(0.5)
+    wait_dom_idle(idle_ms=150, ceiling_ms=500)
 
 
 # ── 1. Compact shell lifecycle ────────────────────────────────────────
@@ -512,11 +521,10 @@ class TestGlobalInputOnSearchPage:
         the chrome's canonical query input always reflects the live q."""
         _open("/search?q=foo")
         # Allow the Alpine init() to run and call _syncGlobalInput().
-        time.sleep(0.5)
-        gs_value = ab_eval("""
+        gs_value = wait_until(lambda: ab_eval("""
             var gs = document.getElementById('global-search');
             return gs ? gs.value : null;
-        """)
+        """), lambda v: v == "foo", timeout=5)
         assert gs_value == "foo", (
             f"expected #global-search.value='foo' on landing, got {gs_value!r}"
         )
@@ -534,8 +542,6 @@ class TestGlobalInputOffSearchPage:
         e1d90e9c Enter on /sessions runs that page's own transcript search
         and never leaves it."""
         _open("/dispatch")
-        # Wait for the SPA to render before driving the input.
-        time.sleep(1.0)
         ab_eval("""
             var gs = document.getElementById('global-search');
             gs.value = 'navtest';
@@ -546,12 +552,12 @@ class TestGlobalInputOffSearchPage:
             gs.dispatchEvent(ev);
             return true;
         """)
-        # Wait a beat for navigateTo() to push the new URL + render.
-        time.sleep(1.0)
-        url_info = ab_eval("""
+        # Wait for navigateTo() to push the new URL + render.
+        url_info = wait_until(lambda: ab_eval("""
             var u = new URL(window.location.href);
             return { path: u.pathname, q: u.searchParams.get('q') };
-        """)
+        """),
+                              lambda u: u.get("path") == "/search", timeout=10)
         assert url_info, "eval returned nothing after Enter"
         assert url_info.get("path") == "/search", (
             f"Enter off /search should navigate to /search, got {url_info!r}"
@@ -564,7 +570,6 @@ class TestGlobalInputOffSearchPage:
         """Navigating into /search from another page must still initialize
         the search fragment's Alpine root."""
         _open("/dispatch")
-        time.sleep(1.0)
         ab_eval("""
             var gs = document.getElementById('global-search');
             gs.value = 'navinit';
@@ -574,8 +579,7 @@ class TestGlobalInputOffSearchPage:
             }));
             return true;
         """)
-        time.sleep(1.0)
-        result = ab_eval("""
+        result = wait_until(lambda: ab_eval("""
             var u = new URL(window.location.href);
             var root = document.querySelector('[x-data^="searchPage"]');
             var data = root && root._x_dataStack ? root._x_dataStack[0] : null;
@@ -586,7 +590,8 @@ class TestGlobalInputOffSearchPage:
                 query: data ? data.query : null,
                 loaded: data ? data.loaded : null
             };
-        """)
+        """), lambda r: r.get("path") == "/search" and r.get("initialized") is True
+            and r.get("query") == "navinit", timeout=10)
         assert result, "eval returned nothing after cross-page search nav"
         assert result.get("path") == "/search", (
             f"expected /search after Enter nav, got {result!r}"

@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from tools.dashboard.tests import fixtures
+from tools.dashboard.test_lib.polling import wait_until
 from tools.dashboard.tests.fixtures import make_session
 # Read the port through the module at call time: the harness binds an
 # OS-assigned port in start_server() by rebinding test_browser.TEST_PORT,
@@ -173,7 +174,8 @@ class TestOverlayUpdatesLiveOnRunningDispatch:
         ab_raw("close")
         ab_raw("open", f"http://localhost:{_sessions_browser.TEST_PORT}/dispatch",
                "--ignore-https-errors")
-        time.sleep(3)
+        wait_until(lambda: ab_eval("return typeof window._livePanelLoad === 'function';"),
+                   lambda ready: ready is True)
 
         # Trigger overlay via window._livePanelLoad — the dispatch page wires
         # this up automatically when clicking Live Trace; call directly to avoid
@@ -190,8 +192,19 @@ class TestOverlayUpdatesLiveOnRunningDispatch:
             "Overlay wiring is missing on /dispatch page."
         )
 
-        # Read initial entry count from overlay state
-        time.sleep(2)
+        # Read initial entry count once the overlay has finished its load.
+        def _overlay_ready():
+            return ab_eval("""
+                var panels = document.querySelectorAll('[x-data]');
+                for (var i=0; i<panels.length; i++) {
+                    var d = panels[i]._x_dataStack && panels[i]._x_dataStack[0];
+                    if (d && Array.isArray(d.entries) && d.configure) {
+                        return d.state === 'ready' && d.entries.length > 0;
+                    }
+                }
+                return false;
+            """)
+        wait_until(_overlay_ready, lambda ready: ready is True, timeout=10)
         initial = ab_eval("""
             var panels = document.querySelectorAll('[x-data]');
             for (var i=0; i<panels.length; i++) {
@@ -223,10 +236,8 @@ class TestOverlayUpdatesLiveOnRunningDispatch:
                 }],
             },
         )
-        # Mock watcher polls every 500ms; give it a couple cycles plus SSE delivery.
-        time.sleep(3)
-
-        final = ab_eval("""
+        # Mock watcher polls every 500ms; wait for its cycle plus SSE delivery.
+        final = wait_until(lambda: ab_eval("""
             var panels = document.querySelectorAll('[x-data]');
             for (var i=0; i<panels.length; i++) {
                 var d = panels[i]._x_dataStack && panels[i]._x_dataStack[0];
@@ -235,7 +246,8 @@ class TestOverlayUpdatesLiveOnRunningDispatch:
                 }
             }
             return -1;
-        """)
+        """),
+            lambda n: isinstance(n, (int, float)) and n > initial, timeout=10)
 
         assert isinstance(final, (int, float)) and final > initial, (
             f"Overlay entry count did not grow over 10s "
@@ -261,7 +273,9 @@ class TestRecentDispatchCardClickResolvesViewer:
         ab_raw("close")
         ab_raw("open", f"http://localhost:{_sessions_browser.TEST_PORT}/sessions",
                "--ignore-https-errors")
-        time.sleep(3)
+        wait_until(lambda: ab_eval(
+            "return document.querySelectorAll('[data-testid=recent-session-row]').length;"),
+            lambda n: isinstance(n, int) and n > 0)
 
         # Click the Recent dispatch card by its row data-testid
         clicked = ab_eval("""
@@ -278,16 +292,16 @@ class TestRecentDispatchCardClickResolvesViewer:
             f"Recent dispatch row not found on /sessions; got {clicked!r}. "
             "Mock fixture not rendering or Recent-loop broken."
         )
-        time.sleep(3)
 
-        url = ab_eval("return window.location.pathname")
+        url = wait_until(lambda: ab_eval("return window.location.pathname"),
+                         lambda u: isinstance(u, str) and "/session/" in u)
         assert isinstance(url, str) and "/session/" in url, (
             f"After Recent-card click, URL did not navigate to /session/...; "
             f"got {url!r}."
         )
 
         # Viewer must render with label as title + entries visible
-        state = ab_eval("""
+        state = wait_until(lambda: ab_eval("""
             var v = document.querySelector('.session-viewer');
             if (!v) return {error: 'no_viewer'};
             var cmp = typeof Alpine !== 'undefined' ? Alpine.$data(v) : null;
@@ -298,7 +312,9 @@ class TestRecentDispatchCardClickResolvesViewer:
                 entries: Array.isArray(cmp.entries) ? cmp.entries.length : -1,
                 errorMsg: cmp.errorMsg || ''
             };
-        """)
+        """),
+                           lambda st: isinstance(st, dict) and st.get("state") == "ready"
+                           and st.get("entries", 0) >= 1)
         assert isinstance(state, dict), f"Could not inspect viewer: {state!r}"
         assert state.get("state") == "ready", (
             f"Viewer state={state.get('state')!r}, errorMsg={state.get('errorMsg')!r}. "
@@ -328,7 +344,9 @@ class TestRecentLibrarianCardClickResolvesViewer:
         ab_raw("close")
         ab_raw("open", f"http://localhost:{_sessions_browser.TEST_PORT}/sessions",
                "--ignore-https-errors")
-        time.sleep(3)
+        wait_until(lambda: ab_eval(
+            "return document.querySelectorAll('[data-testid=recent-session-row]').length;"),
+            lambda n: isinstance(n, int) and n > 0)
 
         clicked = ab_eval("""
             var rows = document.querySelectorAll('[data-testid="recent-session-row"]');
@@ -344,9 +362,8 @@ class TestRecentLibrarianCardClickResolvesViewer:
         assert clicked == "clicked", (
             f"Recent librarian row not found; got {clicked!r}."
         )
-        time.sleep(3)
 
-        state = ab_eval("""
+        state = wait_until(lambda: ab_eval("""
             var v = document.querySelector('.session-viewer');
             if (!v) return {error: 'no_viewer'};
             var cmp = typeof Alpine !== 'undefined' ? Alpine.$data(v) : null;
@@ -357,7 +374,9 @@ class TestRecentLibrarianCardClickResolvesViewer:
                 entries: Array.isArray(cmp.entries) ? cmp.entries.length : -1,
                 errorMsg: cmp.errorMsg || ''
             };
-        """)
+        """),
+                           lambda st: isinstance(st, dict) and st.get("state") == "ready"
+                           and st.get("entries", 0) >= 1)
         assert isinstance(state, dict), f"Could not inspect viewer: {state!r}"
         assert state.get("state") == "ready", (
             f"Viewer state={state.get('state')!r}, errorMsg={state.get('errorMsg')!r}. "
@@ -387,7 +406,9 @@ class TestNoPhantomAfterRecentClick:
         ab_raw("close")
         ab_raw("open", f"http://localhost:{_sessions_browser.TEST_PORT}/sessions",
                "--ignore-https-errors")
-        time.sleep(3)
+        wait_until(lambda: ab_eval(
+            "return document.querySelectorAll('[data-testid=recent-session-row]').length;"),
+            lambda n: isinstance(n, int) and n > 0)
 
         # Click the dispatch Recent row
         ab_eval("""
@@ -400,7 +421,8 @@ class TestNoPhantomAfterRecentClick:
             }
             return 'not_found';
         """)
-        time.sleep(2)
+        wait_until(lambda: ab_eval("return window.location.pathname"),
+                   lambda u: isinstance(u, str) and "/session/" in u)
 
         # Navigate back
         ab_eval("window.history.back(); return 'back';")

@@ -42,6 +42,7 @@ function-scoped string-pool inspection catches the dynamic
 from __future__ import annotations
 
 import ast
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -88,30 +89,37 @@ class Violation:
 
 def find_violations_in_source(source: str, path: str = "<source>") -> list[Violation]:
     """Scan a single Python source string and return any violations."""
+    # A call site is ``subprocess.<attr>(...)``, so the bare name must appear
+    # in the text. Skipping the parse for the ~85% of files without it is
+    # what keeps the repo-wide scan fast; it cannot hide a violation.
+    if "subprocess" not in source:
+        return []
     try:
         tree = ast.parse(source, filename=path)
     except SyntaxError:
         return []
 
-    parents: dict[int, ast.AST] = {}
-    for parent in ast.walk(tree):
-        for child in ast.iter_child_nodes(parent):
-            parents[id(child)] = parent
+    # One traversal: every subprocess call, grouped by its enclosing
+    # function (or module) scope, in ``ast.walk`` order. The scope of a
+    # node is the nearest FunctionDef/AsyncFunctionDef strictly above it.
+    calls: list[tuple[ast.Call, ast.AST]] = []
+    queue: deque[tuple[ast.AST, ast.AST]] = deque([(tree, tree)])
+    while queue:
+        node, scope = queue.popleft()
+        if isinstance(node, ast.Call) and _is_subprocess_call(node):
+            calls.append((node, scope))
+        child_scope = (
+            node if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else scope
+        )
+        for child in ast.iter_child_nodes(node):
+            queue.append((child, child_scope))
 
-    def enclosing_scope(node: ast.AST) -> ast.AST:
-        cur: ast.AST = node
-        while id(cur) in parents:
-            cur = parents[id(cur)]
-            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
-                return cur
-        return tree
-
+    pools: dict[int, set[str]] = {}
     violations: list[Violation] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not _is_subprocess_call(node):
-            continue
-        scope = enclosing_scope(node)
-        pool = _string_pool(scope)
+    for node, scope in calls:
+        pool = pools.get(id(scope))
+        if pool is None:
+            pool = pools[id(scope)] = _string_pool(scope)
         if not _looks_like_graph_cli(node, scope, pool):
             continue
         if "--db" not in pool:

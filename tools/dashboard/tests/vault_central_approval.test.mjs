@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {openVaultCentralApproval, vaultReviewState} from '../static/js/components/vault-central-approval.js';
+import {setCachedConfirmDelayForTest} from '../static/js/components/approval-experiment.js';
+// The 1.5s green-Authorize cancel window is exercised in approval_dialog.test.mjs.
+setCachedConfirmDelayForTest(1);
 const {JSDOM}=createRequire(import.meta.url)('jsdom');
 let dom,calls,result,delivery;
 const CEK='ab'.repeat(32);

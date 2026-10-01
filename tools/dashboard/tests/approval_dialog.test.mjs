@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
 import { openApprovalDialog, localHref } from '../static/js/components/approval-dialog.js';
+import { setCachedConfirmDelayForTest } from '../static/js/components/approval-experiment.js';
+// A short window keeps the cancel test's real wait small; it still has to
+// outlast the window for the no-authorize assertion to mean anything.
+setCachedConfirmDelayForTest(100);
 
 let dom, handle;
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -85,7 +89,7 @@ test('green authorization can be cancelled by second tap or Cancel before any au
     assert.equal(q('#primary').textContent, 'Authorize');
     handle.close();
   }
-  await new Promise(resolve => setTimeout(resolve, 1550));
+  await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(calls, 0);
 });
 

@@ -17,6 +17,7 @@ Provides:
 - test_client: httpx AsyncClient for API tests
 - browser: agent-browser helper for UI tests
 """
+import asyncio
 import json
 import os
 import sqlite3
@@ -248,6 +249,25 @@ def _refuse_real_data_fallback(monkeypatch):
     (dashboard tests), so graph tests on the same worker are unaffected.
     """
     monkeypatch.setenv("AUTONOMY_REFUSE_REAL_DATA_FALLBACK", "1")
+
+
+@pytest.fixture(autouse=True)
+def _idle_browser_broker_reconciler(monkeypatch):
+    """Every app boot activated the browser plugin's lease reconciler, which
+    shells out to the real ``docker`` CLI (network inspect/create, container
+    list) — about half of each TestClient boot, and it created a real
+    ``autonomy_leases`` network on the test machine. No test here exercises
+    the reconciler (its own tests live in plugins/browser/tests), so it idles
+    the way it already does under DASHBOARD_MOCK."""
+    try:
+        from tools.dashboard.plugins.browser import reconciler
+    except Exception:
+        return
+
+    async def _idle():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(reconciler, "run_forever", _idle)
 
 
 @pytest.fixture(autouse=True)

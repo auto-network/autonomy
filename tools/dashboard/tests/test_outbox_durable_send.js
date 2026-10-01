@@ -9,7 +9,7 @@
  *
  * Run: node --test tools/dashboard/tests/test_outbox_durable_send.js
  */
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
@@ -43,10 +43,25 @@ function harness() {
     store(name, obj) { if (obj !== undefined) { stores[name] = obj; return obj; } return stores[name]; },
     watch() { return function () {}; },
   };
+  // The engine arms real confirm/retry timers (seconds long). The tests drive
+  // the engine directly and never wait on them, so each harness tracks its
+  // timers and clears them afterwards; otherwise they held the process open
+  // for ~9s after the last test finished.
+  // A promise settling after the test ended can still arm one, so a disposed
+  // harness arms nothing.
+  const timers = new Set();
+  let disposed = false;
+  const track = (arm) => (...args) => {
+    if (disposed) return 0;
+    const t = arm(...args); timers.add(t); return t;
+  };
   const sandbox = {
     window: windowObj, document, Alpine: alpine,
     fetch: (url, opts) => { fetchCalls.push({ url, opts }); return fetchImpl(url, opts); },
-    console, setTimeout, clearTimeout, setInterval, clearInterval,
+    console,
+    setTimeout: track(setTimeout),
+    setInterval: track(setInterval),
+    clearTimeout, clearInterval,
     URLSearchParams, JSON, Object, Array, Date, Math,
   };
   vm.createContext(sandbox);
@@ -66,6 +81,7 @@ function harness() {
   return {
     windowObj, document, stores, makeViewer, fetchCalls,
     setFetch: (fn) => { fetchImpl = fn; },
+    dispose: () => { disposed = true; for (const t of timers) { clearTimeout(t); clearInterval(t); } },
   };
 }
 
@@ -77,6 +93,7 @@ describe('outbox durable send + reconciliation', () => {
     store.isLive = true; store.sessionType = 'container';
     v = h.makeViewer('auto-test');
   });
+  afterEach(() => h.dispose());
 
   it('persists the outbox to localStorage BEFORE the POST', async () => {
     store.outbox = { localId: 'ob_a', state: 'sending', source: 'manual', text: 'hello world', ts: 1 };
@@ -275,6 +292,7 @@ describe('contract lifecycle end-to-end (cbb8497c-a1f)', () => {
     store.isLive = true; store.sessionType = 'container'; store.entries = [];
     v = h.makeViewer('auto-test');
   });
+  afterEach(() => h.dispose());
 
   it('voice capturing -> send-flip -> watcher commits -> reconcile on log echo', async () => {
     // 1. CAPTURING — voice sets the outbox live (newOutboxId at capture start).
@@ -321,6 +339,7 @@ describe('contract lifecycle end-to-end (cbb8497c-a1f)', () => {
 describe('outboxPendingState (activity-dot pending ring)', () => {
   let h, store;
   beforeEach(() => { h = harness(); store = h.windowObj.getSessionStore('auto-test'); });
+  afterEach(() => h.dispose());
 
   it('empty when there is no pending message', () => {
     assert.equal(h.windowObj.outboxPendingState('auto-test'), '');
