@@ -63,5 +63,4 @@ test('elsewhere and collection states say so and offer no decision',async()=>{
   assert.match(q('#review-unavailable').textContent,/This device enrolled with Office NUC; decide it there\./);
   assert.equal(serviceReviewState({state:'awaiting_collection'},[]).unavailable,'Allowed. The device picks up its access when it next checks in.');
   assert.equal(serviceReviewState({state:'delivered'},[]).unavailable,'The device has its access.');
-  assert.equal(serviceReviewState({state:'expired_undelivered'},[]).unavailable,'Allowed, but the device did not check in within 30 minutes; enroll it again.');
 });

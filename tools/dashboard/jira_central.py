@@ -15,9 +15,9 @@ checkpoint 2026-09-28).
   sha256. The review carries the text whole when it fits (``complete``) and a
   prefix otherwise; the whole content is served only by the accepting
   machine (:meth:`JiraWriteDesk.content`), sha256-verified on every read.
-- Execution happens once, on the accepting machine, within
-  :data:`EXECUTE_WINDOW_SECONDS` of the Grant: the machine-homed journal row
-  (``autonomy.machine.jira-write``) is claimed before the Jira call. A claim
+- Execution happens once, on the accepting machine, when the Grant reaches
+  it: the machine-homed journal row (``autonomy.machine.jira-write``) is
+  claimed before the Jira call. A claim
   left by a stopped process is settled per op: value-setting ops are
   re-applied once (``reapplied_after_restart``; this can overwrite a human
   edit made in between), a transition is reconciled against the issue's
@@ -74,7 +74,6 @@ APPLICATION_SCOPE = "jira"
 RENDERER_ID = "approval.jira_write.review"
 CONSUMER_ID = "jira_write.local_execute.v1"
 #: A Grant is executed only this long after the resolution.
-EXECUTE_WINDOW_SECONDS = 1800
 MAX_CONTENT_BYTES = 10 * 1024 * 1024
 #: Staged content awaiting a decision or its window, per requester and in all.
 MAX_STAGED_BYTES_PER_REQUESTER = 100 * 1024 * 1024
@@ -99,7 +98,6 @@ AWAITING = "awaiting_execution"
 DONE = "done"
 FAILED = "failed"
 UNKNOWN = "unknown"
-EXPIRED = "expired_unexecuted"
 ELSEWHERE = "elsewhere"
 
 #: Ops whose re-application after an interrupted claim sets the same value.
@@ -204,6 +202,7 @@ class Staging:
             raise JiraWriteError("content_mismatch")
         return data
 
+
     def approval_ids(self) -> list[str]:
         return [str(m["approval_id"]) for m in self._metas() if m.get("approval_id")]
 
@@ -213,7 +212,6 @@ class Staging:
                 path.unlink()
             except FileNotFoundError:
                 pass
-
 
 # ── planning ─────────────────────────────────────────────────────────
 
@@ -508,10 +506,6 @@ class JiraWriteDesk:
             return False
         return isinstance(destination, str) and hmac.compare_digest(destination, ours)
 
-    def _window_open(self, status: ApprovalStatus) -> bool:
-        resolved = float(status.resolution.payload["resolved_at"])
-        return self._clock() < resolved + EXECUTE_WINDOW_SECONDS
-
     def state(self, status: ApprovalStatus) -> tuple[str, dict]:
         payload = status.request.payload
         if payload.get("kind") != KIND:
@@ -527,8 +521,6 @@ class JiraWriteDesk:
         row = self._journal(status.request.approval_id)
         if row is not None and row.get("state") in (DONE, FAILED, UNKNOWN):
             return row["state"], row
-        if row is None and not self._window_open(status):
-            return EXPIRED, {}
         return AWAITING, row or {}
 
     def operator_result(self, status: ApprovalStatus) -> dict:
@@ -560,9 +552,6 @@ class JiraWriteDesk:
             return {"approved": True, "execution": {"ok": False, "error": row.get("error")}}
         if state == UNKNOWN:
             return {"approved": True, "execution": {"ok": False, "error": row.get("error")}}
-        if state == EXPIRED:
-            return {"approved": True, "execution": {
-                "ok": False, "error": "approved too late; nothing was sent to Jira. Ask again."}}
         return None
 
     # ── the write ──
@@ -623,6 +612,23 @@ class JiraWriteDesk:
                 return option.get("to_status") or None
         return None
 
+    def forget_settled(self) -> None:
+        """Delete staged content no write will read again: a request declined,
+        canceled or expired, or granted and already performed. Runs whenever a
+        Jira request event arrives, so nothing piles up against the quota."""
+        for approval_id in self.staging.approval_ids():
+            try:
+                status = self.approvals.status(approval_id)
+            except ApprovalServiceError:
+                self.staging.remove(approval_id)
+                continue
+            resolution = status.resolution
+            if resolution is None:
+                continue
+            if resolution.payload.get("outcome") != "granted" or \
+                    self.state(status)[0] in (DONE, FAILED, UNKNOWN):
+                self.staging.remove(approval_id)
+
     def materialize(self, status: ApprovalStatus) -> bool:
         payload = status.request.payload
         resolution = status.resolution
@@ -641,16 +647,13 @@ class JiraWriteDesk:
             existing = self._journal(approval_id)
             if existing is not None and existing.get("state") != "claimed":
                 return True
-            if existing is None and not self._window_open(status):
-                return False
             if existing is not None:
                 if self._owner_alive(existing):
                     # Another process holds this claim and is still running:
                     # it is in the middle of the call, not interrupted.
                     return True
                 # The process that claimed it is gone.
-                if existing.get("reapplied_after_restart") or request["op"] == "attach" \
-                        or not self._window_open(status):
+                if existing.get("reapplied_after_restart") or request["op"] == "attach":
                     self._record(approval_id, {**existing, "state": UNKNOWN,
                                                "finished_at": self._clock(),
                                                "owner_pid": None, "owner_start": None,
@@ -703,23 +706,6 @@ class JiraWriteDesk:
             finally:
                 self._inflight.discard(approval_id)
         return True
-
-    def prune(self) -> None:
-        """Forget staged content once its approval is terminal and past its window."""
-        now = self._clock()
-        for approval_id in self.staging.approval_ids():
-            try:
-                status = self.approvals.status(approval_id)
-            except (ApprovalServiceError, ValueError) as exc:
-                if getattr(exc, "code", "") == "not_found":
-                    self.staging.remove(approval_id)
-                continue
-            resolution = status.resolution
-            if resolution is None:
-                continue
-            if now >= float(resolution.payload["resolved_at"]) + EXECUTE_WINDOW_SECONDS \
-                    and approval_id not in self._inflight:
-                self.staging.remove(approval_id)
 
     # ── the operator's content route ──
 
@@ -807,11 +793,12 @@ class JiraWriteCoordinator(DashboardAccessCoordinator):
             return None
         if status.resolution is not None:
             self.desk.materialize(status)
+        self.desk.forget_settled()
         return status
 
 
 __all__ = [
-    "APPLICATION_SCOPE", "CONSUMER_ID", "EXECUTE_WINDOW_SECONDS", "KIND", "RENDERER_ID",
+    "APPLICATION_SCOPE", "CONSUMER_ID", "KIND", "RENDERER_ID",
     "JiraWriteCoordinator", "JiraWriteDesk", "JiraWriteError", "Staging",
     "build_approval_runtime", "inbox_text", "build_http_adapter",
     "plan_write", "result_destination_id",

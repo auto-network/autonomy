@@ -27,7 +27,6 @@ export function crosstalkReviewState(result, actions, review = {}) {
   if (state === 'awaiting_delivery') return {state, unavailable: 'Approved; delivering.'};
   if (state === 'delivered') return {state, unavailable: `Delivered to ${target}.`};
   if (state === 'delivery_failed') return {state, unavailable: `Not delivered: ${result.reason || 'unknown reason'}.`};
-  if (state === 'expired_undelivered') return {state, unavailable: 'Approved too late; the message was not delivered.'};
   if (state === 'superseded') return {state, unavailable: 'A newer message from this chat replaced this one.'};
   return {state, unavailable: (actions || []).includes('granted') ? '' : 'This request is no longer available.'};
 }

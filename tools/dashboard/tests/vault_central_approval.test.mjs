@@ -58,10 +58,10 @@ test('elsewhere: says where to release it and offers no ceremony',async()=>{
 });
 
 test('awaiting delivery: Deliver repeats the ceremony and posts only the delivery',async()=>{
-  result={state:'awaiting_delivery',machine_label:'Home',deliverable_until:1790566000};
+  result={state:'awaiting_delivery',machine_label:'Home'};
   await openVaultCentralApproval(item([]),opts);
   assert.equal(q('#title').textContent,'Deliver credential?');
-  assert.match(q('#facts').textContent,/Deliver by/);
+  assert.doesNotMatch(q('#facts').textContent,/Deliver by/);
   q('#primary').click();
   await until(()=>q('#result-title').textContent==='Credential released');
   assert.deepEqual(posts().map(p=>p.url),['/vault-open-delivery']);
@@ -85,7 +85,7 @@ test('decline records a decline and opens nothing',async()=>{
 });
 
 test('state wording for every delivery state',()=>{
-  assert.equal(vaultReviewState({state:'expired_undelivered'},[]).unavailable,'Approved, but the delivery window closed. The session must ask again.');
+  assert.equal(vaultReviewState({state:'session_gone'},[]).unavailable,'Approved, but the session ended before delivery. It must ask again.');
   assert.equal(vaultReviewState({state:'delivered'},[]).unavailable,'This credential was delivered.');
   assert.equal(vaultReviewState({state:'delivery_failed'},[]).deliver,false);
   assert.equal(vaultReviewState(null,['granted']).unavailable,'');

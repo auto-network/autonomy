@@ -18,8 +18,7 @@ machine-homed link-operation journal.
 
 - Only the accepting machine operates: the Dashboard that received the
   request (its frozen ``result_destination_id``).
-- A Grant is operable for :data:`OPERATION_WINDOW_SECONDS`, and the envelope
-  must be signed no earlier than the Grant.
+- The envelope must be signed no earlier than the Grant.
 - The requester's result stays null until the operation is recorded.
 """
 
@@ -28,7 +27,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import time
 from collections.abc import Mapping
 from typing import Any, Callable
 
@@ -54,7 +52,6 @@ REVOKE_KIND = "link_revoke"
 KINDS = (PUBLISH_KIND, REVOKE_KIND)
 APPLICATION_SCOPE = "links"
 CONSUMER_ID = "link.tunnel_operation.v1"
-OPERATION_WINDOW_SECONDS = 1800
 _DESTINATION_DOMAIN = b"dashboard.links.operation-destination.v1"
 
 PENDING = "pending"
@@ -62,7 +59,6 @@ AWAITING = "awaiting_operation"
 RUNNING = "running"
 DONE = "done"
 FAILED = "failed"
-EXPIRED = "expired_unexecuted"
 ELSEWHERE = "elsewhere"
 
 
@@ -174,7 +170,6 @@ class LinkApprovalDesk:
         verify: Callable[..., tuple[dict, str]] = ops.verify,
         execute: Callable[..., Any] = ops.execute,
         signing_view: Callable[[dict, dict], dict] = ops.signing_view,
-        clock: Callable[[], float] = time.time,
     ) -> None:
         self.approvals = approvals
         self._destination_resolver = destination_resolver
@@ -182,7 +177,6 @@ class LinkApprovalDesk:
         self._verify = verify
         self._execute = execute
         self._signing_view = signing_view
-        self._clock = clock
 
     def _here(self, payload: Mapping[str, Any]) -> bool:
         staged = payload.get("staged")
@@ -212,8 +206,6 @@ class LinkApprovalDesk:
             return RUNNING
         if not self._here(payload):
             return ELSEWHERE
-        if self._clock() >= float(resolution.payload["resolved_at"]) + OPERATION_WINDOW_SECONDS:
-            return EXPIRED
         return AWAITING
 
     def operator_result(self, status: ApprovalStatus) -> dict:
@@ -223,9 +215,6 @@ class LinkApprovalDesk:
             "state": state,
             "machine_label": (payload.get("staged") or {}).get("machine_label") or "",
         }
-        resolution = status.resolution
-        if resolution is not None and resolution.payload.get("outcome") == "granted":
-            result["operable_until"] = float(resolution.payload["resolved_at"]) + OPERATION_WINDOW_SECONDS
         if state in (DONE, FAILED):
             result["execution"] = (self._entry(status) or {}).get("execution")
         return result
@@ -234,9 +223,6 @@ class LinkApprovalDesk:
         state = self.state(status)
         if state in (DONE, FAILED):
             return {"approved": True, "execution": (self._entry(status) or {}).get("execution")}
-        if state == EXPIRED:
-            return {"approved": True, "execution": {
-                "ok": False, "error": "approved but not carried out in time; ask again"}}
         return None
 
     def _approval(self, approval_id: Any) -> ApprovalStatus:
@@ -269,8 +255,6 @@ class LinkApprovalDesk:
             raise ops.LinkOperationError("running")
         if state == ELSEWHERE:
             raise ops.LinkOperationError("elsewhere")
-        if state == EXPIRED:
-            raise ops.LinkOperationError("window_closed")
         if state != AWAITING:
             raise ops.LinkOperationError("not_actionable")
         op = ops.op_for_kind(payload["kind"])
@@ -312,6 +296,6 @@ def build_http_adapter(kind: str, desk: LinkApprovalDesk) -> ApprovalHttpKindAda
 
 __all__ = [
     "APPLICATION_SCOPE", "KINDS", "LinkApprovalDesk",
-    "OPERATION_WINDOW_SECONDS", "PUBLISH_KIND", "REVOKE_KIND", "build_approval_runtime",
+    "PUBLISH_KIND", "REVOKE_KIND", "build_approval_runtime",
     "inbox_text", "build_http_adapter", "result_destination_id",
 ]

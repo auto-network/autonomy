@@ -11,7 +11,7 @@ clock stubbed:
 - what is delivered is exactly what was reviewed; a second send while one is
   open changes nothing;
 - a Grant applies once (grant live + one delivery) even under replay and
-  concurrency, only on the accepting machine, only within 30 minutes; a
+  concurrency, only on the accepting machine, whenever it arrives; a
   decline denies; an interrupted or failed delivery ends delivery_failed.
 """
 
@@ -212,17 +212,12 @@ def test_a_decline_denies_and_delivers_nothing(env):
     assert _relay(env).json()["status"] == db.DENIED
 
 
-def test_a_grant_applied_more_than_30_minutes_late_delivers_nothing(env):
-    rid = _relay(env).json()["approval_id"]
+def test_a_grant_that_arrives_late_still_delivers(env):
+    rid = _relay(env, message="late but approved").json()["approval_id"]
     _decide(env, rid)
-    env.clock.t += central.APPLY_WINDOW_SECONDS
-    assert _status(env) != "approved"
-    assert _delivered() == []
-    assert env.desk.operator_result(env.approvals.status(rid))["state"] == central.EXPIRED
-    # the chat may ask again: a fresh approval, not the stale one
-    fresh = _relay(env).json()
-    assert fresh["status"] == "pending" and fresh["approval_id"] != rid
-
+    env.clock.t += 86400      # the decision reached this machine a day later
+    assert _status(env) == "approved"
+    assert _delivered() == ["late but approved"]
 
 def test_another_machine_applies_nothing(env):
     rid = _relay(env).json()["approval_id"]

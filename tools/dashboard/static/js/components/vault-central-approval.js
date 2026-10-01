@@ -20,7 +20,7 @@ import {openContentKey} from '../ceremony/policy-class-open.js';
 
 // The endpoint's fixed error codes, in the words the operator reads.
 const ERRORS = {
-  window_closed: 'The delivery window has closed. The session must ask again.',
+  session_gone: 'The session ended before the credential was delivered. It must ask again.',
   elsewhere: 'This credential can only be delivered from the machine that received the request.',
   binding_drift: 'The session or the saved credential changed since the request. The session must ask again.',
   open_failed: 'The credential could not be opened with that unlock. Try again.',
@@ -36,10 +36,6 @@ function lifetime(seconds) {
   if (seconds % 3600 === 0) return `${seconds / 3600} hour${seconds === 3600 ? '' : 's'}`;
   if (seconds % 60 === 0) return `${seconds / 60} minute${seconds === 60 ? '' : 's'}`;
   return `${seconds} seconds`;
-}
-
-function clock(epochSeconds) {
-  return new Date(epochSeconds * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
 }
 
 async function readJson(url, init) {
@@ -63,8 +59,8 @@ export function vaultReviewState(result, actions) {
       unavailable: `Deliverable only from ${machine}. Open that machine's Dashboard to release it.`};
   }
   if (state === 'awaiting_delivery') return {state, deliver: true, unavailable: ''};
-  if (state === 'expired_undelivered') {
-    return {state, deliver: false, unavailable: 'Approved, but the delivery window closed. The session must ask again.'};
+  if (state === 'session_gone') {
+    return {state, deliver: false, unavailable: 'Approved, but the session ended before delivery. It must ask again.'};
   }
   if (state === 'delivered') return {state, deliver: false, unavailable: 'This credential was delivered.'};
   if (state === 'delivery_failed') {
@@ -92,7 +88,6 @@ export async function openVaultCentralApproval(item, {
   const machine = result?.machine_label || review.machine_label || '';
   const facts = [['Available', duration]];
   if (machine) facts.push(['Delivered from', machine]);
-  if (view.deliver && result?.deliverable_until) facts.push(['Deliver by', clock(result.deliverable_until)]);
 
   async function decide(outcome) {
     const response = await read(itemUrl + '/approval-decision', {

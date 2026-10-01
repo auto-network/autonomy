@@ -61,6 +61,5 @@ test('elsewhere and delivery states say so and offer no decision',async()=>{
   assert.equal(crosstalkReviewState({state:'awaiting_delivery'},[],review).unavailable,'Approved; delivering.');
   assert.equal(crosstalkReviewState({state:'delivered'},[],review).unavailable,'Delivered to Release checklist.');
   assert.equal(crosstalkReviewState({state:'delivery_failed',reason:'session ended'},[],review).unavailable,'Not delivered: session ended.');
-  assert.equal(crosstalkReviewState({state:'expired_undelivered'},[],review).unavailable,'Approved too late; the message was not delivered.');
   assert.equal(crosstalkReviewState({state:'superseded'},[],review).unavailable,'A newer message from this chat replaced this one.');
 });

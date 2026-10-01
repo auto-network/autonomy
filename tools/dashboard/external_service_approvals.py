@@ -15,15 +15,14 @@ lazily, on the accepting machine, when the DEVICE polls with its poll secret:
   leaves this machine: only its sha256, bound to the public Central approval
   id, is kept in auth.db (``service_enrollments``). The Central approval id is
   the public correlation id and mints nothing.
-- Each poll within :data:`DELIVERY_WINDOW_SECONDS` of the Grant (or the
-  granted lifetime, if shorter) rotates: the previous bearer of the exact name
+- Each poll after the Grant, while the granted lifetime lasts, rotates: the previous bearer of the exact name
   ``<prefix>:<approval_id>`` is revoked and a new one inserted in one
   transaction, and the raw bearer is returned in that response only. The
   device is its only holder, so a rotation loses nothing and a stolen earlier
   response stops working.
-- After the window a poll answers ``delivered`` or ``expired`` and mints
-  nothing; the enrollment row is pruned once its approval is terminal and past
-  the window.
+- Once the granted lifetime is over a poll answers ``expired`` and mints
+  nothing; an enrollment nothing can be collected from any more is forgotten
+  the next time a device enrolls.
 """
 
 from __future__ import annotations
@@ -62,7 +61,6 @@ RENDERER_ID = "approval.external_service_access.review"
 CONSUMER_ID = "external_service_access.device_collect.v1"
 MAX_TTL_SECONDS = 10 * 365 * 24 * 60 * 60
 #: How long after the Grant the device may collect (and rotate) its bearer.
-DELIVERY_WINDOW_SECONDS = 1800
 _DESTINATION_DOMAIN = b"dashboard.external-service.collect-destination.v1"
 
 DROPBOX_PRODUCER = RegisteredApprovalProducer(
@@ -87,7 +85,6 @@ APPLICATIONS = {
 PENDING = "pending"
 AWAITING = "awaiting_collection"
 DELIVERED = "delivered"
-EXPIRED = "expired_undelivered"
 ELSEWHERE = "elsewhere"
 
 
@@ -220,15 +217,12 @@ class EnrollmentDesk:
         return isinstance(destination, str) and hmac.compare_digest(destination, ours)
 
     @staticmethod
-    def _collectable_until(status: ApprovalStatus) -> float | None:
-        resolution = status.resolution
-        if resolution is None or resolution.payload.get("outcome") != "granted":
+    def _lifetime_ends(status: ApprovalStatus) -> float | None:
+        """When the granted access ends; None for a lifetime without end."""
+        ttl = (status.resolution.payload.get("decision") or {}).get("ttl_seconds")
+        if not isinstance(ttl, int):
             return None
-        window = DELIVERY_WINDOW_SECONDS
-        ttl = (resolution.payload.get("decision") or {}).get("ttl_seconds")
-        if isinstance(ttl, int) and ttl < window:
-            window = ttl
-        return float(resolution.payload["resolved_at"]) + window
+        return float(status.resolution.payload["resolved_at"]) + ttl
 
     def _minted(self, status: ApprovalStatus) -> bool:
         scope = (status.request.payload.get("staged") or {}).get("application_scope")
@@ -247,20 +241,14 @@ class EnrollmentDesk:
             return str(resolution.payload.get("outcome"))
         if not here:
             return ELSEWHERE
-        if self._clock() < (self._collectable_until(status) or 0):
-            return DELIVERED if self._minted(status) else AWAITING
-        return DELIVERED if self._minted(status) else EXPIRED
+        return DELIVERED if self._minted(status) else AWAITING
 
     def operator_result(self, status: ApprovalStatus) -> dict:
         """review.application_result for the Central renderer. Never a bearer."""
-        result: dict[str, Any] = {
+        return {
             "state": self.state(status),
             "machine_label": (status.request.payload.get("staged") or {}).get("machine_label") or "",
         }
-        until = self._collectable_until(status)
-        if until is not None:
-            result["collectable_until"] = until
-        return result
 
     # ── the device ──────────────────────────────────────────────────────
 
@@ -289,7 +277,9 @@ class EnrollmentDesk:
         return count
 
     def prune(self) -> None:
-        """Forget enrollments whose approval is terminal and past its window."""
+        """Forget enrollments nothing can be collected from any more: declined,
+        canceled or expired, or granted with the granted lifetime over. Run
+        when a device enrolls, never on a timer."""
         now = self._clock()
         for approval_id in auth_db.service_enrollment_approvals():
             try:
@@ -301,14 +291,16 @@ class EnrollmentDesk:
             resolution = status.resolution
             if resolution is None:
                 continue
-            ends = self._collectable_until(status) or (
-                float(resolution.payload["resolved_at"]) + DELIVERY_WINDOW_SECONDS)
-            if now >= ends:
-                auth_db.delete_service_enrollment(approval_id)
+            if resolution.payload.get("outcome") == "granted":
+                ends = self._lifetime_ends(status)
+                if ends is None or now < ends:
+                    continue
+            auth_db.delete_service_enrollment(approval_id)
 
     def collect(self, approval_id: str) -> dict:
         """What the device's poll answers. Mints (rotating) only on a Grant,
-        on this machine, inside the window; the bearer is in this return only."""
+        on this machine, while the granted lifetime lasts; the bearer is in this
+        return only."""
         with _ApprovalLocks.for_id(_bounded_approval_id(approval_id)):
             status = self.approvals.status(approval_id)
             state = self.state(status)
@@ -316,11 +308,9 @@ class EnrollmentDesk:
                 return {"status": "pending"}
             if state in ("declined", "canceled"):
                 return {"status": "declined"}
-            if state in ("expired", EXPIRED):
+            ends = self._lifetime_ends(status) if state in (AWAITING, DELIVERED) else None
+            if state == "expired" or (ends is not None and self._clock() >= ends):
                 return {"status": "expired"}
-            until = self._collectable_until(status)
-            if until is None or self._clock() >= until:
-                return {"status": "delivered"}
             payload = status.request.payload
             scope = payload["staged"]["application_scope"]
             spec = APPLICATIONS[scope]
@@ -349,7 +339,7 @@ class EnrollmentDesk:
 
 
 __all__ = [
-    "APPLICATIONS", "CONSUMER_ID", "DELIVERY_WINDOW_SECONDS", "DROPBOX_PRODUCER", "KIND",
+    "APPLICATIONS", "CONSUMER_ID", "DROPBOX_PRODUCER", "KIND",
     "RENDERER_ID", "EnrollmentDesk", "bearer_name",
     "build_approval_runtime", "inbox_text", "poll_hash", "result_destination_id",
 ]

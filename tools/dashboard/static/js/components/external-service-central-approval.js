@@ -28,7 +28,6 @@ export function serviceReviewState(result, actions, review = {}) {
   if (state === 'elsewhere') return {state, unavailable: `This device enrolled with ${machine}; decide it there.`};
   if (state === 'awaiting_collection') return {state, unavailable: 'Allowed. The device picks up its access when it next checks in.'};
   if (state === 'delivered') return {state, unavailable: 'The device has its access.'};
-  if (state === 'expired_undelivered') return {state, unavailable: 'Allowed, but the device did not check in within 30 minutes; enroll it again.'};
   return {state, unavailable: (actions || []).includes('granted') ? '' : 'This request is no longer available.'};
 }
 

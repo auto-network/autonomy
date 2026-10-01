@@ -17,7 +17,6 @@ import {_linkTtlText, _LINK_DURATION_VALUES, _matchingApprovalAuthority, _signLi
 const ERRORS = {
   authority_refused: 'The signature was refused, so nothing was published. Try again.',
   not_actionable: 'This request is no longer waiting for approval.',
-  window_closed: 'The time to publish has passed. The session must ask again.',
   elsewhere: 'Only the machine that received this request can carry it out.',
   stale_envelope: 'The approval was signed before it was granted. Try again.',
   running: 'This operation is already running.',
@@ -39,10 +38,6 @@ async function readJson(url, init) {
   return data;
 }
 
-function clock(epochSeconds) {
-  return new Date(epochSeconds * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
-}
-
 /* What the review says for each operation state; '' means the action is open. */
 export function linkReviewState(result, actions, op) {
   const state = result?.state || 'pending';
@@ -50,7 +45,6 @@ export function linkReviewState(result, actions, op) {
   const machine = result?.machine_label || 'the machine that received the request';
   if (state === 'elsewhere') return {state, operate: false, unavailable: `Only ${machine} can carry this out. Open that machine's Dashboard.`};
   if (state === 'awaiting_operation') return {state, operate: true, unavailable: ''};
-  if (state === 'expired_unexecuted') return {state, operate: false, unavailable: `Approved but not ${verb} in time.`};
   if (state === 'running') return {state, operate: false, unavailable: 'This operation is running.'};
   if (state === 'done') return {state, operate: false, unavailable: `This link was ${verb}.`};
   if (state === 'failed') return {state, operate: false, unavailable: result?.execution?.error || `The link could not be ${verb}.`};
@@ -134,7 +128,6 @@ export async function openLinkCentralApproval(item, {
   const session = await requestingSession(label.split(' · ')[0], label);
   // The link kind's intro is fixed by the dialog, so the state is a fact.
   if (view.operate) sheet.facts.push(['Status', `Approved, not yet ${sheet.op === 'revoke' ? 'revoked' : 'published'}`]);
-  if (view.operate && result?.operable_until) sheet.facts.push([sheet.op === 'revoke' ? 'Revoke by' : 'Publish by', clock(result.operable_until)]);
 
   async function decide(outcome) {
     const response = await readJson(itemUrl + '/approval-decision', {

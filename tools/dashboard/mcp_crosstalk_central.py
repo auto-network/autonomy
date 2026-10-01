@@ -12,8 +12,8 @@ for a lifetime, or declines (auto-fkhq0.14, design checkpoint 2026-09-28).
   ``safe_review.message_lines`` at creation and delivered from there. A
   message the review cannot hold whole is refused at creation, never
   truncated.
-- Applied once, on the accepting machine only, within
-  :data:`APPLY_WINDOW_SECONDS` of the resolution: the guarded grant
+- Applied once, on the accepting machine only, when the resolution reaches
+  it: the guarded grant
   transition and the outcome row commit together
   (``mcp_relay_db.settle_crosstalk``), then the message is delivered at most
   once. A delivery interrupted by a crash ends ``delivery_failed``
@@ -65,7 +65,6 @@ CONSUMER_ID = "mcp_crosstalk.local_delivery.v1"
 RELAY_SUBJECT = "mcp-relay"
 RELAY_LABEL = "ChatGPT relay"
 #: A Grant is applied only this long after the resolution.
-APPLY_WINDOW_SECONDS = 1800
 MAX_MESSAGE_BYTES = 6000
 MAX_MESSAGE_LINES = 120
 #: ApprovalRequestV1's own bound on safe_review, measured the same way.
@@ -81,7 +80,6 @@ AWAITING = "awaiting_delivery"
 DELIVERING = "delivering"
 DELIVERED = "delivered"
 FAILED = "delivery_failed"
-EXPIRED = "expired_undelivered"
 SUPERSEDED = "superseded"
 ELSEWHERE = "elsewhere"
 
@@ -305,8 +303,6 @@ class CrosstalkDesk:
             return (AWAITING if state == DELIVERING else state), outcome.get("detail") or ""
         if resolution.payload.get("outcome") != "granted":
             return str(resolution.payload.get("outcome")), ""
-        if self._clock() >= float(resolution.payload["resolved_at"]) + APPLY_WINDOW_SECONDS:
-            return EXPIRED, ""
         return AWAITING, ""
 
     def operator_result(self, status: ApprovalStatus) -> dict:
@@ -338,9 +334,6 @@ class CrosstalkDesk:
                     outcome=str(outcome))
                 return
             now = self._clock()
-            if now >= float(resolution.payload["resolved_at"]) + APPLY_WINDOW_SECONDS:
-                db.settle_crosstalk(approval_id, status="expired", outcome=EXPIRED)
-                return
             ttl = resolution.payload["decision"].get("ttl_seconds")
             pid, start = self._owner()
             grant = db.settle_crosstalk(
@@ -402,7 +395,7 @@ class CrosstalkCoordinator(DashboardAccessCoordinator):
 
 
 __all__ = [
-    "APPLICATION_SCOPE", "APPLY_WINDOW_SECONDS", "CONSUMER_ID", "KIND", "RENDERER_ID",
+    "APPLICATION_SCOPE", "CONSUMER_ID", "KIND", "RENDERER_ID",
     "CrosstalkCoordinator", "CrosstalkDesk", "CrosstalkRefused", "build_approval_runtime",
     "inbox_text", "crosstalk_review", "message_lines",
     "relay_principal", "result_destination_id", "service_label",

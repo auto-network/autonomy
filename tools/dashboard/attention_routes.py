@@ -754,7 +754,7 @@ async def api_attention_decision(request: Request):
 
 _VAULT_OPEN_STATUS = {
     "invalid_request": 422, "not_found": 404, "not_actionable": 409,
-    "window_closed": 409, "elsewhere": 409, "binding_drift": 409,
+    "session_gone": 409, "elsewhere": 409, "binding_drift": 409,
     "open_failed": 409, "delivery_failed": 503, "unavailable": 503,
 }
 
@@ -842,7 +842,7 @@ async def api_attention_vault_open_delivery(request: Request):
 
 _LINK_OPERATION_STATUS = {
     "invalid_request": 422, "not_found": 404, "not_actionable": 409,
-    "window_closed": 409, "elsewhere": 409, "stale_envelope": 409,
+    "elsewhere": 409, "stale_envelope": 409,
     "authority_refused": 409, "running": 409, "unavailable": 503,
 }
 

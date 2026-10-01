@@ -6,7 +6,7 @@ by test_link_publish_tunnel.py / test_link_approvals.py):
 
 - a request is validated and frozen at creation; a refused plan raises no
   approval; the decision carries nothing;
-- a Grant is operable only on the accepting machine, within 30 minutes, with
+- a Grant is operable only on the accepting machine, whenever it arrives, with
   an envelope signed no earlier than the Grant; it runs once, and a replay
   returns the recorded execution;
 - the requester's result is null until the operation is recorded;
@@ -121,8 +121,7 @@ def env():
     desk = central.LinkApprovalDesk(approvals=approvals,
                                     destination_resolver=lambda: HERE, journal=MemoryJournal,
                                     verify=verify, execute=execute,
-                                    signing_view=lambda request, staged: {"registry_request": staged},
-                                    clock=clock)
+                                    signing_view=lambda request, staged: {"registry_request": staged})
     return SimpleNamespace(approvals=approvals, desk=desk, clock=clock, calls=calls)
 
 
@@ -242,23 +241,21 @@ def test_a_granted_publish_runs_once_after_the_grant(env):
     assert entry["persona_pub"] == "persona-pub"
 
 
-def test_the_window_closes_thirty_minutes_after_the_grant(env):
+def test_a_late_grant_is_still_operable(env):
     approval_id = _create(env)
     _grant(env, approval_id)
-    env.clock.t = NOW + central.OPERATION_WINDOW_SECONDS
+    env.clock.t = NOW + 86400
     status = env.approvals.status(approval_id)
-    assert env.desk.state(status) == central.EXPIRED
-    assert env.desk.requester_result(status)["execution"]["ok"] is False
-    assert _code(_operate, env, approval_id, {"envelope": {"ts": int(env.clock.t)}}) == "window_closed"
-    assert env.calls == []
-
+    assert env.desk.state(status) == central.AWAITING
+    assert env.desk.requester_result(status) is None
+    assert "operable_until" not in env.desk.operator_result(status)
 
 def test_another_machine_neither_bootstraps_nor_operates(env):
     approval_id = _create(env)
     _grant(env, approval_id)
     other = central.LinkApprovalDesk(approvals=env.approvals,
                                      destination_resolver=lambda: ELSEWHERE,
-                                     journal=MemoryJournal, clock=env.clock)
+                                     journal=MemoryJournal)
     assert other.state(env.approvals.status(approval_id)) == central.ELSEWHERE
     assert _code(other.bootstrap, approval_id) == "elsewhere"
     assert _code(lambda: asyncio.run(other.operate(approval_id, {"envelope": {"ts": int(NOW)}}))) == "elsewhere"

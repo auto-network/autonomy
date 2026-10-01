@@ -164,10 +164,10 @@ test('decline records a decline and signs nothing', async () => {
 });
 
 test('approved but not yet published: Publish signs and operates with no new decision', async () => {
-  result = { state: 'awaiting_operation', machine_label: 'Home', operable_until: 1790566000 };
+  result = { state: 'awaiting_operation', machine_label: 'Home' };
   await openLinkCentralApproval(item({}, []));
   assert.match(q('#facts').textContent, /StatusApproved, not yet published/);
-  assert.match(q('#facts').textContent, /Publish by/);
+  assert.doesNotMatch(q('#facts').textContent, /Publish by/);
   q('#primary').click();
   await until(() => q('#result-title')?.textContent === 'Link published');
   assert.deepEqual(log.filter(e => typeof e === 'string'), ['sign', 'operation']);
@@ -197,8 +197,6 @@ test('elsewhere and expired states say why and offer no action', async () => {
   await openLinkCentralApproval(item());
   assert.equal(q('#primary').disabled, true);
   assert.match(q('#review-unavailable').textContent, /Only Office NUC can carry this out/);
-  assert.equal(linkReviewState({ state: 'expired_unexecuted' }, [], 'publish').unavailable, 'Approved but not published in time.');
-  assert.equal(linkReviewState({ state: 'expired_unexecuted' }, [], 'revoke').unavailable, 'Approved but not revoked in time.');
 });
 
 // The operator's own link requests (org invitation, asset share, fleet

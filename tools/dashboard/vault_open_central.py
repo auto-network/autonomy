@@ -19,9 +19,8 @@ logs or echoes the CEK.
   runs on (its frozen ``result_destination_id``). A Grant replicated to
   another machine delivers nothing there, and the review says which machine
   can deliver before the ceremony.
-- A Grant is deliverable until the requesting session is no longer live or
-  :data:`DELIVERY_WINDOW_SECONDS` after the Grant, whichever comes first.
-  An interrupted delivery (Grant without receipt) is redelivered only by
+- A Grant is deliverable while the requesting session is live. An
+  interrupted delivery (Grant without receipt) is redelivered only by
   repeating the factor ceremony; no key material persists and nothing
   resumes on its own.
 - The requester's result stays null until the receipt exists.
@@ -37,7 +36,6 @@ import hashlib
 import hmac
 import logging
 import threading
-import time
 from collections.abc import Mapping
 from typing import Any, Callable
 
@@ -67,7 +65,6 @@ APPLICATION_SCOPE = "vault"
 RENDERER_ID = "approval.vault_open.review"
 CONSUMER_ID = "vault_open.local_delivery.v1"
 #: How long after the Grant the operator may still post the content key.
-DELIVERY_WINDOW_SECONDS = 1800
 _DESTINATION_DOMAIN = b"dashboard.vault.open-delivery-destination.v1"
 _REQUEST_FIELDS = {"set_id", "key", "ttl_seconds"}
 _HEX = frozenset("0123456789abcdef")
@@ -77,7 +74,7 @@ PENDING = "pending"
 AWAITING = "awaiting_delivery"
 DELIVERED = "delivered"
 FAILED = "delivery_failed"
-EXPIRED = "expired_undelivered"
+SESSION_GONE = "session_gone"
 ELSEWHERE = "elsewhere"
 
 
@@ -224,7 +221,6 @@ class VaultOpenDelivery:
         deliver: Callable[[str, dict, dict, bytearray], dict] = vault.open_and_deliver,
         ceremony: Callable[[dict, dict], dict] = vault.ceremony_for,
         notify: Callable[..., None] = _notify,
-        clock: Callable[[], float] = time.time,
     ) -> None:
         self.approvals = approvals
         self._destination_resolver = destination_resolver
@@ -233,7 +229,6 @@ class VaultOpenDelivery:
         self._deliver = deliver
         self._ceremony = ceremony
         self._notify = notify
-        self._clock = clock
 
     # ── state ───────────────────────────────────────────────────────────
 
@@ -245,12 +240,6 @@ class VaultOpenDelivery:
         except Exception:
             return False
         return isinstance(destination, str) and hmac.compare_digest(destination, ours)
-
-    def _deliverable_until(self, status: ApprovalStatus) -> float | None:
-        resolution = status.resolution
-        if resolution is None or resolution.payload.get("outcome") != "granted":
-            return None
-        return float(resolution.payload["resolved_at"]) + DELIVERY_WINDOW_SECONDS
 
     def state(self, status: ApprovalStatus) -> str:
         payload = status.request.payload
@@ -267,9 +256,8 @@ class VaultOpenDelivery:
         if not self._here(payload):
             return ELSEWHERE
         requester = (payload.get("request") or {}).get("requester") or {}
-        until = self._deliverable_until(status)
-        if until is None or self._clock() >= until or not self._session_live(requester.get("session")):
-            return EXPIRED
+        if not self._session_live(requester.get("session")):
+            return SESSION_GONE
         return AWAITING
 
     @staticmethod
@@ -286,9 +274,6 @@ class VaultOpenDelivery:
             "state": state,
             "machine_label": (payload.get("staged") or {}).get("machine_label") or "",
         }
-        until = self._deliverable_until(status)
-        if until is not None:
-            result["deliverable_until"] = until
         if state == DELIVERED:
             lease = self._lease(status.request.approval_id) or {}
             result["path"] = lease.get("container_path", "")
@@ -304,9 +289,9 @@ class VaultOpenDelivery:
         if state == FAILED:
             return {"approved": True, "execution": {
                 "ok": False, "error": "the release could not be written to the session"}}
-        if state == EXPIRED:
+        if state == SESSION_GONE:
             return {"approved": True, "execution": {
-                "ok": False, "error": "the release was granted but not delivered in time; ask again"}}
+                "ok": False, "error": "the session ended before the release was delivered"}}
         return None
 
     # ── operator actions ─────────────────────────────────────────────────
@@ -358,8 +343,8 @@ class VaultOpenDelivery:
                     return {"receipt": self._receipt(lease, payload.get("request") or {})}
                 if state == ELSEWHERE:
                     raise VaultOpenDeliveryError("elsewhere")
-                if state == EXPIRED:
-                    raise VaultOpenDeliveryError("window_closed")
+                if state == SESSION_GONE:
+                    raise VaultOpenDeliveryError("session_gone")
                 if state == FAILED:
                     raise VaultOpenDeliveryError("delivery_failed")
                 if state != AWAITING:
@@ -457,7 +442,7 @@ class VaultOpenCoordinator(DashboardAccessCoordinator):
 
 
 __all__ = [
-    "APPLICATION_SCOPE", "CONSUMER_ID", "DELIVERY_WINDOW_SECONDS", "KIND", "RENDERER_ID",
+    "APPLICATION_SCOPE", "CONSUMER_ID", "KIND", "RENDERER_ID",
     "VaultOpenCoordinator", "VaultOpenDelivery", "VaultOpenDeliveryError",
     "build_approval_runtime", "inbox_text", "build_http_adapter",
     "result_destination_id", "this_machine_label", ]

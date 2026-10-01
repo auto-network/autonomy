@@ -92,7 +92,6 @@ function unavailableFor(result, actions, r) {
   if (state === 'done') return 'Done.';
   if (state === 'failed') return `Jira refused it: ${result.reason || 'unknown reason'}.`;
   if (state === 'unknown') return 'Interrupted; it may or may not have been applied. Check the ticket before retrying.';
-  if (state === 'expired_unexecuted') return 'Approved too late; nothing was sent.';
   return (actions || []).includes('granted') ? '' : 'This request is no longer available.';
 }
 

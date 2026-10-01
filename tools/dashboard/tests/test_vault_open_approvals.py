@@ -10,7 +10,7 @@ browser does), this proves:
 - delivery is a separate operator step bound to the canonical Grant: the right
   content key writes the exact bytes to the requester's ramfs once; a wrong key
   opens nothing and can be retried; a replay returns the same receipt;
-- it refuses a pending, declined, foreign-machine, drifted, or out-of-window
+- it refuses a pending, declined, foreign-machine, drifted, or ended-session
   release, with fixed codes, and the content key never appears in a Central
   row, the lease, a response, an error or a log line;
 - the requester's result is null until the receipt exists;
@@ -134,7 +134,7 @@ def env(tmp_path, monkeypatch):
     notes: list = []
     delivery = central.VaultOpenDelivery(
         approvals=approvals, destination_resolver=lambda: HERE,
-        session_live=lambda s: live.get(s, False), clock=clock,
+        session_live=lambda s: live.get(s, False),
         notify=lambda session, approval_id, **spec: notes.append((session, approval_id, spec)),
     )
     try:
@@ -389,28 +389,26 @@ def test_another_machine_neither_bootstraps_nor_delivers(env):
     _grant(env, approval_id)
     other = central.VaultOpenDelivery(
         approvals=env.approvals, destination_resolver=lambda: ELSEWHERE,
-        session_live=lambda s: True, clock=env.clock, notify=lambda *a, **k: None)
+        session_live=lambda s: True, notify=lambda *a, **k: None)
     assert other.state(env.approvals.status(approval_id)) == central.ELSEWHERE
     assert _code(other.bootstrap, approval_id) == "elsewhere"
     assert _code(other.deliver, approval_id, {"content_key": key}) == "elsewhere"
     assert env.delivered == {}
 
 
-def test_the_window_closes_at_thirty_minutes_or_when_the_session_ends(env):
+def test_a_late_grant_still_delivers_but_not_into_an_ended_session(env):
     _seal(env)
     approval_id = _request(env)
     key = _content_key(env, env.delivery.bootstrap(approval_id)["bundle"])
     _grant(env, approval_id)
-    env.clock.t = NOW + central.DELIVERY_WINDOW_SECONDS
-    status = env.approvals.status(approval_id)
-    assert env.delivery.state(status) == central.EXPIRED
-    assert env.delivery.requester_result(status)["execution"]["ok"] is False
-    assert _code(env.delivery.deliver, approval_id, {"content_key": key}) == "window_closed"
-    env.clock.t = NOW + 1
+    env.clock.t = NOW + 86400
+    assert env.delivery.state(env.approvals.status(approval_id)) == central.AWAITING
     env.live["auto-real"] = False
-    assert _code(env.delivery.deliver, approval_id, {"content_key": key}) == "window_closed"
+    status = env.approvals.status(approval_id)
+    assert env.delivery.state(status) == central.SESSION_GONE
+    assert env.delivery.requester_result(status)["execution"]["ok"] is False
+    assert _code(env.delivery.deliver, approval_id, {"content_key": key}) == "session_gone"
     assert env.delivered == {}
-
 
 def test_a_drifted_setting_is_refused_before_the_key_touches_it(env):
     setting_id, _ = _seal(env, key="test.drift", value="first")

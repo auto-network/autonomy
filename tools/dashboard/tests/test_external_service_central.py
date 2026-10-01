@@ -8,10 +8,11 @@ and the clock stubbed:
   it nor its hash); the Central approval id is public and polls nothing;
 - a public caller cannot open this kind or choose its audience/capabilities;
 - the decision is ``{ttl_seconds}`` on a grant and ``{}`` on a decline;
-- the bearer is minted at the device's poll on the accepting machine, inside
-  the window only, rotating atomically (one live bearer by exact name);
-- decline, expiry, a late Grant and another machine mint nothing, and a
-  terminal enrollment is pruned after its window;
+- the bearer is minted at the device's poll on the accepting machine while
+  the granted lifetime lasts, rotating atomically (one live bearer by exact
+  name); a late Grant is collected at the next poll;
+- decline, expiry, an ended lifetime and another machine mint nothing, and
+  an enrollment nothing can be collected from is forgotten at the next enrollment;
 - neither the uvicorn access log nor the request middleware writes the poll
   secret.
 """
@@ -234,32 +235,31 @@ def test_concurrent_polls_leave_exactly_one_live_bearer(env):
     assert _named(approval_id) == 8
 
 
-def test_after_the_window_a_poll_mints_nothing(env):
+def test_a_later_poll_rotates_within_the_granted_lifetime(env):
     with TestClient(_app()) as client:
         secret, approval_id = _enroll(client)
         _decide(env, approval_id)
-        token = client.get(f"/api/dropbox/enrollments/{secret}").json()["token"]
-        env.clock.t += ext.DELIVERY_WINDOW_SECONDS
-        late = client.get(f"/api/dropbox/enrollments/{secret}").json()
-    assert late == {"id": secret, "status": "delivered"}
-    assert _live(approval_id) == [_hash(token)]
+        client.get(f"/api/dropbox/enrollments/{secret}")
+        env.clock.t += 3600
+        later = client.get(f"/api/dropbox/enrollments/{secret}").json()
+    assert later["status"] == "approved"
+    assert _live(approval_id) == [_hash(later["token"])]
 
-
-def test_a_grant_after_the_device_stopped_polling_leaves_no_bearer(env):
-    """The shortcut polls three times within about three minutes; a Grant
-    later than that, never collected, leaves zero bearers of that name."""
+def test_a_late_grant_is_collected_at_the_next_poll(env):
+    """A Grant long after the device's first polls mints nothing until the
+    device polls again; then it is collected."""
     with TestClient(_app()) as client:
         secret, approval_id = _enroll(client)
         for _ in range(3):
             assert client.get(f"/api/dropbox/enrollments/{secret}").json()["status"] == "pending"
         _decide(env, approval_id)
-        env.clock.t += ext.DELIVERY_WINDOW_SECONDS
-        assert client.get(f"/api/dropbox/enrollments/{secret}").json()["status"] == "expired"
-    assert _named(approval_id) == 0
-    assert env.desk.operator_result(env.approvals.status(approval_id))["state"] == ext.EXPIRED
+        env.clock.t += 20 * 3600     # inside the one-day lifetime granted
+        assert _named(approval_id) == 0
+        assert env.desk.operator_result(env.approvals.status(approval_id))["state"] == ext.AWAITING
+        assert client.get(f"/api/dropbox/enrollments/{secret}").json()["status"] == "approved"
+    assert env.desk.operator_result(env.approvals.status(approval_id))["state"] == ext.DELIVERED
 
-
-def test_a_short_lifetime_bounds_the_window(env):
+def test_a_short_lifetime_ends_collection(env):
     with TestClient(_app()) as client:
         secret, approval_id = _enroll(client)
         _decide(env, approval_id, decision={"ttl_seconds": 600})
@@ -268,29 +268,26 @@ def test_a_short_lifetime_bounds_the_window(env):
     assert _named(approval_id) == 0
 
 
-def test_a_decline_mints_nothing_and_the_enrollment_is_pruned_after_its_window(env):
+def test_a_decline_mints_nothing(env):
     with TestClient(_app()) as client:
         secret, approval_id = _enroll(client)
         _decide(env, approval_id, outcome="declined")
         assert client.get(f"/api/dropbox/enrollments/{secret}").json()["status"] == "declined"
-        env.desk.prune()
-        assert auth_db.service_enrollment_approvals() == [approval_id]
-        env.clock.t += ext.DELIVERY_WINDOW_SECONDS
-        env.desk.prune()
-        assert auth_db.service_enrollment_approvals() == []
-        assert client.get(f"/api/dropbox/enrollments/{secret}").status_code == 404
     assert _named(approval_id) == 0
 
-
-def test_a_delivered_enrollment_is_pruned_after_its_window_and_the_bearer_stays(env):
+def test_only_an_enrollment_nothing_can_be_collected_from_is_pruned(env):
     with TestClient(_app()) as client:
-        secret, approval_id = _enroll(client)
-        _decide(env, approval_id)
-        token = client.get(f"/api/dropbox/enrollments/{secret}").json()["token"]
-    env.clock.t += ext.DELIVERY_WINDOW_SECONDS
-    env.desk.prune()
-    assert auth_db.service_enrollment_approvals() == []
-    assert _live(approval_id) == [_hash(token)]
+        declined_secret, declined = _enroll(client)
+        _decide(env, declined, outcome="declined")
+        short_secret, short = _enroll(client)
+        _decide(env, short, decision={"ttl_seconds": 600})
+        _live_secret, live = _enroll(client)
+        _decide(env, live)
+        env.clock.t += 601
+        env.desk.prune()
+        assert auth_db.service_enrollment_approvals() == [live]
+        assert client.get(f"/api/dropbox/enrollments/{declined_secret}").status_code == 404
+        assert client.get(f"/api/dropbox/enrollments/{short_secret}").status_code == 404
 
 
 def test_a_grant_on_another_machine_mints_nothing_here(env):

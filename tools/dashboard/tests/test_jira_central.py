@@ -9,8 +9,8 @@ calls themselves are covered in test_jira_broker.py):
   review holds it whole when it fits and a prefix otherwise; the whole
   content is served only by the accepting machine, sha256-checked on every
   read, and never as active content;
-- staging is bounded per requester and in total, and pruned after the window;
-- a Grant executes once, within 30 minutes, on the accepting machine; an
+- staging is bounded per requester and in total;
+- a Grant executes once, whenever it reaches the accepting machine; an
   interrupted claim is settled per op (re-applied once, reconciled, or
   unknown); decline/cancel/expiry never call Jira.
 """
@@ -199,7 +199,7 @@ def test_an_org_session_cannot_name_another_org_and_a_local_session_must_name_on
 def test_a_write_that_could_never_run_is_refused_at_creation(env, request_body):
     with pytest.raises(ApprovalServiceError):
         _create(env, request_body)
-    assert env.staging.approval_ids() == []
+    assert not list((env.tmp / "jira-staging").glob("*.json"))
 
 
 def test_a_long_body_reviews_as_a_prefix_and_is_fetched_whole_here_only(env):
@@ -287,15 +287,13 @@ def test_decline_and_cancel_never_call_jira(env, outcome):
     assert env.jira.calls == [] and env.journal == {}
 
 
-def test_a_grant_executed_more_than_30_minutes_late_sends_nothing(env):
+def test_a_grant_that_arrives_late_still_runs(env):
     rid = _create(env, COMMENT)
     status = _grant(env, rid)
-    env.clock.t += jc.EXECUTE_WINDOW_SECONDS
+    env.clock.t += 86400      # the decision reached this machine a day later
     env.desk.materialize(status)
-    assert env.jira.calls == []
-    assert env.desk.operator_result(status)["state"] == jc.EXPIRED
-    assert "too late" in env.desk.requester_result(status)["execution"]["error"]
-
+    assert len(env.jira.calls) == 1
+    assert env.desk.operator_result(status)["state"] == jc.DONE
 
 def test_another_machine_executes_nothing(env):
     rid = _create(env, COMMENT)
@@ -407,29 +405,6 @@ def test_an_interrupted_create_that_landed_is_found(env):
     assert result["execution"] == {"ok": True, "key": "ENT-9"}
 
 
-def test_an_interrupted_claim_past_the_window_is_unknown(env):
-    rid = _create(env, {"op": "change_type", "key": "ENT-1", "issue_type": "Bug"})
-    status = _grant(env, rid)
-    env.journal[rid] = {"state": "claimed", "claimed_at": env.clock.t}
-    env.clock.t += jc.EXECUTE_WINDOW_SECONDS
-    env.desk.materialize(status)
-    assert env.jira.calls == []
-    assert env.desk.operator_result(status)["state"] == jc.UNKNOWN
-
-
-# ── housekeeping and composition ─────────────────────────────────────
-
-
-def test_staging_is_pruned_after_the_window(env):
-    rid = _create(env, COMMENT)
-    _run(env, rid)
-    env.desk.prune()
-    assert env.staging.approval_ids() == [rid]
-    env.clock.t += jc.EXECUTE_WINDOW_SECONDS
-    env.desk.prune()
-    assert env.staging.approval_ids() == []
-
-
 def test_production_composition_claims_the_kind_and_the_legacy_executor_is_gone():
     from tools.dashboard import approvals_routes, attention_routes, jira_routes
 
@@ -441,3 +416,14 @@ def test_production_composition_claims_the_kind_and_the_legacy_executor_is_gone(
     assert not hasattr(jira_routes, "_execute_jira_write")
     paths = {route.path for route in attention_routes.routes}
     assert "/api/attention/items/{attention_id:path}/jira-write-content" in paths
+
+
+def test_staged_content_no_write_will_read_again_is_deleted_on_the_next_event(env):
+    declined = _create(env, {**COMMENT, "body_markdown": "declined body"})
+    performed = _create(env, {**COMMENT, "body_markdown": "performed body"})
+    waiting = _create(env, {**COMMENT, "body_markdown": "waiting body"})
+    _grant(env, declined, outcome="declined")
+    env.desk.materialize(_grant(env, performed))
+    assert sorted(env.staging.approval_ids()) == sorted([declined, performed, waiting])
+    env.desk.forget_settled()
+    assert env.staging.approval_ids() == [waiting]
