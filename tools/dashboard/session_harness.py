@@ -606,9 +606,24 @@ def _graph_db_path() -> str | None:
     return os.environ.get("GRAPH_DB") or None
 
 
-#: tmux name -> live session-viewer path, refreshed at most every few
-#: seconds. The tail parser runs per entry; the registry read is per burst.
+#: tmux name -> live session-viewer path. The answer changes only when a
+#: session starts, ends or is renamed, so the session monitor invalidates the
+#: map on every registry change (``invalidate_sender_hrefs``); the TTL is a
+#: safety net, not the refresh mechanism. It was 5 s, which made every busy
+#: parse rebuild constantly (load test 2026-10-01).
 _SENDER_HREF_CACHE: dict = {"at": None, "map": {}}
+_SENDER_HREF_TTL_S = 60.0
+
+
+def invalidate_sender_hrefs() -> None:
+    """Drop the sender-link map; the next sender line rebuilds it."""
+    _SENDER_HREF_CACHE["at"] = None
+
+
+def _sender_href_rows() -> list[dict]:
+    """Live sessions as ``{tmux_session, project}`` rows for the link map."""
+    from tools.dashboard.dao import sessions as _dao
+    return _dao.get_active_sessions()
 
 
 def _sender_href(ct: dict) -> str:
@@ -629,14 +644,13 @@ def _sender_href(ct: dict) -> str:
     import time as _t
     from urllib.parse import quote as _q
     at = _SENDER_HREF_CACHE["at"]
-    if at is None or _t.monotonic() - at > 5:
+    if at is None or _t.monotonic() - at > _SENDER_HREF_TTL_S:
         # Measured (2026-10-01): the suspected cause of the post-restart
         # viewer stalls is this refresh running in every concurrent parse.
         from tools.dashboard import perf_telemetry
         with perf_telemetry.section("session_harness._sender_href.refresh", slow_log_s=1.0):
             try:
-                from tools.dashboard.dao import sessions as _dao
-                rows = _dao.get_active_sessions()
+                rows = _sender_href_rows()
             except Exception:
                 rows = []
             _SENDER_HREF_CACHE["map"] = {
@@ -647,7 +661,7 @@ def _sender_href(ct: dict) -> str:
                 for r in rows if r.get("tmux_session")
             }
             # Stamped when the rebuild FINISHES. Stamping its start meant a
-            # rebuild slower than the 5 s window stored a map that had already
+            # rebuild slower than the (then 5 s) TTL stored a map that had already
             # expired, so every sender line in every concurrent parse rebuilt
             # again: a herd that sustained itself (load test 2026-10-01).
             _SENDER_HREF_CACHE["at"] = _t.monotonic()

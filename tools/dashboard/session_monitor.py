@@ -1999,6 +1999,9 @@ class SessionMonitor:
 
     async def _broadcast_registry(self) -> None:
         """Push session registry to SSE subscribers."""
+        # A registry change is the one thing that changes where a crosstalk
+        # sender's name links to.
+        session_harness_mod.invalidate_sender_hrefs()
         if self._event_bus is None:
             return
         await self._event_bus.broadcast("session:registry", self.get_registry())

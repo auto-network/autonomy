@@ -1309,3 +1309,28 @@ class TestQueuedCommandAttachment:
         entries = self._entries(fixture)
         users = [e for e in entries if e.get("type") == "user"]
         assert users == [], f"placeholder-only text must not become a user tile, got {users}"
+
+
+def test_sender_links_expire_on_registry_change_not_on_a_short_timer(monkeypatch):
+    """2026-10-01: the map was rebuilt every 5 s on every sender line; it now
+    lives until the session monitor reports a registry change (60 s safety net)."""
+    import time
+    from tools.dashboard import session_harness
+    builds = []
+    monkeypatch.setattr(session_harness, "_SENDER_HREF_CACHE", {"at": None, "map": {}})
+    monkeypatch.setattr(session_harness, "_sender_href_rows",
+                        lambda: builds.append(1) or [{"tmux_session": "host-a", "project": "host"}],
+                        )
+    real_monotonic = time.monotonic
+    clock = [real_monotonic()]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    assert session_harness._sender_href({"from": "host-a"}).startswith("/session/host/host-a")
+    clock[0] += 30                      # well past the old 5 s window
+    session_harness._sender_href({"from": "host-a"})
+    assert len(builds) == 1
+    session_harness.invalidate_sender_hrefs()
+    session_harness._sender_href({"from": "host-a"})
+    assert len(builds) == 2
+    clock[0] += 61                      # the safety net still expires it
+    session_harness._sender_href({"from": "host-a"})
+    assert len(builds) == 3
