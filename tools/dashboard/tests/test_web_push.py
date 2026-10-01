@@ -332,6 +332,8 @@ def test_main_activity_exposes_direct_gesture_controls_and_render_ack():
     )
     assert "document.visibilityState === 'visible'" in overlay
     assert "acknowledgeApproval(r.id)" in overlay
-    activity_controller = (DASHBOARD / "static" / "js" / "pages" / "activity.js").read_text()
-    assert "params.get('focus') !== 'approval'" in activity_controller
-    assert "window.openApprovalOverlay(id)" in activity_controller
+    # A push opens /activity?focus=approval&id=..., which the Central inbox on
+    # every page opens in the shared dialog and acknowledges.
+    central = (DASHBOARD / "static" / "js" / "components" / "central-attention.js").read_text()
+    assert "focus === 'approval' && id" in central
+    assert "acknowledgeApproval?.(item.id)" in central

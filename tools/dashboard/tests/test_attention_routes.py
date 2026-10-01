@@ -661,3 +661,30 @@ def test_production_runtime_resolves_requester_labels_through_the_session_regist
     production = attention_routes.build_production_runtime()
     label = production.approvals._session_label("auto-0910-155648")
     assert label == "auto-0910-155648 · Voice capsule"
+
+
+def test_a_request_row_pushes_and_its_decision_cancels_the_push(monkeypatch, route_client):
+    _client, runtime = route_client
+    from tools.dashboard import web_push
+    pushed, cancelled = [], []
+    monkeypatch.setattr(web_push, "register_approval_pending_sync",
+                        lambda approval_id, kind, **_: pushed.append((approval_id, kind)) or 1)
+    monkeypatch.setattr(web_push, "cancel_approval",
+                        lambda approval_id, reason="approval_decided": cancelled.append(approval_id))
+    request_row = {"set_id": APPROVAL_REQUEST_SET_ID, "schema_revision": 1, "key": APPROVAL_ID}
+    attention_routes.emit_setting_change(operation="add", snapshot=request_row, org=None)
+    assert pushed == [(APPROVAL_ID, "test_kind")]
+    # The same request arriving by sync pushes to this machine's own devices.
+    synced = type("Address", (), {"set_id": APPROVAL_REQUEST_SET_ID, "key": APPROVAL_ID})()
+    attention_routes.emit_personal_sync_change(addresses=[synced])
+    assert len(pushed) == 2
+    # Another organization's row, or an unknown approval, pushes nothing.
+    attention_routes.emit_setting_change(operation="add", snapshot=request_row, org="acme")
+    attention_routes.emit_setting_change(
+        operation="add", snapshot={**request_row, "key": "central-unknown"}, org=None)
+    assert len(pushed) == 2
+    attention_routes.emit_setting_change(
+        operation="add",
+        snapshot={"set_id": APPROVAL_RESOLUTION_SET_ID, "schema_revision": 1, "key": APPROVAL_ID},
+        org=None)
+    assert cancelled == [APPROVAL_ID]

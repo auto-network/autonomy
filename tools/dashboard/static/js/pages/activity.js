@@ -991,18 +991,6 @@
         }
       },
 
-      openFocusedApproval() {
-        const params = new URLSearchParams(window.location.search || '');
-        const id = params.get('id');
-        if (params.get('focus') !== 'approval' ||
-            !id || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) return;
-        this.$nextTick(() => {
-          if (typeof window.openApprovalOverlay === 'function') {
-            window.openApprovalOverlay(id);
-          }
-        });
-      },
-
       init() {
         if (window._sseCache && window._sseCache.dispatch) {
           this.applyDispatch(window._sseCache.dispatch);
@@ -1039,7 +1027,6 @@
         this._heartbeatId = setInterval(() => this.refreshTimeline(), 60000);
         this._initAsks();
         this.initDeviceAlerts();
-        this.openFocusedApproval();
       },
 
       destroy() {

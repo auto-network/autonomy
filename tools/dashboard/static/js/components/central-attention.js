@@ -411,6 +411,8 @@
           item.detail = item.safeReview.detail || item.safeReview.summary || item.summary;
           item.sourceLabel = [item.applicationScope, review.kind].filter(Boolean).join(' · ');
           item.unavailable = false;
+          // Shown in a visible page: the phone push for it is no longer needed.
+          if (item.type === 'approval') window.AutonomyWebPush?.acknowledgeApproval?.(item.id)?.catch?.(() => {});
           if (shared) {
             if (item.rendererId === 'approval.jira_write.review') {
               const { openJiraCentralApproval } = await import('./jira-central-approval.js');

@@ -406,8 +406,28 @@ def approval_runtime() -> AttentionRouteRuntime:
     return _runtime
 
 
+def _push_for_approval_row(set_id: Any, approval_id: Any) -> None:
+    """A new request pushes to the devices subscribed on this machine, and a
+    decision cancels any push still waiting. Every machine the row reaches
+    pushes to its own subscribers; a phone shows one notification per
+    approval, because the push tag is derived from the approval."""
+    from tools.dashboard import web_push
+    if not isinstance(approval_id, str) or not approval_id:
+        return
+    if set_id == APPROVAL_RESOLUTION_SET_ID:
+        web_push.cancel_approval(approval_id)
+        return
+    if set_id != APPROVAL_REQUEST_SET_ID:
+        return
+    item = _exact_item(approval_id)
+    if item is not None and item.status.resolution is None:
+        web_push.register_approval_pending_sync(approval_id, item.registration.kind)
+
+
 def emit_setting_change(*, operation: str, snapshot: Mapping[str, Any], org: str | None) -> None:
     try:
+        if org is None and isinstance(snapshot, Mapping):
+            _push_for_approval_row(snapshot.get("set_id"), snapshot.get("key"))
         if _runtime.approval_reconciler is not None:
             _runtime.approval_reconciler.offer_local_setting(
                 operation=operation,
@@ -429,6 +449,8 @@ def emit_personal_sync_change(*, addresses=()) -> None:
             _runtime.approval_reconciler.offer_synced(addresses=addresses)
         if any(getattr(a, "set_id", None) in _APPROVAL_SET_IDS for a in addresses):
             _runtime.hub.emit_refresh()
+        for address in addresses:
+            _push_for_approval_row(getattr(address, "set_id", None), getattr(address, "key", None))
     except Exception:
         logger.warning("personal-sync approval hint failed", exc_info=True)
 
