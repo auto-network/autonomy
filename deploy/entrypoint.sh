@@ -61,38 +61,39 @@ if [ -n "$DOCKER_GID" ]; then
     usermod -aG "$DOCKER_GID" autonomy 2>/dev/null || true
 fi
 
-# Provision the autonomy user's git SSH access from the operator's key artifacts
-# (data/artifacts/<org>/<service>/id_*), so workspace preparation can clone
-# private repos over git+SSH — the containerized-node analog of a dev box where
-# the dashboard user already has keys in ~/.ssh. (Per-workspace key selection via
-# the declared WIDGETS_SSH_PRIV_KEY_PATH is the longer-term refinement; this
-# gives the single-key common case a clean, reproducible home.)
+# The autonomy user's git SSH access, so workspace preparation can clone private
+# repos over git+SSH. The KEY comes only from the vault (auto-zhbje): the
+# dashboard releases the audited entry node.github-ssh-key into its ramfs key
+# cache at NODE_SSH_KEY whenever the vault is unlocked (tools/dashboard/
+# node_ssh.py). Nothing is copied from disk any more -- the old loop over
+# data/artifacts/*/*/id_* left a plaintext key in every container sharing this
+# entrypoint -- and copies an earlier start left behind are removed. A role
+# without the key cache (tmux, dispatcher, relay) simply has no identity.
 AUT_HOME="$(getent passwd autonomy | cut -d: -f6)"
+NODE_SSH_KEY=/run/autonomy-keycache/node-ssh/id_ed25519
 if [ -n "$AUT_HOME" ]; then
     mkdir -p "$AUT_HOME/.ssh" && chmod 700 "$AUT_HOME/.ssh"
-    for k in /app/data/artifacts/*/*/id_ed25519 /app/data/artifacts/*/*/id_rsa; do
-        [ -f "$k" ] && install -m 600 "$k" "$AUT_HOME/.ssh/$(basename "$k")"
-    done
-    if [ -f "$AUT_HOME/.ssh/id_ed25519" ] || [ -f "$AUT_HOME/.ssh/id_rsa" ]; then
+    rm -f "$AUT_HOME/.ssh/id_ed25519" "$AUT_HOME/.ssh/id_rsa"
+    {
         ssh-keyscan -t ed25519,rsa github.com >> "$AUT_HOME/.ssh/known_hosts" 2>/dev/null || true
         # Workspace repos declare their `host` as an ssh CONFIG ALIAS
         # (github-autonomy, github-relay-cli, …). The operator's ~/.ssh/config
         # defines those on the host, but the container has none, so a clone/
         # fetch dies with "Could not resolve hostname github-autonomy" and every
         # remote-repo workspace launch fails instantly (2026-08-31). Those
-        # aliases all resolve to github.com, so map github-* to it with the
-        # staged key. (Distinct per-alias keys are the longer-term refinement,
-        # same as the per-workspace key selection noted above.)
-        _key="$AUT_HOME/.ssh/id_ed25519"; [ -f "$_key" ] || _key="$AUT_HOME/.ssh/id_rsa"
+        # aliases all resolve to github.com, so map github-* (and github.com
+        # itself, which used to fall back to the copied default key) to it
+        # with the released key. (Distinct per-alias keys are the longer-term
+        # refinement.)
         cat > "$AUT_HOME/.ssh/config" <<SSHCFG
-Host github-*
+Host github-* github.com
     HostName github.com
     User git
-    IdentityFile $_key
+    IdentityFile $NODE_SSH_KEY
     IdentitiesOnly yes
 SSHCFG
         chmod 600 "$AUT_HOME/.ssh/config"
-    fi
+    }
     chown -R autonomy:autonomy "$AUT_HOME/.ssh"
 fi
 

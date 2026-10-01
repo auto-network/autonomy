@@ -265,11 +265,27 @@ def _run_git(args: list[str], *, cwd: Path | None = None, timeout: int = 600) ->
     except subprocess.TimeoutExpired:
         raise WorkspaceError(f"git {' '.join(args)} timed out after {timeout}s")
     if result.returncode != 0:
+        hint = ""
+        if "Permission denied (publickey)" in (result.stderr or "") \
+                and not _node_ssh_key_released():
+            # The node's GitHub key comes only from the vault (auto-zhbje):
+            # say that, not git's bare "Permission denied".
+            hint = (" -- the node's GitHub SSH key is not released: unlock the "
+                    "vault on the dashboard (vault entry node.github-ssh-key)")
         raise WorkspaceError(
             f"git {' '.join(args)} failed "
-            f"(cwd={cwd}, rc={result.returncode}): {result.stderr.strip()}"
+            f"(cwd={cwd}, rc={result.returncode}): {result.stderr.strip()}{hint}"
         )
     return result.stdout
+
+
+def _node_ssh_key_released() -> bool:
+    """Whether the dashboard has released the node's GitHub key into its
+    ramfs key cache (tools/dashboard/node_ssh.py)."""
+    from agents.secret_ramfs import KEYCACHE_MOUNT
+
+    root = os.environ.get("AUTONOMY_KEYCACHE_MOUNT") or KEYCACHE_MOUNT
+    return os.path.isfile(os.path.join(root, "node-ssh", "id_ed25519"))
 
 
 def ensure_managed_clone(
