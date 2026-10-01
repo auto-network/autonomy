@@ -33,6 +33,42 @@ def image_targets(markdown_text: str) -> list[str]:
     return out
 
 
+_NUMBERED = re.compile(r'^\d+\.\s+')
+
+
+def _starts_block(line: str) -> bool:
+    """Whether *line* begins its own block rather than continuing the text above."""
+    stripped = line.strip()
+    return (not stripped or stripped.startswith(('```', '|', '#', '>'))
+            or line.startswith(('* ', '- ')) or bool(_NUMBERED.match(line))
+            or bool(_BLOCK_IMAGE.match(stripped)))
+
+
+def _flowed(lines: list[str]) -> list[dict[str, Any]]:
+    """Inline content for wrapped lines, as CommonMark reads them: a newline
+    inside a paragraph is a space; only a line ending in two spaces or a
+    backslash is a hard break."""
+    nodes: list[dict[str, Any]] = []
+    for index, raw in enumerate(lines):
+        hard = raw.endswith('  ') or raw.rstrip(' ').endswith('\\')
+        text = raw.strip()
+        if text.endswith('\\'):
+            text = text[:-1].rstrip()
+        parts = _parse_inline(text)
+        if nodes and nodes[-1].get("type") != "hardBreak":
+            parts = [{"type": "text", "text": " "}] + parts
+        for part in parts:
+            last = nodes[-1] if nodes else None
+            if (last and last.get("type") == "text" and part.get("type") == "text"
+                    and not last.get("marks") and not part.get("marks")):
+                last["text"] += part["text"]
+            else:
+                nodes.append(part)
+        if hard and index < len(lines) - 1:
+            nodes.append({"type": "hardBreak"})
+    return nodes
+
+
 def markdown_to_adf(markdown_text: str,
                     media_resolver: Callable[[str], str | None] | None = None,
                     ) -> dict[str, Any]:
@@ -141,24 +177,30 @@ def markdown_to_adf(markdown_text: str,
         elif re.match(r'^\d+\.\s+', line):
             list_items = []
             while i < len(lines) and re.match(r'^\d+\.\s+', lines[i]):
-                item_text = re.sub(r'^\d+\.\s+', '', lines[i])
+                item = [re.sub(r'^\d+\.\s+', '', lines[i])]
+                i += 1
+                while i < len(lines) and not _starts_block(lines[i]):
+                    item.append(lines[i])
+                    i += 1
                 list_items.append({
                     "type": "listItem",
-                    "content": [{"type": "paragraph", "content": _parse_inline(item_text)}],
+                    "content": [{"type": "paragraph", "content": _flowed(item)}],
                 })
-                i += 1
             content.append({"type": "orderedList", "content": list_items})
             continue
         # Bullet lists
         elif line.startswith('* ') or line.startswith('- '):
             list_items = []
             while i < len(lines) and (lines[i].startswith('* ') or lines[i].startswith('- ')):
-                item_text = lines[i][2:]
+                item = [lines[i][2:]]
+                i += 1
+                while i < len(lines) and not _starts_block(lines[i]):
+                    item.append(lines[i])
+                    i += 1
                 list_items.append({
                     "type": "listItem",
-                    "content": [{"type": "paragraph", "content": _parse_inline(item_text)}],
+                    "content": [{"type": "paragraph", "content": _flowed(item)}],
                 })
-                i += 1
             content.append({"type": "bulletList", "content": list_items})
             continue
         elif line.strip() == '':
@@ -179,8 +221,12 @@ def markdown_to_adf(markdown_text: str,
                     "content": [{"type": "media", "attrs": attrs}],
                 })
             else:
-                content.append({"type": "paragraph",
-                                "content": _parse_inline(line)})
+                # A paragraph runs until a blank line or the next block.
+                paragraph = [line]
+                while not image and i + 1 < len(lines) and not _starts_block(lines[i + 1]):
+                    i += 1
+                    paragraph.append(lines[i])
+                content.append({"type": "paragraph", "content": _flowed(paragraph)})
 
         i += 1
 

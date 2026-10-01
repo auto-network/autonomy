@@ -178,6 +178,26 @@ def test_markdown_to_adf_blocks():
     assert doc["content"][2]["attrs"]["language"] == "bash"
 
 
+def test_wrapped_lines_flow_into_one_paragraph_as_commonmark_reads_them():
+    doc = adf.markdown_to_adf(
+        "First line wraps\nand **continues** here.\n\n"
+        "Hard break  \nnext.\nBack\\\nslash\n\n"
+        "- item one\n  wraps on\n- item two\n\n"
+        "```\nkeep\nlines\n```"
+    )
+    first, second, items, code = doc["content"]
+    assert first["content"] == [
+        {"type": "text", "text": "First line wraps and "},
+        {"type": "text", "text": "continues", "marks": [{"type": "strong"}]},
+        {"type": "text", "text": " here."},
+    ]
+    assert [n.get("text", n["type"]) for n in second["content"]] == [
+        "Hard break", "hardBreak", "next. Back", "hardBreak", "slash"]
+    assert [i["content"][0]["content"] for i in items["content"]] == [
+        [{"type": "text", "text": "item one wraps on"}], [{"type": "text", "text": "item two"}]]
+    assert code["content"][0]["text"] == "keep\nlines"
+
+
 def test_adf_round_trip_preserves_meaning():
     md = "## Steps\n1. run `psql`\n2. check output\nplain line"
     back = adf.adf_to_markdown(adf.markdown_to_adf(md))
