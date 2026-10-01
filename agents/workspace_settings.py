@@ -348,12 +348,19 @@ class ArtifactSpec:
     help: str = ""
 
 
+def _vault_link_key(org: str, vault: str) -> str:
+    from tools.graph.schemas.workspace import vault_link_key
+
+    return vault_link_key(org, vault)
+
+
 @dataclass(frozen=True)
 class VaultLink:
     """A secret file the workspace reads, from the operator's audited vault
-    (``vault_links`` on the workspace row, auto-2eqpb). ``key`` is
-    ``<workspace org>:<vault>`` -- built here from the org that carried the
-    row, never from the payload, so a row cannot reach another org's entry.
+    (``vault_links`` on the workspace row, auto-2eqpb). ``key`` is the
+    audited-tier key, derived from the org that carried the row -- never
+    from the payload -- exactly as the write side names it:
+    ``<org>:<vault>``, or the bare name for the operator's own store.
     The launcher delivers it into /run/secrets and links it at ``path``."""
     key: str
     vault: str
@@ -666,7 +673,7 @@ def _workspace_from_setting(
         artifacts=artifacts,
         vault_links=tuple(
             VaultLink(
-                key=f"{graph_project}:{link['vault']}",
+                key=_vault_link_key(graph_project, link["vault"]),
                 vault=str(link["vault"]), path=str(link["path"]),
                 name=str(link.get("name") or ""),
                 description=str(link.get("description") or ""),

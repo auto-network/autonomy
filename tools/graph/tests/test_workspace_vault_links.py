@@ -69,17 +69,31 @@ def test_an_optional_absent_entry_is_advisory():
 
 
 def test_the_readiness_hook_probes_existence_without_opening(monkeypatch):
-    """existing_row_id decrypts nothing, so readiness answers while cold."""
-    from tools.dashboard import vault_seal_central
+    """The live-base-row probe decrypts nothing, so readiness answers while
+    the vault is cold; the schema layer does not reach into the dashboard."""
+    from tools.graph import settings_ops
 
     probed = []
-    monkeypatch.setattr(vault_seal_central, "existing_row_id",
-                        lambda set_id, key: probed.append((set_id, key)) or None)
+    monkeypatch.setattr(settings_ops, "_existing_base_id",
+                        lambda set_id, rev, key, org: probed.append((set_id, key, org)) or None)
     findings = WorkspaceV1.readiness_findings(
         key="widgets-ng", payload={"name": "w", "image": "i", "vault_links": [LINK]},
         org="anchore", read=None)
-    assert probed == [("autonomy.vault.audited", "anchore:docker-config")]
+    assert probed == [("autonomy.vault.audited", "anchore:docker-config", None)]
     assert [f.subject for f in findings] == ["anchore:docker-config"]
+
+
+@pytest.mark.parametrize("org, key", [
+    ("anchore", "anchore:docker-config"),
+    ("personal", "docker-config"),       # the operator's own entries are bare
+    ("machine", "docker-config"),
+])
+def test_the_key_matches_how_the_write_side_names_the_entry(org, key):
+    from tools.graph.schemas.workspace import vault_link_key
+
+    assert vault_link_key(org, "docker-config") == key
+    (finding,) = vault_link_findings([LINK], org, exists=lambda k: False)
+    assert finding.subject == key
 
 
 def test_the_remediation_is_registered_for_the_kind_with_no_params():

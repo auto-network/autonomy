@@ -791,3 +791,14 @@ def test_a_workspace_without_vault_links_has_none():
         workspace_id="autonomy", graph_project="autonomy", artifacts=(), mounts={},
     )
     assert workspace.vault_links == ()
+
+
+def test_a_personal_workspaces_vault_link_opens_the_bare_entry():
+    """Personal vault entries carry no org prefix (the write side leaves the
+    operator's own store bare); 'personal:<name>' would never be found."""
+    workspace = _workspace_from_setting(
+        {"name": "Mine", "image": "i", "vault_links": [
+            {"vault": "docker-config", "path": "/home/agent/.docker/config.json"}]},
+        workspace_id="mine", graph_project="personal", artifacts=(), mounts={},
+    )
+    assert workspace.vault_links[0].key == "docker-config"

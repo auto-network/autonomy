@@ -76,7 +76,25 @@ _VALID_HARNESSES = {"claude", "codex", "grok"}
 # to mounts: old readers refuse a row that carries it (unknown field), so a
 # row gains vault_links only after every machine reading the org runs this.
 
-_VAULT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+# Capped so `vault.<entry>` stays a valid ramfs file name (128 chars).
+_VAULT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
+
+#: Stores whose vault entries carry no org prefix: the write side
+#: (settings_ops._apply_org_writeback, vault_seal_central.routed_key) leaves
+#: the operator's own entries bare.
+_UNPREFIXED_VAULT_STORES = ("personal", "machine")
+
+
+def vault_link_key(org: str, vault: str) -> str:
+    """The audited-tier key a vault link of a workspace owned by *org* opens:
+    bare for the operator's own stores, ``<org>:<vault>`` otherwise -- the
+    same derivation the write side uses, so a sealed entry is found."""
+    if org in _UNPREFIXED_VAULT_STORES:
+        return vault
+    from .registry import derive_org_writeback_key
+    from .vault_credential import VAULT_AUDITED_SET_ID
+
+    return derive_org_writeback_key(VAULT_AUDITED_SET_ID, org, vault)
 _VAULT_LINK_FIELDS = {"vault", "path", "name", "description", "help", "required"}
 
 
@@ -141,14 +159,17 @@ def vault_link_findings(links, org: str, *, exists=None) -> list:
     existence probe only (nothing decrypted), so it answers the same while
     the vault is cold."""
     if exists is None:
-        from tools.dashboard.vault_seal_central import existing_row_id
-        from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
+        from tools.graph import settings_ops
+        from .vault_credential import VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION
 
         def exists(key):
-            return existing_row_id(VAULT_AUDITED_SET_ID, key) is not None
+            # The live base row, or None; both tiers live in the personal
+            # store (org None). Nothing is decrypted.
+            return settings_ops._existing_base_id(
+                VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION, key, None) is not None
     findings = []
     for i, link in enumerate(links or ()):
-        key = f"{org}:{link['vault']}"
+        key = vault_link_key(org, link["vault"])
         if exists(key):
             continue
         what = " — ".join(t for t in (link.get("name"), link.get("description")) if t)
