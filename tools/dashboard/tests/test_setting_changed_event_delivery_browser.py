@@ -23,7 +23,7 @@ pytest.importorskip("pytest_asyncio")
 
 from tools.dashboard.event_bus import EventBus
 from tools.graph import schemas
-from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS
+from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS, home
 
 
 _DASHBOARD_TABLE_DDL = """CREATE TABLE IF NOT EXISTS tmux_sessions (
@@ -58,9 +58,18 @@ def _isolate_schema_registry():
 @pytest.fixture
 def isolated_dashboard(tmp_path, monkeypatch):
     """Reload dashboard with a tmp-pathed graph DB + dashboard DB."""
-    graph_path = tmp_path / "graph.db"
+    # Hermetic personal scope (the sibling test_setting_changed_events.py
+    # pattern): GRAPH_DB no longer selects the store, so pointing it at tmp
+    # left the checkout's real personal.db in charge, whose enrolled identity
+    # turns the sign-in gate on and 401s the write.
+    from tools.graph.db import GraphDB
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db("autonomy").close()
     dash_path = tmp_path / "dashboard.db"
-    monkeypatch.setenv("GRAPH_DB", str(graph_path))
     monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.setenv("DASHBOARD_DB", str(dash_path))
     monkeypatch.setenv("DASHBOARD_EVENT_BUS_STATE", str(tmp_path / "bus.state"))
@@ -83,6 +92,7 @@ async def test_setting_write_delivers_event_to_subscriber(isolated_dashboard):
     """POST a Setting write → subscriber receives setting.changed in <2s."""
     server_mod = isolated_dashboard
 
+    @home("personal")  # a test of delivery, not placement
     class V1(schemas.SettingSchema):
         set_id = "autonomy.test.delivery"
         schema_revision = 1

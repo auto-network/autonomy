@@ -27,9 +27,9 @@ def test_manifest_validates() -> None:
 
     assert manifest.id == "settings"
     assert manifest.api_version == 1
-    # Operator's primary org-DB hosts canonical dashboard.plugin#1 +
-    # autonomy.org rows, so the install scope must default there.
-    assert manifest.org == "autonomy"
+    # Plugin toggles and declared settings live in personal; no manifest
+    # names a shared org (e5fd45de, auto-2v6ay.2).
+    assert manifest.org == "personal"
     assert manifest.paths == ["/settings"]
     assert manifest.assets.template == "page.html"
     assert manifest.assets.script == "page.js"

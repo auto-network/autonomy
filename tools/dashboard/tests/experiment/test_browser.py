@@ -104,10 +104,14 @@ def experiment_server(tmp_path_factory):
     # session's server (port-collision report, auto-0812-211339).
     global TEST_PORT
     sock, TEST_PORT = bind_free_port()
+    # Output goes to a file, never an undrained PIPE: after ~64 KB of request
+    # logs the server's next write blocked its event loop and every later
+    # request hung (the fix sessions/test_browser.py got in auto-v797r).
+    server_log = open(tmp / "server.log", "wb")
     proc = subprocess.Popen(
         ["python3", "-m", "uvicorn", "tools.dashboard.server:app",
          "--fd", str(sock.fileno())],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=server_log, stderr=subprocess.STDOUT,
         env=env, cwd=repo_root, pass_fds=(sock.fileno(),),
     )
     sock.close()
@@ -131,6 +135,7 @@ def experiment_server(tmp_path_factory):
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
+    server_log.close()
     ab_raw("close")
 
 

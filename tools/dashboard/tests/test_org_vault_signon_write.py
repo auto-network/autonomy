@@ -152,6 +152,14 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
     monkeypatch.setattr(settings_ops, "_vault_sealer", None)
     monkeypatch.setattr(settings_ops, "_vault_key_holder", None)
     monkeypatch.setattr(settings_ops, "_personal_delegate_audited_key", None)
+    # The dashboard process signs organization rows with its storage
+    # delegates (server.py installs this provider at import). Install it here
+    # too so the outcome does not depend on whether an earlier test in this
+    # worker imported the server, and start with no cached delegate: the
+    # cache is keyed by org name, and every parametrization founds a fresh
+    # ledger under the same name.
+    monkeypatch.setattr(settings_ops, "_SIGNER_PROVIDER", org_storage_delegate.signing_context)
+    monkeypatch.setattr(org_storage_delegate, "_SIGNING_CONTEXTS", {})
     monkeypatch.setattr(unlock_routes, "session_from_request", lambda request: {"sid": "test"})
     # Reload durability and certificate renewal are outside this regression.
     monkeypatch.setattr(unlock_routes, "save_vault_across_hot_reload", lambda: False)

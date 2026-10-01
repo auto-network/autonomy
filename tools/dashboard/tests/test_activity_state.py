@@ -530,6 +530,15 @@ class TestActivityStateDerivation:
             await bus.wait_for_event(
                 "session:messages", session_id="auto-act-7", timeout=3.0,
             )
+            # The two results are separate appends; under load the monitor
+            # can tail them in two batches, and the first batch's event
+            # arrives with only toolu_1 returned. Wait for both to land.
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                ts = mon._tail_states.get("auto-act-7")
+                if ts is not None and ts.pending_tool_ids == {"toolu_3"}:
+                    break
+                await asyncio.sleep(0.05)
 
             state = _read_activity_state(db_path, "auto-act-7")
             assert state == "tool_running"

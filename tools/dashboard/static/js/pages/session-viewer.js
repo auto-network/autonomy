@@ -1351,8 +1351,11 @@
 
             var store = window.getSessionStore(sessionId);
 
-            // Hydrate uploads before the tail ingest so they merge inline.
-            await this._initUploads();
+            // Uploads hydrate in the background, as on the sessionId path:
+            // awaiting them here turned any upload-schema fetch failure into
+            // an overlay error state even though the tail itself had loaded.
+            // Attachments flush into the store when they resolve.
+            this._initUploads().catch(function () {});
 
             if (data.entries && data.entries.length > 0) {
               window.mergeSessionEntries(store, data, 'fetch');

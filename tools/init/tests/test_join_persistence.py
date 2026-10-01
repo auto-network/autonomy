@@ -233,6 +233,20 @@ class FoundedInvite:
                 approval,
             )
 
+    def admit(self, ready: dict) -> dict:
+        """The approver that completed the threshold appends the admission
+        event carrying the staged claim unchanged (8038f999, rule P3)."""
+        from tools.network.ledger.claims import make_admission
+
+        admission = ready["admission"]
+        event = make_admission(
+            self.admin, admission, HLC(int(time.time() * 1000)),
+        )
+        with _org_root(self.root, self.slug):
+            return claim_service.admit(
+                self.slug, event.to_json().decode("utf-8"),
+            )
+
     def member_and_content(self, persona_pub: str) -> tuple[object, dict]:
         from tools.graph.db import GraphDB
 
@@ -355,15 +369,23 @@ def test_docker_path_pending_join_survives_a_process_restart(tmp_path):
     assert ready["status"] == "ready"
     assert ready["admitting"] == [world.admin.public_hex]
 
-    # A second OS process resumes via status, uses the server's pinned
-    # position/admitting subset, and deletes the row only after append.
+    # Approved but not yet admitted: a restarted node keeps waiting rather
+    # than submitting anything itself, and keeps its durable row.
+    waiting = _run_node(volume, world, password_file)
+    assert len(waiting["pending"]) == 1
+    assert (waiting["pending"][0]["have"], waiting["pending"][0]["need"]) == (1, 1)
+
+    assert world.admit(ready)["status"] == "admitted"
+
+    # A second OS process resumes via status, sees the admission, and deletes
+    # the row only then.
     second = _run_node(
         volume,
         world,
         password_file,
         # context() would return invite-expired at this clock. A successful
-        # restart proves the durable row selected status-first resume and the
-        # pinned cz4fb finalize exemption survived the process boundary.
+        # restart proves the durable row selected status-first resume, which
+        # needs no live invitation, across the process boundary.
         wall_clock_ms=world.expiry + 1,
     )
     assert second["org_dbs"] == [] and second["personal_db"]

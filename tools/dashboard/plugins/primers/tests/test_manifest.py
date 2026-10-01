@@ -25,7 +25,8 @@ def test_manifest_validates() -> None:
 
     assert manifest.id == "primers"
     assert manifest.api_version == 1
-    assert manifest.org == "autonomy"
+    # Plugin toggles and declared settings live in personal (e5fd45de).
+    assert manifest.org == "personal"
     assert manifest.paths == ["/primers"]
     assert manifest.assets.template == "page.html"
     assert manifest.assets.script == "page.js"

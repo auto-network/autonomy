@@ -17,7 +17,7 @@ from starlette.routing import Route
 
 from tools.dashboard.plugin_api import loader
 from tools.dashboard.plugin_api.manifest import PluginManifest
-from tools.dashboard.plugin_api.schema import PLUGIN_OWNED_SETTING_SET_ID
+from tools.dashboard.plugin_api.schema import PLUGIN_OWNED_SETTING_SET_ID, PLUGIN_TOGGLE_ORG
 from tools.graph import ops as graph_ops
 from tools.graph import org_ops
 
@@ -783,13 +783,15 @@ def test_plugin_declared_setting_disabled_deprecates_unchanged_row(
     loaded = loader.load_all(plugins_dir=plugins_dir)
     loader.reconcile_declared_settings(loaded)
 
+    # Toggles live in the personal store at a band no wider than curated
+    # (auto-2v6ay.2, e5fd45de).
     graph_ops.upsert_by_key(
         "dashboard.plugin",
         1,
         "settingplug",
         {"enabled": False},
-        state="canonical",
-        org="autonomy",
+        state="curated",
+        org=PLUGIN_TOGGLE_ORG,
     )
     results = loader.reconcile_declared_settings(loaded)
 

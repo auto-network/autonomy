@@ -384,9 +384,10 @@ class TestSessionsJSWiring:
         assert "nextPaint(function() { _loadRecentHistory(); });" in self.sessions_js
 
     def test_restart_action_precedes_close_and_calls_atomic_endpoint(self):
+        # A remote card offers Close alone, earlier in the file (38a5f46f);
+        # the local live menu must still list Restart before its own Close.
         restart = self.sessions_js.index("label: 'Restart Session'")
-        close = self.sessions_js.index("label: 'Close Session'")
-        assert restart < close
+        assert "label: 'Close Session'" in self.sessions_js[restart:]
         assert "encodeURIComponent(tmux) + '/restart'" in self.sessions_js
 
 class TestSessionsBoardHTML:

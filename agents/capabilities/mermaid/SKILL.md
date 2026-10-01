@@ -1,5 +1,5 @@
 ---
-name: autonomy/mermaid
+name: mermaid
 description: Render Mermaid source to SVG and share inline tiles in the session viewer. Includes a hand-laid HTML escape hatch for diagrams Mermaid auto-layout can't handle cleanly.
 ---
 

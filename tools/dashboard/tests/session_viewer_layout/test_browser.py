@@ -90,10 +90,14 @@ class LayoutTestHarness:
         env["DASHBOARD_MOCK"] = str(self.fixture_path)
         repo_root = str(Path(__file__).resolve().parents[4])
         env["PYTHONPATH"] = repo_root
+        # Output goes to a file, never an undrained PIPE: after ~64 KB of request
+        # logs the server's next write blocked its event loop and every later
+        # request hung (the fix sessions/test_browser.py got in auto-v797r).
+        self.server_log = open(self.tmp / "server.log", "wb")
         self.proc = subprocess.Popen(
             ["python3", "-m", "uvicorn", "tools.dashboard.server:app",
              "--fd", str(sock.fileno())],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdout=self.server_log, stderr=subprocess.STDOUT,
             env=env, cwd=repo_root, pass_fds=(sock.fileno(),),
         )
         sock.close()
@@ -124,6 +128,8 @@ class LayoutTestHarness:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+        if getattr(self, "server_log", None):
+            self.server_log.close()
 
     def open_session_page(self, project, session_id):
         ab_raw("close")

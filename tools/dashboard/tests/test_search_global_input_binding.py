@@ -528,10 +528,12 @@ class TestGlobalInputOnSearchPage:
 class TestGlobalInputOffSearchPage:
 
     def test_enter_off_search_navigates_to_search(self, harness):
-        """Press Enter in #global-search while on /sessions → URL changes
+        """Press Enter in #global-search on an ordinary page → URL changes
         to /search?q=…. This is the existing nav behaviour from auto-bcxdr,
-        the new wiring must not break it."""
-        _open("/sessions")
+        the new wiring must not break it. /dispatch, not /sessions: since
+        e1d90e9c Enter on /sessions runs that page's own transcript search
+        and never leaves it."""
+        _open("/dispatch")
         # Wait for the SPA to render before driving the input.
         time.sleep(1.0)
         ab_eval("""
@@ -561,7 +563,7 @@ class TestGlobalInputOffSearchPage:
     def test_enter_off_search_initializes_search_page_alpine(self, harness):
         """Navigating into /search from another page must still initialize
         the search fragment's Alpine root."""
-        _open("/sessions")
+        _open("/dispatch")
         time.sleep(1.0)
         ab_eval("""
             var gs = document.getElementById('global-search');

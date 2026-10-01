@@ -126,7 +126,10 @@ describe('voice flow health acknowledgements', () => {
       type: 'voice_state', connection_id: 'current',
       fsm_state: 'listening', upstream: 'ready', epoch: 0,
     });
-    assert.equal(h.voice.connState, 'reconnecting');
+    // Control-plane listening is not shown as a red reconnect (e9db0273),
+    // but the transport stays unverified until audio actually flows.
+    assert.equal(h.voice.connState, 'ok');
+    assert.equal(h.voice.transportStatus, 'connecting');
     assert.equal(h.socket.sent.length, 0);
 
     h.socket.deliver({
@@ -134,6 +137,7 @@ describe('voice flow health acknowledgements', () => {
       received: 1, forwarded: 1, ts_ms: Date.now(),
     });
     assert.equal(h.voice.connState, 'ok');
+    assert.equal(h.voice.transportStatus, 'flowing');
     assert.equal(h.state.lastForwarded, 1);
   });
 
@@ -170,7 +174,8 @@ describe('voice flow health acknowledgements', () => {
       type: 'audio_flow', connection_id: 'stale',
       received: 9, forwarded: 9, ts_ms: Date.now(),
     });
-    assert.equal(h.voice.connState, 'reconnecting');
+    assert.equal(h.voice.transportStatus, 'connecting');
+    assert.equal(h.state.lastForwarded, 0);
 
     h.socket.deliver({
       type: 'audio_flow', connection_id: 'current',

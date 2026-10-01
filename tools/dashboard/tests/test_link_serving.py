@@ -53,6 +53,18 @@ def _iso(epoch: float) -> str:
     return time.strftime(ISO, time.gmtime(epoch))
 
 
+@pytest.fixture(autouse=True)
+def _built_note_viewer(tmp_path_factory, monkeypatch):
+    """The served viewer is a gitignored build artifact (relay_viewer/.build)
+    that only deploy, or another test module, generates. Build it here so this
+    module does not depend on test order or a prior build in the checkout."""
+    from tools.dashboard.scripts import build_relay_note_viewer
+    page = tmp_path_factory.mktemp("note_viewer") / "note-viewer.html"
+    page.write_text(build_relay_note_viewer.build())
+    monkeypatch.setattr(link_serving, "_NOTE_VIEWER", page)
+    monkeypatch.setattr(link_serving, "_NOTE_VIEWER_CACHE", None)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """Tmp GRAPH_DB + tmp designs DB; yields nothing — state is the env."""

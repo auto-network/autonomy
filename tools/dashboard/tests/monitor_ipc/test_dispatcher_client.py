@@ -110,6 +110,7 @@ class TestDispatcherHTTPClient:
         (sessions_dir.parent / ".session_meta.json").write_text(_json.dumps({
             "harness": "codex",
             "model": "gpt-5.6-sol",
+            "org": "acme",
         }))
         jsonl = sessions_dir / "agent-uuid.jsonl"
         jsonl.write_text("")
@@ -134,14 +135,15 @@ class TestDispatcherHTTPClient:
         assert "/api/monitor/register" in url
 
         # Body shape: tmux_name=run_id, type='agentic', jsonl_path set,
-        # project derived from the JSONL's parent dir name.
+        # project is the org the launcher stamped into .session_meta.json
+        # (the JSONL's parent dir is "-workspace-repo" in every container).
         body = req.data if hasattr(req, "data") else None
         assert body is not None
         payload = _json.loads(body.decode())
         assert payload["tmux_name"] == run_id
         assert payload["type"] == "agentic"
         assert payload["jsonl_path"] == str(jsonl)
-        assert payload["project"] == "-workspace-repo"
+        assert payload["project"] == "acme"
         assert payload["run_dir"] == output_dir
         assert payload["harness"] == "codex"
         assert payload["model"] == "gpt-5.6-sol"

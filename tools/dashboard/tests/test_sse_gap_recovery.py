@@ -190,7 +190,7 @@ def _make_fixture():
 
 # ── Server lifecycle ─────────────────────────────────────────────────
 
-def _start_server(fixture_path, events_path, nonce, state_path=None):
+def _start_server(fixture_path, events_path, nonce, state_path=None, port=0):
     """Boot mock dashboard server. Returns ``(proc, port)``.
 
     Binds a kernel-assigned free port and verifies the server echoes *nonce*
@@ -209,7 +209,7 @@ def _start_server(fixture_path, events_path, nonce, state_path=None):
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
     if state_path is not None:
         env["DASHBOARD_EVENT_BUS_STATE"] = str(state_path)
-    return spawn_mock_uvicorn(env=env, nonce=nonce)
+    return spawn_mock_uvicorn(env=env, nonce=nonce, port=port)
 
 
 def _wait_for_server(port, timeout=30.0):
@@ -304,9 +304,11 @@ class GapRecoveryHarness:
         self.events_path.write_text("")
         self._restart_idx += 1
         global TEST_PORT
+        # Same port: the open page reconnects to its own origin, and only an
+        # epoch change on that origin exercises the restart path.
         self.proc, TEST_PORT = _start_server(
             self.fixture_path, self.events_path, self.nonce,
-            state_path=self._state_path_for_run(),
+            state_path=self._state_path_for_run(), port=TEST_PORT,
         )
 
     def stop(self):
@@ -585,7 +587,13 @@ class TestServerRestart:
     """Epoch change during disconnect uses the unified restart notice. Test 9."""
 
     def test_epoch_change_resets(self, harness):
-        """Restart server → new epoch → rich notice says it just restarted."""
+        """Restart server → new epoch → brief "Server restarted" notice.
+
+        Since 4743fe2e an epoch change with no structured restart on screen
+        raises the short-lived ``sseInterrupted`` notice (cleared after 5 s)
+        rather than a ``restartStatus`` banner, which is reserved for
+        server:restart frames.
+        """
         harness.open_session_page()
         time.sleep(2)
 
@@ -602,27 +610,30 @@ class TestServerRestart:
         # Restart server (new epoch)
         harness.restart_server()
 
-        # Reconnect SSE (to new server with different epoch)
-        # The subscribe() sends cached events with the NEW epoch in the id field.
-        # Client detects epoch mismatch and shows the unified restart notice.
+        # Reconnect SSE (to new server with different epoch). The first frame
+        # carries the NEW epoch in its id; the client detects the mismatch.
         ab_eval("window._connect(); return 'reconnecting';")
 
         # Write a trigger event to ensure the client receives something from
         # the new server with the new epoch
         trigger = _assistant_entry("Post-restart trigger", 70)
         harness.write_gap_events([trigger])
-        time.sleep(4)
 
-        result = ab_eval("return Alpine.store('app').restartStatus;")
-        assert result and result.get("phase") in {"recovered", "complete"}, (
-            f"Expected restartStatus after epoch change, got {result}"
+        # Poll: the notice clears itself 5 s after it is raised.
+        notice = None
+        for _ in range(16):
+            notice = ab_eval("return Alpine.store('app').sseInterrupted;")
+            if notice:
+                break
+            time.sleep(0.25)
+        assert notice == "Server restarted", (
+            f"Expected the 'Server restarted' notice after epoch change, got {notice!r}"
         )
+        # The structured banner stays reserved for server:restart frames.
+        assert ab_eval("return Alpine.store('app').restartStatus;") is None
 
-        # Verify _lastSeq was reset by _onInterruption
-        last_seq = ab_eval("return window._lastSeq;")
-        # _onInterruption sets _lastSeq = 0, but subsequent events may update it
-        # The key assertion: the interruption banner is shown (above)
-        assert last_seq is not None
+        # _onInterruption resets _lastSeq to 0; later events may advance it.
+        assert ab_eval("return window._lastSeq;") is not None
 
 
 # ═══════════════════════════════════════════════════════════════════════

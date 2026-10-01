@@ -1,7 +1,8 @@
 """Tests for dispatcher bd error handling — returncode checks, retries, cleanup flags."""
 
-from unittest.mock import patch, call
+from unittest.mock import MagicMock, patch, call
 import subprocess
+import threading
 import time
 
 import pytest
@@ -112,8 +113,29 @@ class TestRunCmd:
 # ── _retry_bd ───────────────────────────────────────────────────
 
 
+@pytest.fixture
+def mock_sleep(monkeypatch):
+    """Record _retry_bd's back-off sleeps.
+
+    ``agents.dispatcher.time`` is the process-wide time module, so patching its
+    ``sleep`` also catches background threads an earlier test in the same
+    worker left running (a full run saw 49,507 calls). Only this thread's
+    calls are recorded; every other thread still really sleeps."""
+    real_sleep = time.sleep
+    test_thread = threading.get_ident()
+    recorder = MagicMock()
+
+    def sleep(seconds):
+        if threading.get_ident() == test_thread:
+            recorder(seconds)
+        else:
+            real_sleep(seconds)
+
+    monkeypatch.setattr("agents.dispatcher.time.sleep", sleep)
+    return recorder
+
+
 class TestRetryBd:
-    @patch("agents.dispatcher.time.sleep")
     @patch("agents.dispatcher.subprocess.run")
     def test_succeeds_first_try(self, mock_run, mock_sleep):
         mock_run.return_value = _completed_process(stdout="ok")
@@ -121,7 +143,6 @@ class TestRetryBd:
         assert result == "ok"
         mock_sleep.assert_not_called()
 
-    @patch("agents.dispatcher.time.sleep")
     @patch("agents.dispatcher.subprocess.run")
     def test_succeeds_after_retry(self, mock_run, mock_sleep):
         """Fails first, succeeds on second attempt."""
@@ -133,7 +154,6 @@ class TestRetryBd:
         assert result == "ok"
         mock_sleep.assert_called_once_with(1)  # 2^0 = 1s
 
-    @patch("agents.dispatcher.time.sleep")
     @patch("agents.dispatcher.subprocess.run")
     def test_all_retries_exhausted_raises(self, mock_run, mock_sleep):
         """All attempts fail — raises BdCommandError."""
@@ -147,7 +167,6 @@ class TestRetryBd:
         mock_sleep.assert_any_call(1)
         mock_sleep.assert_any_call(2)
 
-    @patch("agents.dispatcher.time.sleep")
     @patch("agents.dispatcher.subprocess.run")
     def test_logs_critical_on_exhaustion(self, mock_run, mock_sleep, capsys):
         mock_run.return_value = _completed_process(

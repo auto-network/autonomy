@@ -26,8 +26,11 @@ import pytest
 
 from tools.dashboard.tests import fixtures
 from tools.dashboard.tests.fixtures import make_session
+# Read the port through the module at call time: the harness binds an
+# OS-assigned port in start_server() by rebinding test_browser.TEST_PORT,
+# so a `from ... import TEST_PORT` copy keeps the stale default.
+from tools.dashboard.tests.sessions import test_browser as _sessions_browser
 from tools.dashboard.tests.sessions.test_browser import (
-    TEST_PORT,
     SessionsTestHarness,
     ab_eval,
     ab_raw,
@@ -168,7 +171,7 @@ class TestOverlayUpdatesLiveOnRunningDispatch:
 
     def test_overlay_updates_live_on_running_dispatch(self, h):
         ab_raw("close")
-        ab_raw("open", f"http://localhost:{TEST_PORT}/dispatch",
+        ab_raw("open", f"http://localhost:{_sessions_browser.TEST_PORT}/dispatch",
                "--ignore-https-errors")
         time.sleep(3)
 
@@ -256,7 +259,7 @@ class TestRecentDispatchCardClickResolvesViewer:
 
     def test_recent_dispatch_card_click_resolves_viewer(self, h):
         ab_raw("close")
-        ab_raw("open", f"http://localhost:{TEST_PORT}/sessions",
+        ab_raw("open", f"http://localhost:{_sessions_browser.TEST_PORT}/sessions",
                "--ignore-https-errors")
         time.sleep(3)
 
@@ -323,7 +326,7 @@ class TestRecentLibrarianCardClickResolvesViewer:
 
     def test_recent_librarian_card_click_resolves_viewer(self, h):
         ab_raw("close")
-        ab_raw("open", f"http://localhost:{TEST_PORT}/sessions",
+        ab_raw("open", f"http://localhost:{_sessions_browser.TEST_PORT}/sessions",
                "--ignore-https-errors")
         time.sleep(3)
 
@@ -382,7 +385,7 @@ class TestNoPhantomAfterRecentClick:
 
     def test_no_phantom_after_recent_click_back_nav(self, h):
         ab_raw("close")
-        ab_raw("open", f"http://localhost:{TEST_PORT}/sessions",
+        ab_raw("open", f"http://localhost:{_sessions_browser.TEST_PORT}/sessions",
                "--ignore-https-errors")
         time.sleep(3)
 
@@ -436,7 +439,7 @@ class TestDispatchNotInActiveList:
     def test_dispatch_not_in_active_list(self, h):
         import httpx
         resp = httpx.get(
-            f"http://localhost:{TEST_PORT}/api/dao/active_sessions",
+            f"http://localhost:{_sessions_browser.TEST_PORT}/api/dao/active_sessions",
             timeout=5,
         )
         assert resp.status_code == 200
@@ -472,7 +475,7 @@ class TestLibrarianNotInActiveList:
     def test_librarian_not_in_active_list(self, h):
         import httpx
         resp = httpx.get(
-            f"http://localhost:{TEST_PORT}/api/dao/active_sessions",
+            f"http://localhost:{_sessions_browser.TEST_PORT}/api/dao/active_sessions",
             timeout=5,
         )
         assert resp.status_code == 200

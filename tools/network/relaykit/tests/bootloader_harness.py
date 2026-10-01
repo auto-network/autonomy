@@ -155,9 +155,9 @@ def main() -> int:
     remote_thread = threading.Thread(target=remote.serve_forever, daemon=True)
     remote_thread.start()
     RemoteHandler.requests.clear()
-    RemoteHandler.viewer_bytes = (
-        REPO / "tools" / "dashboard" / "relay_viewer" / "note-viewer.html"
-    ).read_bytes()
+    # The viewer is a build artifact (relay_viewer/.build), never checked in.
+    from tools.dashboard.scripts import build_relay_note_viewer
+    RemoteHandler.viewer_bytes = build_relay_note_viewer.build().encode()
 
     env = {
         **os.environ,

@@ -50,7 +50,8 @@ def test_manifest_yaml_parses_and_validates():
     manifest = PluginManifest.model_validate(raw)
     assert manifest.id == "nexus"
     assert manifest.api_version == 1
-    assert manifest.org == "autonomy"
+    # Plugin toggles and declared settings live in personal (e5fd45de).
+    assert manifest.org == "personal"
     assert manifest.default_enabled is False
     assert manifest.paths == ["/nexus", "/settings-nexus"]
     assert manifest.assets.template == "page.html"

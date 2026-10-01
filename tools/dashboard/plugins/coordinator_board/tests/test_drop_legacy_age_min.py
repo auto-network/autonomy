@@ -5,10 +5,7 @@ from the now-prior ``ageMin``-bearing revision to the new revision,
 strips ``ageMin`` from the stored payload, and is idempotent.
 
 These tests live with the plugin per the operator's structural rule
-(graph://f6c6c43e-24a). The main pytest ``testpaths`` does not collect
-them; run explicitly with::
-
-    pytest tools/dashboard/plugins/coordinator_board/tests/
+(graph://f6c6c43e-24a); the default ``testpaths`` sweep collects them.
 """
 from __future__ import annotations
 
@@ -28,8 +25,9 @@ COORD_SPRINT_SET_ID = "dashboard.coordinator-sprint"
 def isolated_db():
     # Hermetic per-org tree, not a GRAPH_DB pin: a pin collapses every org
     # to one file and conflicts with the fail-loud resolver's explicit-org
-    # reads. Seeds write at CALLER_ORG and the migration reads at org=None;
-    # with no GRAPH_ORG both resolve to the personal store and align.
+    # reads. Seeds name the personal store explicitly -- a write with no org
+    # is refused for a set with no declared home (01427b24) -- and the
+    # migration is pointed at that same file.
     from tools.graph.db import GraphDB
     with tempfile.TemporaryDirectory() as tmp:
         orgs = os.path.join(tmp, "orgs")
@@ -43,9 +41,15 @@ def isolated_db():
             GraphDB.create_org_db(slug, type_=kind,
                                   path=os.path.join(orgs, f"{slug}.db")).close()
         GraphDB.close_all_pooled()
-        importlib.import_module(
+        from tools.graph.schemas.registry import get_schema
+        module = importlib.import_module(
             "tools.dashboard.plugins.coordinator_board.entrypoints.schemas"
         )
+        # A dashboard test that booted the app imported this module, and the
+        # dashboard conftest's registry restore then dropped its schemas while
+        # the module stayed imported; re-run its registrations.
+        if get_schema(COORD_TILE_SET_ID, 2) is None:
+            importlib.reload(module)
         try:
             yield os.path.join(orgs, "personal.db")
         finally:
@@ -71,7 +75,7 @@ class TestDropLegacyAgeMin:
             payload["ageMin"] = 7
         return settings_ops.add_setting(
             COORD_TILE_SET_ID, 2, key, payload,
-            org=settings_ops.CALLER_ORG,
+            org="personal",
         )
 
     def _seed_thread_v2(self, key: str = "auto-peer-A") -> str:
@@ -87,7 +91,7 @@ class TestDropLegacyAgeMin:
                 "totalTurns": 33,
                 "needs": "Make a call",
             },
-            org=settings_ops.CALLER_ORG,
+            org="personal",
         )
 
     def _seed_sprint_v1(self, key: str = "sprint-X") -> str:
@@ -101,7 +105,7 @@ class TestDropLegacyAgeMin:
                 "participants": ["auto-coord-1"],
                 "commitCount": 4,
             },
-            org=settings_ops.CALLER_ORG,
+            org="personal",
         )
 
     def test_drops_age_min_from_tile_rows(self, isolated_db):
@@ -118,7 +122,7 @@ class TestDropLegacyAgeMin:
         # Resolves at v3 with no ageMin.
         result = settings_ops.read_set(
             COORD_TILE_SET_ID, target_revision=3,
-            org=settings_ops.CALLER_ORG,
+            org="personal",
         )
         assert len(result.members) == 1
         payload = result.members[0].payload
@@ -140,7 +144,7 @@ class TestDropLegacyAgeMin:
         assert thread_report.rewritten == 1, thread_report.to_dict()
         result = settings_ops.read_set(
             COORD_THREAD_SET_ID, target_revision=3,
-            org=settings_ops.CALLER_ORG,
+            org="personal",
         )
         payload = result.members[0].payload
         assert "ageMin" not in payload
@@ -160,7 +164,7 @@ class TestDropLegacyAgeMin:
         assert sprint_report.rewritten == 1, sprint_report.to_dict()
         result = settings_ops.read_set(
             COORD_SPRINT_SET_ID, target_revision=2,
-            org=settings_ops.CALLER_ORG,
+            org="personal",
         )
         payload = result.members[0].payload
         assert "ageMin" not in payload
@@ -202,7 +206,7 @@ class TestDropLegacyAgeMin:
         # Row still at v2 with ageMin.
         result_v2 = settings_ops.read_set(
             COORD_TILE_SET_ID, target_revision=2,
-            org=settings_ops.CALLER_ORG,
+            org="personal",
         )
         assert result_v2.members[0].payload.get("ageMin") == 7
 
@@ -218,7 +222,7 @@ class TestDropLegacyAgeMin:
             {
                 "label": "x", "role": "y", "thing": "z", "asks": "fyi",
             },
-            org=settings_ops.CALLER_ORG,
+            org="personal",
         )
         reports = coord_migrate.drop_legacy_age_min(isolated_db)
         tile_report = next(

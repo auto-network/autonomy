@@ -27,8 +27,11 @@ import pytest
 
 from tools.dashboard.tests import fixtures
 from tools.dashboard.tests.fixtures import make_session
+# Read the port through the module at call time: the harness binds an
+# OS-assigned port in start_server() by rebinding test_browser.TEST_PORT,
+# so a `from ... import TEST_PORT` copy keeps the stale default.
+from tools.dashboard.tests.sessions import test_browser as _sessions_browser
 from tools.dashboard.tests.sessions.test_browser import (
-    TEST_PORT,
     SessionsTestHarness,
     ab_eval,
     ab_raw,
@@ -107,7 +110,7 @@ def h(tmp_path_factory):
 def _open_viewer(project: str, session_id: str) -> None:
     ab_raw("close")
     ab_raw("open",
-           f"http://localhost:{TEST_PORT}/session/{project}/{session_id}",
+           f"http://localhost:{_sessions_browser.TEST_PORT}/session/{project}/{session_id}",
            "--ignore-https-errors")
     time.sleep(3)
 

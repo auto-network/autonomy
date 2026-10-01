@@ -155,7 +155,7 @@ def test_a_second_persona_joins_as_member_and_holds_no_governance(tmp_path, monk
         # the claim ready; the joiner then re-submits it at the exact staged
         # position carrying the countersignatures, and that is the admission.
         assert steps["claim_status"]["have"] == steps["claim_status"]["need"] == 1
-        assert steps["finalize"]["status"] == "admitted"
+        assert steps["admit"]["status"] == "admitted"
         assert steps["widen"]["version"] == 2
         assert steps["narrow"]["version"] == 3
         assert steps["narrow"]["eventId"] in state.loss_heads
@@ -178,7 +178,7 @@ def test_a_second_persona_joins_as_member_and_holds_no_governance(tmp_path, monk
         # the third persona was admitted on the JOINER's countersignature,
         # which counts only because Admin carries role:grant:member.
         assert steps["third_status"]["have"] == steps["third_status"]["need"] == 1
-        assert steps["third_finalize"]["status"] == "admitted"
+        assert steps["third_admit"]["status"] == "admitted"
         third_view = state.members.get(third.public_hex)
         assert third_view is not None, "the third persona did not become a member"
         assert set(third_view.roles) == {"member"}

@@ -1231,6 +1231,11 @@ def test_dispatch_trace_agentic_shape(
     _insert_note_source(org="autonomy", source_id=asset_id, title=asset_title)
 
     with TestClient(test_app) as client:
+        from tools.dashboard import unlock_routes
+        client.cookies.set(
+            unlock_routes.SESSION_COOKIE,
+            unlock_routes.mint_session_token(method="test"),
+        )
         r = client.post(
             "/api/agent-actions/dispatch",
             json={"member_key": "note.update-summary", "asset_id": asset_id},
@@ -1289,6 +1294,11 @@ def test_dispatch_trace_agentic_bead_shape(
     _patch_bead_runtime(monkeypatch, bead)
 
     with TestClient(test_app) as client:
+        from tools.dashboard import unlock_routes
+        client.cookies.set(
+            unlock_routes.SESSION_COOKIE,
+            unlock_routes.mint_session_token(method="test"),
+        )
         r = client.post(
             "/api/agent-actions/dispatch",
             json={
@@ -1319,7 +1329,7 @@ def test_dispatch_trace_agentic_bead_shape(
 @pytest.mark.asyncio
 async def test_live_active_resolves_agentic_target_title(
     test_app, per_org_universe, isolated_dispatch_db,
-    patch_launch_session, reset_idempotency_cache,
+    patch_launch_session, reset_idempotency_cache, monkeypatch,
 ):
     """The SSE-fed live-active list (built by ``_collect_dispatch_data``)
     must resolve the *target asset* title for ``kind='agentic'`` rows —
@@ -1346,8 +1356,16 @@ async def test_live_active_resolves_agentic_target_title(
     _insert_note_source(org="autonomy", source_id=asset_id, title=asset_title)
 
     # Dispatch via the API so we get a real agentic source row + a
-    # real dispatch_runs row (kind='agentic', no title column).
+    # real dispatch_runs row (kind='agentic', no title column). Dispatch
+    # accepts then launches in the background (0a5e31fa); launch inline so
+    # the row is RUNNING — the state the live-active list reads — at 202.
+    monkeypatch.setenv("AGENT_ACTIONS_SYNC_LAUNCH", "1")
     with TestClient(test_app) as client:
+        from tools.dashboard import unlock_routes
+        client.cookies.set(
+            unlock_routes.SESSION_COOKIE,
+            unlock_routes.mint_session_token(method="test"),
+        )
         r = client.post(
             "/api/agent-actions/dispatch",
             json={"member_key": "note.update-summary", "asset_id": asset_id},

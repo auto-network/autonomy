@@ -202,7 +202,7 @@ def dispatch_server(tmp_path_factory):
     proc = subprocess.Popen(
         ["python3", "-m", "uvicorn", "tools.dashboard.server:app",
          "--fd", str(sock.fileno())],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,  # an undrained PIPE blocks the server once 64 KiB of logs queue
         env=env, cwd=repo_root, pass_fds=(sock.fileno(),),
     )
     sock.close()

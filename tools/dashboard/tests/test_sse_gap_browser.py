@@ -193,12 +193,16 @@ def _start_server(fixture_path, events_path):
     env["DASHBOARD_MOCK_EVENTS"] = str(events_path)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
     sock, port = bind_free_port()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "tools.dashboard.server:app",
-         "--fd", str(sock.fileno())],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=env, pass_fds=(sock.fileno(),),
-    )
+    # Output to a file, never an undrained PIPE: once the server's logs fill
+    # the pipe buffer every write blocks in pipe_write and SSE stalls (the
+    # overflow tests, which run last, were the ones that hit it).
+    with open(fixture_path.parent / "server.log", "ab") as log:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "tools.dashboard.server:app",
+             "--fd", str(sock.fileno())],
+            stdout=log, stderr=subprocess.STDOUT,
+            env=env, pass_fds=(sock.fileno(),),
+        )
     sock.close()
     return proc, port
 

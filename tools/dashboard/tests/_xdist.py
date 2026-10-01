@@ -10,8 +10,12 @@ import os
 import socket
 
 
-def bind_free_port() -> tuple[socket.socket, int]:
+def bind_free_port(port: int = 0) -> tuple[socket.socket, int]:
     """Allocate a listening socket on a kernel-assigned free port.
+
+    Pass *port* only to rebind a port this harness itself just released (a
+    server restart that must keep the page's origin); a fresh bind always
+    takes 0.
 
     Returns ``(socket, port)``. Hand ``socket.fileno()`` to uvicorn via
     ``--fd`` (with ``pass_fds``) and close the socket after ``Popen`` — the
@@ -26,13 +30,13 @@ def bind_free_port() -> tuple[socket.socket, int]:
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("127.0.0.1", 0))
+    s.bind(("127.0.0.1", port))
     s.listen(128)
     s.set_inheritable(True)
     return s, s.getsockname()[1]
 
 
-def spawn_mock_uvicorn(*, env, nonce, cwd=None, ready_timeout=45):
+def spawn_mock_uvicorn(*, env, nonce, cwd=None, ready_timeout=45, port=0):
     """Boot a DASHBOARD_MOCK uvicorn on a kernel-assigned free port and verify
     identity before returning ``(proc, port)``.
 
@@ -49,13 +53,22 @@ def spawn_mock_uvicorn(*, env, nonce, cwd=None, ready_timeout=45):
     import time
     import urllib.request
 
-    sock, port = bind_free_port()
+    import tempfile
+
+    sock, port = bind_free_port(port)
+    # Output goes to a file, never an undrained PIPE: the server's warning
+    # logs fill the 64 KiB pipe buffer within a few tests, after which every
+    # write -- and so every request and SSE frame -- blocks in pipe_write.
+    log = tempfile.NamedTemporaryFile(
+        prefix="mock-uvicorn-", suffix=".log", delete=False,
+    )
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "tools.dashboard.server:app",
          "--fd", str(sock.fileno()), "--log-level", "warning"],
         env=env, pass_fds=(sock.fileno(),), cwd=cwd,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=log, stderr=subprocess.STDOUT,
     )
+    log.close()
     sock.close()
     deadline = time.time() + ready_timeout
     while time.time() < deadline:
@@ -71,7 +84,8 @@ def spawn_mock_uvicorn(*, env, nonce, cwd=None, ready_timeout=45):
     proc.kill()
     raise RuntimeError(
         f"mock uvicorn on port {port} failed to start or did not echo this "
-        "harness's nonce (port collision / wrong server / boot failure)"
+        "harness's nonce (port collision / wrong server / boot failure); "
+        f"server output: {log.name}"
     )
 
 

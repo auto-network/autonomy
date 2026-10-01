@@ -232,11 +232,20 @@ def test_orgs_delete_missing(orgs_root, client):
     assert r.status_code == 404
 
 
+def _create_personal_store(orgs_root):
+    from tools.graph.db import GraphDB
+    GraphDB.create_org_db(
+        "personal", type_="personal", path=str(orgs_root / "personal.db"),
+    ).close()
+
+
 def test_orgs_delete_refuses_with_references(
     orgs_root, stub_org_schema, client,
 ):
     client.post("/api/orgs", json=create_org_body("anchore"))
-    client.post("/api/orgs", json=create_org_body("personal", type="personal"))
+    # "personal" is the operator's local store, not an organization the API
+    # can create (2745b3f5); provision it the way the node does.
+    _create_personal_store(orgs_root)
     # Insert a reference in personal.db keyed by 'anchore'.
     conn = sqlite3.connect(str(orgs_root / "personal.db"))
     conn.execute(
@@ -258,7 +267,9 @@ def test_orgs_delete_refuses_with_references(
 
 def test_orgs_delete_force(orgs_root, stub_org_schema, client):
     client.post("/api/orgs", json=create_org_body("anchore"))
-    client.post("/api/orgs", json=create_org_body("personal", type="personal"))
+    # "personal" is the operator's local store, not an organization the API
+    # can create (2745b3f5); provision it the way the node does.
+    _create_personal_store(orgs_root)
     conn = sqlite3.connect(str(orgs_root / "personal.db"))
     conn.execute(
         "INSERT INTO settings(id, set_id, schema_revision, key, payload, "

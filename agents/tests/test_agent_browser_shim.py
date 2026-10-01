@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -194,10 +195,23 @@ def test_daemon_death_is_reported_and_orphaned_chrome_is_reaped(shim):
     assert _counts(shim)["orphans"] == 0
 
 
+def _sentinel_is_sleeping(shim, name: str) -> bool:
+    reg = shim.state / f"{name}.sentinel"
+    if not reg.exists():
+        return False
+    spid = reg.read_text().split()[0]
+    procs = subprocess.run(["ps", "-eo", "ppid=,args="], capture_output=True, text=True).stdout
+    return any(line.split(None, 1) == [spid, "sleep 600"] for line in procs.splitlines())
+
+
 def test_ps_shows_orphans_and_reap_removes_them(shim):
     # A sentinel that polls slowly stays out of the way so `reap` is what acts.
     assert shim("--session", "orph", "open", "about:blank", AGENT_BROWSER_SENTINEL_POLL_S="600").returncode == 0
     daemon = _daemon_pid(shim, "orph")
+    # The sentinel checks the daemon once before its first sleep; killing the
+    # daemon before then lets the sentinel sweep the orphan itself (seen under
+    # load). Kill only once it is parked in its 600 s poll.
+    assert _wait(lambda: _sentinel_is_sleeping(shim, "orph"), 10)
     os.kill(daemon, signal.SIGKILL)
     assert _wait(lambda: _counts(shim)["orphans"] == 1, 10)
 
@@ -210,7 +224,17 @@ def test_ps_shows_orphans_and_reap_removes_them(shim):
 
     reaped = shim("reap")
     assert reaped.returncode == 0
-    assert "reaped 1 orphaned Chrome tree" in reaped.stdout
+    # Orphan sweeps are machine-wide by design: any other agent-browser
+    # session's sentinel (a browser test on a parallel worker closing its
+    # session, say) can reap this tree between `ps` and `reap`. So the count
+    # may be 0, but only when this state dir's janitor log shows our reap did
+    # not touch the profile; either way the tree must be gone.
+    count = re.search(r"reaped (\d+) orphaned Chrome tree", reaped.stdout)
+    assert count, reaped.stdout
+    uuid = profile.removeprefix("/tmp/agent-browser-chrome-")
+    janitor = shim.state / "janitor.log"
+    log = janitor.read_text() if janitor.exists() else ""
+    assert (f"profile={uuid}" in log) == (int(count.group(1)) > 0), (reaped.stdout, log[-2000:])
     assert _counts(shim)["orphans"] == 0
     assert not Path(profile).exists()
     assert not any(profile in line for line in subprocess.run(["ps", "-eww", "-o", "args="], capture_output=True, text=True).stdout.splitlines())

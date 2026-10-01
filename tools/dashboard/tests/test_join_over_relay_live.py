@@ -138,6 +138,8 @@ def stack(tmp_path, monkeypatch):
                 "protocol": "public-link", "key": link_key,
             },
             min_backoff=0.1, max_backoff=1.0,
+            # A keyless connector refuses to dial (tunnel hello v1 is gone).
+            machine_key=KeyPair.generate(),
         )
         yield {"port": port, "root": root, "root_pub": root.public_hex,
                "link_pub": link_key.public_hex,

@@ -54,8 +54,8 @@ def start_mock_server(
     Writes ``fixture_data`` to ``tmp_path/fixtures.json`` and creates an
     empty ``tmp_path/events.jsonl`` for SSE replay. Blocks up to 8s
     waiting for ``/api/dao/active_sessions`` to respond. On failure the
-    subprocess is killed and a ``RuntimeError`` is raised with the
-    captured stdout/stderr.
+    subprocess is killed and a ``RuntimeError`` is raised with the tail of
+    its output, which is kept in ``tmp_path/server.log``.
 
     *extra_env* lets callers override or extend the subprocess
     environment — e.g. plugin tests pointing ``AUTONOMY_ORGS_DIR`` at a
@@ -104,18 +104,25 @@ def start_mock_server(
     if extra_env:
         env.update(extra_env)
 
-    proc = subprocess.Popen(
-        [
-            sys.executable, "-m", "uvicorn",
-            "tools.dashboard.server:app",
-            "--fd", str(sock.fileno()),
-            "--log-level", "warning",
-        ],
-        env=env,
-        pass_fds=(sock.fileno(),),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    # Server output goes to a file, never an undrained PIPE: the server's
+    # warning logs fill the 64 KiB pipe buffer partway through a long module,
+    # after which every write -- and so every request and SSE frame -- blocks
+    # in pipe_write. That stall is what late sweep classes saw as requests
+    # hanging past their timeouts.
+    log_path = tmp_path / "server.log"
+    with open(log_path, "ab") as log:
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-m", "uvicorn",
+                "tools.dashboard.server:app",
+                "--fd", str(sock.fileno()),
+                "--log-level", "warning",
+            ],
+            env=env,
+            pass_fds=(sock.fileno(),),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
     sock.close()  # uvicorn inherited its own copy of the descriptor
 
     url = f"http://127.0.0.1:{real_port}"
@@ -139,10 +146,10 @@ def start_mock_server(
 
     if not ready:
         proc.kill()
-        out, err = proc.communicate(timeout=3)
+        proc.wait(timeout=3)
         raise RuntimeError(
             "Mock server failed to start:\n"
-            f"stdout: {out.decode()}\nstderr: {err.decode()}"
+            + log_path.read_text(errors="replace")[-8000:]
         )
 
     if served_nonce != nonce:

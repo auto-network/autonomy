@@ -313,8 +313,15 @@ def test_declared_long_poll_hold_is_not_logged_as_a_hang(caplog, monkeypatch):
 
     # Only the middleware's own clock is faked (server.time); anyio and the
     # test client keep the real one.
+    # server.time is module-wide: a dashboard thread an earlier test left
+    # running in the same worker also calls server.time.monotonic(), and once
+    # it took a tick the /slow request read the real clock and logged at INFO.
+    # Hand the ticks only to the middleware's dispatch().
+    import sys
     ticks = iter([0.0, 55.02, 0.0, 6.0])
     def monotonic():
+        if sys._getframe(1).f_code is not M.dispatch.__code__:
+            return real_time.monotonic()
         tick = next(ticks, None)
         return real_time.monotonic() if tick is None else tick
 

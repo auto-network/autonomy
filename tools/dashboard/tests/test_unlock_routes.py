@@ -641,14 +641,19 @@ class TestGateFailsClosedOnReadError:
                 holder.rollback()
             holder.close()
 
-    def test_long_write_lock_fails_closed_then_recovers(
-            self, env, monkeypatch):
+    def test_long_write_lock_does_not_block_the_enrollment_read(
+            self, env, root, monkeypatch):
+        """A writer holding the personal store's lock indefinitely cannot
+        make enrollment unverifiable: Settings reads open the store read-only
+        (9ebfdef0, c3da9560), take no write lock and run no migration, so the
+        gate reads the real value instead of failing closed. Even a store
+        still stamped for migration (user_version 0) reads."""
         import sqlite3
         from tools.graph import db as graph_db
-        from tools.graph.db import GraphDB, resolve_caller_db_path
+        from tools.graph.db import resolve_caller_db_path
 
+        _store_identity(env, root)
         personal_db = resolve_caller_db_path(None)
-        GraphDB(personal_db).close()
         with sqlite3.connect(personal_db) as conn:
             conn.execute("PRAGMA user_version = 0")
 
@@ -665,16 +670,12 @@ class TestGateFailsClosedOnReadError:
 
         try:
             assert unlock_routes.human_auth_enrolled() is True
-            assert unlock_routes._enforce_cache == {
-                "at": 0.0,
-                "value": None,
-            }
+            # Cached: the read succeeded under the lock rather than taking
+            # the uncached fail-closed branch.
+            assert unlock_routes._enforce_cache["value"] is True
         finally:
             holder.rollback()
             holder.close()
-
-        assert unlock_routes.human_auth_enrolled() is False
-        assert unlock_routes._enforce_cache["value"] is False
 
     @pytest.mark.parametrize("cached", [False, True])
     def test_warm_cache_is_returned_without_read(
@@ -904,6 +905,7 @@ from tools.graph.schemas.personal_identity import (
     PASSKEY_SET_ID as _PASSKEY_SET,
     PERSONAL_IDENTITY_SET_ID as _PERSONAL_SET,
 )
+from tools.graph.schemas.registry import SchemaValidationError
 
 
 def _valid_passkey_payload(cred_id="attacker-injected-cred1", *, root=None):
@@ -971,18 +973,43 @@ def test_identity_shadow_via_generic_settings_is_refused(env, root):
 
 
 def test_canonical_label_pin_defeats_a_shadow_row(env, root, monkeypatch):
-    """Defense-in-depth: even if a shadow row is present (written WITH the
-    capability, e.g. a bug elsewhere), _personal_member pins to 'default'
-    so the operator's root — not the low-key attacker row — verifies."""
+    """Defense-in-depth: even if a shadow row is present, _personal_member
+    pins to 'default' so the operator's root — not the low-key attacker row —
+    verifies. The schema is a singleton keyed 'default' (eb186d0c), so even a
+    write WITH the capability is refused; the shadow is planted in the store
+    directly, as a bug below the Settings layer would leave it."""
+    import json
+    import sqlite3
+    import uuid
+    from tools.graph.db import GraphDB, resolve_caller_db_path
+
     _store_identity(env, root)                     # writes key 'default'
     attacker = KeyPair.generate()
-    with _sops.identity_write_context():           # simulate a row slipping in
-        _sops.add_setting(_PERSONAL_SET, 1, "000-shadow", {
-            "armored_private_key": _armor(attacker),
-            "root_pub": attacker.public_hex,
-            "display_name": "attacker",
-            "created_at": "2026-07-19T00:00:00Z",
-        }, org=ORG)
+    shadow = {
+        "armored_private_key": _armor(attacker),
+        "root_pub": attacker.public_hex,
+        "display_name": "attacker",
+        "created_at": "2026-07-19T00:00:00Z",
+    }
+    with _sops.identity_write_context():
+        with pytest.raises(SchemaValidationError):
+            _sops.add_setting(_PERSONAL_SET, 1, "000-shadow", shadow, org=None)
+    GraphDB.close_all_pooled()
+    with sqlite3.connect(resolve_caller_db_path(None)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = dict(conn.execute(
+            "SELECT * FROM settings WHERE set_id = ? AND key = 'default'",
+            (_PERSONAL_SET,),
+        ).fetchone())
+        row.update(id=str(uuid.uuid4()), key="000-shadow",
+                   payload=json.dumps(shadow))
+        conn.execute(
+            f"INSERT INTO settings ({', '.join(row)}) "
+            f"VALUES ({', '.join('?' for _ in row)})",
+            tuple(row.values()),
+        )
+    assert {m.key for m in _sops.read_owned_set(_PERSONAL_SET, org=None).members} \
+        >= {"default", "000-shadow"}
     member = identity_routes._personal_member()
     assert member.key == "default"
     assert member.payload["root_pub"] == root.public_hex

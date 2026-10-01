@@ -465,11 +465,14 @@ def _resume_pending(
     role: str,
     reply: dict,
 ) -> JoinOutcome:
-    """Return pending or finalize from the service's authoritative subset."""
-    from tools.network.idkit import derive_persona
-    from tools.network.ledger import HLC
-    from tools.network.ledger.claims import mint_member_claim
+    """Report a staged claim's progress; the org admits it, never the joiner.
 
+    Since the admission event (8038f999, OrgAdmission.tla rule P3) the approver
+    whose countersignature completes the threshold appends a member.admission
+    carrying this claim unchanged. A claim whose approvals are complete but
+    which is not yet admitted keeps waiting, exactly as the browser joiner
+    does; there is no second invitee submit.
+    """
     have, need = reply.get("have"), reply.get("need")
     if (
         not isinstance(have, int)
@@ -481,69 +484,14 @@ def _resume_pending(
         or have > need
     ):
         raise JoinError("join status response has invalid approval counts")
-    if have < need:
-        return JoinOutcome(
-            state=PENDING, org=invitation.org, invite_ref=invitation.invite_ref,
-            persona_pub=persona_pub, genesis_id=genesis_id, granted_role=role,
-            have=have, need=need,
-            detail=f"awaiting approval ({have} of {need})",
-        )
-
-    approvals = reply.get("approvals")
-    admitting = reply.get("admitting")
-    position = reply.get("position")
-    if (
-        not isinstance(approvals, list)
-        or not isinstance(admitting, list)
-        or not isinstance(position, dict)
-        or set(position) != {"parents", "hlc"}
-    ):
-        raise JoinError("ready claim status omitted approvals or stored position")
-    by_key = {
-        entry.get("key"): entry
-        for entry in approvals
-        if isinstance(entry, dict) and set(entry) == {"key", "sig"}
-    }
-    try:
-        selected = [by_key[key] for key in admitting]
-    except (KeyError, TypeError):
-        raise JoinError("ready claim status has an invalid admitting subset") from None
-    if len(selected) != need or len(set(admitting)) != len(admitting):
-        raise JoinError("ready claim status has a non-authoritative admitting subset")
-    from tools.network.storagekit import credentials as credentials_mod
-
-    try:
-        # The finalized claim carries the same eager PersonaKemCredential the
-        # direct-admission path publishes (auto-uh2dp): approvals countersign
-        # only {invite_ref, persona_pub} (events.approval_core), so citing the
-        # stored frontier here does not disturb the approval subset.
-        persona = derive_persona(seed, genesis_id)
-        record, _ = credentials_mod.build(
-            persona,
-            genesis_id,
-            credentials_mod.derive_kem_seed(seed),
-            list(position["parents"]),
-            tuple(position["hlc"]),
-        )
-        final, _ = mint_member_claim(
-            seed,
-            genesis_id,
-            invite_ref=invitation.invite_ref,
-            heads=position["parents"],
-            hlc=HLC(*position["hlc"]),
-            token=invitation.claim_token,
-            kem_credential=record.to_dict(),
-            approvals=selected,
-        )
-    except (KeyError, TypeError, ValueError):
-        raise JoinError("ready claim status has a malformed stored position") from None
-    admitted = transport.request({
-        "v": 1,
-        "op": "submit",
-        "event": final.to_json().decode("utf-8"),
-    })
-    return _outcome_from_submit(
-        invitation, persona_pub, role, admitted, genesis_id=genesis_id
+    detail = (
+        f"awaiting approval ({have} of {need})" if have < need
+        else "approved; awaiting admission by the approver"
+    )
+    return JoinOutcome(
+        state=PENDING, org=invitation.org, invite_ref=invitation.invite_ref,
+        persona_pub=persona_pub, genesis_id=genesis_id, granted_role=role,
+        have=have, need=need, detail=detail,
     )
 
 

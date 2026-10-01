@@ -10,11 +10,11 @@ Test server runs HTTP on port 8082 (not HTTPS).
 Expected test results:
   - TestSessionDetailPage: PASS (session viewer already works)
   - TestExperimentPanel: likely PASS (auto-ozev wired chatWithPanel)
-  - TestOverlayPanel: FAIL on master — Phase 0 contract for auto-ylj6r.
-    The overlay must use the unified viewer AND load entries for dispatch
-    sessions through the unified tail. Fails because the unified tail
-    endpoint cannot resolve dispatch runDirs to JSONL files (Phase 3).
-  - TestUnresolvedState: FAIL (unified viewer Unresolved state not implemented yet)
+  - TestOverlayPanel: the overlay uses the unified viewer and loads entries
+    for dispatch runs (auto-ylj6r Phase 0 contract, landed).
+
+The Unresolved/Link Terminal state was retired with the native host path
+(08c930e3, auto-87rmr): a host terminal registers its transcript at launch.
 """
 import json
 import os
@@ -101,10 +101,14 @@ class ViewerTestHarness:
         env["DASHBOARD_MOCK"] = str(self.fixture_path)
         repo_root = str(Path(__file__).resolve().parents[4])
         env["PYTHONPATH"] = repo_root
+        # Output goes to a file, never an undrained PIPE: after ~64 KB of request
+        # logs the server's next write blocked its event loop and every later
+        # request hung (the fix sessions/test_browser.py got in auto-v797r).
+        self.server_log = open(self.tmp / "server.log", "wb")
         self.proc = subprocess.Popen(
             ["python3", "-m", "uvicorn", "tools.dashboard.server:app",
              "--fd", str(sock.fileno())],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdout=self.server_log, stderr=subprocess.STDOUT,
             env=env, cwd=repo_root, pass_fds=(sock.fileno(),),
         )
         sock.close()
@@ -138,6 +142,8 @@ class ViewerTestHarness:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+        if getattr(self, "server_log", None):
+            self.server_log.close()
 
     def open_session_page(self, project, session_id):
         """Navigate to the session detail page.
@@ -364,8 +370,6 @@ def h(tmp_path_factory):
                                      role="designer", last_message="Working on task"),
         fixtures.make_dead_session("auto-test-dead", label="Dead Session",
                                    role="reviewer", last_message="Completed"),
-        fixtures.make_unresolved_session("host-test-unresolved", label="Unresolved Host",
-                                         last_message="No JSONL yet"),
         # Dispatch fixtures for overlay tests (auto-ylj6r Phase 0)
         {**fixtures.make_session(_OVERLAY_LIVE_TMUX, label="Overlay — running dispatch",
                                   role="dispatch", last_message="dispatch working"),
@@ -633,63 +637,3 @@ class TestOverlayPanel:
             "Close hook did not hide/remove the overlay. "
             "Phase 4 wires _livePanelReset to hide the unified viewer."
         )
-
-
-# ══════════════════════════════════════════════════════════════════════
-# TestUnresolvedState — host sessions with linked=false
-# EXPECTED FAIL: unified viewer Unresolved state not implemented yet
-# ══════════════════════════════════════════════════════════════════════
-
-class TestUnresolvedState:
-    """Unresolved state — host sessions with no JSONL path (resolved=false)."""
-
-    def test_link_button_visible(self, h):
-        """Host session with resolved=false → Link Terminal button."""
-        h.open_session_page("autonomy", "host-test-unresolved")
-        time.sleep(2)
-        text = h.visible_text()
-        assert "link" in text.lower() and "terminal" in text.lower(), (
-            "unified viewer Unresolved state not implemented yet — "
-            f"no Link Terminal button visible. Text: {text[:200]}"
-        )
-
-    def test_no_entries_when_unresolved(self, h):
-        """Unresolved session shows empty state, not stale entries.
-
-        EXPECTED FAIL: The current viewer doesn't distinguish between
-        "no entries yet" and "unresolved — can't tail". auto-vl46 will
-        add explicit empty state for unresolved sessions.
-        """
-        h.open_session_page("autonomy", "host-test-unresolved")
-        # Poll for the store row — a fixed 2s loses to page-load jitter on
-        # a loaded parallel run and lands in the "no store yet" branch.
-        state = None
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            state = h.session_store_state("host-test-unresolved")
-            if state:
-                break
-            time.sleep(0.5)
-        # In the unresolved state, there should be NO entries and
-        # an explicit message about linking being needed
-        if state:
-            assert state.get("resolved") is False, (
-                "unified viewer Unresolved state not implemented yet"
-            )
-            # When unresolved state IS implemented, entries should be empty
-            # and a specific "Link Terminal" message should appear. Poll —
-            # the store row can resolve while the page still shows the
-            # loading slot for a beat under parallel load.
-            text = ""
-            _deadline = time.time() + 12
-            while time.time() < _deadline:
-                text = h.visible_text()
-                if "link" in text.lower():
-                    break
-                time.sleep(0.5)
-            assert "link" in text.lower(), (
-                "unified viewer Unresolved state not implemented yet — "
-                "no link prompt shown for unresolved session"
-            )
-        else:
-            assert False, "unified viewer Unresolved state not implemented yet"

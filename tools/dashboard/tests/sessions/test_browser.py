@@ -76,6 +76,29 @@ def ab_raw(*args, timeout=10):
     ).stdout
 
 
+def ab_eval_until(js, settled, timeout=8.0, interval=0.25):
+    """Re-evaluate *js* until ``settled(result)`` holds or *timeout* passes.
+
+    Layout measured right after a viewport change or navigation is still
+    settling under a loaded parallel run (the toolbar and desktop transcript
+    checks failed in the full sweep and passed alone). The caller asserts on
+    the returned result exactly as before; this only waits for it to settle.
+    """
+    deadline = time.time() + timeout
+    result = ab_eval(js)
+    while not _safe(settled, result) and time.time() < deadline:
+        time.sleep(interval)
+        result = ab_eval(js)
+    return result
+
+
+def _safe(predicate, value):
+    try:
+        return bool(predicate(value))
+    except Exception:
+        return False
+
+
 # ── Test Harness ──────────────────────────────────────────────────────
 
 class SessionsTestHarness:
@@ -365,7 +388,7 @@ class TestSessionOverlayNavigation:
             """)
             time.sleep(1.5)
 
-            desktop_state = ab_eval("""
+            desktop_state = ab_eval_until("""
                 var layer = document.getElementById('session-view-layer');
                 var content = document.querySelector('main#content');
                 var viewer = document.querySelector('main#content .session-viewer');
@@ -393,7 +416,7 @@ class TestSessionOverlayNavigation:
                     entriesRect.bottom <= (inputRect.top + 1)
                   ),
                 };
-            """)
+            """, lambda r: r["inputInViewport"] and r["entriesBounded"])
             assert desktop_state["path"] == "/session/autonomy/auto-test-alpha"
             assert not desktop_state["overlayActive"], "Desktop session open should not use the fullscreen overlay"
             assert not desktop_state["fullscreen"], "Desktop session open should not toggle mobile fullscreen mode"
@@ -694,7 +717,7 @@ class TestStableActiveOrdering:
 class TestMobileToolbarLayout:
     def test_long_org_name_cannot_wrap_launch_control(self, h):
         ab_raw("set", "viewport", "320", "900")
-        compact_state = ab_eval("""
+        compact_state = ab_eval_until("""
             var toolbar = document.querySelector('[data-testid="sessions-page-toolbar"]');
             var zoom = toolbar.querySelector('.sc-zoom-bar');
             var org = toolbar.querySelector('[data-testid="org-filter"]');
@@ -709,7 +732,8 @@ class TestMobileToolbarLayout:
               zoomHeight: zr.height,
               centered: Math.abs((or.left + or.right) / 2 - (zr.right + lr.left) / 2),
             };
-        """)
+        """, lambda r: r["centered"] <= 1
+                and abs(r["orgHeight"] - r["launchHeight"]) <= 1)
         assert compact_state["orgWidth"] < 150, (
             "The picker was given a fixed mobile width instead of fitting the selected organization"
         )
@@ -807,7 +831,7 @@ class TestMobileToolbarLayout:
 class TestDesktopToolbarLayout:
     def test_actions_follow_zoom_control_without_consuming_page_width(self, h):
         ab_raw("set", "viewport", "1440", "900")
-        layout = ab_eval("""
+        layout = ab_eval_until("""
             var toolbar = document.querySelector('[data-testid="sessions-page-toolbar"]');
             var zoom = toolbar && toolbar.querySelector('.sc-zoom-bar');
             var org = toolbar && toolbar.querySelector('[data-testid="org-filter"]');
@@ -827,7 +851,9 @@ class TestDesktopToolbarLayout:
               zoomHeight: zr.height,
               toolbarWidth: toolbar.getBoundingClientRect().width,
             };
-        """)
+        """, lambda r: r["gap"] <= 16
+                and abs(r["leftGap"] - r["rightGap"]) <= 1
+                and abs(r["orgHeight"] - r["launchHeight"]) <= 1)
         assert layout is not None
         assert layout["gap"] <= 16, (
             "The organization and create-session controls were distributed across "

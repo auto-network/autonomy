@@ -109,7 +109,7 @@ describe('AssetPresence', () => {
   it('renders people as text while retaining actual session links', () => {
     makeWindow();
     const el = new FakeEl();
-    const ctl = AssetPresence.mount(el, {sessions: [
+    const ctl = AssetPresence.mount(el, {org: 'autonomy', sessions: [
       {id: 'person-key', label: 'Operator', participant_kind: 'operator'},
       {id: 'auto-editor', label: 'Editor', participant_kind: 'agent'},
     ]});

@@ -596,10 +596,14 @@ def test_diag_settings_counts_errors(graph_db_env, example_schema, client):
     assert body["last_error"]["ok"] is False
 
 
-def test_diag_settings_latency_percentiles(graph_db_env, client):
-    settings_ops.reset_settings_api_stats()
+def test_diag_settings_latency_percentiles(graph_db_env, client, monkeypatch):
+    # The app's own startup work (plugin reconcile, background loops) keeps
+    # recording Settings calls into the process-wide stats after any reset,
+    # so the endpoint is served from a private recorder holding only these.
+    stats = settings_ops.SettingsApiStats()
+    monkeypatch.setattr(settings_ops, "settings_api_stats_snapshot", stats.snapshot)
     for duration_ms in (10, 20, 30, 40):
-        settings_ops._SETTINGS_API_STATS.record(
+        stats.record(
             operation="synthetic_read",
             set_id="autonomy.test.synthetic",
             org=None,
@@ -802,9 +806,13 @@ def test_contested_route_reports_slots(graph_db_env, example_schema, client):
     r = client.get("/api/graph/settings/autonomy.test.api/contested")
     assert r.status_code == 200
     contested = r.json()["contested"]
-    # No founded ledger exists in this fixture, so eligibility fails closed
-    # and neither slot resolves — the report is empty rather than wrong.
-    assert contested == []
+    # Resolution reads no ledger (b52c1a19): both signed slots are eligible,
+    # so the key is contested and the later signature is the one resolving.
+    assert [c["key"] for c in contested] == ["k"]
+    slots = contested[0]["slots"]
+    assert [s["terminal_persona"] for s in slots] == ["aa" * 32, "bb" * 32]
+    assert [s["resolves"] for s in slots] == [True, False]
+    assert all("payload" not in s for s in slots)
 
 
 # ── exact-key endpoint parity (indexed key_equals narrowing) — auto-x0xsu ──

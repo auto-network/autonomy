@@ -17,6 +17,7 @@ const { mintOrgInvite } = await import('../org-invite.js');
 const {
   getClaimContext, mintMemberClaim, submitClaim,
   signClaimApproval, submitClaimApproval, getClaimStatus, claimKey,
+  signAdmission, submitAdmission,
 } = await import('../claim.js');
 const { derivePersona } = await import('../ledger-event.js');
 
@@ -55,6 +56,21 @@ function context(heads) {
     heads: heads,
     maxHlc: [Date.now(), 0],
   };
+}
+
+// The approver whose countersignature completes the threshold admits: it
+// signs a member.admission carrying the invitee's claim unchanged plus the
+// counted approvals, exactly as org-membership.js does after the countersign.
+async function admit(ready, approverSeed, label) {
+  if (!ready || ready.status !== 'ready' || !ready.admission) {
+    throw new Error(label + ': countersign did not complete the threshold: '
+      + JSON.stringify(ready));
+  }
+  const admissionContext = { ...context(ready.admission.parents), maxHlc: [Date.now(), 0] };
+  const signed = await signAdmission({
+    context: admissionContext, personalRootSeed: approverSeed, admission: ready.admission,
+  });
+  return submitAdmission({ context: admissionContext, wire: signed.wire });
 }
 
 try {
@@ -122,29 +138,10 @@ try {
   step('claim_status', { status: status && (status.status || status.state),
                          have: status && status.have, need: status && status.need });
 
-  // 4b. FINALIZE. Approvals reaching the threshold only makes the claim
-  //     READY; admission is a second submit of the same claim re-minted at
-  //     the EXACT staged position, now carrying the countersignatures.
-  //     The joiner does this — it is their membership being redeemed.
-  if (status && status.position) {
-    const finalized = await mintMemberClaim({
-      context: { ...context(status.position.parents), maxHlc: status.position.hlc },
-      personalRootSeed: joinerSeed,
-      inviteRef: invite.inviteId,
-      token: invite.bearer,
-      profile: { display_name: 'Second Joiner' },
-      approvals: status.approvals || [],
-      kemSeed: joinerSeed,
-      position: status.position,
-      credentialHlc: status.position.hlc,
-    });
-    const admittedNow = await submitClaim({
-      context: { ...context(status.position.parents), maxHlc: status.position.hlc },
-      event: finalized.event,
-      position: status.position,
-    });
-    step('finalize', { status: admittedNow && (admittedNow.status || admittedNow.ok) });
-  }
+  // 4b. ADMIT. The operator completed the threshold, so the operator's
+  //     admission event admits the joiner; the joiner does not submit again.
+  const admission = await admit(admitted, operatorSeed, 'joiner');
+  step('admit', { status: admission && (admission.status || admission.ok) });
 
   // 5. Widen then narrow the role — both halves of the reach ruling.
   const widened = await defineRole({
@@ -205,7 +202,7 @@ try {
     context: { ...context(ctx4.heads), maxHlc: ctx4.max_hlc || [Date.now(), 0] },
     personalRootSeed: joinerSeed, inviteRef: secondInvite.inviteId, personaPub: third.publicHex,
   });
-  await submitClaimApproval({
+  const thirdReady = await submitClaimApproval({
     context: { ...context(ctx4.heads), maxHlc: ctx4.max_hlc || [Date.now(), 0] },
     claimKey: thirdKey, inviteRef: secondInvite.inviteId, personaPub: third.publicHex,
     approval: joinerApproval,
@@ -215,19 +212,8 @@ try {
     claimKey: thirdKey, inviteRef: secondInvite.inviteId, personaPub: third.publicHex,
   });
   step('third_status', { have: thirdStatus && thirdStatus.have, need: thirdStatus && thirdStatus.need });
-  if (thirdStatus && thirdStatus.position) {
-    const finalThird = await mintMemberClaim({
-      context: { ...context(thirdStatus.position.parents), maxHlc: thirdStatus.position.hlc },
-      personalRootSeed: thirdSeed, inviteRef: secondInvite.inviteId, token: secondInvite.bearer,
-      profile: { display_name: 'Third Joiner' }, approvals: thirdStatus.approvals || [],
-      kemSeed: thirdSeed, position: thirdStatus.position, credentialHlc: thirdStatus.position.hlc,
-    });
-    const admittedThird = await submitClaim({
-      context: { ...context(thirdStatus.position.parents), maxHlc: thirdStatus.position.hlc },
-      event: finalThird.event, position: thirdStatus.position,
-    });
-    step('third_finalize', { status: admittedThird && (admittedThird.status || admittedThird.ok) });
-  }
+  const thirdAdmission = await admit(thirdReady, joinerSeed, 'third');
+  step('third_admit', { status: thirdAdmission && (thirdAdmission.status || thirdAdmission.ok) });
 
   out.ok = true;
   out.joinerPersona = joiner.publicHex;

@@ -31,6 +31,12 @@ from tools.dashboard.test_lib.l2b_harness import (
 # data by setting ``window.__primersStubData`` before navigating.
 
 _FETCH_STUB_JS = r"""
+// The rail opens on the shell's org, else personal -- never a literal org
+// (e5fd45de). The mock shell renders no org, so these tests state theirs.
+(function () {
+    var shellOrg = document.querySelector('meta[name="autonomy-shell-org"]');
+    if (shellOrg) shellOrg.content = 'autonomy';
+})();
 window.__primersStubData = window.__primersStubData || {
     orgs: ['autonomy', 'anchore', 'personal'],
     workspaces: [
@@ -371,6 +377,7 @@ class TestPrimersPlugin:
         """API stubbed to 404 for the picked workspace; the page shows
         ``primers-error`` text and does NOT render the markdown."""
         _install_stub({
+            "orgs": ["autonomy"],
             "workspaces": [
                 {"id": "broken", "name": "Broken", "org": "autonomy",
                  "image": "autonomy-session-broken", "writable": False},
@@ -579,6 +586,7 @@ class TestPrimersPlugin:
                         !!document.querySelector('[data-testid="app-structured-topbar"]');
                     r.shell_icon_visible =
                         shellIcon !== null && shellIcon.offsetParent !== null;
+                    r.mobile = window.innerWidth <= 767;
                     r.control_present = !!control;
                     r.button_visible = button !== null && button.offsetParent !== null;
                     r.input_present = !!input;
@@ -660,7 +668,9 @@ class TestPrimersPlugin:
             """
         )
         assert result.get("topbar_present"), result
-        assert result.get("shell_icon_visible") is False, result
+        # The page topbar takes the shell search's row only on mobile; at
+        # desktop the shell search stays in the corner (55989753).
+        assert result.get("shell_icon_visible") is (not result.get("mobile")), result
         assert result.get("control_present"), result
         assert result.get("button_visible"), result
         assert result.get("input_present"), result

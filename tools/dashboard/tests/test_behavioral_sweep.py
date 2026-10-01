@@ -2181,6 +2181,12 @@ def sweep_server(tmp_path_factory):
     from tools.graph.schemas.registry import flush_schema_meta_machine_store
     flush_schema_meta_machine_store()
     _GraphDB.close_all_pooled()
+    # A hermetic dashboard-session realm (its secret moves with it), shared by
+    # the server -- which inherits the environment, across hard resets too --
+    # and this process, so _authenticate_browser can mint a session the
+    # server honours without touching the checkout's real realm.
+    _prior_realm = _os.environ.get(_SESSION_REALM_ENV)
+    _os.environ[_SESSION_REALM_ENV] = str(tmpdir / "identity_sessions.db")
     state = start_mock_server(
         _build_fixture(), tmpdir, port=worker_test_port(8094),
     )
@@ -2188,6 +2194,35 @@ def sweep_server(tmp_path_factory):
         yield state
     finally:
         stop_mock_server(state)
+        if _prior_realm is None:
+            _os.environ.pop(_SESSION_REALM_ENV, None)
+        else:
+            _os.environ[_SESSION_REALM_ENV] = _prior_realm
+
+
+_SESSION_REALM_ENV = "DASHBOARD_IDENTITY_SESSION_DB"
+
+
+def _authenticate_browser(sweep_server: dict) -> None:
+    """Give the browser a real dashboard session cookie for the sweep server.
+
+    Agent dispatch refuses unauthenticated (compatibility) callers even while
+    the human gate is open (8c99d942), so a cookie-less mock browser is
+    refused with 401. Mint into the hermetic realm sweep_server shares.
+    """
+    from tools.dashboard import unlock_routes
+    token = unlock_routes.mint_session_token(method="test")
+    subprocess.run(
+        ["agent-browser", "cookies", "set", unlock_routes.SESSION_COOKIE,
+         token, "--url", sweep_server["url"]],
+        capture_output=True, timeout=15, check=True,
+    )
+
+
+def _deauthenticate_browser() -> None:
+    subprocess.run(
+        ["agent-browser", "cookies", "clear"], capture_output=True, timeout=15,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -8792,11 +8827,15 @@ class TestAgentActionsDropdown:
     @pytest.fixture(scope="class", autouse=True)
     @classmethod
     def checks(cls, browser, request):
-        result = _navigate_and_eval_async(
-            f"/graph/{SWEEP_AGENT_ACTIONS_AUTONOMY_NOTE_ID[:12]}",
-            AGENT_ACTIONS_AUTONOMY_CHECKS,
-            wait_ms=1500,
-        )
+        _authenticate_browser(browser)
+        try:
+            result = _navigate_and_eval_async(
+                f"/graph/{SWEEP_AGENT_ACTIONS_AUTONOMY_NOTE_ID[:12]}",
+                AGENT_ACTIONS_AUTONOMY_CHECKS,
+                wait_ms=1500,
+            )
+        finally:
+            _deauthenticate_browser()
         request.cls._checks = result
 
     def test_dropdown_lives_in_persistent_slot(self):
@@ -9260,11 +9299,15 @@ class TestAskQuestionActionBehavior:
     @pytest.fixture(scope="class", autouse=True)
     @classmethod
     def checks(cls, browser, request):
-        result = _navigate_and_eval_async(
-            "/bead/auto-sweep-b1",
-            ASK_QUESTION_MODAL_CHECKS,
-            wait_ms=1500,
-        )
+        _authenticate_browser(browser)
+        try:
+            result = _navigate_and_eval_async(
+                "/bead/auto-sweep-b1",
+                ASK_QUESTION_MODAL_CHECKS,
+                wait_ms=1500,
+            )
+        finally:
+            _deauthenticate_browser()
         request.cls._checks = result
 
     def test_dropdown_button_visible_on_bead_page(self):

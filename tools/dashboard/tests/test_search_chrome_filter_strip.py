@@ -61,8 +61,12 @@ def test_search_page_filter_strip_row_1_has_org_and_state_chips(test_app):
     assert 'data-testid="sp-filter-strip"' in html, (
         "filter strip container missing"
     )
-    # Org chip — kept from auto-13134, just relocated inside the strip.
-    assert 'data-testid="sp-org-chip"' in html, "org chip missing"
+    # Org chip — kept from auto-13134, relocated inside the strip, and since
+    # 4c627dd8 rendered client-side by the shared x-org-picker directive,
+    # which stamps the testId it is given onto the chip.
+    assert "x-org-picker=" in html and "testId: 'sp-org-chip'" in html, (
+        "org chip missing"
+    )
     # Publication-state chip — new for auto-zvu3z.
     assert 'data-testid="sp-state-chip"' in html, "state chip missing"
     assert 'data-testid="sp-state-dropdown"' in html, "state dropdown missing"

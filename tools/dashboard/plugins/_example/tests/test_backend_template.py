@@ -70,14 +70,21 @@ def test_org_bearer_forces_settings_read_to_token_org(monkeypatch):
 
     monkeypatch.setattr(example_api.settings_ops, "read_set_key", fake_read)
     with TestClient(_app()) as client:
-        response = client.get(
+        # A header naming another org cannot redirect an org bearer; the
+        # middleware refuses the conflict before the plugin runs (5efa893f).
+        refused = client.get(
             "/api/plugins/example/record",
             headers={
                 "Authorization": "Bearer org-a",
                 "X-Graph-Org": "org-b",
             },
         )
+        response = client.get(
+            "/api/plugins/example/record",
+            headers={"Authorization": "Bearer org-a"},
+        )
 
+    assert refused.status_code == 403
     assert response.status_code == 200
     assert response.json()["organization"] == "org-a"
     assert calls == [(EXAMPLE_RECORD_SET_ID, "current", "org-a", [])]

@@ -42,9 +42,10 @@ def test_output_names_the_file_for_the_connector_to_stream(runs):
 
 @pytest.mark.parametrize("body,refusal", [
     ({"tmux_name": "auto-1", "path": "missing.txt"}, "file-not-found"),
-    ({"tmux_name": "auto-1", "path": "../../etc/passwd"}, "bad-request"),
-    ({"tmux_name": "auto-1", "path": "/etc/passwd"}, "bad-request"),
-    ({"tmux_name": "bad name", "path": "proof.txt"}, "bad-request"),
+    # Every session-control refusal names its own cause (f5864628).
+    ({"tmux_name": "auto-1", "path": "../../etc/passwd"}, "invalid-path"),
+    ({"tmux_name": "auto-1", "path": "/etc/passwd"}, "invalid-path"),
+    ({"tmux_name": "bad name", "path": "proof.txt"}, "invalid-tmux-name"),
 ])
 def test_output_refusals(runs, body, refusal):
     assert _output(body)["refusal"] == refusal
@@ -52,7 +53,7 @@ def test_output_refusals(runs, body, refusal):
 
 def test_an_oversize_file_is_refused(runs, monkeypatch):
     monkeypatch.setattr(session_control, "MAX_STREAM_BYTES", 3)
-    assert _output({"tmux_name": "auto-1", "path": "proof.txt"})["refusal"] == scc.OP_TOO_LARGE
+    assert _output({"tmux_name": "auto-1", "path": "proof.txt"})["refusal"] == "file-too-large"
 
 
 class _Request:
