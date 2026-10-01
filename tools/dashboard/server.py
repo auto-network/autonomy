@@ -9608,8 +9608,17 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
     if loop is not None and not isinstance(loop, asyncio.AbstractEventLoop):
         loop = None
 
+    # An organization member's launch on this runner (auto-1qj12): the
+    # workspace is the member's organization's row, never a same-named row of
+    # another organization, and every secret was carried in the request.
+    # ``carried`` is popped so the job holds no secret past this launch.
+    workspace_org = job.config.get("workspace_org")
+    carried = job.config.pop("carried", None)
     try:
-        proj = workspace_settings.get_workspace(project_id)
+        if workspace_org:
+            proj = workspace_settings._workspaces_in_org(workspace_org)[project_id]
+        else:
+            proj = workspace_settings.get_workspace(project_id)
     except Exception as exc:
         writer.fail(
             tmux_name,
@@ -9701,10 +9710,12 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         if proj.default_tags:
             meta["graph_tags"] = list(proj.default_tags)
         extra_env: dict[str, str] = dict(proj.env) if proj.env else {}
-        _apply_env_from_host(
-            proj.env_from_host, extra_env,
-            context=f"workspace {getattr(proj, 'id', None) or proj.graph_project}",
-        )
+        if carried is None:
+            _apply_env_from_host(
+                proj.env_from_host, extra_env,
+                context=f"workspace {getattr(proj, 'id', None) or proj.graph_project}",
+            )
+        # else: env_from_host values came from the member's machine, in carried.env.
         where = _session_machine_context(tmux_name)
         extra_env.update(_machine_env(where))
         extra_env = extra_env or None
@@ -9737,7 +9748,9 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             working_dir=working_dir,
             network_host=proj.network_host,
             capabilities=proj.capabilities,
+            carried=carried,
         )
+        carried = None
         _remaining_step_timeout(launch_deadline, "launching")
         if not cmd_str:
             raise RuntimeError(f"launch_session failed for project '{proj.id}'")
@@ -9946,6 +9959,14 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         startup_script: Path | None = None
 
         if kind == "project":
+            if (dashboard_db.get_session(tmux_name) or {}).get("owner_persona"):
+                # An organization member launched it with credentials carried
+                # in the request; they are gone, and a resume must not fall
+                # back to this machine's own.
+                raise RuntimeError(
+                    "an organization member's session cannot be resumed on the "
+                    "runner: its credentials were carried at launch and are not "
+                    "kept; launch it again")
             phase = "preparing"
             writer.set_state(tmux_name, "preparing")
             prepare_deadline = time.monotonic() + _LIFECYCLE_PREPARING_TIMEOUT_S
@@ -10591,6 +10612,7 @@ async def _recover_stuck_lifecycle_rows() -> None:
             logger.exception("startup_recovery: sweep failed for %s", tmux_name)
 
 
+@remote_api.remote("fleet", "org", check_is_runner=True)
 async def api_session_create(request):
     """Create a new session (container, project, or host) and return its tmux name.
 
@@ -10619,14 +10641,24 @@ async def api_session_create(request):
     another machine, the create becomes a ``launch`` request over
     session-control/1 (graph://7eb29bc8-31a §9.4) and that machine runs it
     through this same path; only workspace (``project``) sessions, and only
-    with global operator authority.
+    with global operator authority. When it names an organization's runner,
+    this machine fills the launch's credentials from its own vault and sends
+    it to the runner over member-message/1 (auto-1qj12).
+
+    Called by an organization member through the remote API, it runs that
+    member's launch on this runner (:func:`_create_org_member_session`).
     """
     body = {}
     try:
         body = await request.json()
     except Exception:
         pass
-    machine = body.get("machine") if isinstance(body, dict) else None
+    if not isinstance(body, dict):
+        body = {}
+    caller = request.scope.get(remote_api.SCOPE_KEY) if hasattr(request, "scope") else None
+    if caller is not None and caller.kind == remote_api.ORG:
+        return await _create_org_member_session(body, caller)
+    machine = body.get("machine")
     if machine:
         return await _create_remote_session(request, body)
     return await _create_session_from_body(body, request)
@@ -10643,6 +10675,10 @@ async def _create_remote_session(request, body: dict):
         return refused
     machine_pub = await asyncio.to_thread(
         session_control_client.resolve_machine, str(body["machine"]))
+    if machine_pub is None:
+        runner = await asyncio.to_thread(remote_api._org_runner, str(body["machine"]))
+        if runner is not None:
+            return await _launch_on_org_runner(body, runner)
     local = await asyncio.to_thread(session_presence.local_machine)
     if machine_pub is not None and local is not None \
             and machine_pub == local.machine_pub:
@@ -10699,7 +10735,239 @@ async def _create_remote_session(request, body: dict):
     }, status_code=202)
 
 
-async def _create_session_from_body(body: dict, request=None, provenance=None):
+def _member_launch_credentials(proj, harness: str, model: str | None) -> dict | str:
+    """Everything a launch of *proj* on another member's runner must carry,
+    opened from THIS machine's vault and environment (auto-1qj12), as the
+    request's ``credentials`` object; or a refusal detail naming what is
+    missing. Values are never logged."""
+    import base64
+
+    from agents import session_launcher as sl
+
+    keys, host_names, refusals = sl.carried_requirements(
+        proj.env, proj.env_from_host, proj.capabilities)
+    if refusals:
+        return "; ".join(refusals)
+    credentials: dict[str, str] = {}
+    env: dict[str, str] = {}
+    signins: dict[str, bytes] = {}
+    if harness == "grok":
+        profile = sl._grok_launch_profile(proj.env, model)
+        if profile.mode == "xai" and not (proj.env or {}).get(sl.GROK_API_KEY_ENV) \
+                and sl._grok_vault_key_available():
+            keys = keys | {sl.GROK_VAULT_KEY}
+    for key in sorted(keys):
+        value = sl._resolve_credential(key)
+        if value is None:
+            return f"credential {key} could not be opened from this machine's vault"
+        credentials[key] = value
+    for name in host_names:
+        value = os.environ.get(name)
+        if value is not None:
+            env[name] = value
+        else:
+            logger.warning("org runner launch: env_from_host %r is not set here; "
+                           "the session starts without it", name)
+    if harness == "claude":
+        creds = sl._resolve_credentials_via_substrate(prefer_alias=None)
+        if creds is None:
+            return "no launchable Claude account in this machine's vault"
+        if creds.get("type") == "token":
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = creds["token"]
+        else:
+            payloads = sl._signin_payloads(creds["harness_token"], harness="claude")
+            if payloads is None:
+                return "the chosen Claude account could not be opened"
+            signins.update(payloads)
+    else:
+        signins.update(sl._signin_payloads(None, harness=harness) or {})
+    return {"credentials": credentials, "env": env,
+            "signins": {name: base64.b64encode(value).decode("ascii")
+                        for name, value in signins.items()}}
+
+
+async def _launch_on_org_runner(body: dict, runner: dict) -> JSONResponse:
+    """The ``machine`` branch of api_session_create when it names an
+    organization's runner (auto-1qj12): the launch carries this member's own
+    credentials and goes to the runner over member-message/1 as the remote
+    API's ``api`` op, where @remote and the runner's launch handler decide.
+    The request body holds secrets: it is never logged."""
+    import base64
+    import secrets as _secrets
+
+    from tools.dashboard import member_message_client
+
+    if body.get("type", "container") != "container" or not body.get("project"):
+        return JSONResponse({"error": "a launch on a runner needs a workspace project "
+                                      "(type 'container')"}, status_code=400)
+    operation_id = body.get("operation_id")
+    if operation_id is not None and not (
+            isinstance(operation_id, str) and re.fullmatch(r"[0-9a-f]{32}", operation_id)):
+        return JSONResponse({"error": "operation_id must be 32 lowercase hex"}, status_code=400)
+    try:
+        proj = (await asyncio.to_thread(
+            workspace_settings._workspaces_in_org, runner["org"]))[body["project"]]
+    except KeyError:
+        return JSONResponse(
+            {"error": f"organization {runner['org']} has no workspace {body['project']!r}",
+             "refusal": "workspace-unavailable"}, status_code=404)
+    harness = body.get("harness") or proj.harness or "claude"
+    carried = await asyncio.to_thread(
+        _member_launch_credentials, proj, harness, body.get("model") or proj.model)
+    if isinstance(carried, str):
+        return JSONResponse({"error": carried, "refusal": "credential-refused",
+                             "at": "local"}, status_code=409)
+    operation_id = operation_id or _secrets.token_hex(16)
+    launch = {"type": "container", "project": body["project"], "harness": harness,
+              "operation_id": operation_id, "credentials": carried}
+    for name in ("primer", "model"):
+        if isinstance(body.get(name), str) and body[name]:
+            launch[name] = body[name]
+    payload = {"method": "POST", "path": "/api/session/create", "query": "",
+               "headers": {"content-type": "application/json"},
+               "body": base64.b64encode(json.dumps(launch).encode()).decode("ascii")}
+    del launch, carried
+    timeout = remote_api.DISPATCH_TIMEOUT_S + 5
+    reply = await member_message_client.request(runner, "api", payload, timeout=timeout)
+    if reply.get("refusal") in ("reply-timeout", "handshake-timeout", "reply-lost"):
+        # The runner may have launched and only the reply was lost: the same
+        # operation_id returns that session.
+        reply = await member_message_client.request(runner, "api", payload, timeout=timeout)
+    del payload
+    if not reply.get("ok"):
+        return JSONResponse({"error": reply.get("detail") or reply.get("refusal"),
+                             "refusal": reply.get("refusal"), "at": reply.get("at"),
+                             "machine": runner["machine_pub"]}, status_code=502)
+    result = reply.get("result") or {}
+    try:
+        data = json.loads(base64.b64decode(result.get("body") or ""))
+    except ValueError:
+        data = {}
+    status = int(result.get("status") or 502)
+    if status != 202:
+        return JSONResponse({**(data if isinstance(data, dict) else {}),
+                             "at": "peer", "machine": runner["machine_pub"]},
+                            status_code=status)
+    return JSONResponse({"tmux_name": data.get("tmux_name"), "label": "", "type": "container",
+                         "pending": True, "org": runner["org"],
+                         "machine_pub": runner["machine_pub"], "operation_id": operation_id,
+                         **({"repeated": True} if data.get("repeated") else {})},
+                        status_code=202)
+
+
+_org_launch_lock: asyncio.Lock | None = None
+
+
+def _carried_from_body(raw) -> "session_launcher.CarriedCredentials | str":
+    """The ``credentials`` of a member's launch request, or a refusal
+    detail. Shape: ``{credentials: {key: value}, env: {NAME: value},
+    signins: {filename: base64}}``. Never logs a value."""
+    import base64
+
+    from agents.session_launcher import CarriedCredentials
+
+    raw = raw if raw is not None else {}
+    if not isinstance(raw, dict):
+        return "credentials must be an object"
+    parts = {}
+    for part in ("credentials", "env", "signins"):
+        value = raw.get(part) or {}
+        if not isinstance(value, dict) or not all(
+                isinstance(k, str) and k and isinstance(v, str) and v
+                for k, v in value.items()):
+            return f"credentials.{part} must map names to non-empty strings"
+        parts[part] = value
+    try:
+        signins = {name: base64.b64decode(value, validate=True)
+                   for name, value in parts["signins"].items()}
+    except (ValueError, TypeError):
+        return "credentials.signins values must be base64"
+    return CarriedCredentials(parts["credentials"], parts["env"], signins)
+
+
+async def _create_org_member_session(body: dict, caller) -> JSONResponse:
+    """An organization member's launch on this runner (auto-1qj12; design
+    graph://7eb29bc8-31a v6 §9.8). @remote has already refused a caller when
+    this machine has no live runner offer in the caller's organization.
+
+    The workspace is the caller's organization's row. Every secret the
+    session may use is carried in ``credentials``; a credential the
+    workspace names that was not carried, or a capability that reads this
+    machine's environment or files, refuses the launch (credential-refused)
+    before anything is registered. The session records the caller's persona
+    as its owner. The same ``operation_id`` returns the session it already
+    started."""
+    from agents.session_launcher import (
+        CLAUDE_BUNDLE_FILENAME, carried_requirements)
+    from tools.dashboard import session_control_client as scc
+
+    global _org_launch_lock
+
+    def refuse(code: str, detail: str, status: int) -> JSONResponse:
+        return JSONResponse({"error": detail, "refusal": code}, status_code=status)
+
+    if body.get("machine"):
+        return refuse("request-malformed", "a launch on a runner names no other machine", 400)
+    project = body.get("project")
+    if body.get("type", "container") != "container" or not isinstance(project, str) or not project:
+        return refuse("missing-project",
+                      "an organization member may launch only a workspace session", 400)
+    operation_id = body.get("operation_id")
+    if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+        return refuse("bad-operation-id", "operation_id must be 32 lowercase hex", 400)
+    carried = _carried_from_body(body.get("credentials"))
+    if isinstance(carried, str):
+        return refuse("request-malformed", carried, 400)
+
+    if _org_launch_lock is None:
+        _org_launch_lock = asyncio.Lock()
+    async with _org_launch_lock:
+        existing = await asyncio.to_thread(dashboard_db.session_for_launch_op, operation_id)
+        if existing is not None:
+            if existing.get("owner_persona") != caller.persona or existing.get("state") in (
+                    "FAILED", "ENDED"):
+                return refuse(scc.LAUNCH_OP_SPENT,
+                              f"operation {operation_id} was already used; retry with a "
+                              "new operation_id", 409)
+            return JSONResponse({"tmux_name": existing["tmux_name"], "label": "",
+                                 "type": "container", "pending": True, "repeated": True},
+                                status_code=202)
+        try:
+            workspaces = await asyncio.to_thread(
+                workspace_settings._workspaces_in_org, caller.org)
+        except workspace_settings.WorkspaceSettingsError as exc:
+            return refuse(scc.WORKSPACE_CONFIG_ERROR, str(exc), 500)
+        proj = workspaces.get(project)
+        if proj is None:
+            return refuse(scc.WORKSPACE_UNAVAILABLE,
+                          f"organization {caller.org} has no workspace {project!r}", 404)
+        keys, _host_env, refusals = carried_requirements(
+            proj.env, proj.env_from_host, proj.capabilities)
+        missing = [f"credential {k} was not carried"
+                   for k in sorted(keys) if k not in carried.credentials]
+        harness = body.get("harness") or proj.harness or "claude"
+        if harness == "claude" and CLAUDE_BUNDLE_FILENAME not in carried.signins \
+                and "CLAUDE_CODE_OAUTH_TOKEN" not in carried.env:
+            missing.append("no Claude sign-in was carried")
+        if missing or refusals:
+            return refuse("credential-refused", "; ".join(missing + refusals), 403)
+        request_body = {"type": "container", "project": project}
+        for name in ("primer", "model", "harness"):
+            if isinstance(body.get(name), str) and body[name]:
+                request_body[name] = body[name]
+        logger.info("org member launch: org=%s persona=%s project=%s carried=%r",
+                    caller.org, (caller.persona or "")[:12], project, carried)
+        return await _create_session_from_body(
+            request_body, None,
+            provenance={"launched_by": f"persona:{caller.persona}",
+                        "home_machine": caller.machine_pub,
+                        "launch_op_id": operation_id,
+                        "owner_persona": caller.persona},
+            workspace_org=caller.org, carried=carried)
+
+
+async def _create_session_from_body(body: dict, request=None, provenance=None,
+                                    *, workspace_org=None, carried=None):
     """api_session_create for an already-parsed body, on THIS machine. Also
     the executor of an inbound session-control ``launch`` (``request`` None:
     a remote launch is always a workspace session, which never reads it).
@@ -10707,7 +10975,12 @@ async def _create_session_from_body(body: dict, request=None, provenance=None):
     ``provenance`` ({launched_by, home_machine, launch_op_id}) is recorded on
     the session row as soon as it is registered, before the lifecycle job is
     enqueued, so the launched session's primer and env already see it and a
-    retried launch finds its operation id."""
+    retried launch finds its operation id.
+
+    ``workspace_org`` pins the workspace to that organization's row, and
+    ``carried`` (a :class:`agents.session_launcher.CarriedCredentials`) is
+    every secret the launch may use: an organization member's launch on this
+    runner (auto-1qj12). Both ride the lifecycle job in memory only."""
     # auto-bpomi: throwaway phase-trace diagnostics — measure session-boot
     # slices for Bead B. Single grep target: 'phase-trace:'.
     _phase_t0 = time.monotonic()
@@ -10751,7 +11024,10 @@ async def _create_session_from_body(body: dict, request=None, provenance=None):
     proj = None
     if project_name:
         try:
-            proj = workspace_settings.get_workspace(project_name)
+            if workspace_org:
+                proj = workspace_settings._workspaces_in_org(workspace_org)[project_name]
+            else:
+                proj = workspace_settings.get_workspace(project_name)
         except KeyError:
             return JSONResponse(
                 {"error": f"Unknown project '{project_name}'",
@@ -10813,6 +11089,8 @@ async def _create_session_from_body(body: dict, request=None, provenance=None):
                 # back to the workspace config in the worker when absent.
                 "model": body.get("model"),
                 "harness": body.get("harness"),
+                **({"workspace_org": workspace_org} if workspace_org else {}),
+                **({"carried": carried} if carried is not None else {}),
             },
         )
         if not _SESSION_LIFECYCLE_WORKER.try_enqueue(job):
@@ -11596,6 +11874,15 @@ async def api_session_resume(request):
     while _od.parent != _od and _od.name != "sessions":
         _od = _od.parent
     output_dir = str(_od.parent)
+
+    if (dead_session or {}).get("owner_persona"):
+        # auto-1qj12: an organization member launched it with credentials
+        # carried in the request; they are not kept, and a resume must not
+        # fall back to this machine's own.
+        return JSONResponse(
+            {"error": "an organization member's session cannot be resumed on "
+                      "the runner; launch it again",
+             "refusal": "carried-session-not-resumable"}, status_code=409)
 
     if session_type == "container":
 

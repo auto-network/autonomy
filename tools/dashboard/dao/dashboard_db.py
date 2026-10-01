@@ -541,8 +541,10 @@ def init_db(db_path: Path | None = None) -> None:
     # Migrate: remote-launch provenance (graph://7eb29bc8-31a §9.4). NULL on
     # every local launch. launched_by names who asked; home_machine is the
     # machine_pub the session:control handshake proved; launch_op_id makes a
-    # retried launch return the session it already started.
-    for column in ("launched_by", "home_machine", "launch_op_id"):
+    # retried launch return the session it already started. owner_persona is
+    # the organization member whose launch started it on this runner (the
+    # persona the org hello proved); only that member may stop it remotely.
+    for column in ("launched_by", "home_machine", "launch_op_id", "owner_persona"):
         try:
             _conn.execute(f"SELECT {column} FROM tmux_sessions LIMIT 0")
         except sqlite3.OperationalError:
@@ -553,13 +555,14 @@ def init_db(db_path: Path | None = None) -> None:
 
 def set_launch_provenance(
     tmux_name: str, *, launched_by: str, home_machine: str, launch_op_id: str,
+    owner_persona: str | None = None,
 ) -> None:
     """Record who launched *tmux_name* from which machine, and the op id."""
     conn = get_conn()
     conn.execute(
         "UPDATE tmux_sessions SET launched_by = ?, home_machine = ?, "
-        "launch_op_id = ? WHERE tmux_name = ?",
-        (launched_by, home_machine, launch_op_id, tmux_name),
+        "launch_op_id = ?, owner_persona = ? WHERE tmux_name = ?",
+        (launched_by, home_machine, launch_op_id, owner_persona, tmux_name),
     )
     conn.commit()
 

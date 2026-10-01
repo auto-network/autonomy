@@ -943,6 +943,68 @@ SIGNIN_WAIT_S = 120
 SIGNIN_CONTAINER_WAIT_S = 300
 
 
+# ── Carried credentials: an organization member's launch on a runner ─────────
+# A member who launches on another member's runner brings every secret the
+# session needs in the launch request, over the authenticated pair
+# (graph://7eb29bc8-31a v6 §9.8, D9). The runner reads none of its own: no
+# vault, no account picker, no host environment, no host file. Carried values
+# reach the container the way sign-ins do -- written into its private ramfs
+# once it runs -- and an environment variable is exported from its file by
+# the same argv prefix, so no value is ever a ``docker run -e`` argument,
+# which Docker would keep on the runner's disk in the container's config.
+#: ramfs filename prefix for a carried environment variable.
+ENV_FILE_PREFIX = "env."
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+class CarriedCredentials:
+    """What a member's dashboard carried: ``credentials`` maps a
+    ``credential:`` key to its value, ``env`` maps an environment variable
+    name to its value (``env_from_host`` names, a Claude setup token),
+    ``signins`` maps a sign-in filename to its content. Held in memory only;
+    its repr names nothing."""
+
+    __slots__ = ("credentials", "env", "signins")
+
+    def __init__(self, credentials=None, env=None, signins=None) -> None:
+        self.credentials: dict[str, str] = dict(credentials or {})
+        self.env: dict[str, str] = dict(env or {})
+        self.signins: dict[str, bytes] = dict(signins or {})
+
+    def __repr__(self) -> str:
+        return (f"CarriedCredentials(credentials={sorted(self.credentials)}, "
+                f"env={sorted(self.env)}, signins={sorted(self.signins)})")
+
+
+def carried_requirements(env, env_from_host, capabilities) -> tuple[set, list, list]:
+    """What a launch on a runner must carry for a workspace, and what it
+    cannot run with: ``(credential keys, env_from_host names, refusals)``.
+
+    A capability binding that reads this machine's environment or a file on
+    it, and a capability secret file, are the runner owner's data; each is a
+    refusal by name, never silently dropped."""
+    keys = _credential_keys_in_env(env) | _declared_credential_keys(capabilities)
+    refusals: list[str] = []
+    for cap in capabilities or ():
+        slug = getattr(cap, "implementation", None) or getattr(cap, "slug", None) or "?"
+        for env_name, source in getattr(cap, "env_bindings", {}).items():
+            if isinstance(source, str):
+                kind = parse_capability_env_source(source).kind
+                if kind in ("host", "file"):
+                    refusals.append(
+                        f"capability {slug}: {env_name} is read from the runner's "
+                        f"own {'environment' if kind == 'host' else 'files'}")
+        if getattr(cap, "secret_file_bindings", None):
+            refusals.append(f"capability {slug}: mounts secret files from the runner")
+    return keys, list(env_from_host or ()), refusals
+
+
+def _carried_env_files(env_values: dict[str, str]) -> dict[str, bytes]:
+    """``{ramfs filename: content}`` for carried environment variables."""
+    return {f"{ENV_FILE_PREFIX}{name}": value.encode()
+            for name, value in env_values.items()}
+
+
 def _pick_account(harness: str, rng: random.Random | None = None) -> Any | None:
     """The account a Codex or Grok session launches with: the only
     launchable one, or a uniform random pick among several (record v16
@@ -1082,19 +1144,33 @@ def signin_argv_prefix(filenames) -> list[str]:
     file (rename) swaps the symlink for a regular file in the container's
     writable layer, where it stays for the session's life. That is not the
     data volume, and the container is removed when the session ends."""
-    pairs = [f"{f}:{SIGNIN_CONTAINER_PATHS[f]}" for f in sorted(filenames)]
-    if not pairs:
+    filenames = sorted(filenames)
+    pairs = [f"{f}:{SIGNIN_CONTAINER_PATHS[f]}" for f in filenames
+             if not f.startswith(ENV_FILE_PREFIX)]
+    env_names = [f[len(ENV_FILE_PREFIX):] for f in filenames
+                 if f.startswith(ENV_FILE_PREFIX)]
+    if any(not _ENV_NAME_RE.fullmatch(n) for n in env_names):
+        raise ValueError("a carried environment variable name is not a shell name")
+    if not pairs and not env_names:
         return []
     from agents.secret_ramfs import SESSION_SECRET_DST
-    script = (
-        f"n=0; for p in {' '.join(shlex.quote(p) for p in pairs)}; do "
-        f'f="{SESSION_SECRET_DST}/${{p%%:*}}"; d="${{p#*:}}"; '
-        f'while [ ! -s "$f" ] && [ "$n" -lt {int(SIGNIN_WAIT_S * 10)} ]; do '
-        f"sleep 0.1; n=$((n+1)); done; "
-        f'if [ -s "$f" ]; then mkdir -p "${{d%/*}}" && ln -sfn "$f" "$d"; '
-        f'else echo "autonomy: sign-in $f was not delivered; the harness '
-        f'will ask you to sign in" >&2; fi; done; exec "$@"'
-    )
+    wait = (f'while [ ! -s "$f" ] && [ "$n" -lt {int(SIGNIN_WAIT_S * 10)} ]; do '
+            f"sleep 0.1; n=$((n+1)); done; ")
+    script = "n=0; "
+    if pairs:
+        script += (
+            f"for p in {' '.join(shlex.quote(p) for p in pairs)}; do "
+            f'f="{SESSION_SECRET_DST}/${{p%%:*}}"; d="${{p#*:}}"; ' + wait +
+            f'if [ -s "$f" ]; then mkdir -p "${{d%/*}}" && ln -sfn "$f" "$d"; '
+            f'else echo "autonomy: sign-in $f was not delivered; the harness '
+            f'will ask you to sign in" >&2; fi; done; ')
+    for env_name in env_names:
+        # The value never appears in argv: the shell reads it from the file.
+        script += (
+            f'f="{SESSION_SECRET_DST}/{ENV_FILE_PREFIX}{env_name}"; ' + wait +
+            f'if [ -s "$f" ]; then {env_name}="$(cat "$f")"; export {env_name}; '
+            f'else echo "autonomy: {env_name} was not delivered" >&2; fi; ')
+    script += 'exec "$@"'
     return ["sh", "-c", script, "autonomy-signin"]
 
 
@@ -1887,6 +1963,7 @@ def launch_session(
     capabilities: tuple = (),
     host_terminal: bool = False,
     claude_alias: str | None = None,
+    carried: CarriedCredentials | None = None,
 ) -> str | None:
     """Launch an agent container session.
 
@@ -1961,6 +2038,12 @@ def launch_session(
                     missing.
         claude_alias: Prefer this Claude account (by alias) when resolving
                     credentials; the usual pick otherwise.
+        carried: An organization member's launch on this runner: every secret
+                    comes from here, and nothing from this machine's vault,
+                    account picker, host environment or host files. A
+                    ``credential:`` the workspace names that was not carried,
+                    or a capability that reads this machine's environment or
+                    files, refuses the launch.
 
     Returns:
         detach=True:  container_id string on success, None on failure.
@@ -2005,9 +2088,30 @@ def launch_session(
     # from byte zero (a resume keeps the original session instead).
     grok_profile: GrokLaunchProfile | None = None
     grok_session_id: str | None = None
+    if carried is not None:
+        _keys, _host, _refusals = carried_requirements(extra_env, (), capabilities)
+        _missing = sorted(k for k in _keys if k not in carried.credentials)
+        _refusals += [f"sign-in {f!r} is not one this launcher delivers"
+                      for f in sorted(carried.signins) if f not in SIGNIN_CONTAINER_PATHS]
+        _refusals += [f"{n!r} is not an environment variable name"
+                      for n in sorted(set(carried.env) | set(extra_env or {}))
+                      if not _ENV_NAME_RE.fullmatch(n)]
+        if _missing or _refusals:
+            print(
+                f"  ERROR: credential-refused for session '{name}': "
+                + "; ".join([f"credential {k} was not carried" for k in _missing]
+                            + _refusals),
+                file=sys.stderr,
+            )
+            return None
     if harness == "grok":
         grok_profile = _grok_launch_profile(extra_env, model)
-        extra_env = _grok_env_with_default_key(extra_env, grok_profile)
+        if carried is None:
+            extra_env = _grok_env_with_default_key(extra_env, grok_profile)
+        elif (grok_profile.mode == "xai" and not (extra_env or {}).get(GROK_API_KEY_ENV)
+              and GROK_VAULT_KEY in carried.credentials):
+            extra_env = {**(extra_env or {}),
+                         GROK_API_KEY_ENV: f"credential:{GROK_VAULT_KEY}"}
         if not resume_uuid:
             import uuid as _uuid
             grok_session_id = str(_uuid.uuid4())
@@ -2036,7 +2140,7 @@ def launch_session(
     # must hard-fail on missing Claude credentials.
     auth_args: list[str] = []
     creds: dict | None = None
-    if harness == "claude":
+    if harness == "claude" and carried is None:
         creds = (_resolve_credentials(prefer_alias=claude_alias) if claude_alias
                  else _resolve_credentials())
         _lap("resolve_credentials")
@@ -2099,7 +2203,7 @@ def launch_session(
             # of the vault record this session launched with (record v16
             # §10.9). The dashboard joins it to the account's alias.
             meta_doc["harness_token"] = creds["harness_token"]
-        elif harness in ("codex", "grok"):
+        elif harness in ("codex", "grok") and carried is None:
             _acct = _pick_account(harness)
             if _acct is not None:
                 meta_doc["harness_token"] = _acct.id
@@ -2193,10 +2297,15 @@ def launch_session(
     # that was chosen but cannot be opened refuses the launch before any
     # authority is minted below.
     signin_accounts: dict[str, str] = {}
-    signins = _signin_payloads(
-        creds.get("harness_token")
-        if creds is not None and creds.get("type") == "vault" else None,
-        accounts_out=signin_accounts, harness=harness)
+    if carried is not None:
+        # No account ids: a re-delivery would reopen THIS machine's vault.
+        signins = dict(carried.signins)
+        carried_env = dict(carried.env)
+    else:
+        signins = _signin_payloads(
+            creds.get("harness_token")
+            if creds is not None and creds.get("type") == "vault" else None,
+            accounts_out=signin_accounts, harness=harness)
     if signins is None:
         print(
             f"  ERROR: refusing to launch session '{name}': a sign-in "
@@ -2217,8 +2326,9 @@ def launch_session(
     from agents import launch_preflight
     _problems = launch_preflight.preflight(
         image=image, runtime_args=runtime_args, plan=plan, topo=_topo,
-        credential_keys=(_declared_credential_keys(capabilities)
-                         | _credential_keys_in_env(extra_env)),
+        credential_keys=(set() if carried is not None else
+                         (_declared_credential_keys(capabilities)
+                          | _credential_keys_in_env(extra_env))),
     )
     if _problems:
         print(
@@ -2364,7 +2474,10 @@ def launch_session(
             # drops the binding rather than injecting a wrong/empty value; the
             # value is never logged.
             parsed = parse_workspace_env_source(v) if isinstance(v, str) else None
-            if parsed is not None and parsed.kind == "credential":
+            if parsed is not None and parsed.kind == "credential" and carried is not None:
+                # Checked above: every credential the workspace names was carried.
+                carried_env[k] = carried.credentials[parsed.locator]
+            elif parsed is not None and parsed.kind == "credential":
                 key = parsed.locator
                 resolved = _resolve_credential(key) if parsed.valid else None
                 if resolved is None:
@@ -2380,8 +2493,19 @@ def launch_session(
     # Capability env bindings: non-secret env vars declared by org installs.
     # Secret values stay file-mounted (see _capability_mounts) and never
     # land here per graph://86e04207-a25 § Runtime materialization.
-    for k, v in _capability_env(capabilities).items():
-        cmd.extend(["-e", f"{k}={v}"])
+    if carried is None:
+        for k, v in _capability_env(capabilities).items():
+            cmd.extend(["-e", f"{k}={v}"])
+    else:
+        # Literal bindings only; host and file sources were refused above.
+        for cap in capabilities:
+            for k, source in cap.env_bindings.items():
+                parsed = parse_capability_env_source(source)
+                if parsed.kind == "credential":
+                    carried_env[k] = carried.credentials[parsed.locator]
+                elif parsed.kind == "literal":
+                    cmd.extend(["-e", f"{k}={parsed.literal}"])
+        signins.update(_carried_env_files(carried_env))
 
     # Command-surface env (e.g. AUTONOMY_CAPABILITY_BIN) — only present
     # when at least one capability declared ``tool_target.expose_commands``.
