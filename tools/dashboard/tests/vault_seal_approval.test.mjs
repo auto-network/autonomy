@@ -89,3 +89,28 @@ test('a request with no grant action or no approval id renders unavailable',()=>
   assert.equal(q('#review-unavailable').hidden,false);
   assert.equal(q('#primary').disabled,true);
 });
+
+test('https links in the description open in a new tab, built as nodes from untrusted text (auto-1z8lf)',async()=>{
+  const detail='Create it at https://github.com/settings/personal-access-tokens/new?name=ci&target_name=blindhash. '+
+    'Not http://plain.test nor javascript:alert(1) <img src=x onerror="window.pwned=1">';
+  open({safeReview:{...item().safeReview,detail}});
+  await until(()=>q('#intro')?.textContent);
+  const links=[...q('#intro').querySelectorAll('a')];
+  assert.equal(links.length,1);
+  assert.equal(links[0].href,'https://github.com/settings/personal-access-tokens/new?name=ci&target_name=blindhash');
+  assert.equal(links[0].textContent,'https://github.com/settings/personal-access-tokens/new?name=ci&target_name=blindhash');
+  assert.equal(links[0].target,'_blank');
+  assert.equal(links[0].rel,'noopener noreferrer');
+  assert.equal(q('#intro').textContent,detail);          // every character kept, as text
+  assert.equal(q('#intro').querySelector('img'),null);   // markup in the text is never parsed
+  assert.equal(window.pwned,undefined);
+});
+
+test('linkifyInto keeps punctuation around a link as text, and a bare scheme stays text',async()=>{
+  const {linkifyInto}=await import('../static/js/components/approval-experiment.js');
+  const el=document.createElement('p');
+  linkifyInto(el,'a https://x.test/p, then (https://y.test/q) and https://');
+  assert.deepEqual([...el.querySelectorAll('a')].map(a=>[a.textContent,a.href]),
+    [['https://x.test/p','https://x.test/p'],['https://y.test/q','https://y.test/q']]);
+  assert.equal(el.textContent,'a https://x.test/p, then (https://y.test/q) and https://');
+});

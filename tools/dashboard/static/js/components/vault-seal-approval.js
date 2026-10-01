@@ -49,6 +49,8 @@ export function openVaultSealApproval(item, { onResolved, onClose }) {
     review: {
       kind: 'vault-seal', title: 'Vault a secret',
       intro: review.detail || '',
+      // The requester's own words: its https links open in a new tab (auto-1z8lf).
+      linkifyIntro: true,
       target: { type: 'Secret', name, byline: review.key && review.key !== name ? 'Stored as ' + review.key : '' },
       requester, facts,
       consequence: 'The value is sealed into your vault on this dashboard. The requesting session learns only that it exists until the vault releases it.',
