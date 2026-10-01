@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -297,6 +298,7 @@ def _update_revision_metadata(
             (*values, rev_id),
         )
         conn.commit()
+        _clear_session_designs()      # a title shows in the session's link
         updated = conn.execute("""\
             SELECT
               d.id,
@@ -778,43 +780,160 @@ _SESSION_ICON = (
 )
 
 
+# ── which design a session links to ────────────────────────────────────────
+#
+# session_contributions runs for every batch of session cards. It used to
+# build every design series (3,758 rows, thumbnails, form factors, share
+# lookups) to answer "which design did each of these sessions create". It now
+# keeps, per session, that session's design series (only the five fields the
+# link needs), backfills a session it has not seen with one query for that
+# session's designs, and invalidates by the designs table's newest rowid, so
+# the table is read again only when a design has been created since.
+# Operator design, 2026-10-01.
+
+#: session id -> that session's series, newest first:
+#: (latest_created_at, design_id, latest_revision_id, title, org)
+_session_designs: "OrderedDict[str, list[tuple]]" = OrderedDict()
+#: design id -> sessions whose cached list includes it (for invalidation)
+_design_sessions: dict[str, set[str]] = defaultdict(set)
+_designs_max_rowid: int | None = None
+_session_designs_lock = threading.Lock()
+#: Least-recently-used sessions beyond this are dropped (the session viewer
+#: asks for one session at a time, so pruning to each request's list would
+#: empty the map on every view).
+_SESSION_DESIGNS_MAX = 4096
+
+
+def _clear_session_designs() -> None:
+    global _designs_max_rowid
+    with _session_designs_lock:
+        _session_designs.clear()
+        _design_sessions.clear()
+        _designs_max_rowid = None
+
+
+def _contribution_series(rows: list[dict]) -> dict[str, list[tuple]]:
+    """Per creator session, its series from these revision rows, newest
+    first — the same creator, latest revision, title, org and latest-created
+    rules as _series_from_rows, for only the fields a session link uses."""
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("design_id") or row.get("id"))].append(row)
+    by_session: dict[str, list[tuple]] = defaultdict(list)
+    for design_id, revisions in grouped.items():
+        revisions.sort(key=lambda r: (
+            _coerce_int(r.get("revision_seq"), 1),
+            r.get("created_at") or "",
+            r.get("id") or "",
+        ))
+        latest = revisions[-1]
+        creator = next((str(r.get("creator_session_id")) for r in reversed(revisions)
+                        if r.get("creator_session_id")), "")
+        if not creator:
+            continue
+        created = [str(r.get("created_at") or "") for r in revisions if r.get("created_at")]
+        by_session[creator].append((
+            max(created) if created else "", design_id, str(latest.get("id") or ""),
+            latest.get("title") or "Untitled Design", latest.get("org"),
+        ))
+    for series in by_session.values():
+        series.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return by_session
+
+
+def _backfill_session_designs(session_ids: list[str]) -> dict[str, list[tuple]]:
+    """The series of exactly these sessions: their designs' revisions only."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        found = _contribution_series(_design_rows())
+        return {sid: found.get(sid, []) for sid in session_ids}
+    from agents.design_db import _get_conn
+
+    conn = _get_conn()
+    try:
+        marks = ",".join("?" for _ in session_ids)
+        design_ids = [r[0] for r in conn.execute(
+            f"SELECT DISTINCT COALESCE(design_id, id) FROM designs "
+            f"WHERE creator_session_id IN ({marks})", session_ids).fetchall()]
+        rows: list[dict] = []
+        if design_ids:
+            marks = ",".join("?" for _ in design_ids)
+            rows = [{k: r[k] for k in r.keys()} for r in conn.execute(
+                "SELECT id, COALESCE(design_id, id) AS design_id, title, "
+                "COALESCE(revision_seq, 1) AS revision_seq, created_at, "
+                f"creator_session_id, org FROM designs "
+                f"WHERE COALESCE(design_id, id) IN ({marks})", design_ids).fetchall()]
+    finally:
+        conn.close()
+    found = _contribution_series(rows)
+    return {sid: found.get(sid, []) for sid in session_ids}
+
+
+def _invalidate_new_designs() -> None:
+    """Drop the sessions affected by designs written since the last call."""
+    global _designs_max_rowid
+    if os.environ.get("DASHBOARD_MOCK"):
+        return
+    from agents.design_db import _get_conn
+
+    conn = _get_conn()
+    try:
+        newest = conn.execute("SELECT MAX(rowid) FROM designs").fetchone()[0] or 0
+        with _session_designs_lock:
+            last = _designs_max_rowid
+        if last is not None and newest <= last:
+            return
+        changed = [] if last is None else conn.execute(
+            "SELECT COALESCE(design_id, id), creator_session_id FROM designs "
+            "WHERE rowid > ?", (last,)).fetchall()
+    finally:
+        conn.close()
+    with _session_designs_lock:
+        for design_id, creator in changed:
+            for sid in _design_sessions.pop(str(design_id), set()) | {str(creator or "")}:
+                _session_designs.pop(sid, None)
+        _designs_max_rowid = newest
+
+
 def session_contributions(session_ids: list[str], request: Request) -> dict[str, list[dict]]:
     """Contribute one latest linked-design action per requested session."""
-    requested = set(session_ids)
     result: dict[str, list[dict]] = {session_id: [] for session_id in session_ids}
-    if not requested:
+    if not session_ids:
         return result
-    designs = sorted(
-        _series_from_rows(_design_rows()),
-        key=lambda row: (row.get("latest_created_at") or "", row.get("design_id") or ""),
-        reverse=True,
-    )
-    claimed: set[str] = set()
-    for design in designs:
-        session_id = str(design.get("creator_session_id") or "")
-        if (
-            session_id not in requested
-            or session_id in claimed
-            or api_auth.caller_org_scope_hides(request, design.get("org"))
-        ):
-            continue
-        revision_id = str(design.get("latest_revision_id") or "")
-        if not revision_id:
-            continue
-        title = str(design.get("title") or "Untitled Design")
-        result[session_id].append({
-            "id": f"design:{design.get('design_id') or revision_id}",
-            "kind": "action",
-            "label": "Design Studio",
-            "title": f"Open Design Studio: {title}",
-            "href": (
-                f"/design/{revision_id}?from_session="
-                f"{quote(session_id, safe='')}"
-            ),
-            "icon_svg": _SESSION_ICON,
-            "accent": "#818cf8",
-        })
-        claimed.add(session_id)
+    _invalidate_new_designs()
+    with _session_designs_lock:
+        missing = [sid for sid in session_ids if sid not in _session_designs]
+    if missing:
+        filled = _backfill_session_designs(missing)
+        with _session_designs_lock:
+            for sid, series in filled.items():
+                _session_designs[sid] = series
+                for entry in series:
+                    _design_sessions[entry[1]].add(sid)
+            while len(_session_designs) > _SESSION_DESIGNS_MAX:
+                _session_designs.popitem(last=False)
+    with _session_designs_lock:
+        cached = {}
+        for sid in session_ids:
+            if sid in _session_designs:
+                _session_designs.move_to_end(sid)
+                cached[sid] = list(_session_designs[sid])
+    for session_id, series in cached.items():
+        for _created, design_id, revision_id, title, org in series:
+            if not revision_id or api_auth.caller_org_scope_hides(request, org):
+                continue
+            result[session_id].append({
+                "id": f"design:{design_id or revision_id}",
+                "kind": "action",
+                "label": "Design Studio",
+                "title": f"Open Design Studio: {title}",
+                "href": (
+                    f"/design/{revision_id}?from_session="
+                    f"{quote(session_id, safe='')}"
+                ),
+                "icon_svg": _SESSION_ICON,
+                "accent": "#818cf8",
+            })
+            break
     return result
 
 

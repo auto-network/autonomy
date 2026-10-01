@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 from unittest.mock import patch
 import json
+import pytest
 import yaml
 
 from starlette.applications import Starlette
@@ -232,31 +234,122 @@ def test_catalog_preserves_latest_nonempty_creator_link():
     assert design["creator_session_label"] == "Designer"
 
 
-def test_session_contribution_links_latest_design_for_exact_creator():
-    request = Request({
-        "type": "http",
-        "method": "POST",
-        "path": "/api/session-contributions",
-        "headers": [],
-        "state": {
-            "api_principal": api_auth.ApiPrincipal(
-                api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
-                subject="operator",
-            ),
-        },
-    })
-    with patch.object(design_api, "_design_rows", return_value=_rows()):
-        rows = design_api.session_contributions(
-            ["auto-designer", "auto-unlinked"],
-            request,
-        )
+@pytest.fixture
+def design_store(tmp_path):
+    """A temporary designs database and an empty session-to-design map."""
+    from agents import design_db
+
+    old_db_path, old_initialized = design_db.DB_PATH, design_db._initialized
+    design_db.DB_PATH = tmp_path / "experiments.db"
+    design_db._initialized = False
+    design_api._clear_session_designs()
+    try:
+        yield design_db
+    finally:
+        design_api._clear_session_designs()
+        design_db.DB_PATH, design_db._initialized = old_db_path, old_initialized
+
+
+_made = itertools.count()
+
+
+def _make(design_db, title, session, *, design_id=None, org=None):
+    """A revision one second newer than the last (created_at has second
+    resolution, and equal times would tie-break on the random design id)."""
+    revision = design_db.create_design(
+        title=title, variants=[{"id": "main", "html": f"<p>{title}</p>"}],
+        design_id=design_id, creator_session_id=session, org=org, force=True)
+    conn = design_db._get_conn()
+    conn.execute("UPDATE designs SET created_at = datetime('2026-01-01', ?) WHERE id = ?",
+                 (f"+{next(_made)} seconds", revision))
+    conn.commit()
+    conn.close()
+    return revision
+
+
+def _contrib_request(principal=None) -> Request:
+    return _req(principal or api_auth.ApiPrincipal(
+        api_auth.ApiPrincipalKind.OPERATOR_COOKIE, subject="operator"))
+
+
+def test_session_contribution_links_latest_design_for_exact_creator(design_store):
+    _make(design_store, "Older design", "auto-designer")
+    first = _make(design_store, "Session card", "auto-designer")
+    latest = _make(design_store, "Session card refined", "auto-designer", design_id=first)
+
+    rows = design_api.session_contributions(
+        ["auto-designer", "auto-unlinked"], _contrib_request())
 
     [linked] = rows["auto-designer"]
     assert linked["kind"] == "action"
     assert linked["label"] == "Design Studio"
-    assert linked["href"] == "/design/rev-a2?from_session=auto-designer"
+    assert linked["id"] == f"design:{first}"
+    assert linked["href"] == f"/design/{latest}?from_session=auto-designer"
     assert "Session card refined" in linked["title"]
     assert rows["auto-unlinked"] == []
+
+
+def test_session_contribution_skips_a_design_the_caller_org_cannot_see(design_store):
+    visible = _make(design_store, "Autonomy design", "auto-designer", org="autonomy")
+    _make(design_store, "Anchore design", "auto-designer", org="anchore")
+
+    [linked] = design_api.session_contributions(
+        ["auto-designer"], _contrib_request(_org_session("autonomy")))["auto-designer"]
+
+    assert linked["href"] == f"/design/{visible}?from_session=auto-designer"
+
+
+def test_session_contribution_reads_a_session_once_until_a_design_is_created(design_store):
+    _make(design_store, "First", "auto-designer")
+    request = _contrib_request()
+    real_backfill = design_api._backfill_session_designs
+    with patch.object(design_api, "_backfill_session_designs",
+                      side_effect=real_backfill) as backfill:
+        design_api.session_contributions(["auto-designer", "auto-idle"], request)
+        design_api.session_contributions(["auto-designer"], request)
+        design_api.session_contributions(["auto-idle"], request)
+        assert backfill.call_count == 1
+
+        second = _make(design_store, "Second", "auto-designer")
+        [linked] = design_api.session_contributions(["auto-designer"], request)["auto-designer"]
+        design_api.session_contributions(["auto-idle"], request)
+
+    assert backfill.call_count == 2
+    assert linked["href"] == f"/design/{second}?from_session=auto-designer"
+
+
+def test_session_contribution_follows_a_revision_by_another_session(design_store):
+    first = _make(design_store, "Shared", "auto-designer")
+    request = _contrib_request()
+    assert design_api.session_contributions(["auto-designer"], request)["auto-designer"]
+
+    _make(design_store, "Shared v2", "auto-reviser", design_id=first)
+    rows = design_api.session_contributions(["auto-designer", "auto-reviser"], request)
+
+    assert rows["auto-designer"] == []
+    assert "Shared v2" in rows["auto-reviser"][0]["title"]
+
+
+def test_session_contribution_shows_an_edited_title(design_store):
+    revision = _make(design_store, "Before", "auto-designer")
+    request = _contrib_request()
+    design_api.session_contributions(["auto-designer"], request)
+
+    design_api._update_revision_metadata(revision, title="After")
+
+    [linked] = design_api.session_contributions(["auto-designer"], request)["auto-designer"]
+    assert linked["title"] == "Open Design Studio: After"
+
+
+def test_session_contribution_map_drops_least_recently_used_sessions(design_store):
+    with patch.object(design_api, "_SESSION_DESIGNS_MAX", 2):
+        request = _contrib_request()
+        design_api.session_contributions(["auto-a"], request)
+        design_api.session_contributions(["auto-b"], request)
+        design_api.session_contributions(["auto-a"], request)
+        design_api.session_contributions(["auto-c"], request)
+
+    assert list(design_api._session_designs) == ["auto-a", "auto-c"]
 
 
 def test_list_designs_uses_older_revision_thumbnail_when_latest_has_none():
