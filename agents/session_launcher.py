@@ -942,6 +942,75 @@ SIGNIN_CONTAINER_PATHS = {
 SIGNIN_WAIT_S = 120
 SIGNIN_CONTAINER_WAIT_S = 300
 
+# ── vault links (auto-2eqpb) ────────────────────────────────────────────────
+#
+# A workspace's declared vault links ride the SAME step as the sign-ins: the
+# value is opened from the audited vault in memory, delivered into the
+# session's private ramfs as ``vault.<entry>``, and linked at the declared
+# path. Two differences, both so the links exist before anything reads them:
+# the link step runs BEFORE the image's own entrypoint (its ssh-agent block
+# and /startup.sh read the linked files), and /etc/autonomy/artifacts --
+# where the Anchore scripts read them, and which the unprivileged session
+# user cannot create -- is a small tmpfs owned by that user. It holds only
+# symlinks; the values stay in the ramfs.
+VAULT_LINK_FILE_PREFIX = "vault."
+VAULT_LINK_DIR = "/etc/autonomy/artifacts"
+#: The account recorded for a vault link in a pending delivery record, so a
+#: re-delivery after a dashboard reload reopens the same entry.
+VAULT_LINK_ACCOUNT_PREFIX = "vault:"
+
+
+def _vault_link_payloads(vault_links, carried=None):
+    """``(payloads, dests, accounts, refusals)`` for a launch's vault links.
+
+    payloads: ``{vault.<entry>: bytes}``; dests: ``{vault.<entry>: path}``;
+    accounts: the pending-record account per file; refusals: the required
+    links that could not be opened, by key. A carried launch (a member's,
+    on a runner) reads only what was carried, never this machine's vault."""
+    payloads: dict[str, bytes] = {}
+    dests: dict[str, str] = {}
+    accounts: dict[str, str] = {}
+    refusals: list[str] = []
+    for link in vault_links or ():
+        if carried is not None:
+            value = carried.credentials.get(link.key)
+        else:
+            value = _resolve_credential(link.key)
+        if not value:
+            if link.required:
+                refusals.append(link.key)
+            else:
+                logger.warning("vault link %s (%s) could not be opened; launching "
+                               "without it", link.key, link.path)
+            continue
+        filename = f"{VAULT_LINK_FILE_PREFIX}{link.vault}"
+        payloads[filename] = value.encode("utf-8")
+        dests[filename] = link.path
+        accounts[filename] = f"{VAULT_LINK_ACCOUNT_PREFIX}{link.key}"
+    return payloads, dests, accounts, refusals
+
+
+def _image_entrypoint(image: str) -> list[str] | None:
+    """The image's own ENTRYPOINT (exec form), or None when it has none or
+    it cannot be read. Read at launch, never assumed: images differ, and a
+    workspace's provision row can carry its own Dockerfile."""
+    try:
+        r = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{json .Config.Entrypoint}}", image],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        value = json.loads(r.stdout.strip() or "null")
+    except ValueError:
+        return None
+    if not isinstance(value, list) or not value or not all(
+            isinstance(part, str) and part for part in value):
+        return None
+    return value
+
 
 # ── Carried credentials: an organization member's launch on a runner ─────────
 # A member who launches on another member's runner brings every secret the
@@ -1118,6 +1187,11 @@ def _signin_payloads(claude_account: str | None,
 
 def _open_signin(filename: str, account_id: str) -> bytes | None:
     """Reopen one sign-in from the vault by the account a launch chose."""
+    if filename.startswith(VAULT_LINK_FILE_PREFIX):
+        if not account_id.startswith(VAULT_LINK_ACCOUNT_PREFIX):
+            return None
+        value = _resolve_credential(account_id[len(VAULT_LINK_ACCOUNT_PREFIX):])
+        return value.encode("utf-8") if value else None
     if filename == CLAUDE_BUNDLE_FILENAME:
         return _claude_bundle_doc(account_id)
     harness = {CODEX_AUTH_FILENAME: "codex", GROK_AUTH_FILENAME: "grok"}.get(filename)
@@ -1132,7 +1206,7 @@ def _open_signin(filename: str, account_id: str) -> bytes | None:
     return auth.encode() if auth else None
 
 
-def signin_argv_prefix(filenames) -> list[str]:
+def signin_argv_prefix(filenames, dests: dict[str, str] | None = None) -> list[str]:
     """argv placed before the harness command: wait (bounded) for each
     delivered sign-in, symlink it where its harness reads it, then exec the
     harness. Empty when nothing is delivered. It runs inside the shared
@@ -1145,7 +1219,8 @@ def signin_argv_prefix(filenames) -> list[str]:
     writable layer, where it stays for the session's life. That is not the
     data volume, and the container is removed when the session ends."""
     filenames = sorted(filenames)
-    pairs = [f"{f}:{SIGNIN_CONTAINER_PATHS[f]}" for f in filenames
+    dests = dests or {}
+    pairs = [f"{f}:{dests.get(f) or SIGNIN_CONTAINER_PATHS[f]}" for f in filenames
              if not f.startswith(ENV_FILE_PREFIX)]
     env_names = [f[len(ENV_FILE_PREFIX):] for f in filenames
                  if f.startswith(ENV_FILE_PREFIX)]
@@ -1162,8 +1237,10 @@ def signin_argv_prefix(filenames) -> list[str]:
             f"for p in {' '.join(shlex.quote(p) for p in pairs)}; do "
             f'f="{SESSION_SECRET_DST}/${{p%%:*}}"; d="${{p#*:}}"; ' + wait +
             f'if [ -s "$f" ]; then mkdir -p "${{d%/*}}" && ln -sfn "$f" "$d"; '
-            f'else echo "autonomy: sign-in $f was not delivered; the harness '
-            f'will ask you to sign in" >&2; fi; done; ')
+            f'else case "$f" in */{VAULT_LINK_FILE_PREFIX}*) '
+            f'echo "autonomy: vault link $f was not delivered; $d is absent" >&2;; '
+            f'*) echo "autonomy: sign-in $f was not delivered; the harness '
+            f'will ask you to sign in" >&2;; esac; fi; done; ')
     for env_name in env_names:
         # The value never appears in argv: the shell reads it from the file.
         script += (
@@ -1964,6 +2041,7 @@ def launch_session(
     host_terminal: bool = False,
     claude_alias: str | None = None,
     carried: CarriedCredentials | None = None,
+    vault_links: tuple = (),
 ) -> str | None:
     """Launch an agent container session.
 
@@ -2313,6 +2391,31 @@ def launch_session(
             file=sys.stderr,
         )
         return None
+    # The workspace's vault links (auto-2eqpb), on the same carrier. A
+    # required one that cannot be opened -- absent, or the vault cold --
+    # refuses the launch by name; it is never dropped silently.
+    vault_payloads, vault_dests, vault_accounts, vault_refusals = (
+        _vault_link_payloads(vault_links, carried))
+    if vault_refusals:
+        print(
+            f"  ERROR: refusing to launch session '{name}': required vault "
+            f"link(s) could not be opened: {', '.join(vault_refusals)} "
+            "(absent from the audited vault, or the vault is cold)",
+            file=sys.stderr,
+        )
+        return None
+    if vault_payloads:
+        vault_entrypoint = _image_entrypoint(image)
+        if vault_entrypoint is None:
+            print(
+                f"  ERROR: refusing to launch session '{name}': image {image!r} "
+                "declares no ENTRYPOINT that can be read, so its vault links "
+                "cannot be placed before it runs",
+                file=sys.stderr,
+            )
+            return None
+        signins = {**signins, **vault_payloads}
+        signin_accounts.update(vault_accounts)
 
     # Preflight EVERY input the docker run depends on that could be missing —
     # the image, the runtime, and every mount source (host binds AND
@@ -2526,7 +2629,22 @@ def launch_session(
     # Entrypoint, image, and arguments. With sign-ins to deliver, a prefix
     # after the image waits for them in /run/secrets and links them into
     # place before exec'ing the harness argv (signin_argv_prefix).
-    image_head = [image, *signin_argv_prefix(signins)]
+    if vault_payloads:
+        # Vault links must exist before the image's entrypoint runs its
+        # ssh-agent block and /startup.sh, so the one link step runs AS the
+        # entrypoint and hands off to the image's own (read above, exec form)
+        # with the same argv as always. The tmpfs gives the session user the
+        # directory the Anchore scripts read from; it holds only symlinks.
+        _prefix = signin_argv_prefix(signins, vault_dests)
+        image_head = ["--entrypoint", _prefix[0]]
+        if any(d == VAULT_LINK_DIR or d.startswith(VAULT_LINK_DIR + "/")
+               for d in vault_dests.values()):
+            from agents.secret_ramfs import SESSION_SECRET_UID
+            image_head += ["--tmpfs", f"{VAULT_LINK_DIR}:uid={SESSION_SECRET_UID},"
+                                      f"gid={SESSION_SECRET_UID},mode=0700"]
+        image_head += [image, *_prefix[1:], *vault_entrypoint]
+    else:
+        image_head = [image, *signin_argv_prefix(signins)]
     # Base images have ENTRYPOINT=["claude", "--dangerously-skip-permissions"];
     # dind-based images have a shell wrapper that does `exec "$@"` so the
     # caller must pass the full command starting with `claude`.

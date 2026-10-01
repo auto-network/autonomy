@@ -2834,3 +2834,136 @@ def test_a_claude_session_with_a_vault_account_gets_only_its_bundle(monkeypatch)
     _claude_vault(monkeypatch)
     payloads = session_launcher._signin_payloads("org-1", harness="claude")
     assert set(payloads) == {session_launcher.CLAUDE_BUNDLE_FILENAME}
+
+
+# ── vault links (auto-2eqpb) ────────────────────────────────────────────────
+
+from agents.workspace_settings import VaultLink  # noqa: E402
+
+DOCKER_LINK = VaultLink(key="anchore:docker-config", vault="docker-config",
+                        path="/etc/autonomy/artifacts/docker-config.json",
+                        name="Docker config")
+IMAGE_ENTRYPOINT = ["/usr/local/bin/autonomy-entrypoint.sh"]
+
+
+@pytest.fixture
+def vault(monkeypatch):
+    values = {"anchore:docker-config": '{"auths": {}}'}
+    monkeypatch.setattr(session_launcher, "_resolve_credential", lambda key: values.get(key))
+    monkeypatch.setattr(session_launcher, "_image_entrypoint", lambda image: IMAGE_ENTRYPOINT)
+    return values
+
+
+def test_a_vault_link_rides_the_signin_carrier_and_runs_before_the_images_entrypoint(
+        tmp_path, fake_crosstalk, captured_run, signin_deliveries, vault):
+    """One link step, placed AS the entrypoint, so the link exists before
+    the image's own entrypoint runs its ssh-agent block and /startup.sh;
+    then exactly that entrypoint, with the same argv as always."""
+    _run(name="auto-v", output_dir=str(tmp_path / "run"), harness="codex",
+         vault_links=(DOCKER_LINK,))
+    cmd = captured_run[0]
+    assert signin_deliveries["now"] == [("auto-v", ["vault.docker-config"])]
+    i = cmd.index("session-widgets")
+    assert cmd[i - 4:i] == ["--entrypoint", "sh", "--tmpfs",
+                            "/etc/autonomy/artifacts:uid=1000,gid=1000,mode=0700"]
+    assert cmd[i + 1] == "-c" and cmd[i + 3] == "autonomy-signin"
+    assert "vault.docker-config:/etc/autonomy/artifacts/docker-config.json" in cmd[i + 2]
+    assert cmd[i + 4] == IMAGE_ENTRYPOINT[0]
+    assert cmd[i + 5] == "codex"
+
+
+def test_a_required_vault_link_that_cannot_open_refuses_by_name(
+        tmp_path, fake_creds, fake_crosstalk, captured_run, signin_deliveries, vault, capsys):
+    vault.clear()                     # absent, or the vault is cold
+    assert _run(name="auto-w", output_dir=str(tmp_path / "run"),
+                vault_links=(DOCKER_LINK,)) is None
+    assert captured_run == []
+    assert "anchore:docker-config" in capsys.readouterr().err
+
+
+def test_an_optional_vault_link_that_cannot_open_is_skipped(
+        tmp_path, fake_creds, fake_crosstalk, captured_run, signin_deliveries, vault):
+    vault.clear()
+    optional = VaultLink(**{**DOCKER_LINK.__dict__, "required": False})
+    _run(name="auto-x", output_dir=str(tmp_path / "run"), vault_links=(optional,))
+    cmd = captured_run[0]
+    assert "--entrypoint" not in cmd and "--tmpfs" not in cmd
+
+
+def test_an_image_without_a_readable_entrypoint_refuses_a_vault_link(
+        tmp_path, fake_creds, fake_crosstalk, captured_run, signin_deliveries, vault, monkeypatch, capsys):
+    monkeypatch.setattr(session_launcher, "_image_entrypoint", lambda image: None)
+    assert _run(name="auto-y", output_dir=str(tmp_path / "run"),
+                vault_links=(DOCKER_LINK,)) is None
+    assert captured_run == []
+    assert "ENTRYPOINT" in capsys.readouterr().err
+
+
+def test_a_link_outside_the_artifacts_dir_adds_no_tmpfs(
+        tmp_path, fake_creds, fake_crosstalk, captured_run, signin_deliveries, vault):
+    home_link = VaultLink(key="anchore:docker-config", vault="docker-config",
+                          path="/home/agent/.docker/config.json")
+    _run(name="auto-z", output_dir=str(tmp_path / "run"), vault_links=(home_link,))
+    cmd = captured_run[0]
+    assert "--entrypoint" in cmd and "--tmpfs" not in cmd
+
+
+def test_without_vault_links_the_launch_is_unchanged(
+        tmp_path, fake_creds, fake_crosstalk, captured_run, signin_deliveries, monkeypatch):
+    monkeypatch.setattr(session_launcher, "_image_entrypoint",
+                        lambda image: pytest.fail("no image inspect without vault links"))
+    _run(name="auto-n", output_dir=str(tmp_path / "run"))
+    assert "--entrypoint" not in captured_run[0] and "--tmpfs" not in captured_run[0]
+
+
+def test_the_link_step_places_a_vault_file_and_says_when_one_is_missing(tmp_path, monkeypatch):
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "vault.docker-config").write_text("{}")
+    monkeypatch.setattr(session_launcher, "SIGNIN_WAIT_S", 0.3)
+    dest = tmp_path / "etc" / "autonomy" / "artifacts" / "docker-config.json"
+    missing = tmp_path / "etc" / "autonomy" / "artifacts" / "license.yaml"
+    argv = session_launcher.signin_argv_prefix(
+        ["vault.docker-config", "vault.enterprise-license"],
+        {"vault.docker-config": str(dest), "vault.enterprise-license": str(missing)})
+    argv[2] = argv[2].replace("/run/secrets", str(secrets_dir))
+    r = subprocess.run([*argv, "echo", "entrypoint-ran"],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and r.stdout.strip() == "entrypoint-ran"
+    assert dest.is_symlink() and os.readlink(dest) == str(secrets_dir / "vault.docker-config")
+    assert "vault link" in r.stderr and str(missing) in r.stderr
+    assert "sign in" not in r.stderr
+
+
+def test_a_reload_redelivers_a_vault_link_from_the_same_entry(monkeypatch):
+    monkeypatch.setattr(session_launcher, "_resolve_credential",
+                        lambda key: "v" if key == "anchore:docker-config" else None)
+    assert session_launcher._open_signin(
+        "vault.docker-config", "vault:anchore:docker-config") == b"v"
+    assert session_launcher._open_signin("vault.docker-config", "codex-account") is None
+
+
+def test_a_carried_launch_reads_only_what_was_carried(monkeypatch):
+    monkeypatch.setattr(session_launcher, "_resolve_credential",
+                        lambda key: pytest.fail("a carried launch opened this machine's vault"))
+    carried = session_launcher.CarriedCredentials(credentials={"anchore:docker-config": "c"})
+    payloads, dests, accounts, refusals = session_launcher._vault_link_payloads(
+        (DOCKER_LINK,), carried)
+    assert payloads == {"vault.docker-config": b"c"} and refusals == []
+    _, _, _, refusals = session_launcher._vault_link_payloads(
+        (DOCKER_LINK,), session_launcher.CarriedCredentials())
+    assert refusals == ["anchore:docker-config"]
+
+
+def test_the_image_entrypoint_is_read_not_assumed(monkeypatch):
+    class R:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode = out, rc
+
+    for out, rc, want in (('["/usr/local/bin/autonomy-entrypoint.sh"]\n', 0,
+                           ["/usr/local/bin/autonomy-entrypoint.sh"]),
+                          ('["tini","--","/entry.sh"]', 0, ["tini", "--", "/entry.sh"]),
+                          ("null\n", 0, None), ("[]", 0, None), ("", 1, None)):
+        monkeypatch.setattr(session_launcher.subprocess, "run",
+                            lambda *a, **k: R(out, rc))
+        assert session_launcher._image_entrypoint("img") == want

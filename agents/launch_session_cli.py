@@ -90,6 +90,19 @@ def _workspace_runtime(workspace_id: str) -> tuple[bool, str]:
     return False, "standard"
 
 
+def _workspace_vault_links(workspace_id: str) -> tuple:
+    """The vault links declared on ``workspace_id`` (auto-2eqpb), so a
+    dispatched bead's session gets them as a dashboard launch does. Empty
+    when the workspace is unknown."""
+    if not workspace_id:
+        return ()
+    try:
+        ws = load_workspaces().get(workspace_id)
+        return ws.vault_links if ws else ()
+    except Exception:
+        return ()
+
+
 def _workspace_network_host(workspace_id: str) -> bool:
     """Return the ``network_host`` privilege declared on ``workspace_id``.
 
@@ -227,6 +240,7 @@ def main() -> int:
             needs_nested_docker=needs_nested_docker,
             runtime=session_runtime,
             network_host=network_host,
+            vault_links=_workspace_vault_links(args.workspace_id),
         )
         if not container_id:
             return 1

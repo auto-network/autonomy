@@ -9918,6 +9918,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             working_dir=working_dir,
             network_host=proj.network_host,
             capabilities=proj.capabilities,
+            vault_links=proj.vault_links,
             carried=carried,
         )
         carried = None
@@ -10233,6 +10234,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 resume_uuid=cfg["resume_uuid"],
                 network_host=proj.network_host,
                 capabilities=proj.capabilities,
+                vault_links=proj.vault_links,
             )
         else:
             cmd_str = launch_session(
