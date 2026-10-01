@@ -1,7 +1,7 @@
 """Workspace config composed from ``autonomy.workspace#1`` Settings.
 
 Replaces the yaml-reading ``project_config`` module. Callers see typed
-dataclasses (:class:`WorkspaceV1`, :class:`RepoMount`, :class:`ArtifactSpec`,
+dataclasses (:class:`WorkspaceV1`, :class:`RepoMount`, :class:`VaultLink`,
 :class:`OrgOverride`) composed from Settings the dispatcher / session
 launcher / dashboard need; the actual Setting read goes through
 ``tools.graph.ops.read_set`` / ``get_setting`` so per-org routing stays in
@@ -13,19 +13,19 @@ Composition rules:
   (``graph_project``) is the org-slug of the DB the Setting lives in —
   implicit in the Setting primitive; surfaced by iterating orgs via
   :func:`tools.graph.org_ops.list_orgs`.
-* ``autonomy.workspace.artifact#1`` → :class:`ArtifactSpec` tuple attached
-  to the matching workspace. Composite Setting key
-  ``<workspace-id>:<artifact-name>`` tells us the binding.
+* ``vault_links`` on the workspace row → :class:`VaultLink` tuple: secret
+  files delivered from the audited vault at launch (auto-2eqpb). They
+  replaced ``autonomy.workspace.artifact#1``, whose plaintext disk files
+  under ``data/artifacts`` no other fleet machine had; nothing reads that
+  set any more.
 * ``autonomy.org#1`` → :class:`OrgOverride` for the identity cascade in
   ``tools.dashboard.org_identity``.
 
-Artifact host paths come from the default layering rule
-(``data/artifacts/{shared|personal}/{org}[/{workspace}]/{name}``); a
-future ``autonomy.artifact-path#1`` Personal Setting can override per host
-(lookup is best-effort — absence of that schema is not an error).
+``autonomy.artifact-path#1`` (this machine's own store) still locates
+machine-located MOUNTS (workspace_manager._machine_located_mount_source).
 
 Spec refs: graph://0d3f750f-f9c (Setting primitive), graph://bcce359d-a1d
-(cross-org search architecture), graph://bc0dda40-f56 (artifact layering).
+(cross-org search architecture).
 """
 
 from __future__ import annotations
@@ -45,11 +45,6 @@ from tools.graph.schemas.workspace import (
     WORKSPACE_SET_ID,
     WORKSPACE_REVISION,
     WORKSPACE_REVISION_2,
-)
-from tools.graph.schemas.workspace_artifact import (
-    SET_ID as ARTIFACT_SET_ID,
-    SCHEMA_REVISION as ARTIFACT_REVISION,
-    VALID_SCOPES as VALID_ARTIFACT_SCOPES,
 )
 from tools.graph.schemas.org import ORG_SET_ID, ORG_REVISION
 from tools.graph.schemas.mount import (
@@ -87,12 +82,10 @@ from tools.graph.capability_chain import (
 from tools.data_paths import DATA_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_ARTIFACTS_ROOT = DATA_ROOT / "artifacts"
 #: Root of the dashboard-managed local repositories (``<root>/<org>/<id>``).
 #: Same value as ``workspace_manager.LOCAL_WORKSPACE_REPOS_DIR`` (a test
 #: asserts they cannot drift).
 LOCAL_WORKSPACE_REPOS_ROOT = DATA_ROOT / "workspace-repos"
-ARTIFACTS_MOUNT_DIR = "/etc/autonomy/artifacts"
 CAPABILITIES_MOUNT_DIR = "/opt/autonomy/capabilities"
 
 ARTIFACT_PATH_SET_ID = "autonomy.artifact-path"
@@ -133,7 +126,6 @@ def overrides_generation() -> int:
 
 _WORKSPACE_COMPOSITION_SET_IDS = frozenset({
     WORKSPACE_SET_ID,
-    ARTIFACT_SET_ID,
     MOUNT_SET_ID,
     WORKSPACE_CAPABILITY_ENABLE_SET_ID,
     ORG_CAPABILITY_INSTALL_SET_ID,
@@ -332,22 +324,6 @@ class RepoMount:
         return cls(host=host, repo=path, user=user, **kwargs)
 
 
-@dataclass(frozen=True)
-class ArtifactSpec:
-    """A file the workspace expects inside its container.
-
-    Constructed from an ``autonomy.workspace.artifact#1`` Setting. ``name``
-    comes from the composite key; ``scope`` / ``required`` / ``description``
-    / ``help`` come from the payload. Resolved to a host path by the
-    artifact layering rule.
-    """
-    name: str
-    scope: str
-    required: bool = False
-    description: str = ""
-    help: str = ""
-
-
 def _vault_link_key(org: str, vault: str) -> str:
     from tools.graph.schemas.workspace import vault_link_key
 
@@ -369,14 +345,6 @@ class VaultLink:
     description: str = ""
     help: str = ""
     required: bool = True
-
-
-@dataclass(frozen=True)
-class MissingArtifact:
-    """A required artifact whose resolved host path does not exist on disk."""
-    artifact: ArtifactSpec
-    path: Path
-    project_id: str
 
 
 @dataclass(frozen=True)
@@ -464,7 +432,7 @@ class MaterializedCapability:
 @dataclass(frozen=True)
 class WorkspaceV1:
     """Composed workspace config — one ``autonomy.workspace#1`` Setting
-    plus its attached artifact + mount Settings plus the owning org slug.
+    plus its attached mount Settings, its vault links, and the owning org slug.
 
     Field names match the legacy ``ProjectConfig`` surface so existing
     consumers (dispatcher, session launcher, primer renderer, dashboard)
@@ -498,7 +466,6 @@ class WorkspaceV1:
     dispatch_labels: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
     env_from_host: tuple[str, ...] = ()
-    artifacts: tuple[ArtifactSpec, ...] = ()
     vault_links: tuple[VaultLink, ...] = ()
     mounts: dict[str, ResolvedSetting] = field(default_factory=dict)
     capabilities: tuple[MaterializedCapability, ...] = ()
@@ -590,7 +557,6 @@ def _workspace_from_setting(
     setting_payload: dict,
     workspace_id: str,
     graph_project: str,
-    artifacts: tuple[ArtifactSpec, ...],
     mounts: dict[str, ResolvedSetting],
     capabilities: tuple[MaterializedCapability, ...] = (),
     capability_issues: tuple[CapabilityChainIssue, ...] = (),
@@ -670,7 +636,6 @@ def _workspace_from_setting(
         env_from_host=tuple(
             str(v) for v in (setting_payload.get("env_from_host") or ())
         ),
-        artifacts=artifacts,
         vault_links=tuple(
             VaultLink(
                 key=_vault_link_key(graph_project, link["vault"]),
@@ -688,42 +653,6 @@ def _workspace_from_setting(
         capability_issues=capability_issues,
         host_root_mount_reason=host_root_mount_reason,
     )
-
-
-def _artifact_from_setting(
-    key: str, payload: dict, workspace_id: str,
-) -> ArtifactSpec:
-    """Construct an :class:`ArtifactSpec` from a
-    ``<workspace-id>:<artifact-name>`` keyed Setting.
-    """
-    prefix = f"{workspace_id}:"
-    if not key.startswith(prefix):
-        raise WorkspaceSettingsError(
-            f"artifact Setting key {key!r} does not start with "
-            f"expected prefix {prefix!r}"
-        )
-    name = key[len(prefix):]
-    scope = payload.get("scope")
-    if scope not in VALID_ARTIFACT_SCOPES:
-        raise WorkspaceSettingsError(
-            f"workspace {workspace_id!r}: artifact {name!r} has "
-            f"invalid scope {scope!r}"
-        )
-    return ArtifactSpec(
-        name=name,
-        scope=str(scope),
-        # Default mirrors the schema (True). Every stored artifact row states
-        # required explicitly, so this governs only future rows -- where an
-        # artifact declared without saying otherwise is one the workspace
-        # needs, and a missing file should stop the launch rather than start
-        # a container that is quietly missing a credential.
-        required=bool(payload.get("required", True)),
-        description=str(payload.get("description") or ""),
-        help=str(payload.get("help") or ""),
-    )
-
-
-# ── Public read path ───────────────────────────────────────
 
 
 PROVISION_SET_ID = "autonomy.workspace.provision"
@@ -769,43 +698,6 @@ def materialize_startup_script(proj, run_dir: Path) -> Path | None:
     path.write_text(content)
     path.chmod(0o755)
     return path
-
-
-def _artifacts_for_workspace(
-    workspace_id: str, *, org: str | None,
-) -> tuple[ArtifactSpec, ...]:
-    """Read the ``autonomy.workspace.artifact#1`` Set and filter by
-    composite-key prefix ``<workspace-id>:``.
-    """
-    members = ops.read_set(
-        ARTIFACT_SET_ID, org=org, peers=[],
-    ).members
-    prefix = f"{workspace_id}:"
-    out: list[ArtifactSpec] = []
-    for m in members:
-        if not m.key.startswith(prefix):
-            continue
-        out.append(_artifact_from_setting(m.key, m.payload, workspace_id))
-    out.sort(key=lambda a: a.name)
-    return tuple(out)
-
-
-def _artifacts_by_workspace(
-    workspace_ids: set[str], *, org: str | None,
-) -> dict[str, tuple[ArtifactSpec, ...]]:
-    """Resolve artifacts for many workspaces with one Set read."""
-    grouped: dict[str, list[ArtifactSpec]] = {wid: [] for wid in workspace_ids}
-    for member in ops.read_set(ARTIFACT_SET_ID, org=org, peers=[]).members:
-        workspace_id, separator, _ = member.key.partition(":")
-        if not separator or workspace_id not in grouped:
-            continue
-        grouped[workspace_id].append(
-            _artifact_from_setting(member.key, member.payload, workspace_id)
-        )
-    return {
-        workspace_id: tuple(sorted(values, key=lambda artifact: artifact.name))
-        for workspace_id, values in grouped.items()
-    }
 
 
 def load_mounts(
@@ -1185,7 +1077,6 @@ def _compose_workspaces(
     if not members:
         return {}
     workspace_ids = {member.key for member in members}
-    artifacts = _artifacts_by_workspace(workspace_ids, org=org)
     mounts = _mounts_by_workspace(workspace_ids, org=org)
     capabilities, capability_issues = _capabilities_by_workspace(
         workspace_ids, org=org,
@@ -1200,7 +1091,6 @@ def _compose_workspaces(
                     graph_project if graph_project is not None
                     else member.org or ""
                 ),
-                artifacts=artifacts[member.key],
                 mounts=mounts[member.key],
                 capabilities=capabilities[member.key],
                 capability_issues=capability_issues[member.key],
@@ -1217,7 +1107,7 @@ def _compose_workspaces(
 
 
 def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
-    """Read every ``autonomy.workspace#1`` owned by *slug* + attach artifacts.
+    """Read every ``autonomy.workspace#1`` owned by *slug* + attach its mounts.
 
     ``peers=["personal"]`` whitelists personal.db so operators can layer
     operator-local overrides (e.g. credential env values) on top of the
@@ -1241,7 +1131,7 @@ def load_workspaces() -> dict[str, WorkspaceV1]:
     """Return every visible workspace, keyed by workspace id.
 
     Iterates per-org DBs via :func:`tools.graph.org_ops.list_orgs` and reads
-    ``autonomy.workspace#1`` from each, attaching its artifact Settings.
+    ``autonomy.workspace#1`` from each, attaching its mount Settings.
     Ops owns DB routing; consumers do not enumerate peers themselves.
 
     Process-wide cached until a dependent ``setting.changed`` event. A
@@ -1343,113 +1233,3 @@ def _org_override_from_payload(slug: str, payload: dict) -> OrgOverride:
 
 # ── Artifact resolution ────────────────────────────────────
 
-
-def _artifact_path_override(
-    workspace: WorkspaceV1, artifact: ArtifactSpec,
-) -> Path | None:
-    """Look up an ``autonomy.artifact-path#1`` Personal Setting override.
-
-    The override Setting is keyed by ``<workspace-id>:<artifact-name>`` and
-    carries a ``path`` payload field. Absent schema (auto-S1 did not ship
-    this one yet) → no override; absent Setting → no override. The schema
-    is optional today; a best-effort lookup keeps the consumer correct
-    either way.
-    """
-    if get_schema(ARTIFACT_PATH_SET_ID, ARTIFACT_PATH_REVISION) is None:
-        return None
-    key = f"{workspace.id}:{artifact.name}"
-    try:
-        members = ops.read_set(
-            ARTIFACT_PATH_SET_ID, org="personal",
-        ).members
-    except Exception:
-        # Personal DB absent is fine — fall through to the default rule.
-        return None
-    for m in members:
-        if m.key == key:
-            path = m.payload.get("path")
-            if isinstance(path, str) and path:
-                return Path(path)
-    return None
-
-
-def artifact_host_path(
-    artifact: ArtifactSpec,
-    workspace: WorkspaceV1,
-    *,
-    artifacts_root: Path | str = DEFAULT_ARTIFACTS_ROOT,
-) -> Path:
-    """Resolve *artifact* to its host filesystem path.
-
-    Checks for an ``autonomy.artifact-path#1`` override (Personal Settings)
-    first, then falls back to the default layering rule::
-
-        {root}/{shared|personal}/{org}[/{workspace}]/{name}
-    """
-    override = _artifact_path_override(workspace, artifact)
-    if override is not None:
-        return override
-    root = Path(artifacts_root)
-    share = "shared" if artifact.scope.startswith("shared-") else "personal"
-    base = root / share / workspace.graph_project
-    if artifact.scope.endswith("-workspace"):
-        base = base / workspace.id
-    return base / artifact.name
-
-
-def validate_artifacts(
-    workspace: WorkspaceV1,
-    *,
-    artifacts_root: Path | str = DEFAULT_ARTIFACTS_ROOT,
-) -> list[MissingArtifact]:
-    """Return every required artifact whose resolved host path does not exist."""
-    missing: list[MissingArtifact] = []
-    for art in workspace.artifacts:
-        if not art.required:
-            continue
-        path = artifact_host_path(art, workspace, artifacts_root=artifacts_root)
-        if not path.exists():
-            missing.append(
-                MissingArtifact(
-                    artifact=art, path=path, project_id=workspace.id,
-                )
-            )
-    return missing
-
-
-def artifact_mounts(
-    workspace: WorkspaceV1,
-    *,
-    artifacts_root: Path | str = DEFAULT_ARTIFACTS_ROOT,
-) -> dict[str, str]:
-    """Return ``{host_path: container_spec}`` for every artifact that exists.
-
-    Each artifact resolves to a read-only bind mount at
-    ``/etc/autonomy/artifacts/{name}``. Missing optional artifacts are
-    silently skipped — call :func:`validate_artifacts` first to enforce
-    required ones.
-    """
-    mounts: dict[str, str] = {}
-    for art in workspace.artifacts:
-        host = artifact_host_path(art, workspace, artifacts_root=artifacts_root)
-        if host.exists():
-            mounts[str(host)] = f"{ARTIFACTS_MOUNT_DIR}/{art.name}:ro"
-    return mounts
-
-
-def format_missing_artifact_error(
-    missing: MissingArtifact, workspace: WorkspaceV1,
-) -> str:
-    """Human-friendly error string for a missing required artifact."""
-    try:
-        shown = missing.path.relative_to(REPO_ROOT)
-    except ValueError:
-        shown = missing.path
-    label = missing.artifact.description or missing.artifact.name
-    lines = [
-        f'Cannot launch {workspace.name}: missing required artifact "{label}"',
-        f"  Expected at: {shown}",
-    ]
-    if missing.artifact.help:
-        lines.append(f"  Help: {missing.artifact.help}")
-    return "\n".join(lines)

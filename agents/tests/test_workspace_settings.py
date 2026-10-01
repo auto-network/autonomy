@@ -114,7 +114,8 @@ def test_workspace_composition_reads_dependent_sets_once_for_many_workspaces(
     composed = _compose_workspaces(members, org="autonomy", graph_project="autonomy")
 
     assert set(composed) == {"one", "two"}
-    assert reads.count(ARTIFACT_SET_ID) == 1
+    # The disk-artifact set is no longer read (auto-2eqpb part 3).
+    assert reads.count(ARTIFACT_SET_ID) == 0
     assert reads.count(MOUNT_SET_ID) == 1
     assert reads.count(WORKSPACE_CAPABILITY_ENABLE_SET_ID) == 1
 
@@ -124,7 +125,6 @@ def test_workspace_from_setting_defaults_harness_to_claude():
         {"name": "Autonomy", "image": "autonomy-session-platform"},
         workspace_id="autonomy",
         graph_project="autonomy",
-        artifacts=(),
         mounts={},
     )
     assert workspace.harness == "claude"
@@ -140,7 +140,6 @@ def test_workspace_from_setting_reads_grok_harness():
         },
         workspace_id="autonomy-grok",
         graph_project="autonomy",
-        artifacts=(),
         mounts={},
     )
     assert workspace.harness == "grok"
@@ -156,7 +155,6 @@ def test_workspace_from_setting_reads_codex_harness():
         },
         workspace_id="autonomy-codex",
         graph_project="autonomy",
-        artifacts=(),
         mounts={},
     )
     assert workspace.harness == "codex"
@@ -200,7 +198,6 @@ def test_legacy_dind_defaults_to_privileged_nested_docker():
         },
         workspace_id="legacy-dind",
         graph_project="autonomy",
-        artifacts=(),
         mounts={},
     )
     assert workspace.needs_nested_docker is True
@@ -218,7 +215,6 @@ def test_nested_docker_runtime_is_independently_configurable():
         },
         workspace_id="sysbox-dind",
         graph_project="autonomy",
-        artifacts=(),
         mounts={},
     )
     assert workspace.needs_nested_docker is True
@@ -310,7 +306,6 @@ def test_workspace_from_setting_resolves_local_repo_via_owning_org():
         },
         workspace_id="my-board",
         graph_project="personal",
-        artifacts=(),
         mounts={},
     )
     assert ws.repos[0].local is True
@@ -330,7 +325,6 @@ def test_workspace_from_setting_rejects_invalid_harness():
             },
             workspace_id="broken",
             graph_project="autonomy",
-            artifacts=(),
             mounts={},
         )
 
@@ -705,7 +699,6 @@ def test_workspace_from_setting_parses_host_root_mount_reason():
         },
         workspace_id="ops",
         graph_project="autonomy",
-        artifacts=(),
         mounts={},
     )
     assert workspace.host_root_mount_reason == "reads live dashboard state"
@@ -716,7 +709,6 @@ def test_workspace_from_setting_defaults_to_no_host_root_mount():
         {"name": "Ops", "image": "img"},
         workspace_id="ops",
         graph_project="autonomy",
-        artifacts=(),
         mounts={},
     )
     assert workspace.host_root_mount_reason is None
@@ -729,7 +721,6 @@ def test_workspace_from_setting_rejects_reasonless_host_root_mount(bad):
             {"name": "Ops", "image": "img", "host_root_mount": bad},
             workspace_id="ops",
             graph_project="autonomy",
-            artifacts=(),
             mounts={},
         )
 
@@ -776,7 +767,7 @@ def test_vault_links_are_keyed_by_the_org_that_carried_the_row():
             {"vault": "enterprise-license", "path": "/etc/autonomy/artifacts/license.yaml",
              "required": False},
         ]},
-        workspace_id="widgets-ng", graph_project="anchore", artifacts=(), mounts={},
+        workspace_id="widgets-ng", graph_project="anchore", mounts={},
     )
     first, second = workspace.vault_links
     assert (first.key, first.path, first.name, first.required) == (
@@ -788,7 +779,7 @@ def test_vault_links_are_keyed_by_the_org_that_carried_the_row():
 def test_a_workspace_without_vault_links_has_none():
     workspace = _workspace_from_setting(
         {"name": "Autonomy", "image": "autonomy-session-platform"},
-        workspace_id="autonomy", graph_project="autonomy", artifacts=(), mounts={},
+        workspace_id="autonomy", graph_project="autonomy", mounts={},
     )
     assert workspace.vault_links == ()
 
@@ -799,6 +790,6 @@ def test_a_personal_workspaces_vault_link_opens_the_bare_entry():
     workspace = _workspace_from_setting(
         {"name": "Mine", "image": "i", "vault_links": [
             {"vault": "docker-config", "path": "/home/agent/.docker/config.json"}]},
-        workspace_id="mine", graph_project="personal", artifacts=(), mounts={},
+        workspace_id="mine", graph_project="personal", mounts={},
     )
     assert workspace.vault_links[0].key == "docker-config"

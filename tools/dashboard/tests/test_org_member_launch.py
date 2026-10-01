@@ -204,7 +204,6 @@ def test_the_worker_launches_the_pinned_workspace_and_drops_the_secrets(server, 
     monkeypatch.setattr(server.workspace_settings, "_workspaces_in_org",
                         lambda org: {"dev": proj} if org == "alpha" else {})
     monkeypatch.setattr(server.workspace_settings, "materialize_startup_script", lambda *_a: None)
-    monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _p: {})
     monkeypatch.setattr(server, "render_workspace_primer", lambda *_a, **_k: "primer")
     monkeypatch.setattr(server, "prepare_session_mounts", lambda *_a, **_k: {})
     monkeypatch.setattr(server, "DATA_ROOT", tmp_path)

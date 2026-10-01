@@ -144,15 +144,17 @@ docker compose up -d         # start project services
 docker compose logs -f       # follow service logs
 ```
 {% endif %}
-{% if config.artifacts or config.env %}
+{% if config.vault_links or config.env %}
 
 ## Environment (pre-configured by Autonomy)
 
-{% if config.artifacts %}
-Host-supplied artifacts mounted read-only under `/etc/autonomy/artifacts/`:
+{% if config.vault_links %}
+Secret files from the operator's vault, delivered into this session's
+private ramfs (`/run/secrets`) and linked at these paths before setup ran.
+Read them in place; never copy them elsewhere or print them:
 
-{% for artifact in config.artifacts %}
-- `/etc/autonomy/artifacts/{{ artifact.name }}`{{ ' — ' ~ artifact.description if artifact.description else '' }}
+{% for link in config.vault_links %}
+- `{{ link.path }}`{{ ' — ' ~ (link.name or link.description) if (link.name or link.description) else '' }}
 {% endfor %}
 {% endif %}
 {% if config.env %}

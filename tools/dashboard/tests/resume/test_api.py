@@ -578,8 +578,6 @@ class TestWorkspaceHarnessPassthrough:
         )
 
         monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
-        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
-        monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
         monkeypatch.setattr(
             server._SESSION_LIFECYCLE_WORKER,
             "try_enqueue",
@@ -642,8 +640,6 @@ class TestWorkspaceHarnessPassthrough:
         )
 
         monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
-        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
-        monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
         monkeypatch.setattr(server._SESSION_LIFECYCLE_WORKER, "try_enqueue", lambda _job: True)
 
         def slow_prepare(_proj, _tmux_name, **_kwargs):
@@ -676,7 +672,6 @@ class TestWorkspaceHarnessPassthrough:
         )
 
         monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
-        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
 
         monkeypatch.setattr(server._SESSION_LIFECYCLE_WORKER, "try_enqueue", lambda _job: False)
 
@@ -719,8 +714,6 @@ class TestWorkspaceHarnessPassthrough:
         }
 
         monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
-        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
-        monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
         monkeypatch.setattr(server, "render_workspace_primer", lambda _proj, **_kw: "primer")
 
         def fake_prepare(_proj, _tmux_name, **kwargs):
@@ -791,8 +784,6 @@ class TestWorkspaceCapabilityPassthrough:
         workspace = self._workspace_with_capabilities()
 
         monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
-        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
-        monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
         monkeypatch.setattr(server._SESSION_LIFECYCLE_WORKER, "enqueue", enqueued.append)
 
         resp = test_client.post("/api/session/create", json={"project": "autonomy"})
@@ -818,8 +809,6 @@ class TestWorkspaceCapabilityPassthrough:
         }
 
         monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
-        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
-        monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
         monkeypatch.setattr(server, "render_workspace_primer", lambda _proj, **_kw: "primer")
         monkeypatch.setattr(server, "prepare_session_mounts", lambda *a, **kw: {})
 

@@ -150,7 +150,6 @@ def test_project_start_handler_prepares_launches_registers_without_event_loop(mo
         server.workspace_settings, "materialize_startup_script",
         lambda _proj, _run_dir: None,
     )
-    monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
     monkeypatch.setattr(server, "render_workspace_primer", lambda _proj, **_kw: "primer")
 
     def fake_prepare(workspace, tmux_name, **kwargs):
@@ -214,7 +213,6 @@ def test_project_start_handler_failure_writes_lifecycle_detail(monkeypatch, tmp_
         lambda _proj, _run_dir: None,
     )
     monkeypatch.setattr(server, "prepare_session_mounts", lambda *_a, **_kw: {})
-    monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
     monkeypatch.setattr(server, "render_workspace_primer", lambda _proj, **_kw: "primer")
     monkeypatch.setattr(server, "launch_session", lambda **_kw: None)
     cleanup_calls = []
@@ -254,7 +252,6 @@ def test_project_start_handler_cleanup_error_preserves_failed_state(monkeypatch,
         lambda _proj, _run_dir: None,
     )
     monkeypatch.setattr(server, "prepare_session_mounts", lambda *_a, **_kw: {})
-    monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
     monkeypatch.setattr(server, "render_workspace_primer", lambda _proj, **_kw: "primer")
     monkeypatch.setattr(server, "launch_session", lambda **_kw: None)
     monkeypatch.setattr(
@@ -600,7 +597,6 @@ def test_resume_start_handler_failure_preserves_worktrees(monkeypatch, tmp_path)
         server.workspace_settings, "materialize_startup_script",
         lambda _proj, _run_dir: None,
     )
-    monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
     monkeypatch.setattr(server, "render_workspace_primer", lambda _proj, **_kw: "primer")
     monkeypatch.setattr(
         server, "prepare_session_mounts", lambda *_a, **_kw: {},
@@ -923,7 +919,6 @@ def _start_until_waiting_ready_timeout(monkeypatch, tmp_path, server, capture):
         server.workspace_settings, "materialize_startup_script",
         lambda _proj, _run_dir: None,
     )
-    monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
     monkeypatch.setattr(server, "render_workspace_primer", lambda _proj, **_kw: "primer")
     monkeypatch.setattr(server, "prepare_session_mounts", lambda *_a, **_kw: {})
     monkeypatch.setattr(server, "launch_session", lambda **_kw: "echo launched")

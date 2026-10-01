@@ -9907,7 +9907,6 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             git_timeout=_LIFECYCLE_PREPARING_TIMEOUT_S,
         )
         _remaining_step_timeout(prepare_deadline, "preparing")
-        project_mounts.update(workspace_settings.artifact_mounts(proj))
 
         # Settings-built image freshness. Entered ONLY when this workspace
         # launches its own <org>/<workspace-id> image AND the resolved
@@ -10220,7 +10219,6 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 git_timeout=_LIFECYCLE_PREPARING_TIMEOUT_S,
             )
             _remaining_step_timeout(prepare_deadline, "preparing")
-            mounts.update(workspace_settings.artifact_mounts(proj))
             # Same freshness gate as the primary start path: a resume
             # relaunches the container, so a stale Settings-built image
             # is rebuilt here too, under its own stage and budget.
@@ -11324,29 +11322,6 @@ async def _create_session_from_body(body: dict, request=None, provenance=None,
                 {"error": f"Project config error: {e}",
                  "code": "workspace-config-error"}, status_code=500,
             )
-        missing_artifacts = workspace_settings.validate_artifacts(proj)
-        if missing_artifacts:
-            first = missing_artifacts[0]
-            message = workspace_settings.format_missing_artifact_error(first, proj)
-            logger.warning(
-                "api_session_create: missing required artifact  project=%s  name=%s  path=%s",
-                proj.id, first.artifact.name, first.path,
-            )
-            return JSONResponse(
-                {
-                    "error": message,
-                    "missing_artifacts": [
-                        {
-                            "name": m.artifact.name,
-                            "description": m.artifact.description,
-                            "help": m.artifact.help,
-                            "expected_path": str(m.path),
-                        }
-                        for m in missing_artifacts
-                    ],
-                },
-                status_code=400,
-            )
         # auto-ja51w C3: register the session row IMMEDIATELY (before the
         # ~7-9s prepare_session_mounts + launch_session block) so the dashboard
         # can broadcast per-step progress via SSE during the otherwise dead-air
@@ -12201,30 +12176,6 @@ async def api_session_resume(request):
                     and not model):
                 model = proj_for_resume.model
 
-        if proj_for_resume is not None:
-            missing_artifacts = workspace_settings.validate_artifacts(proj_for_resume)
-            if missing_artifacts:
-                first = missing_artifacts[0]
-                message = workspace_settings.format_missing_artifact_error(first, proj_for_resume)
-                logger.warning(
-                    "api_session_resume: missing required artifact  project=%s  name=%s  path=%s",
-                    proj_for_resume.id, first.artifact.name, first.path,
-                )
-                return JSONResponse(
-                    {
-                        "error": message,
-                        "missing_artifacts": [
-                            {
-                                "name": m.artifact.name,
-                                "description": m.artifact.description,
-                                "help": m.artifact.help,
-                                "expected_path": str(m.path),
-                            }
-                            for m in missing_artifacts
-                        ],
-                    },
-                    status_code=400,
-                )
         # Everything blocking (git worktree prep, credential resolution,
         # docker command build, tmux spawn) runs on the lifecycle worker.
         kind = "project" if proj_for_resume is not None else "container"
@@ -20866,16 +20817,12 @@ def _prepare_agent_action_workspace(
 ):
     """Blocking half of an explicit-workspace agentic dispatch.
 
-    Runs on a worker thread (never the event loop): artifact existence
-    checks, git clone-sync + worktree creation, env resolution, primer
-    render, and startup-script materialization. Returns
-    ``(missing_artifacts, error, launch_kwargs_update)`` — exactly one of
-    the three carries the outcome, so the async handler keeps its exact
-    response shapes without doing any blocking work itself.
+    Runs on a worker thread (never the event loop): git clone-sync +
+    worktree creation, env resolution, primer render, and startup-script
+    materialization. Returns ``(error, launch_kwargs_update)`` — one of the
+    two carries the outcome, so the async handler keeps its exact response
+    shapes without doing any blocking work itself.
     """
-    missing_artifacts = workspace_settings.validate_artifacts(workspace)
-    if missing_artifacts:
-        return missing_artifacts, None, {}
     try:
         project_mounts = prepare_session_mounts(
             workspace,
@@ -20883,8 +20830,7 @@ def _prepare_agent_action_workspace(
             refresh_existing_worktree=True,
         )
     except WorkspaceError as exc:
-        return [], exc, {}
-    project_mounts.update(workspace_settings.artifact_mounts(workspace))
+        return exc, {}
     extra_env: dict[str, str] = dict(workspace.env) if workspace.env else {}
     _apply_env_from_host(
         workspace.env_from_host, extra_env,
@@ -20898,7 +20844,7 @@ def _prepare_agent_action_workspace(
     launch_metadata["org"] = workspace.graph_project
     if workspace.default_tags:
         launch_metadata["graph_tags"] = list(workspace.default_tags)
-    return [], None, {
+    return None, {
         "mounts": project_mounts or None,
         "metadata": launch_metadata,
         "working_dir": workspace.working_dir or "/workspace/repo",
@@ -20910,6 +20856,7 @@ def _prepare_agent_action_workspace(
         "runtime": workspace.session_runtime,
         "network_host": workspace.network_host,
         "capabilities": workspace.capabilities,
+        "vault_links": workspace.vault_links,
     }
 
 
@@ -20945,20 +20892,11 @@ async def _agentic_launch_task(
                 # network hiccup there must block a worker thread, never
                 # the loop (2026-08-28 incident: this work ran bare on the
                 # loop, freezing the dashboard ~20s per dispatch, 131x).
-                missing_artifacts, prep_error, prep_update = await asyncio.to_thread(
+                prep_error, prep_update = await asyncio.to_thread(
                     _prepare_agent_action_workspace,
                     workspace, container_name, output_dir_path,
                     dict(launch_kwargs["metadata"]),
                 )
-            if missing_artifacts:
-                first = missing_artifacts[0]
-                await asyncio.to_thread(
-                    record_dispatch_failure, run_id,
-                    failure_class="missing-artifacts",
-                    reason=workspace_settings.format_missing_artifact_error(
-                        first, workspace),
-                )
-                return
             if prep_error is not None:
                 logger.error(
                     "agent-actions: workspace prep failed workspace=%s err=%s",
@@ -21581,32 +21519,6 @@ async def api_agent_action_dispatch(request):
         "output_dir": output_dir,
         "model": model,
     }
-    if explicit_workspace:
-        # The artifact-contract check stays synchronous (cheap stat calls,
-        # still off-loop) so a missing artifact remains a crisp 400 at
-        # dispatch time. Everything heavier happens in the background task.
-        missing_artifacts = await asyncio.to_thread(
-            workspace_settings.validate_artifacts, workspace,
-        )
-        if missing_artifacts:
-            first = missing_artifacts[0]
-            message = workspace_settings.format_missing_artifact_error(first, workspace)
-            return JSONResponse(
-                {
-                    "error": message,
-                    "workspace": workspace.id,
-                    "missing_artifacts": [
-                        {
-                            "name": m.artifact.name,
-                            "description": m.artifact.description,
-                            "help": m.artifact.help,
-                            "expected_path": str(m.path),
-                        }
-                        for m in missing_artifacts
-                    ],
-                },
-                status_code=400,
-            )
 
     # ── Accept: the run row is born QUEUED and IS the status surface ──
     # (operator directive, 2026-08-28: never hold the POST open across

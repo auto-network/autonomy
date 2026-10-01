@@ -1507,3 +1507,25 @@ def test_where_section_for_a_local_launch():
         "launched_by": "local"})
     assert "launched on this machine" in out
     assert "launched from **" not in out
+
+
+def test_the_primer_names_each_vault_link_by_path_never_a_value():
+    """The session learns where its secret files are (auto-2eqpb), never what
+    they hold; the old /etc/autonomy/artifacts mount listing is gone."""
+    from agents.workspace_settings import VaultLink
+
+    out = render_workspace_primer(_cfg(vault_links=(
+        VaultLink(key="anchore:docker-config", vault="docker-config",
+                  path="/etc/autonomy/artifacts/docker-config.json",
+                  name="Docker config"),
+        VaultLink(key="anchore:github-ssh-key", vault="github-ssh-key",
+                  path="/etc/autonomy/artifacts/id_ed25519",
+                  description="GitHub deploy key"),
+    )))
+    assert "`/etc/autonomy/artifacts/docker-config.json` — Docker config" in out
+    assert "`/etc/autonomy/artifacts/id_ed25519` — GitHub deploy key" in out
+    assert "/run/secrets" in out and "mounted read-only" not in out
+
+
+def test_no_vault_links_and_no_env_render_no_environment_section():
+    assert "## Environment (pre-configured by Autonomy)" not in render_workspace_primer(_cfg())

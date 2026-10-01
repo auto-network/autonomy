@@ -75,8 +75,6 @@ _EXPORTED_PATHS = [
     ("from agents.workspace_manager import WORKTREES_DIR", "WORKTREES_DIR"),
     ("from agents.workspace_manager import LOCAL_WORKSPACE_REPOS_DIR",
      "LOCAL_WORKSPACE_REPOS_DIR"),
-    ("from agents.workspace_settings import DEFAULT_ARTIFACTS_ROOT",
-     "DEFAULT_ARTIFACTS_ROOT"),
     ("from agents.backfill_runs import AGENT_RUNS_DIR", "AGENT_RUNS_DIR"),
     ("from agents.dispatch_db import DB_PATH", "DB_PATH"),
 ]
