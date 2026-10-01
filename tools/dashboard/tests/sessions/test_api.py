@@ -252,6 +252,14 @@ class TestSessionStatusAPI:
 class TestSessionsPageHTML:
     """/sessions returns the page shell; /pages/sessions has the Alpine template."""
 
+    @pytest.fixture(autouse=True)
+    def _no_shared_org(self, monkeypatch):
+        # These are claims about a node with no shared organization. The
+        # worker's stores are shared across its tests, and an earlier test
+        # that created one ("autonomy") would otherwise become the default.
+        from tools.graph.schemas import dashboard_shell
+        monkeypatch.setattr(dashboard_shell, "shell_default_org", lambda: "")
+
     def test_sessions_returns_200(self, test_client):
         resp = test_client.get("/sessions")
         assert resp.status_code == 200
