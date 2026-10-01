@@ -59,9 +59,11 @@ The operator holds the organization `{{ onboarding.org }}`; whether they founded
 - `{{ m.path }}` — {{ m.kind }}, {{ '**read/write**' if m.writable else 'read-only' }}{{ ' — ' ~ m.description if m.description else '' }}
 {% endfor %}
 
-These are shared network storage, not local disk. **No SQLite and no exclusive
-locking on them, at any scope** — the export provides no lock coordination and
-WAL cannot work on a network share at all. Keep databases on local disk.
+These are shared network storage, not local disk. They are exported NFSv4.2
+with `local_lock=none`, so locking is server-side: SQLite in rollback-journal
+mode with a single writer works. **WAL does not, at any NFS version** — the
+`-shm` file needs mmap coherence NFS cannot provide — and concurrent writers
+to one database remain a bad idea. Check the mount before relying on this.
 {% endif %}
 
 {% if not writable_repos %}
