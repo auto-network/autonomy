@@ -22,6 +22,25 @@ function text(review) {
   return Array.isArray(review.content?.lines) ? review.content.lines.join('\n') : '';
 }
 
+// A Jira field value as a person reads it: {"name": "High"} is High, a list
+// is its readable items, and plain text stays as it is.
+function readable(value) {
+  let parsed = value;
+  try { parsed = JSON.parse(value); } catch (_) { return String(value ?? ''); }
+  const one = v => (v && typeof v === 'object')
+    ? (v.name ?? v.value ?? v.displayName ?? v.key ?? JSON.stringify(v)) : String(v);
+  return Array.isArray(parsed) ? parsed.map(one).join(', ') : one(parsed);
+}
+
+// The fields of the ticket being created, besides the ones shown on their own.
+function createFacts(r) {
+  const shown = new Set(['project', 'summary', 'issuetype']);
+  return (Array.isArray(r.facts) ? r.facts : [])
+    .filter(fact => !shown.has(fact.label))
+    .map(fact => [fact.label.charAt(0).toUpperCase() + fact.label.slice(1).replace(/_/g, ' '),
+      readable(fact.value)]);
+}
+
 /* Each operation exactly as the design state words it. */
 export function jiraReview(r) {
   const key = r.target || '';
@@ -34,10 +53,18 @@ export function jiraReview(r) {
       return {review: {title: 'Change issue status', target: {type: 'Subject', name: key},
         facts: [['New status', r.to_status || r.transition || '']]},
         result: {working: 'Updating issue…', success: 'Issue updated', copy: `${key} was moved to ${r.to_status || r.transition || ''}.`}};
-    case 'create':
-      return {review: {title: 'Create this issue', target: {type: 'Project', name: r.project || key},
-        facts: [['Issue type', r.issue_type || '']], reviewLabel: 'Issue summary', reviewText: r.summary || ''},
+    case 'create': {
+      // The whole ticket: its summary, type and every other field, and its
+      // description in full (the operator asked to read the ticket first).
+      const description = text(r);
+      const review = description
+        ? {facts: [['Summary', r.summary || ''], ['Issue type', r.issue_type || ''], ...createFacts(r)],
+          reviewLabel: 'Description', reviewText: description}
+        : {facts: [['Issue type', r.issue_type || ''], ...createFacts(r)],
+          reviewLabel: 'Issue summary', reviewText: r.summary || ''};
+      return {review: {title: 'Create this issue', target: {type: 'Project', name: r.project || key}, ...review},
         result: {working: 'Creating issue…', success: 'Issue created', copy: `The issue was created in ${r.project || key}.`}};
+    }
     case 'set_field':
       return {review: {title: 'Update this issue', target: {name: key},
         facts: [['Field', r.field || ''], ['New value', text(r)]]},
@@ -81,7 +108,7 @@ export async function openJiraCentralApproval(item, {onResolved = () => {}, onCl
   let shown = r;
   // A long comment or value arrives as a prefix: read it whole from the
   // machine that holds it. Without the whole text there is nothing to approve.
-  if (!unavailable && ['comment', 'set_field'].includes(r.op) && r.content?.complete === false) {
+  if (!unavailable && ['comment', 'set_field', 'create'].includes(r.op) && r.content?.complete === false) {
     try {
       const whole = await readJson(itemUrl + '/jira-write-content');
       shown = {...r, content: {...r.content, lines: whole.lines, complete: true}};

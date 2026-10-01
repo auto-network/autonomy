@@ -88,3 +88,17 @@ test('authorizing grants with an empty decision', async () => {
   await until(() => q('#result-title').textContent === 'Issue updated');
   assert.deepEqual(posts(), [{outcome: 'granted', decision: {}}]);
 });
+
+test('a create review shows the whole ticket: summary, type, every field and the description', () => {
+  const {review} = jiraReview({
+    op: 'create', target: 'PLAT', project: 'PLAT', issue_type: 'Task', summary: 'Review the library',
+    facts: [{label: 'project', value: '{"key": "PLAT"}'}, {label: 'summary', value: 'Review the library'},
+      {label: 'issuetype', value: '{"name": "Task"}'}, {label: 'priority', value: '{"name": "High"}'},
+      {label: 'labels', value: '["approvals", "design"]'}],
+    content: {complete: true, lines: ['Line one', 'Line two']},
+  });
+  assert.deepEqual(review.facts, [['Summary', 'Review the library'], ['Issue type', 'Task'],
+    ['Priority', 'High'], ['Labels', 'approvals, design']]);
+  assert.equal(review.reviewLabel, 'Description');
+  assert.equal(review.reviewText, 'Line one\nLine two');
+});
