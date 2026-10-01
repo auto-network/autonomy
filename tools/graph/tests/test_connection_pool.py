@@ -337,3 +337,42 @@ def test_settings_reads_and_peer_reads_share_one_handle_per_file(orgs_root):
     assert _pooled_read_handle(_org_db_path("acme"))._db is not peer
     assert GraphDB.for_org("acme", mode="ro") is not peer
     GraphDB.close_all_pooled()
+
+
+def test_closing_the_pool_does_not_close_a_read_in_flight_on_another_thread(orgs_root):
+    """2026-10-01: close_all_pooled() (shutdown, test teardown) and
+    close_pooled_path() (fleet-catalog activation) closed every thread's
+    connection, so a read iterating rows on another thread failed with
+    "Cannot operate on a closed database" (10 of 10 in host-0930-165810's
+    reproduction) or crashed the worker outright. The in-flight read must
+    finish; the connection is only dropped from the pool."""
+    import threading
+    from tools.graph.db import _org_db_path, _pooled_read_handle
+
+    _seed("acme")
+    path = _org_db_path("acme")
+    rows_wanted = 300_000
+    started, result = threading.Event(), {}
+
+    def reader():
+        try:
+            cur = _pooled_read_handle(path).conn.execute(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n "
+                f"WHERE i < {rows_wanted}) SELECT i FROM n")
+            count = 0
+            for (value,) in cur:
+                count += 1
+                if count == 1:
+                    started.set()
+            result["count"] = count
+        except Exception as exc:  # the failure this test exists to catch
+            result["error"] = repr(exc)
+        finally:
+            started.set()
+
+    worker = threading.Thread(target=reader)
+    worker.start()
+    assert started.wait(10)
+    GraphDB.close_all_pooled()
+    worker.join(30)
+    assert result == {"count": rows_wanted}

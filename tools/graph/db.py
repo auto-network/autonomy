@@ -973,14 +973,34 @@ class GraphDB:
         local.conn = self._conn  # the opener keeps the connection it probed
         self._thread_conns = local
         self._thread_conn_list = [self._conn] if self._conn is not None else []
+        if self._conn is not None:
+            self._conn_thread[id(self._conn)] = weakref.ref(threading.current_thread())
 
     def _close_connections(self) -> None:
-        """Close every connection this handle opened, on any thread."""
+        """Close this handle's connections that no other live thread owns.
+
+        A per-thread connection belonging to another thread that is still
+        alive may be mid-statement right now, and closing a sqlite3
+        connection under a running statement is a use-after-free: it
+        segfaulted test workers whenever a pool was closed (test teardown,
+        dashboard shutdown) while a background thread was still reading.
+        Such a connection is only dropped from the pool; the owning thread's
+        reference keeps it valid until that thread lets go, and its
+        deallocation closes it then."""
+        current = threading.get_ident()
         with self._thread_conn_lock:
-            conns = list(self._thread_conn_list)
+            conns, in_use = [], []
+            for conn in self._thread_conn_list:
+                ref = self._conn_thread.get(id(conn))
+                thread = ref() if ref is not None else None
+                if thread is not None and thread.is_alive() and thread.ident != current:
+                    in_use.append(conn)
+                    continue
+                conns.append(conn)
             self._thread_conn_list = []
             self._conn_thread.clear()
-        if self._conn is not None and self._conn not in conns:
+        if self._conn is not None and self._conn not in conns \
+                and not any(c is self._conn for c in in_use):
             conns.append(self._conn)
         for conn in conns:
             try:
