@@ -81,3 +81,36 @@ def test_implementation_must_declare_resolved_contract_version():
         "capability_implementation_contract_mismatch",
     ]
     assert issues[0].subject == "test_execution@1"
+
+
+def test_every_issue_of_one_broken_chain_is_one_thing_with_the_contract_summary():
+    """``browser`` and ``browser@1`` are two subjects and one repair: readiness
+    groups on ``thing``, and the card says what the capability is."""
+    enable, contract, _install, _implementation = _rows()
+    contract = {**contract, "version": 2, "summary": "Runs tests for a session."}
+    chain, issues = validate_capability_chain(
+        contract_key="test_execution",
+        enable=enable,
+        contract=contract,
+        install=None,
+        implementation=None,
+    )
+    assert chain is None
+    assert len({issue.subject for issue in issues}) > 1
+    assert {issue.thing for issue in issues} == {"capability:test_execution"}
+    assert {issue.name for issue in issues} == {"test_execution"}
+    assert {issue.description for issue in issues} == {"Runs tests for a session."}
+
+
+def test_an_unresolved_contract_still_names_the_capability():
+    enable, _contract, _install, _implementation = _rows()
+    _chain, issues = validate_capability_chain(
+        contract_key="test_execution",
+        enable=enable,
+        contract=None,
+        install=None,
+        implementation=None,
+    )
+    assert issues
+    assert all(issue.name == "test_execution" and issue.description == ""
+               for issue in issues)

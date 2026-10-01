@@ -400,8 +400,9 @@
       var chip = el('span', 'orgset-ws-chip' + (ws.ready ? ' orgset-ws-chip-ready' : ''));
       chip.setAttribute('data-testid', 'orgset-workspace-' + ws.id);
       chip.appendChild(el('span', '', ws.name || ws.id));
-      var unresolved = (ws.blocking || []).length + (ws.unanswerable || []).length;
-      var tag = el('b', '', ws.ready ? '✓' : String(unresolved));
+      // Distinct things, as the server counts them: raw findings count one
+      // capability with two broken edges twice.
+      var tag = el('b', '', ws.ready ? '✓' : String(ws.unresolved));
       tag.setAttribute('data-testid', 'orgset-workspace-state-' + ws.id);
       chip.appendChild(tag);
       chips.appendChild(chip);

@@ -14,7 +14,7 @@ capability and proceeds.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 
@@ -31,6 +31,34 @@ class CapabilityChainIssue:
     key: str = ""
     remediation_id: str = "capability.install-chain.v1"
     remediation_params: dict[str, Any] = field(default_factory=dict)
+    #: Every issue of one chain is one thing to repair -- the capability --
+    #: however many edges are broken and whatever versioned subject each
+    #: names. Readiness groups on this; ``subject`` stays exact.
+    thing: str = ""
+    #: What the capability is, from its contract row when one resolves.
+    name: str = ""
+    description: str = ""
+    help: str = ""
+
+
+def _describe(
+    issues: list[CapabilityChainIssue],
+    contract_key: str,
+    contract: Mapping[str, Any] | None,
+) -> tuple[CapabilityChainIssue, ...]:
+    """Stamp each issue with the capability it belongs to and what it is."""
+    summary = (contract or {}).get("summary")
+    return tuple(
+        replace(
+            issue,
+            thing=f"capability:{contract_key}",
+            name=issue.name or contract_key,
+            description=issue.description or (
+                summary if isinstance(summary, str) else ""
+            ),
+        )
+        for issue in issues
+    )
 
 
 @dataclass(frozen=True)
@@ -214,7 +242,7 @@ def validate_capability_chain(
     if issues or install is None or implementation is None or not isinstance(
         resolved_version, int
     ):
-        return None, tuple(issues)
+        return None, _describe(issues, contract_key, contract)
     return CapabilityChain(
         contract=contract_key,
         contract_version=resolved_version,

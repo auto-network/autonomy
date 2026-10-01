@@ -1563,6 +1563,12 @@ class CheckFinding:
     #: schema-authored JSON scalars, never collected input or secret values.
     remediation_id: str = ""
     remediation_params: dict[str, Any] = dataclass_field(default_factory=dict)
+    #: The one repair this finding is part of, when several findings describe
+    #: it. A capability with no installation also has no resolvable contract
+    #: version: two kinds, two subjects (``browser``, ``browser@1``), one
+    #: thing to fix. Empty means the finding is its own thing, identified by
+    #: (kind, subject).
+    thing: str = ""
 
 
 @dataclass
@@ -2068,6 +2074,14 @@ def check_setting(
                             getattr(issue, "frame", "") or "settings-store"
                         ),
                         field_description=str(field_spec.get("description") or ""),
+                        # What the missing thing IS travels from the hook,
+                        # which is the only party that read the row
+                        # describing it. Rebuilt without these, a card can
+                        # show nothing but a raw key.
+                        name=str(getattr(issue, "name", "") or ""),
+                        description=str(getattr(issue, "description", "") or ""),
+                        help=str(getattr(issue, "help", "") or ""),
+                        thing=str(getattr(issue, "thing", "") or ""),
                         **_remediation_kwargs(field_spec, issue=issue),
                     ))
                 if _passed is not None and not declared_findings:

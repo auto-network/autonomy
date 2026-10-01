@@ -9393,18 +9393,24 @@ def _append_workspace_startup_notice(message: str | None, proj) -> str | None:
     if message is None or not issues:
         return message
 
-    subjects = list(dict.fromkeys(
-        issue.subject for issue in issues if getattr(issue, "subject", "")
-    ))
-    shown = subjects[:3]
+    # One entry per capability, not per broken edge: a capability with no
+    # installation also has no resolvable contract version, and naming it
+    # twice (``browser``, ``browser@1``) reads as two problems.
+    names: dict[str, str] = {}
+    for issue in issues:
+        thing = getattr(issue, "thing", "") or getattr(issue, "subject", "")
+        if thing and thing not in names:
+            names[thing] = getattr(issue, "name", "") or getattr(issue, "subject", "")
+    labels = list(dict.fromkeys(names.values()))
+    shown = labels[:3]
     subject_text = ", ".join(shown)
-    if len(subjects) > len(shown):
-        subject_text += f", +{len(subjects) - len(shown)} more"
+    if len(labels) > len(shown):
+        subject_text += f", +{len(labels) - len(shown)} more"
     scope = f" ({subject_text})" if subject_text else ""
-    check_word = "check" if len(issues) == 1 else "checks"
+    noun = "capability" if len(names) == 1 else "capabilities"
     notice = (
-        f"Startup degraded: {len(issues)} capability {check_word} failed{scope}; "
-        f"diagnose via `GET /api/orgs/{proj.graph_project}/workspaces/health`."
+        f"Startup degraded: {len(names)} {noun} unavailable{scope}; "
+        f"diagnose with `graph workspace doctor --workspace {proj.id}`."
     )
     return f"{message.rstrip()}\n\n{notice}"
 
@@ -21701,7 +21707,32 @@ def _finding_json(finding) -> dict:
         "field_description": getattr(finding, "field_description", ""),
         "remediation_id": remediation_id,
         "remediation_params": dict(remediation_params),
+        "thing": getattr(finding, "thing", ""),
     }
+
+
+def _thing_identity(data: dict) -> tuple:
+    """Which repair a serialized finding belongs to.
+
+    A finding that names its thing is grouped by it; any other is its own
+    thing, identified by what is missing (``kind``, ``subject``).
+    """
+    if data.get("thing"):
+        return ("thing", data["thing"])
+    return (data["kind"], data["subject"] or data["at"])
+
+
+def _workspace_unresolved(w) -> int:
+    """Distinct things that keep one workspace from running.
+
+    Counted by thing, not by finding: a capability with two broken edges is
+    one thing to fix, and a chip reading 2 sends the reader to find a second
+    problem that does not exist.
+    """
+    return len({
+        _thing_identity(_finding_json(f))
+        for f in (*w.blocking, *w.unanswerable)
+    })
 
 
 def _things_missing(rows) -> list[dict]:
@@ -21713,8 +21744,9 @@ def _things_missing(rows) -> list[dict]:
     A reader cannot see that setting one variable clears six workspaces,
     which is the only thing they actually wanted to know.
 
-    Identity is (kind, subject): the same missing thing, however many
-    declarations point at it. Severity is the WORST any declaration gave it
+    Identity is :func:`_thing_identity`: the same missing thing, however
+    many declarations point at it, and however many findings describe it --
+    each finding of a merged thing is kept under ``reasons``. Severity is the WORST any declaration gave it
     -- a thing one workspace treats as optional and another requires is
     required, and reporting the softer answer says a launch will work when
     it will not.
@@ -21723,10 +21755,13 @@ def _things_missing(rows) -> list[dict]:
     for w in rows:
         for finding in (*w.blocking, *w.unanswerable, *w.advisory):
             data = _finding_json(finding)
-            sig = (data["kind"], data["subject"] or data["at"])
+            sig = _thing_identity(data)
             thing = things.get(sig)
             if thing is None:
-                thing = things[sig] = {**data, "needed_by": []}
+                thing = things[sig] = {**data, "needed_by": [], "reasons": []}
+            reason = {k: data[k] for k in ("kind", "subject", "what", "severity")}
+            if reason not in thing["reasons"]:
+                thing["reasons"].append(reason)
             label = w.name or w.workspace_id
             if label not in thing["needed_by"]:
                 thing["needed_by"].append(label)
@@ -21776,8 +21811,24 @@ async def api_org_workspace_health(request):
     from agents import workspace_readiness as readiness
 
     slug = request.path_params["slug"]
+    only = request.query_params.get("workspace") or None
     try:
-        rows = await asyncio.to_thread(readiness.org_readiness, slug)
+        if only:
+            # One workspace, from the org's OWN rows -- the same set
+            # org_readiness walks, so a filter can never reach a peer's.
+            from tools.graph.schemas.workspace import WORKSPACE_SET_ID
+            owned = await asyncio.to_thread(
+                settings_ops.read_owned_set, WORKSPACE_SET_ID, org=slug)
+            if only not in {str(m.key) for m in owned.members}:
+                return JSONResponse(
+                    {"error": f"organization {slug!r} declares no workspace "
+                              f"{only!r}"},
+                    status_code=404,
+                )
+            rows = [await asyncio.to_thread(
+                readiness.workspace_readiness, only, org=slug)]
+        else:
+            rows = await asyncio.to_thread(readiness.org_readiness, slug)
     except Exception as exc:
         logger.exception("workspace health failed for org %s", slug)
         return JSONResponse(
@@ -21805,6 +21856,7 @@ async def api_org_workspace_health(request):
                 "id": w.workspace_id,
                 "name": w.name,
                 "ready": w.ready,
+                "unresolved": _workspace_unresolved(w),
                 "blocking": [_finding_json(f) for f in w.blocking],
                 "advisory": [_finding_json(f) for f in w.advisory],
                 "unanswerable": [_finding_json(f) for f in w.unanswerable],

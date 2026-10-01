@@ -6313,6 +6313,9 @@ def main():
     sp.add_argument("name")
     p.set_defaults(func=cmd_session)
 
+    from .workspace_doctor_cmd import add_parser as _add_workspace_parser
+    _add_workspace_parser(sub)
+
     p = sub.add_parser("remote", help="Drive another of the operator's fleet machines (session-control/1)")
     remote_sub = p.add_subparsers(dest="remote_cmd", required=True)
     rp = remote_sub.add_parser("status", help="Machine identity and live session count")

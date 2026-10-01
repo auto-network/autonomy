@@ -225,3 +225,68 @@ def test_a_row_that_is_about_the_thing_does_get_to_describe_it(org):
     thing = _things("missing_path")[0]
 
     assert thing["description"].startswith("Anchore Widgets license")
+
+
+# ── one capability, however many edges of its chain are broken ──
+
+
+def _enable(workspace, contract):
+    from tools.graph.schemas.workspace_capability_enable import (
+        SCHEMA_REVISION, SET_ID)
+    settings_ops.add_setting(
+        SET_ID, SCHEMA_REVISION, f"{workspace}:{contract}",
+        {"contract": contract, "contract_version": 1},
+        org="anchore", state="raw")
+
+
+def test_a_capability_with_two_broken_edges_is_one_thing_with_both_reasons(org):
+    """No installation AND no contract row: two kinds, two subjects
+    (``browser``, ``browser@1``). It is one thing to install, and a
+    workspace that needs it has one unresolved thing, not two."""
+    from tools.dashboard.server import _workspace_unresolved
+
+    for ws in ("alpha", "beta"):
+        _workspace(ws)
+        _enable(ws, "browser")
+
+    things = [t for t in _things() if t["thing"] == "capability:browser"]
+
+    assert len(things) == 1, things
+    thing = things[0]
+    assert thing["name"] == "browser"
+    assert sorted(thing["needed_by"]) == ["Alpha", "Beta"]
+    assert {r["kind"] for r in thing["reasons"]} == {
+        "missing_capability_install", "missing_capability_contract_version"}
+    assert all(r["what"] for r in thing["reasons"])
+    rows = org_readiness("anchore")
+    assert [_workspace_unresolved(w) for w in rows] == [1, 1]
+
+
+def test_a_thing_without_a_thing_identity_keeps_one_reason(org):
+    _workspace("alpha", env_from_host=["GH_TOKEN"])
+
+    (thing,) = _things("missing_env")
+
+    assert thing["thing"] == ""
+    assert [r["kind"] for r in thing["reasons"]] == ["missing_env"]
+
+
+def test_a_schema_hook_finding_carries_what_the_thing_is(org):
+    """Findings rebuilt from a ``readiness_findings`` hook used to drop the
+    declaration's name, description and help, so the card showed a raw key."""
+    _workspace("alpha", vault_links=[{
+        "vault": "docker-config",
+        "path": "/home/agent/.docker/config.json",
+        "name": "Docker registry login",
+        "description": "Pull credentials for the private registry",
+        "help": "Ask the registry admin for a robot account",
+    }])
+
+    things = [t for t in _things()
+              if t["kind"] in ("missing_vault_credential", "unreadable_vault")]
+
+    assert len(things) == 1, _things()
+    thing = things[0]
+    assert thing["name"] == "Docker registry login"
+    assert thing["description"] == "Pull credentials for the private registry"
+    assert thing["help"] == "Ask the registry admin for a robot account"

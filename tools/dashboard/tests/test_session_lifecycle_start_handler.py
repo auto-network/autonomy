@@ -94,6 +94,8 @@ def test_worker_first_message_appends_one_sentence_for_degraded_workspace(monkey
             field="contract",
             subject="video_tooling@1",
             looked_in="organization installations",
+            thing="capability:video_tooling",
+            name="video_tooling",
         ),
         CapabilityChainIssue(
             kind="missing_capability_implementation_version",
@@ -101,6 +103,17 @@ def test_worker_first_message_appends_one_sentence_for_degraded_workspace(monkey
             field="implementation_version",
             subject="autonomy/video@3",
             looked_in="capability implementations",
+            thing="capability:video_tooling",
+            name="video_tooling",
+        ),
+        CapabilityChainIssue(
+            kind="missing_capability_install",
+            detail="enabled contract has no organization installation",
+            field="contract",
+            subject="browser",
+            looked_in="organization installations",
+            thing="capability:browser",
+            name="browser",
         ),
     )
     monkeypatch.setattr(server, "_resolve_primer_sync", lambda _primer: "# Task")
@@ -113,9 +126,9 @@ def test_worker_first_message_appends_one_sentence_for_degraded_workspace(monkey
 
     assert used_primer is True
     assert message == (
-        "# Task\n\nStartup degraded: 2 capability checks failed "
-        "(video_tooling@1, autonomy/video@3); diagnose via "
-        "`GET /api/orgs/blindhash/workspaces/health`."
+        "# Task\n\nStartup degraded: 2 capabilities unavailable "
+        "(video_tooling, browser); diagnose with "
+        "`graph workspace doctor --workspace blindhash-operations`."
     )
 
 
