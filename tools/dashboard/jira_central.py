@@ -513,7 +513,8 @@ class JiraWriteDesk:
         here = self._here(payload)
         resolution = status.resolution
         if resolution is None:
-            return (PENDING if here else ELSEWHERE), {}
+            # Any dashboard may decide; the accepting machine performs it.
+            return PENDING, {}
         if resolution.payload.get("outcome") != "granted":
             return str(resolution.payload.get("outcome")), {}
         if not here:
@@ -618,9 +619,14 @@ class JiraWriteDesk:
         Jira request event arrives, so nothing piles up against the quota."""
         for approval_id in self.staging.approval_ids():
             try:
-                status = self.approvals.status(approval_id)
-            except ApprovalServiceError:
-                self.staging.remove(approval_id)
+                status = self.approvals.status(_bounded_approval_id(approval_id))
+            except ApprovalServiceError as exc:
+                # Only an approval that no longer exists frees its content; a
+                # store that cannot answer right now must never lose a write.
+                if exc.code == "not_found":
+                    self.staging.remove(approval_id)
+                continue
+            except ValueError:
                 continue
             resolution = status.resolution
             if resolution is None:

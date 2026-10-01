@@ -60,7 +60,7 @@ test('elsewhere and collection states say so and offer no decision',async()=>{
   result={state:'elsewhere',machine_label:'Office NUC'};
   await openExternalServiceCentralApproval(item());
   assert.equal(q('#primary').disabled,true);
-  assert.match(q('#review-unavailable').textContent,/This device enrolled with Office NUC; decide it there\./);
+  assert.match(q('#review-unavailable').textContent,/Approved; the device collects its access from Office NUC\./);
   assert.equal(serviceReviewState({state:'awaiting_collection'},[]).unavailable,'Allowed. The device picks up its access when it next checks in.');
   assert.equal(serviceReviewState({state:'delivered'},[]).unavailable,'The device has its access.');
 });

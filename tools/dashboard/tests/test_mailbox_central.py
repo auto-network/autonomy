@@ -173,7 +173,9 @@ def test_another_machine_never_sends(journal):
     status = _granted(approvals)
     consumer = _consumer(sent, destination=ELSEWHERE)
     assert consumer.materialize(status) is False
-    assert consumer.project(status) is None
+    # Any dashboard may decide; elsewhere the result names the sending machine.
+    result = consumer.project(status)
+    assert result["approved"] is True and result["elsewhere"]
     assert sent == [] and journal == {}
 
 

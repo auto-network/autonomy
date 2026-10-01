@@ -15,6 +15,9 @@ lazily, on the accepting machine, when the DEVICE polls with its poll secret:
   leaves this machine: only its sha256, bound to the public Central approval
   id, is kept in auth.db (``service_enrollments``). The Central approval id is
   the public correlation id and mints nothing.
+- The poll secret is therefore a credential as long-lived as the access it
+  collects: it mints bearers for the whole granted lifetime (forever when the
+  operator chose no expiry). Keep it as carefully as the bearer itself.
 - Each poll after the Grant, while the granted lifetime lasts, rotates: the previous bearer of the exact name
   ``<prefix>:<approval_id>`` is revoked and a new one inserted in one
   transaction, and the raw bearer is returned in that response only. The
@@ -236,7 +239,8 @@ class EnrollmentDesk:
         here = self._here(payload)
         resolution = status.resolution
         if resolution is None:
-            return PENDING if here else ELSEWHERE
+            # Any dashboard may decide; the device collects from the accepting machine.
+            return PENDING
         if resolution.payload.get("outcome") != "granted":
             return str(resolution.payload.get("outcome"))
         if not here:

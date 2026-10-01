@@ -64,7 +64,6 @@ KIND = "vault_open"
 APPLICATION_SCOPE = "vault"
 RENDERER_ID = "approval.vault_open.review"
 CONSUMER_ID = "vault_open.local_delivery.v1"
-#: How long after the Grant the operator may still post the content key.
 _DESTINATION_DOMAIN = b"dashboard.vault.open-delivery-destination.v1"
 _REQUEST_FIELDS = {"set_id", "key", "ttl_seconds"}
 _HEX = frozenset("0123456789abcdef")

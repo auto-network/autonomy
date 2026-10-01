@@ -55,6 +55,15 @@ export async function openEmailApproval(item, {onResolved = () => {}, onClose = 
     return null;
   }
 
+  // Any dashboard may approve; only the machine that accepted the request
+  // sends. Elsewhere the dialog says so rather than wait for a confirmation
+  // only that machine can see.
+  let sender = null;
+  try {
+    const detail = await readJson(itemUrl);
+    sender = detail.review?.application_result?.elsewhere || null;
+  } catch (_) { /* the dialog below reports what it can */ }
+
   return openApprovalDialog({
     retained: true,
     review: {
@@ -71,15 +80,15 @@ export async function openEmailApproval(item, {onResolved = () => {}, onClose = 
     authorize: async (options) => { options.onAuthenticated(); return {}; },
     execute: async () => {
       await decide('granted');
-      const result = await sent();
+      const result = sender ? {approved: true, execution: {ok: true}} : await sent();
       onResolved();
       return result;
     },
     decline: item.actions.includes('declined') ? async () => { await decide('declined'); onResolved(); } : null,
     result: {
-      working: 'Sending email…',
-      success: 'Email sent',
-      copy: 'The mail server accepted the message for ' + to + '.',
+      working: sender ? 'Approving…' : 'Sending email…',
+      success: sender ? 'Email approved' : 'Email sent',
+      copy: sender ? sender + ' sends it to ' + to + '.' : 'The mail server accepted the message for ' + to + '.',
       fact: {name: subject, byline: 'To ' + to + (cc ? ' · Cc ' + cc : ''), href: session.href, linkLabel: 'View requesting session'},
     },
     onClose,

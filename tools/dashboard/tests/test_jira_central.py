@@ -427,3 +427,12 @@ def test_staged_content_no_write_will_read_again_is_deleted_on_the_next_event(en
     assert sorted(env.staging.approval_ids()) == sorted([declined, performed, waiting])
     env.desk.forget_settled()
     assert env.staging.approval_ids() == [waiting]
+
+
+def test_a_store_that_cannot_answer_never_loses_staged_content(env, monkeypatch):
+    waiting = _create(env, {**COMMENT, "body_markdown": "waiting body"})
+    def unavailable(_approval_id, **_):
+        raise ApprovalServiceError("storage_unavailable")
+    monkeypatch.setattr(env.approvals, "status", unavailable)
+    env.desk.forget_settled()
+    assert env.staging.approval_ids() == [waiting]

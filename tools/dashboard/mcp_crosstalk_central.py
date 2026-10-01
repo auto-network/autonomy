@@ -64,7 +64,6 @@ CONSUMER_ID = "mcp_crosstalk.local_delivery.v1"
 #: The relay's identity as a Central requester (after _relay_auth).
 RELAY_SUBJECT = "mcp-relay"
 RELAY_LABEL = "ChatGPT relay"
-#: A Grant is applied only this long after the resolution.
 MAX_MESSAGE_BYTES = 6000
 MAX_MESSAGE_LINES = 120
 #: ApprovalRequestV1's own bound on safe_review, measured the same way.

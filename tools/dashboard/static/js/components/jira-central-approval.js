@@ -87,7 +87,7 @@ export function jiraReview(r) {
 function unavailableFor(result, actions, r) {
   const state = result?.state || 'pending';
   const machine = result?.machine_label || r.machine_label || 'another machine';
-  if (state === 'elsewhere') return `Requested on ${machine}; decide it there.`;
+  if (state === 'elsewhere') return `Approved; ${machine} carries it out.`;
   if (state === 'awaiting_execution') return 'Approved; running.';
   if (state === 'done') return 'Done.';
   if (state === 'failed') return `Jira refused it: ${result.reason || 'unknown reason'}.`;
@@ -111,8 +111,10 @@ export async function openJiraCentralApproval(item, {onResolved = () => {}, onCl
       const whole = await readJson(itemUrl + '/jira-write-content');
       shown = {...r, content: {...r.content, lines: whole.lines, complete: true}};
     } catch (error) {
+      // The whole text is staged only on the machine that will perform the
+      // write: read it there before approving.
       unavailable = error.status === 409
-        ? `Requested on ${r.machine_label || 'another machine'}; decide it there.`
+        ? `The full text is on ${r.machine_label || 'another machine'}; open this request there to read it before approving.`
         : 'The full text is unavailable, so this cannot be approved.';
     }
   }

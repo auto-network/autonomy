@@ -25,7 +25,7 @@ async function readJson(url, init) {
 export function serviceReviewState(result, actions, review = {}) {
   const state = result?.state || 'pending';
   const machine = result?.machine_label || review.machine_label || 'another machine';
-  if (state === 'elsewhere') return {state, unavailable: `This device enrolled with ${machine}; decide it there.`};
+  if (state === 'elsewhere') return {state, unavailable: `Approved; the device collects its access from ${machine}.`};
   if (state === 'awaiting_collection') return {state, unavailable: 'Allowed. The device picks up its access when it next checks in.'};
   if (state === 'delivered') return {state, unavailable: 'The device has its access.'};
   return {state, unavailable: (actions || []).includes('granted') ? '' : 'This request is no longer available.'};

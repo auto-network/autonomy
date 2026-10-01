@@ -121,7 +121,10 @@ def build_request_planner(
     destination_resolver: Callable[[], str] = result_destination_id,
     workspace_resolver: Callable[[str], tuple[str, str | None]] | None = None,
     sender_resolver: Callable[[str | None], str] = mail.sender_address,
+    machine_label: Callable[[], str] | None = None,
 ):
+    if machine_label is None:
+        from tools.dashboard.vault_open_central import this_machine_label as machine_label
     def resolve_workspace(session: str) -> tuple[str, str | None]:
         if workspace_resolver is not None:
             return workspace_resolver(session)
@@ -162,6 +165,7 @@ def build_request_planner(
                 "workspace": workspace,
                 "workspace_org": workspace_org,
                 "result_destination_id": destination,
+                "machine_label": machine_label(),
             },
         )
 
@@ -288,6 +292,18 @@ class EmailSendConsumer:
 
     def project(self, status: ApprovalStatus) -> Mapping[str, Any] | None:
         if self._ours(status) is None:
+            # Any dashboard may decide; only the accepting machine sends.
+            # Elsewhere, say which machine sends instead of waiting for a
+            # confirmation that only that machine can see.
+            staged = status.request.payload.get("staged") or {}
+            destination = staged.get("result_destination_id")
+            if isinstance(destination, str) and not hmac.compare_digest(
+                    destination, self._destination_resolver()):
+                outcome = (status.resolution.payload.get("outcome")
+                           if status.resolution is not None else None)
+                if outcome in (None, "granted"):
+                    return {"approved": outcome == "granted",
+                            "elsewhere": staged.get("machine_label") or "another machine"}
             return None
         self.materialize(status)
         row = self.journal(status.request.approval_id) or {}

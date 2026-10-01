@@ -77,7 +77,7 @@ test('a long comment is read whole from the machine that holds it', async () => 
 test('without the whole text there is nothing to approve, and Decline stays', async () => {
   await openJiraCentralApproval(item({op: 'comment', target: 'PLAT-42', machine_label: 'Office', content: {complete: false, lines: ['part']}}));
   assert.equal(q('#primary').disabled, true);
-  assert.match(q('#review-unavailable').textContent, /Requested on Office; decide it there\./);
+  assert.match(q('#review-unavailable').textContent, /The full text is on Office; open this request there to read it before approving\./);
   q('#secondary').click(); q('#primary').click();
   await until(() => q('#result-title').textContent === 'Request declined');
   assert.deepEqual(posts(), [{outcome: 'declined', decision: {}}]);
