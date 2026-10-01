@@ -138,6 +138,14 @@ RELEASE_FILES = {
 #: Non-secret configuration, released beside them so backup-env.sh needs no
 #: other source: provider and bucket.
 RELEASE_CONFIG_FILE = "offsite.env"
+#: What a released provider or bucket may contain. The host cron run reads
+#: them into shell variables, so nothing that shell could interpret (a
+#: newline, `$(...)`, quotes) is ever released.
+_PLAIN_VALUE = __import__("re").compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
+STATUS_RELEASE_REFUSED = "release-refused"
+#: One release at a time: unlock and a config change can each start one,
+#: and two writers must not interleave in the same temp file.
+_RELEASE_LOCK = __import__("threading").Lock()
 
 
 def release_dir():
@@ -182,6 +190,11 @@ def release_offsite(config: dict | None = None, *, directory=None,
     ``disabled`` / ``unconfigured`` / ``unsealed``: offsite cannot run with
     what is there, so any released files are removed. Never raises; never
     logs a value. Decrypts: call off the event loop."""
+    with _RELEASE_LOCK:
+        return _release_offsite(config, directory=directory, memory_check=memory_check)
+
+
+def _release_offsite(config, *, directory, memory_check) -> str:
     try:
         env, status = offsite_env(config)
         directory = release_dir() if directory is None else directory
@@ -191,6 +204,13 @@ def release_offsite(config: dict | None = None, *, directory=None,
             if directory.exists():
                 _clear_released(directory)
             return status
+        for variable in ("BACKUP_PROVIDER", "BACKUP_BUCKET"):
+            if not _PLAIN_VALUE.fullmatch(env[variable]):
+                logger.error("backup: %s is not a plain name; not releasing the "
+                             "offsite credentials", variable)
+                if directory.exists():
+                    _clear_released(directory)
+                return STATUS_RELEASE_REFUSED
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         if memory_check is None:
             from tools.network.storagekit.memory_cache import assert_memory_backed

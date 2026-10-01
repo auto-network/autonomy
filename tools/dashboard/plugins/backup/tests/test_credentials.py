@@ -181,3 +181,38 @@ def test_unlock_schedules_the_release(monkeypatch):
                         lambda config=None: scheduled.append(config))
     unlock_routes._schedule_vault_releases()
     assert scheduled == [None]
+
+
+@pytest.mark.parametrize("bucket", ["b\nRESTIC_PASSWORD=x", "$(touch /tmp/p)", "a'b", "", "-x"])
+def test_a_bucket_shell_could_interpret_is_never_released(monkeypatch, tmp_path, bucket):
+    """The host cron run reads offsite.env into shell variables."""
+    assert _release(monkeypatch, tmp_path,
+                    ({**ENV, "BACKUP_BUCKET": bucket}, "ok")) == "release-refused"
+    assert not (tmp_path / "backup" / "restic-password").exists()
+
+
+def test_releases_run_one_at_a_time(monkeypatch, tmp_path):
+    import threading
+    import time
+    from tools.dashboard.plugins.backup import credentials as c
+
+    inside, overlap = [], []
+
+    def slow_env(config=None):
+        if inside:
+            overlap.append(True)
+        inside.append(True)
+        time.sleep(0.05)
+        inside.pop()
+        return ENV, "ok"
+
+    monkeypatch.setattr(c, "offsite_env", slow_env)
+    threads = [threading.Thread(target=c.release_offsite,
+                                kwargs={"directory": tmp_path / "backup",
+                                        "memory_check": lambda d: None})
+               for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert overlap == []
