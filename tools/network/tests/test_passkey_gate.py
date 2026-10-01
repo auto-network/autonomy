@@ -397,3 +397,27 @@ def test_a_host_the_gate_does_not_stand_in_front_of_gets_no_ceremony(runtime, da
     forwarded = TestClient(gate.build_app(runtime, post_dashboard=post), base_url="http://127.0.0.1:4181")
     options = forwarded.post("/oauth2/login/options", json={}, headers={"X-Forwarded-Host": SERVICE})
     assert options.status_code == 200 and options.json()["options"]["rpId"] == SUFFIX
+
+
+def test_the_login_page_never_embeds_a_script_closing_redirect(runtime, dashboard):
+    """``rd`` lands inside a ``<script>`` block on an unauthenticated page.
+    A value that passes the origin-prefix check but carries ``</script>``
+    must neither end the block nor be followed after login."""
+    calls, post = dashboard
+    client = _client(runtime, post)
+    _open_enrollment(runtime)
+    key = ec.generate_private_key(ec.SECP256R1())
+    assert _enroll(client, runtime, key).status_code == 200
+    _enrolled_record(runtime, calls)
+    fresh = _client(runtime, post)
+    hostile = ORIGIN + "/</script><script>alert(1)//"
+    page = fresh.get("/oauth2/start", params={"rd": hostile})
+    assert page.status_code == 200 and "Continue with passkey" in page.text
+    assert "</script><script>" not in page.text
+    assert 'var rd="/";' in page.text  # refused as a target, not merely escaped
+    # A plain URL still rides through, and the literal is safe in a script block.
+    assert gate._js_string(ORIGIN + "/a?b=<c>&d") == '"' + ORIGIN + '/a?b=\\u003cc\\u003e\\u0026d"'
+    options = fresh.post("/oauth2/login/options", json={}).json()["options"]
+    verified = fresh.post("/oauth2/login/verify", json={
+        "rd": hostile, "credential": _assertion(key, options["challenge"], sign_count=3)})
+    assert verified.status_code == 200 and verified.json()["redirect"] == "/"

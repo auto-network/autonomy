@@ -44,6 +44,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -250,7 +251,7 @@ class GateApp:
     def _redirect_target(self, record: dict, rd: str | None) -> str:
         """Only a URL on an origin this gate stands in front of is followed
         after login."""
-        if isinstance(rd, str):
+        if isinstance(rd, str) and _SAFE_URL_RE.match(rd):
             for origin in self._allowed_origins(record):
                 if rd.startswith(origin + "/") and not urlsplit(rd).fragment:
                     return rd
@@ -574,6 +575,21 @@ async function post(path,body){var r=await fetch(path,{method:'POST',headers:{'C
 """
 
 
+#: A redirect target is followed only when it is a plain URL: RFC 3986
+#: characters, nothing that could close an attribute or a script block.
+_SAFE_URL_RE = re.compile(r"^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$")
+
+
+def _js_string(value: str) -> str:
+    """*value* as a JavaScript string literal safe inside a ``<script>``
+    block: JSON, with the characters that end a script block or an HTML
+    entity escaped as well (``json.dumps`` leaves ``<`` alone, so a value
+    containing ``</script>`` would otherwise end the block)."""
+    return (json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e")
+            .replace("&", "\\u0026").replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
+
+
 def _page(title: str, body: str, script: str) -> str:
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -590,7 +606,7 @@ def _login_page(rd: str, *, enrolled: bool) -> str:
             "<h1>No passkey enrolled</h1><p>This address is protected by a passkey that has not "
             "been enrolled yet. Open enrollment from the dashboard on the machine itself, or from "
             "another machine of your fleet, and use the link it shows.</p>"), "")
-    rd_json = json.dumps(rd)
+    rd_json = _js_string(rd)
     return _page("Autonomy", (
         "<h1>Autonomy</h1><p>Use your passkey to open this dashboard.</p>"
         "<button id=\"go\">Continue with passkey</button>"), f"""
@@ -615,7 +631,7 @@ document.getElementById('go').addEventListener('click',login);
 
 
 def _enroll_page(token: str) -> str:
-    token_json = json.dumps(token)
+    token_json = _js_string(token)
     return _page("Autonomy", (
         "<h1>Enroll your passkey</h1><p>This passkey will be the only way in at this address. "
         "Enroll it on the device you will use to reach the dashboard.</p>"
