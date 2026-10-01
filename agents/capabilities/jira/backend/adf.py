@@ -163,6 +163,24 @@ def markdown_to_adf(markdown_text: str,
             })
             continue
 
+        # Blockquotes: consecutive "> " lines are one quote; a bare ">" line
+        # separates its paragraphs, and wrapped lines flow as in a paragraph.
+        if line.lstrip().startswith('>'):
+            quoted = []
+            while i < len(lines) and lines[i].lstrip().startswith('>'):
+                quoted.append(re.sub(r'^\s*>\s?', '', lines[i]))
+                i += 1
+            paragraphs, current = [], []
+            for text in quoted + ['']:
+                if text.strip():
+                    current.append(text)
+                elif current:
+                    paragraphs.append({"type": "paragraph", "content": _flowed(current)})
+                    current = []
+            if paragraphs:
+                content.append({"type": "blockquote", "content": paragraphs})
+            continue
+
         # Headers
         if line.startswith('### '):
             content.append({"type": "heading", "attrs": {"level": 3},

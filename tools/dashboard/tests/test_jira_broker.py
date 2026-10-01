@@ -198,6 +198,21 @@ def test_wrapped_lines_flow_into_one_paragraph_as_commonmark_reads_them():
     assert code["content"][0]["text"] == "keep\nlines"
 
 
+def test_a_wrapped_blockquote_is_one_flowing_quote():
+    doc = adf.markdown_to_adf(
+        "> Installed, not healthy: a broken executor is still truthy, so this returns\n"
+        "> one until something notices.\n>\n> Second paragraph.\nAfter."
+    )
+    quote, after = doc["content"]
+    assert quote["type"] == "blockquote"
+    assert [p["content"] for p in quote["content"]] == [
+        [{"type": "text", "text": "Installed, not healthy: a broken executor is still truthy, "
+                                  "so this returns one until something notices."}],
+        [{"type": "text", "text": "Second paragraph."}],
+    ]
+    assert after["content"] == [{"type": "text", "text": "After."}]
+
+
 def test_adf_round_trip_preserves_meaning():
     md = "## Steps\n1. run `psql`\n2. check output\nplain line"
     back = adf.adf_to_markdown(adf.markdown_to_adf(md))
