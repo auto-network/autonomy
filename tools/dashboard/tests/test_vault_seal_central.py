@@ -418,3 +418,56 @@ def test_notification_specs_never_carry_a_value():
     assert central.notification(approval_service.ApprovalStatus(
         state="open", request=_Rec({"request": {}}), resolution=None,
     )) is None
+
+
+# ── multi-line descriptions and refusal reasons (auto-gf08k) ───────────────
+
+def test_a_multi_line_description_is_accepted_as_one_line(personal_store):
+    """Central's approval record keeps review text single-line (no control
+    characters), so line breaks are joined rather than the request refused --
+    which was a bare `invalid_request`."""
+    approvals, _bridge, _runtime = _composition()
+    record = approvals.create_from_principal(
+        central.KIND, _org_principal(),
+        {**REQUEST, "description": "GitHub token for CI\nscopes: contents:read\nrepo: core"})
+    joined = "GitHub token for CI · scopes: contents:read · repo: core"
+    assert record.payload["safe_review"]["detail"] == joined
+    assert record.payload["request"]["description"] == joined
+
+
+@pytest.mark.parametrize("text", ["one\r\ntwo\r\nthree", "one\rtwo\rthree",
+                                  "one\n\n  two\t\tx \nthree\n"])
+def test_crlf_cr_blank_lines_and_tabs_fold_the_same_way(personal_store, text):
+    approvals, _bridge, _runtime = _composition()
+    record = approvals.create_from_principal(
+        central.KIND, _org_principal(), {**REQUEST, "description": text})
+    assert record.payload["safe_review"]["detail"] in (
+        "one · two · three", "one · two x · three")
+
+
+def test_a_refusal_reaches_the_requester_with_its_reason(personal_store):
+    """POST /api/approvals answered a refused vault request with a bare
+    {"error": "invalid_request"}; the requester now sees the field and why."""
+    from tools.dashboard import approvals_routes
+    from tools.dashboard.approval_http_bridge import ApprovalHttpBridgeError
+    from tools.dashboard.approval_service import ApprovalServiceError
+
+    approvals, _bridge, _runtime = _composition()
+    with pytest.raises(ApprovalServiceError) as info:
+        approvals.create_from_principal(
+            central.KIND, _org_principal(), {**REQUEST, "name": "bad name"})
+    assert info.value.public_detail and "1-128 characters" in info.value.public_detail
+    response = approvals_routes._central_error(ApprovalHttpBridgeError(
+        "invalid_request", public_detail=info.value.public_detail))
+    body = json.loads(response.body)
+    assert response.status_code == 400
+    assert body == {"error": "invalid_request", "detail": info.value.public_detail}
+
+
+def test_other_planner_failures_stay_opaque():
+    from tools.dashboard import approvals_routes
+    from tools.dashboard.approval_http_bridge import ApprovalHttpBridgeError
+
+    body = json.loads(approvals_routes._central_error(
+        ApprovalHttpBridgeError("invalid_request")).body)
+    assert body == {"error": "invalid_request"}

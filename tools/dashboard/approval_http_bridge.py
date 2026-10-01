@@ -47,8 +47,11 @@ _KIND_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 class ApprovalHttpBridgeError(RuntimeError):
     """Bounded bridge failure suitable for an HTTP status mapping."""
 
-    def __init__(self, code: str, message: str | None = None):
+    def __init__(self, code: str, message: str | None = None, *,
+                 public_detail: str | None = None):
         self.code = code
+        #: The requester-facing reason for a refused request, or None.
+        self.public_detail = public_detail
         super().__init__(f"{code}: {message or code.replace('_', ' ')}")
 
 
@@ -286,7 +289,8 @@ class ApprovalHttpBridge:
         try:
             row = self.approvals.create_from_principal(kind, principal, request_payload)
         except ApprovalServiceError as exc:
-            raise ApprovalHttpBridgeError(exc.code) from exc
+            raise ApprovalHttpBridgeError(
+                exc.code, public_detail=getattr(exc, "public_detail", None)) from exc
         if not is_central_approval_id(row.approval_id):
             raise ApprovalHttpBridgeError("unavailable")
         return row.approval_id

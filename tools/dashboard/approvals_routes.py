@@ -537,7 +537,13 @@ def _central_error(exc: ApprovalHttpBridgeError) -> JSONResponse:
             )
         )
     )
-    return _central_no_store({"error": public}, status_code=status_code)
+    body = {"error": public}
+    detail = getattr(exc, "public_detail", None)
+    if status_code == 400 and detail:
+        # A planner's refusal written for the requester: the field and the
+        # reason, not a bare code (auto-gf08k).
+        body["detail"] = detail
+    return _central_no_store(body, status_code=status_code)
 
 
 def _approval_http_bridge():

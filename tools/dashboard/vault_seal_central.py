@@ -53,7 +53,9 @@ from tools.dashboard.approval_kind_registry import (
     ApprovalPlanningContext,
     ApprovalRequestPlan,
 )
-from tools.dashboard.approval_service import ApprovalServiceError, ApprovalStatus
+from tools.dashboard.approval_service import (
+    ApprovalRequestRefused, ApprovalServiceError, ApprovalStatus,
+)
 from tools.dashboard.dashboard_access_central import (
     DashboardAccessCoordinator,
     _bounded_approval_id,
@@ -131,8 +133,28 @@ def existing_row_id(set_id: str, key: str) -> str | None:
     return settings_ops._existing_base_id(set_id, VAULT_CREDENTIAL_REVISION, key, None)
 
 
+def _one_line(value: Any) -> Any:
+    """A description written on several lines, as one: Central's approval
+    record keeps review text single-line (no control characters), so line
+    breaks (LF, CRLF, CR) and tabs are joined with " · " rather than the
+    request refused (auto-gf08k)."""
+    if not isinstance(value, str):
+        return value
+    lines = [" ".join(line.split()) for line in value.replace("\r\n", "\n")
+             .replace("\r", "\n").split("\n")]
+    return " · ".join(line for line in lines if line)
+
+
 def build_request_planner():
     def plan(context: ApprovalPlanningContext, body: Mapping[str, Any]) -> ApprovalRequestPlan:
+        # Every refusal here is written for the requester, so it is returned
+        # to them naming the field and the reason, not a bare invalid_request.
+        try:
+            return _plan(context, body)
+        except ValueError as exc:
+            raise ApprovalRequestRefused(str(exc)) from exc
+
+    def _plan(context: ApprovalPlanningContext, body: Mapping[str, Any]) -> ApprovalRequestPlan:
         if not isinstance(body, Mapping) or set(body) - _ALLOWED_REQUEST_FIELDS:
             raise ValueError(
                 "vault_seal request accepts only name, tier, description, and replace"
@@ -152,7 +174,8 @@ def build_request_planner():
         if tier not in TIER_SET:
             raise ValueError("vault_seal tier must be 'secured' or 'audited'")
         description = _clean_text(
-            body.get("description"), label="description", maximum=MAX_DESCRIPTION_CHARS,
+            _one_line(body.get("description")), label="description",
+            maximum=MAX_DESCRIPTION_CHARS,
         )
         replace = body.get("replace", False)
         if not isinstance(replace, bool):

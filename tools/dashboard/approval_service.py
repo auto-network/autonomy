@@ -69,6 +69,13 @@ _REQUESTER_DOMAIN = "dashboard.approval.requester"
 _CENTRAL_ID_PREFIX = "central-"
 
 
+class ApprovalRequestRefused(ValueError):
+    """A request planner's refusal written FOR the requester: it names the
+    field and the reason, and it is returned to them as the 400's detail.
+    Any other planner exception stays an opaque ``invalid_request``, so a
+    planner opts in message by message (auto-gf08k)."""
+
+
 class ApprovalServiceError(RuntimeError):
     """Bounded domain failure; staged data and foreign records never appear."""
 
@@ -78,9 +85,13 @@ class ApprovalServiceError(RuntimeError):
         message: str | None = None,
         *,
         resolution: "ApprovalRecord | None" = None,
+        public_detail: str | None = None,
     ):
         self.code = code
         self.resolution = resolution
+        #: Safe to show the requester (an ApprovalRequestRefused message);
+        #: None means the failure stays opaque.
+        self.public_detail = public_detail
         super().__init__(f"{code}: {message or code.replace('_', ' ')}")
 
 
@@ -684,6 +695,9 @@ class ApprovalService:
                 plan = self._coerce_plan(registration.runtime.request_planner(context, body))
             except ApprovalServiceError:
                 raise
+            except ApprovalRequestRefused as exc:
+                raise ApprovalServiceError(
+                    "invalid_request", str(exc), public_detail=str(exc)) from exc
             except Exception as exc:
                 raise ApprovalServiceError("invalid_request") from exc
             expires_at, effective_expiry = self._expiry_from_plan(
