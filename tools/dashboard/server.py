@@ -24,6 +24,7 @@ import struct
 import subprocess
 import sys
 import termios
+import pickle
 import threading
 import weakref
 from collections import OrderedDict
@@ -432,6 +433,12 @@ DISPATCH_STATE_PATH = DATA_ROOT / "dispatch.state"
 EVENT_BUS_STATE_PATH = Path(
     os.environ.get("DASHBOARD_EVENT_BUS_STATE")
     or str(DATA_ROOT / "event_bus.state")
+)
+# Live-tail state and catch-up checkpoints carried over a hot reload (see
+# _capture_tail_snapshot). Tests override it like the EventBus state.
+TAIL_STATE_PATH = Path(
+    os.environ.get("DASHBOARD_TAIL_STATE")
+    or str(DATA_ROOT / "tail_state.snapshot")
 )
 # A tiny hand-off record for the user-visible reload notice.  It deliberately
 # lives beside the EventBus snapshot rather than inside it: the state needs to
@@ -6803,6 +6810,160 @@ def _reconstruct_read_state_uncounted(
 _RECON_CACHE_MAX = 64
 _recon_cache: "OrderedDict[tuple, dict]" = OrderedDict()
 _recon_cache_lock = threading.Lock()
+
+
+# ── hot-reload hand-off of the two tail states ─────────────────────────────
+#
+# Two separate states live only in a worker's memory:
+#   State 1 — each live session's tail state (SessionMonitor._tail_states plus
+#             its _task_state_tracker slice) at the offset it has published.
+#   State 2 — the catch-up checkpoints above (_recon_cache), each at the cursor
+#             of the last catch-up for that transcript.
+# A hot reload used to lose both: the new worker re-parsed every live
+# transcript from byte 0 to warm the task tracker (16.2 CPU-s after the
+# 13:07:57Z restart, 2026-10-01), and each transcript's first catch-up
+# replayed from byte 0. The old worker now snapshots both at hand-off; the new
+# one restores them before the session monitor starts.
+
+_TAIL_SNAPSHOT_VERSION = 1
+_TAIL_SNAPSHOT_MAX_AGE_S = 900.0      # the reloader's longest hand-off wait
+#: A reload that changes one of these may change the state a parse builds, so
+#: its replacement rebuilds instead of restoring (operator ruling, 2026-10-01).
+#: Bump _TAIL_SNAPSHOT_VERSION if the state's shape changes anywhere else.
+_TAIL_PARSER_FILES = (
+    "tools/dashboard/session_harness.py",
+    "tools/dashboard/session_monitor.py",
+)
+
+
+def _tail_parser_changed(changed_files) -> bool:
+    changed = [str(f).replace("\\", "/") for f in changed_files or ()]
+    return any(f.endswith(p) for f in changed for p in _TAIL_PARSER_FILES)
+
+
+def _capture_tail_snapshot() -> dict:
+    """Both states, copied on the event loop where they are committed."""
+    import copy
+
+    sessions = session_monitor.export_tail_states()
+    for tmux_name, entry in sessions.items():
+        if "tracker" not in entry:       # carried-over entries already have it
+            tracker_slice = _task_state_tracker._sessions.get(tmux_name)
+            entry["tracker"] = copy.deepcopy(tracker_slice) if tracker_slice is not None else None
+    with _recon_cache_lock:
+        recon = [(key, entry["frontier"], copy.deepcopy(entry["state"]))
+                 for key, entry in _recon_cache.items()]
+    return {"version": _TAIL_SNAPSHOT_VERSION, "written_at": time.time(),
+            "sessions": sessions, "recon": recon}
+
+
+def _write_tail_snapshot(path: Path, snapshot: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(pickle.dumps(snapshot, protocol=pickle.HIGHEST_PROTOCOL))
+    os.replace(tmp, path)
+
+
+def _install_restored_tracker(tmux_name: str, tracker_slice) -> None:
+    _task_state_tracker._sessions[tmux_name] = tracker_slice
+
+
+def _advance_restored_tail_state(tmux_name: str, entry: dict) -> dict | None:
+    """Bring one session's State 1 from the snapshot offset P_snap to the row's
+    file_offset P_db (the old worker kept publishing until it drained) by
+    parsing only those bytes, and keep a State 2 checkpoint at P_snap so a
+    viewer whose cursor is at or past P_snap extends it incrementally.
+    Returns the advanced State 1, or None when the file or offsets changed."""
+    import copy
+    from tools.dashboard.dao import dashboard_db
+
+    row = dashboard_db.get_session(tmux_name)
+    if not row or row.get("jsonl_path") != entry.get("path"):
+        return None
+    path = Path(entry["path"])
+    p_snap = int(entry.get("offset") or 0)
+    p_db = int(row.get("file_offset") or 0)
+    if p_db < p_snap or not path.exists():
+        return None
+    chain = _session_chain_files(row, path)
+    if not chain or chain[-1][0] != path.stem:
+        return None
+    harness = session_harness.resolve_harness_for_session_row(row)
+    tracker = TaskStateTracker()
+    if entry.get("tracker") is not None:
+        tracker._sessions["_reconstruct"] = copy.deepcopy(entry["tracker"])
+    postprocess = entry.get("postprocess_state")
+    seeded = {
+        "frontier": {**{stem: _last_complete_offset_in(p) for stem, p in chain[:-1]},
+                     path.stem: p_snap},
+        "state": {
+            "parse_ctx": copy.deepcopy(entry.get("parse_ctx") or {}),
+            "postprocess_state": copy.deepcopy(postprocess) if postprocess is not None
+            else harness.new_postprocess_state(),
+            "tracker": tracker,
+            "last_enqueue_content": entry.get("last_enqueue_content"),
+            "agent_descriptions": dict(entry.get("agent_descriptions") or {}),
+            "claimed_subagents": set(entry.get("claimed_subagents") or ()),
+        },
+    }
+    key = (tuple(stem for stem, _ in chain), path.stem)
+    with _recon_cache_lock:
+        old = _recon_cache.get(key)
+        _recon_cache[key] = copy.deepcopy(seeded)
+    if p_db > p_snap:
+        advanced = _reconstruct_read_state_uncounted(
+            chain, harness, upto_file=path.stem, upto_off=p_db)
+    else:
+        advanced = copy.deepcopy(seeded["state"])
+    # State 2 stays at P_snap, or at the old worker's own checkpoint if that
+    # is newer and still not past P_db.
+    old_f = old["frontier"].get(path.stem, -1) if old is not None else -1
+    with _recon_cache_lock:
+        _recon_cache[key] = old if p_snap < old_f <= p_db else seeded
+        _recon_cache.move_to_end(key)
+    return {
+        "path": str(path), "offset": p_db, "generation": entry.get("generation"),
+        "parse_ctx": advanced["parse_ctx"],
+        "postprocess_state": advanced["postprocess_state"],
+        "last_enqueue_content": advanced["last_enqueue_content"],
+        "agent_descriptions": advanced["agent_descriptions"],
+        "claimed_subagents": advanced["claimed_subagents"],
+        "tracker": advanced["tracker"]._sessions.get("_reconstruct"),
+    }
+
+
+def _restore_tail_snapshot(path: Path) -> tuple[dict, int]:
+    """Load the hand-off snapshot once (then delete it, so a later cold start
+    can never restore state built by other code). Restores State 2 and
+    returns (State 1 per session, ready for the session monitor, number of
+    State 2 checkpoints restored)."""
+    try:
+        blob = path.read_bytes()
+    except FileNotFoundError:
+        return {}, 0
+    finally:
+        path.unlink(missing_ok=True)
+    data = pickle.loads(blob)
+    if (not isinstance(data, dict) or data.get("version") != _TAIL_SNAPSHOT_VERSION
+            or time.time() - float(data.get("written_at") or 0) > _TAIL_SNAPSHOT_MAX_AGE_S):
+        return {}, 0
+    recon = data.get("recon") or []
+    with _recon_cache_lock:
+        for key, frontier, state in recon:
+            _recon_cache[key] = {"frontier": frontier, "state": state}
+            _recon_cache.move_to_end(key)
+    ready: dict[str, dict] = {}
+    for tmux_name, entry in (data.get("sessions") or {}).items():
+        try:
+            advanced = _advance_restored_tail_state(tmux_name, entry)
+        except Exception:
+            logger.exception("tail state for %s could not be carried over", tmux_name)
+            continue
+        if advanced is not None:
+            ready[tmux_name] = advanced
+    with _recon_cache_lock:
+        while len(_recon_cache) > _RECON_CACHE_MAX:
+            _recon_cache.popitem(last=False)
+    return ready, len(recon)
 _recon_stats = {"full": 0, "incremental": 0}
 
 
@@ -14856,12 +15017,22 @@ async def api_dao_bead(request):
 
 # ── SSE EventBus endpoint ─────────────────────────────────────
 
-async def _snapshot_for_handoff() -> dict[str, bool]:
+async def _snapshot_for_handoff(changed_files=()) -> dict[str, bool]:
     """Write the state a replacement worker restores at ITS startup while this
     worker keeps serving: the EventBus replay buffer and the vault key cache.
     Both are re-written at this worker's shutdown as well; the hand-off copy
     only closes the gap so the replacement is warm before it takes traffic."""
-    result = {"event_bus": False, "vault": False}
+    result = {"event_bus": False, "vault": False, "tail_state": False}
+    if _tail_parser_changed(changed_files):
+        TAIL_STATE_PATH.unlink(missing_ok=True)
+        logger.info("tail state not carried over: the reload changed the parser")
+    else:
+        try:
+            snapshot = _capture_tail_snapshot()
+            await asyncio.to_thread(_write_tail_snapshot, TAIL_STATE_PATH, snapshot)
+            result["tail_state"] = True
+        except Exception:
+            logger.exception("hand-off tail state snapshot failed; the replacement rebuilds it")
     try:
         from tools.dashboard.unlock_routes import save_vault_across_hot_reload
         result["vault"] = bool(await asyncio.to_thread(save_vault_across_hot_reload))
@@ -14902,7 +15073,7 @@ async def api_internal_restart_notice(request):
         # Then announce so the operator sees the reload begin (cause + progress
         # bar) while this worker keeps serving; the replacement's activation
         # emits the matching "complete".
-        snapshot = await _snapshot_for_handoff()
+        snapshot = await _snapshot_for_handoff(changed_files)
         try:
             payload = await _announce_restart(changed_files, phase="restarting")
         except Exception:
@@ -23494,6 +23665,15 @@ async def _on_startup():
         logger.exception("plugin declared-settings reconcile failed; continuing startup")
     _mark("plugin_loader.reconcile_declared_settings")
     # Seed from filesystem on first run (one-time), then start background tasks
+    if not os.environ.get("DASHBOARD_MOCK"):
+        try:
+            carried, checkpoints = await asyncio.to_thread(_restore_tail_snapshot, TAIL_STATE_PATH)
+            session_monitor.install_restored_tail_states(carried, _install_restored_tracker)
+            logger.info("tail state carried over: %d live session(s), %d catch-up checkpoint(s)",
+                        len(carried), checkpoints)
+        except Exception:
+            logger.exception("tail state restore failed; sessions warm up from history")
+    _mark("tail_state.restore")
     await session_monitor.seed_from_filesystem()
     _mark("session_monitor.seed_from_filesystem")
     await session_monitor.start(

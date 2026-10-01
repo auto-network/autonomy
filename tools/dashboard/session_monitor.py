@@ -900,6 +900,12 @@ class _TailState:
     postprocess_state: dict | None = None
     # Last queued message content — for deduping against the subsequent user entry
     last_enqueue_content: str | None = None
+    # The file and offset the parse state above corresponds to, set in the
+    # same loop step that commits it (after _process_tail_entries). The row's
+    # file_offset is persisted only after publishing, so it can briefly lag
+    # this state; a hand-off snapshot pairs the state with THIS offset.
+    state_path: str | None = None
+    state_offset: int | None = None
     # inotify watch descriptors
     watch_descriptor: int | None = None       # IN_MODIFY on active JSONL
     dir_watch_descriptor: int | None = None   # IN_CREATE on session directory
@@ -1220,6 +1226,11 @@ class SessionMonitor:
         self._entry_enricher = None
         self._harness: SessionHarness = CLAUDE_HARNESS
         self._todo_snapshot = None
+        # Tail states carried over a hot reload by the previous worker, keyed
+        # by tmux name; each is adopted once, before that session's first read
+        # in this process, only if it matches the row exactly.
+        self._restored_tail_states: dict[str, dict] = {}
+        self._install_restored_tracker = None
         # auto-eerfx: per-session monotonic timestamp of when a session was
         # first observed at harness_starting with setup already complete.
         # Used by the screen-poll loop's grace fallback to promote
@@ -3218,6 +3229,9 @@ class SessionMonitor:
             if row.get("jsonl_path"):
                 if tmux_name not in self._tail_states:
                     self._tail_states[tmux_name] = _TailState()
+                if self._restored_tail_states:
+                    self._adopt_restored_tail_state(
+                        tmux_name, row, self._tail_states[tmux_name])
                 fut = loop.run_in_executor(
                     None, self._read_tail_window, dict(row),
                     self._tail_states[tmux_name].parse_ctx,
@@ -3367,6 +3381,7 @@ class SessionMonitor:
                 "to": window["new_offset"],
             },
         )
+        ts.state_path, ts.state_offset = str(path), window["new_offset"]
         await self._graph_appender_tick(tmux_name, Path(path))
         from tools.dashboard.dao.dashboard_db import increment_entry_count
         increment_entry_count(
@@ -3631,7 +3646,72 @@ class SessionMonitor:
                 int(row.get("entry_count") or 0) + int(window["raw_count"] or 0)
             ),
         )
+        ts.state_path, ts.state_offset = str(window["path"]), window["new_offset"]
         await self._graph_appender_tick(tmux_name, Path(window["path"]))
+
+    # ── hot-reload hand-off of the live tail state ──────────────────────
+
+    def export_tail_states(self) -> dict[str, dict]:
+        """Deep copies of each session's parse state with the file, offset
+        and file identity it corresponds to — for the hand-off snapshot. Runs
+        on the event loop, where every field is committed, so each copy is
+        consistent with its offset. Restored states not yet adopted pass
+        through unchanged."""
+        out: dict[str, dict] = dict(self._restored_tail_states)
+        for tmux_name, ts in self._tail_states.items():
+            if ts.state_path is None or ts.state_offset is None:
+                continue
+            track = self._tracks.get((tmux_name, ts.state_path))
+            out[tmux_name] = {
+                "path": ts.state_path,
+                "offset": ts.state_offset,
+                "generation": track.generation if track is not None else None,
+                "parse_ctx": copy.deepcopy(ts.parse_ctx),
+                "postprocess_state": copy.deepcopy(ts.postprocess_state),
+                "last_enqueue_content": ts.last_enqueue_content,
+                "agent_descriptions": dict(ts.agent_descriptions),
+                "claimed_subagents": set(ts.claimed_subagents),
+            }
+        return out
+
+    def install_restored_tail_states(self, states: dict[str, dict], install_tracker) -> None:
+        """Hand this worker the states the previous one exported (each already
+        advanced to the row's file_offset). ``install_tracker(tmux_name,
+        tracker_slice)`` puts a session's task-tracker state in place when its
+        tail state is adopted."""
+        self._restored_tail_states = dict(states)
+        self._install_restored_tracker = install_tracker
+
+    def _adopt_restored_tail_state(self, tmux_name: str, row: dict, ts: "_TailState") -> None:
+        """Before a session's first read in this process: install the restored
+        state if it is exactly the state at the offset about to be read from.
+        Otherwise drop it; the session warms up from its history as before."""
+        restored = self._restored_tail_states.pop(tmux_name, None)
+        if restored is None:
+            return
+        path = row.get("jsonl_path")
+        offset = row.get("file_offset", 0) or 0
+        try:
+            st = os.stat(path) if path else None
+        except OSError:
+            st = None
+        expected = restored.get("generation")
+        same_file = st is not None and (
+            expected is None or tuple(expected) == (st.st_dev, st.st_ino))
+        if (restored.get("path") != path or restored.get("offset") != offset
+                or not same_file):
+            logger.info("session_monitor: carried-over tail state for %s not used "
+                        "(file or offset changed); it warms up from history", tmux_name)
+            return
+        ts.parse_ctx = restored.get("parse_ctx") or {}
+        ts.postprocess_state = restored.get("postprocess_state")
+        ts.last_enqueue_content = restored.get("last_enqueue_content")
+        ts.agent_descriptions = dict(restored.get("agent_descriptions") or {})
+        ts.claimed_subagents = set(restored.get("claimed_subagents") or ())
+        ts.state_path, ts.state_offset = path, offset
+        if self._install_restored_tracker is not None and restored.get("tracker") is not None:
+            self._install_restored_tracker(tmux_name, restored["tracker"])
+        ts.task_tracker_warmed = True
 
     def _persist_tail_window(
         self, tmux_name: str, row: dict, window: dict,
