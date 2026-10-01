@@ -6,8 +6,15 @@ import logging
 from tools.network.registry.__main__ import REGISTRY_LOGGER, configure_registry_logging
 
 
-def test_the_registry_logger_is_raised_once_and_kept_off_the_root() -> None:
+def test_the_registry_logger_is_raised_once_and_kept_off_the_root(monkeypatch) -> None:
     stream = io.StringIO()
+    # The child logger written through below must inherit from the registry
+    # logger; a test elsewhere in this worker may have set its level or
+    # disabled it (logging state is process-wide).
+    relay = logging.getLogger("tools.network.registry.relay")
+    monkeypatch.setattr(relay, "level", logging.NOTSET)
+    monkeypatch.setattr(relay, "disabled", False)
+    monkeypatch.setattr(relay, "propagate", True)
     # Other tests in the same worker process start an in-process
     # uvicorn.Server(log_level="error"), which sets uvicorn.error to ERROR
     # for the rest of the process. The claim here is that configuring the

@@ -386,10 +386,15 @@ def test_restore_missing_or_corrupt(monitor, tmp_path):
 # ── API endpoint ────────────────────────────────────────────────
 
 
-def test_api_resources_endpoint(tmp_path):
+def test_api_resources_endpoint(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
     from tools.dashboard import server as srv
+    from tools.dashboard import unlock_routes
+
+    # The handler is under test, not the gate: an identity another test on
+    # this worker enrolled would otherwise turn the gate on (401).
+    monkeypatch.setattr(unlock_routes, "gate_enforced", lambda: False)
 
     client = TestClient(srv.app)  # no lifespan — handler needs no startup
     resp = client.get("/api/resources")
