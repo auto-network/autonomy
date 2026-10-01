@@ -19530,21 +19530,20 @@ async def api_graph_setting_create(request):
             body["set_id"]
         ):
             _principal = api_auth.principal_from_request(request)
-            _operator = _principal.kind in {
-                api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
-                api_auth.ApiPrincipalKind.LOCAL_SESSION,
-            }
+            from tools.dashboard.vault_routes import (
+                is_operator_terminal, operator_named_org_refusal,
+            )
+            _operator = is_operator_terminal(_principal)
             if not _principal.org_bound and not _operator:
                 return JSONResponse(
                     {"error": (
-                        f"cannot seal into organization {org!r}: this caller "
-                        "is neither the operator nor a session of that "
-                        "organization"
+                        f"cannot seal into organization {org!r}: only the "
+                        "operator's host terminal or dashboard, or a session "
+                        "of that organization, may"
                     )},
                     status_code=403,
                 )
             if _operator:
-                from tools.dashboard.vault_routes import operator_named_org_refusal
                 if (_refusal := operator_named_org_refusal(org)) is not None:
                     return JSONResponse({"error": _refusal}, status_code=400)
             # ``org`` is a non-empty slug here (checked above), so the

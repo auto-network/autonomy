@@ -60,19 +60,41 @@ def _orgs(monkeypatch, *known):
 
     monkeypatch.setattr(org_ops, "get_org",
                         lambda slug, **_k: object() if slug in known else None)
+    _sessions(monkeypatch, {"host-1001-122405": "host", "auto-0930-161540": "container"})
 
 
-def test_audited_seal_from_a_non_operator_naming_an_org_is_refused(monkeypatch):
+def _sessions(monkeypatch, types: dict):
+    """The dashboard's launch record: tmux_sessions.type per session."""
+    from tools.dashboard.dao import dashboard_db
+
+    monkeypatch.setattr(dashboard_db, "get_session",
+                        lambda name: {"type": types[name]} if name in types else None)
+
+
+#: The operator in person: the dashboard cookie, or a host terminal.
+OPERATORS = [
+    ApiPrincipal(ApiPrincipalKind.OPERATOR_COOKIE),
+    ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host-1001-122405"),
+]
+#: Non-org callers that are NOT the operator's terminal -- refused.
+NON_OPERATORS = [
+    ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="auto-0930-161540"),  # personal container
+    ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="unknown-session"),
+    ApiPrincipal(ApiPrincipalKind.COMPATIBILITY),
+    ApiPrincipal(ApiPrincipalKind.MCP_SERVICE, subject="svc"),
+    ApiPrincipal(ApiPrincipalKind.EXTERNAL_SERVICE, subject="svc"),
+]
+
+
+@pytest.mark.parametrize("principal", NON_OPERATORS)
+def test_audited_seal_from_a_non_operator_naming_an_org_is_refused(monkeypatch, principal):
+    _orgs(monkeypatch, "anchore")
     called = {"write": False}
     monkeypatch.setattr(
         server.graph_ops, "write_by_key",
         lambda *a, **k: called.__setitem__("write", True) or "sid",
     )
-    req = _setting_request(
-        _audited_body(),
-        principal=ApiPrincipal(ApiPrincipalKind.COMPATIBILITY),
-        organization="anchore",
-    )
+    req = _setting_request(_audited_body(), principal=principal, organization="anchore")
     resp = asyncio.run(server.api_graph_setting_create(req))
     assert resp.status_code == 403
     assert b"cannot seal into organization 'anchore'" in resp.body
@@ -80,9 +102,8 @@ def test_audited_seal_from_a_non_operator_naming_an_org_is_refused(monkeypatch):
     assert called["write"] is False
 
 
-@pytest.mark.parametrize("kind", [ApiPrincipalKind.LOCAL_SESSION,
-                                  ApiPrincipalKind.OPERATOR_COOKIE])
-def test_audited_seal_from_the_operator_naming_an_org_lands_in_it(monkeypatch, kind):
+@pytest.mark.parametrize("principal", OPERATORS)
+def test_audited_seal_from_the_operator_naming_an_org_lands_in_it(monkeypatch, principal):
     _orgs(monkeypatch, "anchore")
     captured = {}
 
@@ -92,8 +113,7 @@ def test_audited_seal_from_the_operator_naming_an_org_lands_in_it(monkeypatch, k
 
     monkeypatch.setattr(server.graph_ops, "write_by_key", write_by_key)
     monkeypatch.setattr(server.graph_ops, "take_shadowed_write", lambda *a: None)
-    req = _setting_request(_audited_body(), principal=ApiPrincipal(kind, subject="host"),
-                           organization="anchore")
+    req = _setting_request(_audited_body(), principal=principal, organization="anchore")
     resp = asyncio.run(server.api_graph_setting_create(req))
     assert resp.status_code == 201, resp.body
     # write_by_key derives ``anchore:`` from this org (_apply_org_writeback).
@@ -107,7 +127,7 @@ def test_audited_seal_into_an_unknown_org_is_refused(monkeypatch):
                         lambda *a, **k: called.__setitem__("write", True) or "sid")
     req = _setting_request(
         _audited_body(),
-        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host"),
+        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host-1001-122405"),
         organization="anchroe",
     )
     resp = asyncio.run(server.api_graph_setting_create(req))
@@ -157,10 +177,8 @@ def _secured_app(monkeypatch, *, principal, organization):
     return Starlette(routes=vault_routes.ROUTES)
 
 
-@pytest.mark.parametrize("kind", [ApiPrincipalKind.COMPATIBILITY,
-                                  ApiPrincipalKind.MCP_SERVICE,
-                                  ApiPrincipalKind.EXTERNAL_SERVICE])
-def test_secured_seal_from_a_non_operator_naming_an_org_is_refused(monkeypatch, kind):
+@pytest.mark.parametrize("principal", NON_OPERATORS)
+def test_secured_seal_from_a_non_operator_naming_an_org_is_refused(monkeypatch, principal):
     _orgs(monkeypatch, "anchore")
     sealed = {"called": False}
     monkeypatch.setattr(
@@ -169,7 +187,7 @@ def test_secured_seal_from_a_non_operator_naming_an_org_is_refused(monkeypatch, 
     )
     app = _secured_app(
         monkeypatch,
-        principal=ApiPrincipal(kind, subject="svc"),
+        principal=principal,
         organization="anchore",
     )
     with TestClient(app) as client:
@@ -197,7 +215,7 @@ def test_secured_seal_with_no_named_org_is_not_refused(monkeypatch):
     monkeypatch.setattr(vault_routes, "_store", boom)
     app = _secured_app(
         monkeypatch,
-        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host"),
+        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host-1001-122405"),
         organization=None,
     )
     with TestClient(app) as client:
@@ -211,9 +229,8 @@ def test_secured_seal_with_no_named_org_is_not_refused(monkeypatch):
     assert reached["routing"] is True
 
 
-@pytest.mark.parametrize("kind", [ApiPrincipalKind.LOCAL_SESSION,
-                                  ApiPrincipalKind.OPERATOR_COOKIE])
-def test_secured_seal_from_the_operator_naming_an_org_lands_in_it(monkeypatch, kind):
+@pytest.mark.parametrize("principal", OPERATORS)
+def test_secured_seal_from_the_operator_naming_an_org_lands_in_it(monkeypatch, principal):
     _orgs(monkeypatch, "anchore")
     captured = {}
 
@@ -223,8 +240,7 @@ def test_secured_seal_from_the_operator_naming_an_org_lands_in_it(monkeypatch, k
 
     monkeypatch.setattr(vault_routes.settings_ops, "write_by_key", write_by_key)
     monkeypatch.setattr(vault_routes, "resolve_personal_root_class_id", lambda c: c)
-    app = _secured_app(monkeypatch, principal=ApiPrincipal(kind, subject="host"),
-                       organization="anchore")
+    app = _secured_app(monkeypatch, principal=principal, organization="anchore")
     with TestClient(app) as client:
         resp = client.post("/api/identity/vault-settings", json={
             "key": "sync-proof", "value": "s3cr3t", "policy_class_id": "personal-root",
@@ -240,7 +256,7 @@ def test_secured_seal_into_an_unknown_org_is_refused(monkeypatch):
                         lambda *a, **k: sealed.__setitem__("called", True) or "sid")
     app = _secured_app(
         monkeypatch,
-        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host"),
+        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host-1001-122405"),
         organization="../etc",
     )
     with TestClient(app) as client:
@@ -293,7 +309,7 @@ def test_a_host_audited_seal_lands_as_the_org_row_in_a_real_store(real_vault):
     # itself, asserted above, before the same personal-store write.
     req = _setting_request(
         _audited_body(),
-        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host"),
+        principal=ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject="host-1001-122405"),
         organization="anchore",
     )
     resp = asyncio.run(server.api_graph_setting_create(req))

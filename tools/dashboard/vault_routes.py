@@ -186,6 +186,21 @@ def resolve_personal_root_class_id(class_id: str) -> str:
     return class_id
 
 
+def is_operator_terminal(principal) -> bool:
+    """The operator in person: the dashboard cookie, or a HOST terminal --
+    a session the dashboard launched as ``type = host`` (tmux on the host,
+    not a container). Personal agent containers also carry non-org bearers;
+    they are not the operator's terminal."""
+    if principal.kind is api_auth.ApiPrincipalKind.OPERATOR_COOKIE:
+        return True
+    if principal.kind is not api_auth.ApiPrincipalKind.LOCAL_SESSION or not principal.subject:
+        return False
+    from tools.dashboard.dao import dashboard_db
+
+    row = dashboard_db.get_session(principal.subject)
+    return bool(row) and row.get("type") == "host"
+
+
 def operator_named_org_refusal(slug: str) -> str | None:
     """Why the operator cannot seal into organization *slug*, or None. The
     slug arrives as a raw ``X-Graph-Org`` header, so it is checked as a slug
@@ -232,27 +247,25 @@ async def seal_personal_setting(request: Request):
         principal = api_auth.principal_from_request(request)
         # A NAMED org lands under that org's ``<org>:`` key, never the bare
         # personal key (auto-ha7se). The operator (dashboard cookie or a host
-        # terminal) names any organization directly (auto-kx7uo, operator
-        # ruling 2026-10-01). An org session's org comes from its bearer (the
+        # terminal: is_operator_terminal) names any organization directly
+        # (auto-kx7uo, operator ruling 2026-10-01). An org session's org comes from its bearer (the
         # middleware has already refused a conflicting header); any other
         # caller naming an org is refused.
         requested_org = api_auth.organization_scope_from_request(request)
         named_org = (requested_org
                      if isinstance(requested_org, str)
                      and requested_org not in ("personal", "machine") else None)
-        operator = principal.kind in {
-            api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
-            api_auth.ApiPrincipalKind.LOCAL_SESSION,
-        }
+        operator = named_org is not None and is_operator_terminal(principal)
         if named_org is not None and not operator and not principal.org_bound:
             return JSONResponse(
                 {"error": (
-                    f"cannot seal into organization {named_org!r}: this caller "
-                    "is neither the operator nor a session of that organization"
+                    f"cannot seal into organization {named_org!r}: only the "
+                    "operator's host terminal or dashboard, or a session of "
+                    "that organization, may"
                 )},
                 status_code=403,
             )
-        if operator and named_org is not None:
+        if operator:
             if (refusal := operator_named_org_refusal(named_org)) is not None:
                 return JSONResponse({"error": refusal}, status_code=400)
             routed_key = schema_registry.derive_org_writeback_key(
