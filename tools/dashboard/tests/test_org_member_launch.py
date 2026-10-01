@@ -56,8 +56,10 @@ def _body(**kw):
 def _member_launch(srv, monkeypatch, body, workspaces=None):
     seen = {}
 
-    async def create(request_body, request, provenance=None, *, workspace_org=None, carried=None):
-        seen.update(body=request_body, provenance=provenance, org=workspace_org, carried=carried)
+    async def create(request_body, request, provenance=None, *, workspace_org=None, carried=None,
+                     primer_text=None):
+        seen.update(body=request_body, provenance=provenance, org=workspace_org, carried=carried,
+                    primer_text=primer_text)
         name = "auto-member-1"
         dashboard_db.upsert_session(name, "container", request_body["project"])
         dashboard_db.set_launch_provenance(name, **provenance)
@@ -239,3 +241,86 @@ def test_resume_refuses_a_members_session(server, monkeypatch):
         LifecycleJob("resume", "auto-mr", {"kind": "project", "project_id": "dev",
                                            "resume_uuid": "u"}), writer)
     assert failed and "cannot be resumed" in failed[0]
+
+
+# ── review of 0dc60d5e: the primer, and Retry/Restart ──────────────────────
+
+
+def test_a_graph_primer_from_a_member_is_refused_and_never_read(server, monkeypatch):
+    monkeypatch.setattr(server.graph_ops, "read_source_full",
+                        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("read")))
+    status, data, seen = _member_launch(server, monkeypatch,
+                                        _body(primer="graph://owner-only-note"))
+    assert (status, data["refusal"], seen) == (400, "primer-not-carried", {})
+
+
+def test_carried_primer_text_reaches_the_first_message(server, monkeypatch):
+    status, _data, seen = _member_launch(server, monkeypatch, _body(primer_text="# Brief\nDo X"))
+    assert status == 202 and seen["primer_text"] == "# Brief\nDo X"
+    proj = SimpleNamespace(id="dev", capability_issues=())
+    message, used = server._render_worker_first_message(
+        tmux_name="auto-member-1", proj=proj, primer_url=None, primer_text="# Brief\nDo X")
+    assert used and message.startswith("# Brief")
+
+
+def test_home_resolves_the_primer_in_its_own_graph_and_carries_the_text(server, monkeypatch):
+    from tools.dashboard import member_message_client as mmc
+
+    sent = []
+    monkeypatch.setattr(server.workspace_settings, "_workspaces_in_org", lambda org: {"dev": _proj()})
+    monkeypatch.setattr(server, "_member_launch_credentials",
+                        lambda *_a: {"credentials": {}, "env": {}, "signins": {}})
+    monkeypatch.setattr(server, "_resolve_primer_sync",
+                        lambda primer: "# Mine" if primer == "graph://mine" else None)
+
+    async def fake_request(target, op, payload, *, timeout=15.0):
+        sent.append(json.loads(base64.b64decode(payload["body"])))
+        return {"ok": True, "result": {"status": 202, "headers": {}, "body": base64.b64encode(
+            b'{"tmux_name": "auto-p"}').decode()}}
+
+    monkeypatch.setattr(mmc, "request", fake_request)
+    asyncio.run(server._launch_on_org_runner(
+        {"machine": "e1e1e1e1", "project": "dev", "primer": "graph://mine"}, RUNNER))
+    assert sent[0]["primer_text"] == "# Mine" and "primer" not in sent[0]
+    response = asyncio.run(server._launch_on_org_runner(
+        {"machine": "e1e1e1e1", "project": "dev", "primer": "graph://absent"}, RUNNER))
+    assert json.loads(response.body)["refusal"] == "primer-unresolved" and len(sent) == 1
+
+
+@pytest.fixture
+def no_vault(monkeypatch):
+    def forbidden(*_a, **_k):
+        raise AssertionError("the runner's vault or account picker was used")
+
+    for name in ("_resolve_credentials", "_resolve_credentials_via_substrate",
+                 "_resolve_credential", "_pick_account", "_signin_payloads"):
+        monkeypatch.setattr(sl, name, forbidden)
+
+
+def test_retry_and_restart_of_a_failed_member_launch_refuse(server, monkeypatch, no_vault):
+    dashboard_db.insert_session(tmux_name="auto-mf", session_type="container",
+                                project="dev", harness="claude")
+    dashboard_db.set_launch_provenance("auto-mf", launched_by=f"persona:{PERSONA}",
+                                       home_machine=MACHINE, launch_op_id=OP_ID,
+                                       owner_persona=PERSONA)
+    row = dashboard_db.get_session("auto-mf")
+    config, refusal = server._build_session_relaunch_config(row, attempt=2, event_loop=None)
+    assert config is None and "member's machine" in refusal
+
+
+def test_the_start_worker_refuses_a_member_session_without_carried_credentials(
+        server, monkeypatch, no_vault):
+    from tools.dashboard.session_lifecycle_worker import LifecycleJob, SessionLifecycleStateWriter
+
+    dashboard_db.insert_session(tmux_name="auto-mg", session_type="container",
+                                project="dev", harness="claude")
+    dashboard_db.set_launch_provenance("auto-mg", launched_by="x", home_machine=MACHINE,
+                                       launch_op_id=OP_ID, owner_persona=PERSONA)
+    monkeypatch.setattr(server.workspace_settings, "get_workspace",
+                        lambda _p: (_ for _ in ()).throw(AssertionError("loaded")))
+    failed = []
+    writer = SessionLifecycleStateWriter()
+    monkeypatch.setattr(writer, "fail", lambda name, **kw: failed.append(kw.get("reason")))
+    server._run_project_session_start(
+        LifecycleJob("start", "auto-mg", {"project_id": "dev", "attempt": 2}), writer)
+    assert failed and "carried in its launch" in failed[0]

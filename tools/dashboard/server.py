@@ -9177,7 +9177,11 @@ def _render_worker_first_message(
     tmux_name: str,
     proj,
     primer_url: str | None,
+    primer_text: str | None = None,
 ) -> tuple[str | None, bool]:
+    if primer_text:
+        # Resolved by the member's own dashboard (auto-1qj12).
+        return _append_workspace_startup_notice(primer_text, proj), True
     if primer_url:
         try:
             resolved = _resolve_primer_sync(primer_url)
@@ -9615,6 +9619,11 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
     workspace_org = job.config.get("workspace_org")
     carried = job.config.pop("carried", None)
     try:
+        if carried is None and (dashboard_db.get_session(tmux_name) or {}).get("owner_persona"):
+            raise RuntimeError(
+                "an organization member's session cannot start without the "
+                "credentials carried in its launch; launch it again from the "
+                "member's machine")
         if workspace_org:
             proj = workspace_settings._workspaces_in_org(workspace_org)[project_id]
         else:
@@ -9794,7 +9803,8 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             tmux_name=tmux_name,
             proj=proj,
             run_dir=run_dir,
-            primer_url=primer_url if isinstance(primer_url, str) else None,
+            primer_url=(primer_url if isinstance(primer_url, str) else None)
+            or job.config.get("primer_text"),
             loop=loop,
             harness=resolved_harness,
         )
@@ -9820,6 +9830,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             tmux_name=tmux_name,
             proj=proj,
             primer_url=primer_url if isinstance(primer_url, str) else None,
+            primer_text=job.config.get("primer_text"),
         )
         if first_message:
             phase = "injecting"
@@ -10800,6 +10811,17 @@ async def _launch_on_org_runner(body: dict, runner: dict) -> JSONResponse:
     if body.get("type", "container") != "container" or not body.get("project"):
         return JSONResponse({"error": "a launch on a runner needs a workspace project "
                                       "(type 'container')"}, status_code=400)
+    primer_text = None
+    if body.get("primer"):
+        # Resolved HERE, in this member's own graph: the runner would resolve
+        # a graph:// primer in its owner's graph, so only the text travels.
+        primer_text = await asyncio.to_thread(_resolve_primer_sync, str(body["primer"]))
+        if not primer_text:
+            return JSONResponse({"error": f"primer {body['primer']!r} could not be read here",
+                                 "refusal": "primer-unresolved", "at": "local"}, status_code=400)
+        if len(primer_text.encode()) > MAX_CARRIED_PRIMER_BYTES:
+            return JSONResponse({"error": "the primer is too large to carry",
+                                 "refusal": "primer-too-large", "at": "local"}, status_code=413)
     operation_id = body.get("operation_id")
     if operation_id is not None and not (
             isinstance(operation_id, str) and re.fullmatch(r"[0-9a-f]{32}", operation_id)):
@@ -10820,9 +10842,10 @@ async def _launch_on_org_runner(body: dict, runner: dict) -> JSONResponse:
     operation_id = operation_id or _secrets.token_hex(16)
     launch = {"type": "container", "project": body["project"], "harness": harness,
               "operation_id": operation_id, "credentials": carried}
-    for name in ("primer", "model"):
-        if isinstance(body.get(name), str) and body[name]:
-            launch[name] = body[name]
+    if isinstance(body.get("model"), str) and body["model"]:
+        launch["model"] = body["model"]
+    if primer_text:
+        launch["primer_text"] = primer_text
     payload = {"method": "POST", "path": "/api/session/create", "query": "",
                "headers": {"content-type": "application/json"},
                "body": base64.b64encode(json.dumps(launch).encode()).decode("ascii")}
@@ -10856,6 +10879,9 @@ async def _launch_on_org_runner(body: dict, runner: dict) -> JSONResponse:
 
 
 _org_launch_lock: asyncio.Lock | None = None
+#: Largest primer text a launch on a runner carries (UTF-8 bytes), so the
+#: base64 request stays inside one member-message record.
+MAX_CARRIED_PRIMER_BYTES = 100 * 1024
 
 
 def _carried_from_body(raw) -> "session_launcher.CarriedCredentials | str":
@@ -10915,6 +10941,17 @@ async def _create_org_member_session(body: dict, caller) -> JSONResponse:
     operation_id = body.get("operation_id")
     if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
         return refuse("bad-operation-id", "operation_id must be 32 lowercase hex", 400)
+    if body.get("primer"):
+        # Resolving it here would read the runner owner's graph; the member's
+        # dashboard resolves it in the member's graph and carries the text.
+        return refuse("primer-not-carried",
+                      "a primer must arrive as carried text (primer_text)", 400)
+    primer_text = body.get("primer_text")
+    if primer_text is not None and not (
+            isinstance(primer_text, str) and primer_text
+            and len(primer_text.encode()) <= MAX_CARRIED_PRIMER_BYTES):
+        return refuse("request-malformed", "primer_text must be non-empty text "
+                      f"of at most {MAX_CARRIED_PRIMER_BYTES} bytes", 400)
     carried = _carried_from_body(body.get("credentials"))
     if isinstance(carried, str):
         return refuse("request-malformed", carried, 400)
@@ -10952,7 +10989,7 @@ async def _create_org_member_session(body: dict, caller) -> JSONResponse:
         if missing or refusals:
             return refuse("credential-refused", "; ".join(missing + refusals), 403)
         request_body = {"type": "container", "project": project}
-        for name in ("primer", "model", "harness"):
+        for name in ("model", "harness"):
             if isinstance(body.get(name), str) and body[name]:
                 request_body[name] = body[name]
         logger.info("org member launch: org=%s persona=%s project=%s carried=%r",
@@ -10963,11 +11000,11 @@ async def _create_org_member_session(body: dict, caller) -> JSONResponse:
                         "home_machine": caller.machine_pub,
                         "launch_op_id": operation_id,
                         "owner_persona": caller.persona},
-            workspace_org=caller.org, carried=carried)
+            workspace_org=caller.org, carried=carried, primer_text=primer_text)
 
 
 async def _create_session_from_body(body: dict, request=None, provenance=None,
-                                    *, workspace_org=None, carried=None):
+                                    *, workspace_org=None, carried=None, primer_text=None):
     """api_session_create for an already-parsed body, on THIS machine. Also
     the executor of an inbound session-control ``launch`` (``request`` None:
     a remote launch is always a workspace session, which never reads it).
@@ -10980,7 +11017,8 @@ async def _create_session_from_body(body: dict, request=None, provenance=None,
     ``workspace_org`` pins the workspace to that organization's row, and
     ``carried`` (a :class:`agents.session_launcher.CarriedCredentials`) is
     every secret the launch may use: an organization member's launch on this
-    runner (auto-1qj12). Both ride the lifecycle job in memory only."""
+    runner (auto-1qj12). Both ride the lifecycle job in memory only.
+    ``primer_text`` is a primer the member's dashboard already resolved."""
     # auto-bpomi: throwaway phase-trace diagnostics — measure session-boot
     # slices for Bead B. Single grep target: 'phase-trace:'.
     _phase_t0 = time.monotonic()
@@ -11091,6 +11129,7 @@ async def _create_session_from_body(body: dict, request=None, provenance=None,
                 "harness": body.get("harness"),
                 **({"workspace_org": workspace_org} if workspace_org else {}),
                 **({"carried": carried} if carried is not None else {}),
+                **({"primer_text": primer_text} if primer_text else {}),
             },
         )
         if not _SESSION_LIFECYCLE_WORKER.try_enqueue(job):
@@ -11446,6 +11485,14 @@ def _build_session_relaunch_config(
     session's existing worktree history.
     """
     tmux_name = row["tmux_name"]
+    if row.get("owner_persona"):
+        # auto-1qj12: an organization member launched it with credentials
+        # carried in the request. They are not kept, and a rebuilt config
+        # would launch with this machine's own.
+        return None, (
+            f"session '{tmux_name}' was launched by an organization member with "
+            "credentials carried in the request; launch it again from the "
+            "member's machine")
     harness = row.get("harness") or "claude"
     model = row.get("model") or None
     session_uuid = row.get("session_uuid") or ""
