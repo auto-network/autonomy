@@ -59,15 +59,15 @@ def test_projects():
             default_tags=("dashboard", "ui"),
             dispatch_labels=("dashboard",),
         ),
-        "enterprise": ProjectConfig(
-            id="enterprise",
-            name="Enterprise",
+        "widgets": ProjectConfig(
+            id="widgets",
+            name="Widgets",
             description="",
             image="session-widgets",
             graph_project="anchore",
             harness="codex",
-            default_tags=("enterprise",),
-            dispatch_labels=("enterprise",),
+            default_tags=("widgets",),
+            dispatch_labels=("widgets",),
         ),
     }
     with patch.object(dispatcher, "load_workspaces", return_value=projects):
@@ -85,7 +85,7 @@ class TestLabelToImageRouting:
     def test_build_label_image_map_from_config(self, test_projects):
         mapping = dispatcher._build_label_image_map()
         assert mapping["dashboard"] == "autonomy-session-platform"
-        assert mapping["enterprise"] == "session-widgets"
+        assert mapping["widgets"] == "session-widgets"
 
     def test_project_for_bead_matches_on_dispatch_label(self, test_projects):
         bead = {"id": "auto-x", "labels": ["dashboard"]}
@@ -98,12 +98,12 @@ class TestLabelToImageRouting:
 
     def test_project_for_bead_first_label_wins(self, test_projects):
         """Bead with multiple matching labels: first project in registry wins."""
-        bead = {"id": "auto-x", "labels": ["enterprise"]}
+        bead = {"id": "auto-x", "labels": ["widgets"]}
         project = dispatcher.project_for_bead(bead)
         assert project is not None
-        assert project.id == "enterprise"
+        assert project.id == "widgets"
         assert project.graph_project == "anchore"
-        assert project.default_tags == ("enterprise",)
+        assert project.default_tags == ("widgets",)
 
     def test_image_for_bead_uses_project_image(self, test_projects):
         image = dispatcher.image_for_bead({"labels": ["dashboard"]})
@@ -509,14 +509,14 @@ class TestIngestHonorsSessionMeta:
         assert meta["session_type"] == "dispatch"
 
     def test_anchore_scope_inherited(self, graph_db, tmp_path):
-        """Confirm the same mechanism works for a different org (enterprise)."""
+        """Confirm the same mechanism works for a different org (widgets)."""
         jsonl = self._write_session(
             tmp_path,
             meta={
                 "type": "dispatch",
                 "bead_id": "auto-ent",
                 "graph_project": "anchore",
-                "graph_tags": ["enterprise", "widgets-ng"],
+                "graph_tags": ["widgets", "widgets-ng"],
             },
         )
         with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
@@ -528,7 +528,7 @@ class TestIngestHonorsSessionMeta:
             (result["source_id"],),
         ).fetchone()
         meta = json.loads(row["metadata"])
-        assert meta["graph_tags"] == ["enterprise", "widgets-ng"]
+        assert meta["graph_tags"] == ["widgets", "widgets-ng"]
 
     def test_missing_graph_project_leaves_meta_unset(self, graph_db, tmp_path):
         """Legacy / unlabeled sessions without graph_project → no graph_project/graph_tags in meta."""

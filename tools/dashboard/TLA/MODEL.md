@@ -4,7 +4,7 @@ TLA+ model of the dashboard's rollout-file ingestion state machine as
 specified by bead `auto-suvcp` (the FileTrack FSM: DISCOVERED /
 CHARACTERIZING / STREAMING / IGNORED / CLOSED, with busy/dirty drain
 ownership), checked by TLC via `run_tlc.py`.  The method follows the
-Anchore job-framework model (`widgets_ng` branch `private`,
+an earlier private job-framework model (
 graph notes `c9258052-67e` / `523f9406-6ba`): model the one property
 class that matters, write down every abstraction, and keep the model
 honest with calibration switches that must rediscover every historical

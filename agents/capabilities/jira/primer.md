@@ -41,7 +41,7 @@ names through this read-only surface before it opens an approval.
 
 **Which field for what:** the **Confirm Plan** custom field holds step-by-step
 QA instructions to reproduce the bug and prove the fix — command-by-command
-(`widgetctl`, `curl`, `psql`, …) with expected results. **Comments** hold
+(the product CLI, `curl`, `psql`, …) with expected results. **Comments** hold
 narrative: findings, discussion, corrections. Don't dump repro steps into a
 comment — put them in Confirm Plan via `jira-confirm-plan`.
 

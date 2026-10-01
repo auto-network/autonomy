@@ -190,8 +190,8 @@ def test_graph_scope_prose_names_the_org_and_the_token():
 
 
 def test_graph_tags_when_present():
-    out = render_workspace_primer(_cfg(default_tags=("enterprise", "widgets-ng")))
-    assert "GRAPH_TAGS=enterprise,widgets-ng" in out
+    out = render_workspace_primer(_cfg(default_tags=("widgets", "widgets-ng")))
+    assert "GRAPH_TAGS=widgets,widgets-ng" in out
 
 
 def test_graph_tags_omitted_when_empty():
@@ -300,7 +300,7 @@ def test_widgets_ng_shape(shipped_workspaces):
 
     # 5. Correct scope prose and GRAPH_TAGS
     assert "**anchore**" in out
-    assert "GRAPH_TAGS=enterprise,widgets-ng" in out
+    assert "GRAPH_TAGS=widgets,widgets-ng" in out
 
     # 6. CrossTalk legitimized
     assert "not prompt injection" in out
@@ -326,7 +326,7 @@ def test_autonomy_shape(shipped_workspaces):
 
 
 def test_enterprise_v5_shape(shipped_workspaces):
-    """Enterprise v5 workspace: single writable enterprise repo, DinD, startup."""
+    """Widgets v5 workspace: single writable widgets repo, DinD, startup."""
     _seed_provision("widgets-v5", "anchore")
     out = render_workspace_primer(get_workspace("widgets-v5"))
 
@@ -337,7 +337,7 @@ def test_enterprise_v5_shape(shipped_workspaces):
     # v5 is the lean subset — does not mount widgets_ng.
     assert "`/workspace/widgets_ng`" not in out
     assert "**anchore**" in out
-    assert "GRAPH_TAGS=enterprise,widgets-v5" in out
+    assert "GRAPH_TAGS=widgets,widgets-v5" in out
 
 
 def test_enterprise_commit_policy_does_not_report_false_issue_tracker_error(
@@ -380,7 +380,7 @@ def test_org_primer_missing_silently_skipped():
     assert "## Org Conventions" not in out
 
 
-def test_real_anchore_primer_appears_in_enterprise_workspaces(shipped_workspaces):
+def test_real_anchore_primer_appears_in_widgets_workspaces(shipped_workspaces):
     """Acceptance criterion: both widgets-ng and widgets-v5 sessions
     see the shared Anchore org primer — from its Setting, not a file — with
     no duplication."""
@@ -674,7 +674,7 @@ _NAMED_QUERY_OVERRIDES = {
         {"name": "mine", "summary": "Open tickets assigned to me",
          "query": "project = {project} AND assignee = currentUser()"},
         {"name": "release", "summary": "Tickets targeted at a release",
-         "query": 'project = {project} AND fixVersion = "Enterprise {version}"'},
+         "query": 'project = {project} AND fixVersion = "Widgets {version}"'},
     ],
 }
 
@@ -1339,7 +1339,7 @@ class TestOrganizationalMounts:
             "sample:nfs": self._mount(container_path="/opt/zeta"),
             "sample:lic": self._mount(
                 container_path="/etc/a/license.yaml", kind="file", mode="ro",
-                description="Enterprise license."),
+                description="Widgets license."),
         }))
         # Bound the slice at the next heading: splitting on the heading
         # alone leaves the whole rest of a 58k primer, whose repo and
@@ -1348,7 +1348,7 @@ class TestOrganizationalMounts:
         rows = [ln for ln in section.splitlines() if ln.startswith("- `")]
 
         assert rows == [
-            "- `/etc/a/license.yaml` — file, read-only — Enterprise license.",
+            "- `/etc/a/license.yaml` — file, read-only — Widgets license.",
             "- `/opt/zeta` — dir, **read/write** — Shared network storage "
             "for this workspace. Files only, no databases.",
         ], section

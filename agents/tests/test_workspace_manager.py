@@ -41,7 +41,7 @@ def test_managed_clone_path_layout(tmp_path):
         "git@github.com:anchore/widgets.git",
         repos_dir=tmp_path,
     )
-    assert p == tmp_path / "github.com" / "anchore" / "enterprise.git"
+    assert p == tmp_path / "github.com" / "anchore" / "widgets.git"
 
 
 # ── Local-first repos (no git remote, e.g. a git-svn mirror) ───────

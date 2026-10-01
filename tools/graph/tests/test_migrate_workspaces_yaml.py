@@ -43,8 +43,8 @@ YAML_FIXTURE = textwrap.dedent(
         dispatch_labels: [dashboard]
         dind: false
 
-      enterprise:
-        name: "Enterprise"
+      widgets:
+        name: "Widgets"
         description: "Anchore Widgets"
         image: "session-widgets"
         repos:
@@ -54,8 +54,8 @@ YAML_FIXTURE = textwrap.dedent(
         working_dir: "/workspace/widgets"
         dind: true
         graph_project: anchore
-        default_tags: [enterprise]
-        dispatch_labels: [enterprise]
+        default_tags: [widgets]
+        dispatch_labels: [widgets]
 
       widgets-ng:
         name: "Widgets NG"
@@ -72,7 +72,7 @@ YAML_FIXTURE = textwrap.dedent(
         dind: true
         network_host: false
         graph_project: anchore
-        default_tags: [enterprise, widgets-ng]
+        default_tags: [widgets, widgets-ng]
         dispatch_labels: [widgets-ng]
         env:
           WIDGETS_CONFIG_PATH: /workspace/widgets_ng/config/default_config.yaml
@@ -162,7 +162,7 @@ def test_migration_routes_to_correct_org_dbs(yaml_path, orgs_dir):
     anchore_keys = {r["key"] for r in anchore_rows}
 
     assert autonomy_keys == {"autonomy"}
-    assert anchore_keys == {"enterprise", "widgets-ng"}
+    assert anchore_keys == {"widgets", "widgets-ng"}
 
 
 def test_migration_payload_shape(yaml_path, orgs_dir):
@@ -188,7 +188,7 @@ def test_migration_payload_shape(yaml_path, orgs_dir):
     assert payload["network_host"] is False
     assert payload["dispatch_labels"] == ["widgets-ng"]
     # default_tags → tags.
-    assert payload["tags"] == ["enterprise", "widgets-ng"]
+    assert payload["tags"] == ["widgets", "widgets-ng"]
     # Env preserved.
     assert payload["env"] == {
         "WIDGETS_CONFIG_PATH": (
@@ -296,7 +296,7 @@ def test_read_set_returns_workspaces_per_org(yaml_path, orgs_dir,
     returns the workspaces living in that org's DB.
 
     Single-DB world (today): each call routes to exactly one DB — there
-    is no cross-org union yet. Anchore's DB yields enterprise + widgets-ng;
+    is no cross-org union yet. Anchore's DB yields widgets + widgets-ng;
     autonomy's DB yields the autonomy workspace.
     """
     # Per-org routing resolves each slug's DB from the orgs root; a
@@ -319,7 +319,7 @@ def test_read_set_returns_workspaces_per_org(yaml_path, orgs_dir,
 
     anchore = _with_caller("anchore")
     anchore_keys = sorted(m.key for m in anchore.members)
-    assert anchore_keys == ["enterprise", "widgets-ng"]
+    assert anchore_keys == ["widgets", "widgets-ng"]
 
     autonomy = _with_caller("autonomy")
     autonomy_keys = sorted(m.key for m in autonomy.members)
@@ -348,5 +348,5 @@ def test_cli_apply(yaml_path, orgs_dir, capsys):
     ])
     assert rc == 0
     assert {r["key"] for r in _settings_rows(orgs_dir / "anchore.db")} == {
-        "enterprise", "widgets-ng",
+        "widgets", "widgets-ng",
     }

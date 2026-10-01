@@ -82,9 +82,9 @@ data/*.pid
 data/agent-runs/
 
 # Per-workspace image definitions (agents/projects/<name>/Dockerfile + startup.sh).
-# These are ORGANIZATION-SPECIFIC infrastructure — widgets-ng, widgets-v5,
-# bench-harness are Anchore's. They were purged from this repo's public history
-# on 2026-08-01 and must not return: this repo is public, and `git add -A` would
+# These are ORGANIZATION-SPECIFIC infrastructure belonging to client
+# organizations. They were purged from this repo's public history on
+# 2026-08-01 and must not return: this repo is public, and `git add -A` would
 # otherwise re-commit them silently. They live on disk only; agents/build.sh
 # reads the filesystem, not git, so ignoring them changes nothing about builds.
 /agents/projects/
@@ -191,3 +191,6 @@ dolt-server.pid
 # It only exists inside a node / host-terminal checkout as a mount target, not
 # in a plain dev clone — a mount point, never autonomy source.
 /orgs/
+
+# Manual WebKit compose harness input: an organization's own document, exported locally
+tools/network/registry/tests/manual/pillar-sample.html

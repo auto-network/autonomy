@@ -142,7 +142,7 @@ def test_profile_row_cannot_silently_weaken_builtin_profile(graph_db_env):
     ops.upsert_by_key(
         COMMIT_POLICY_SET_ID,
         COMMIT_POLICY_REVISION,
-        "workspace:enterprise",
+        "workspace:widgets",
         {
             "profile": "enterprise.signed-pr",
             "override_mode": "none",
@@ -151,7 +151,7 @@ def test_profile_row_cannot_silently_weaken_builtin_profile(graph_db_env):
         org=ops.CALLER_ORG,
     )
     with pytest.raises(CommitPolicyError, match="override_mode=none"):
-        resolve_commit_policy(workspace_id="enterprise", org=ops.CALLER_ORG)
+        resolve_commit_policy(workspace_id="widgets", org=ops.CALLER_ORG)
 
 
 def test_narrow_mode_rejects_issue_linkage_weakening():
@@ -621,13 +621,13 @@ def test_commit_policy_block_issue_linkage_uses_real_capability_context(graph_db
     # issue_linkage.required == True and the workspace really has no issue
     # tracker enabled: the error must still fire (regression guard).
     seed_workspace_policy(
-        workspace_id="enterprise-no-tracker-ws",
+        workspace_id="widgets-no-tracker-ws",
         org=ops.CALLER_ORG,
         profile=ENTERPRISE_PROFILE,
     )
     no_tracker_workspace = WorkspaceV1(
-        id="enterprise-no-tracker-ws",
-        name="Enterprise No Tracker",
+        id="widgets-no-tracker-ws",
+        name="Widgets No Tracker",
         description="",
         image="autonomy-session-platform",
         graph_project=ops.CALLER_ORG,
@@ -639,8 +639,8 @@ def test_commit_policy_block_issue_linkage_uses_real_capability_context(graph_db
     # issue_linkage.required == True and the workspace DOES have an issue
     # tracker capability enabled: no issue-linkage error.
     tracker_workspace = WorkspaceV1(
-        id="enterprise-no-tracker-ws",
-        name="Enterprise With Tracker",
+        id="widgets-no-tracker-ws",
+        name="Widgets With Tracker",
         description="",
         image="autonomy-session-platform",
         graph_project=ops.CALLER_ORG,
@@ -668,7 +668,7 @@ def test_deploy_seed_only_autonomy_workspaces(multi_org_env):
 
     results = seed_default_workspace_policies({
         "autonomy": Workspace("autonomy"),
-        "enterprise": Workspace("anchore"),
+        "widgets": Workspace("anchore"),
     })
     assert results == {"autonomy": "inserted"}
     # Each workspace's policy resolves in the workspace's OWN org — the
@@ -676,7 +676,7 @@ def test_deploy_seed_only_autonomy_workspaces(multi_org_env):
     # every org into one file (the tautology this sweep retires).
     resolved = resolve_commit_policy(workspace_id="autonomy", org="autonomy")
     assert resolved.profile == AUTONOMY_PROFILE
-    assert resolve_commit_policy(workspace_id="enterprise", org="anchore").profile == "safe.default"
+    assert resolve_commit_policy(workspace_id="widgets", org="anchore").profile == "safe.default"
 
 
 def test_enterprise_no_issue_profile_matches_enterprise_signed_pr_except_linkage():
@@ -708,7 +708,7 @@ def test_enterprise_no_issue_profile_matches_enterprise_signed_pr_except_linkage
 
 def test_anchore_workspace_policies_seeded_and_resolve_without_issue_linkage(multi_org_env):
     """P0-1: the two Anchore workspace commit-policy Settings rows exist in
-    the anchore org DB and resolve to the enterprise workflow shape without
+    the anchore org DB and resolve to the widgets workflow shape without
     requiring issue linkage."""
     from tools.graph.commit_policy import seed_workspace_policy
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TLC runner for the rollout-ingestion model (pattern: Anchore PROJ-8916).
+"""TLC runner for the rollout-ingestion model (pattern: an earlier private job-framework model).
 
 Green configurations must check clean; calibration configurations must FAIL
 with a *real* violation.  The violation detection greps TLC output for

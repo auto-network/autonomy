@@ -1083,7 +1083,7 @@ class TestWorktreeAPI:
             called["worktrees_dir"] = worktrees_dir
             return CleanupResult(
                 removed=["/tmp/worktrees/auto-test/autonomy"],
-                preserved=[("/tmp/worktrees/auto-test/enterprise", "local commits")],
+                preserved=[("/tmp/worktrees/auto-test/widgets", "local commits")],
                 errors=[],
             )
 
@@ -1097,7 +1097,7 @@ class TestWorktreeAPI:
             "removed": ["/tmp/worktrees/auto-test/autonomy"],
             "preserved": [
                 {
-                    "path": "/tmp/worktrees/auto-test/enterprise",
+                    "path": "/tmp/worktrees/auto-test/widgets",
                     "reason": "local commits",
                 },
             ],
@@ -2036,13 +2036,13 @@ class TestWorktreeGithubResolution:
         rows = [
             _row(session="auto-dead", repo="autonomy", live=False),
             _row(session="auto-live", repo="autonomy", live=True),
-            _row(session="auto-live", repo="enterprise", live=True),
+            _row(session="auto-live", repo="widgets", live=True),
         ]
 
-        live = wg.find_live_worktree_row("auto-live", "enterprise", rows)
+        live = wg.find_live_worktree_row("auto-live", "widgets", rows)
         assert live is not None
         assert live.session_name == "auto-live"
-        assert live.repo_name == "enterprise"
+        assert live.repo_name == "widgets"
 
         dead = wg.find_live_worktree_row("auto-dead", "autonomy", rows)
         assert dead is None
@@ -3989,7 +3989,7 @@ class TestWorktreeMonitorNagMode:
         monitor.set_nag_mode("auto-x", "autonomy", "nag_all")
         assert monitor.get_nag_mode("auto-x", "autonomy") == "nag_all"
         # Distinct repo on the same session keeps its own default.
-        assert monitor.get_nag_mode("auto-x", "enterprise") == "silent"
+        assert monitor.get_nag_mode("auto-x", "widgets") == "silent"
 
     def test_set_nag_mode_persists_across_monitor_restart(self):
         from tools.dashboard import worktree_monitor as wm_module

@@ -45,7 +45,7 @@ scrape_configs:
       module: [https_2xx]
     static_configs:
       - targets:
-          - https://oss-metrics.persona-0f1e2d3c4b5a69788796.serve.auto.network/
+          - https://example.persona-0f1e2d3c4b5a69788796.serve.auto.network/
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target

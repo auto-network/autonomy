@@ -1540,11 +1540,11 @@ SWEEP_WORKTREE_BETA_COMMITS = [
         "subject": "Refine PROJ-7644 release branch plumbing",
         "author": "Beta Agent",
         "date": "2026-04-24 02:24",
-        "body": "Keeps enterprise branch metadata visible in review mode.",
+        "body": "Keeps widgets branch metadata visible in review mode.",
         "files": [
             {
                 "status": "M",
-                "path": "enterprise/release_dashboard.py",
+                "path": "widgets/release_dashboard.py",
                 "additions": 11,
                 "deletions": 2,
             },
@@ -1563,7 +1563,7 @@ SWEEP_WORKTREE_DELTA_COMMITS = [
         "files": [
             {
                 "status": "M",
-                "path": "enterprise/jobs/directives.py",
+                "path": "widgets/jobs/directives.py",
                 "additions": 42,
                 "deletions": 6,
             },
@@ -1579,7 +1579,7 @@ SWEEP_WORKTREE_DELTA_COMMITS = [
         "files": [
             {
                 "status": "M",
-                "path": "enterprise/jobs/admission.py",
+                "path": "widgets/jobs/admission.py",
                 "additions": 31,
                 "deletions": 9,
             },
@@ -1595,7 +1595,7 @@ SWEEP_WORKTREE_DELTA_COMMITS = [
         "files": [
             {
                 "status": "M",
-                "path": "enterprise/jobs/resolve_image.py",
+                "path": "widgets/jobs/resolve_image.py",
                 "additions": 57,
                 "deletions": 14,
             },
@@ -1637,9 +1637,9 @@ SWEEP_WORKTREE_ROWS = [
     {
         "session_name": "auto-sweep-beta",
         "session_title": "Beta Builder",
-        "repo_name": "enterprise",
-        "worktree_path": "/tmp/worktrees/auto-sweep-beta/enterprise",
-        "managed_clone": "/tmp/repos/enterprise.git",
+        "repo_name": "widgets",
+        "worktree_path": "/tmp/worktrees/auto-sweep-beta/widgets",
+        "managed_clone": "/tmp/repos/widgets.git",
         "branch": "PROJ-7644",
         "target_branch": "PROJ-7644",
         "commits_ahead": 1,
@@ -1758,15 +1758,15 @@ index def5678..fedcba9 100644
 +<span class=\"border-r border-white/10 text-center\"
        x-text=\"diffMarker(line.kind)\"></span>""",
     },
-    "auto-sweep-beta/enterprise/3333333ccccccccccccccccccccccccccccccccc": {
+    "auto-sweep-beta/widgets/3333333ccccccccccccccccccccccccccccccccc": {
         **SWEEP_WORKTREE_BETA_COMMITS[0],
-        "patch": """diff --git a/enterprise/release_dashboard.py b/enterprise/release_dashboard.py
+        "patch": """diff --git a/widgets/release_dashboard.py b/widgets/release_dashboard.py
 index 1234567..89abcde 100644
---- a/enterprise/release_dashboard.py
-+++ b/enterprise/release_dashboard.py
+--- a/widgets/release_dashboard.py
++++ b/widgets/release_dashboard.py
 @@ -18,6 +18,9 @@
 def branch_title(branch_name):
-+    if branch_name.startswith("ENTERPRISE-"):
++    if branch_name.startswith("PROJ-"):
 +        return f"Release branch {branch_name}"
 +
      return branch_name""",
@@ -1809,21 +1809,21 @@ SWEEP_WORKTREE_INTEGRATED_DIFF_DETAILS = {
         "files": [
             {
                 "status": "M",
-                "path": "enterprise/jobs/directives.py",
+                "path": "widgets/jobs/directives.py",
                 "additions": 42,
                 "deletions": 6,
             },
             {
                 "status": "M",
-                "path": "enterprise/jobs/pool_manager.py",
+                "path": "widgets/jobs/pool_manager.py",
                 "additions": 18,
                 "deletions": 3,
             },
         ],
-        "patch": """diff --git a/enterprise/jobs/directives.py b/enterprise/jobs/directives.py
+        "patch": """diff --git a/widgets/jobs/directives.py b/widgets/jobs/directives.py
 index 1111111..2222222 100644
---- a/enterprise/jobs/directives.py
-+++ b/enterprise/jobs/directives.py
+--- a/widgets/jobs/directives.py
++++ b/widgets/jobs/directives.py
 @@ -12,6 +12,11 @@ class WorkerDirective:
      retry_limit: int
 +    suspend_timeout: int | None = None
@@ -1843,7 +1843,7 @@ index 1111111..2222222 100644
 SWEEP_WORKTREE_REVIEW_BINDINGS = [
     {
         "id": "mock-binding-beta-7644",
-        "key": "auto-sweep-beta:enterprise:PROJ-7644:7644",
+        "key": "auto-sweep-beta:widgets:PROJ-7644:7644",
         "payload": {
             "base_sha": "1234500aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         },
@@ -1870,7 +1870,7 @@ SWEEP_WORKTREE_REVIEW_STATE = [
         "key": "anchore/widgets:7644",
         "payload": {
             "title": "Refine PROJ-7644 release branch plumbing",
-            "body": "Keeps enterprise branch metadata visible in review mode.",
+            "body": "Keeps widgets branch metadata visible in review mode.",
             "state": "open",
             "head_sha": "3333333ccccccccccccccccccccccccccccccccc",
             "base_sha": "1234500aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -5392,7 +5392,7 @@ class TestWorktreesPageBehavior:
         )
         rows = (c.get("worktrees_state") or {}).get("rows") or []
         for wt in ("auto-sweep-alpha/autonomy", "auto-sweep-alpha/encore-service",
-                   "auto-sweep-beta/enterprise", "auto-sweep-delta/widgets_ng"):
+                   "auto-sweep-beta/widgets", "auto-sweep-delta/widgets_ng"):
             assert wt in rows, (wt, rows)
 
     def test_commit_cards_show_fixture_titles(self):

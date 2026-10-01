@@ -578,7 +578,7 @@ def get_ready_beads(label_filter: str | None = None) -> list[dict]:
     if label_filter:
         query += f" AND label={label_filter}"
     # Defect B (2026-08-28 handoff): the dispatcher only ever queried the
-    # shared tracker, so provisioned orgs' beads (anchore: 49 ready) were
+    # shared tracker, so provisioned orgs' beads (one org: 49 ready) were
     # invisible to dispatch. Query the shared tracker plus every
     # provisioned org tracker, each with its own credentials.
     beads: list[dict] = []

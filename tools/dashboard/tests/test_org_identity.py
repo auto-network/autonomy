@@ -324,7 +324,7 @@ class TestPathDerivedProjectMapsToUnknown:
         from tools.dashboard.org_identity import session_org_slug, UNKNOWN_SLUG
 
         assert session_org_slug({"project": "-some-unknown-legacy-junk"}) == UNKNOWN_SLUG
-        assert session_org_slug({"project": "  -enterprise  "}) == UNKNOWN_SLUG
+        assert session_org_slug({"project": "  -widgets  "}) == UNKNOWN_SLUG
         # Bracket-wrapped path-derived junk also maps to unknown.
         assert session_org_slug({"project": "[-some-other-repo]"}) == UNKNOWN_SLUG
 

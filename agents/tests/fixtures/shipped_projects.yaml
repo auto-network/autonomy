@@ -93,7 +93,7 @@ projects:
     network_host: true
 
   widgets-v5:
-    name: "Enterprise v5"
+    name: "Widgets v5"
     description: "Anchore Widgets v5 — lean v5-only patch workspace with DinD"
     image: "session-widgets-v5"
     repos:
@@ -103,7 +103,7 @@ projects:
     working_dir: "/workspace/widgets"
     dind: true
     graph_project: anchore
-    default_tags: [enterprise, widgets-v5]
+    default_tags: [widgets, widgets-v5]
     dispatch_labels: [widgets-v5]
 
   widgets-ng:
@@ -121,7 +121,7 @@ projects:
     dind: true
     network_host: false
     graph_project: anchore
-    default_tags: [enterprise, widgets-ng]
+    default_tags: [widgets, widgets-ng]
     dispatch_labels: [widgets-ng]
     env:
       # Only container-specific overrides go here — project defaults

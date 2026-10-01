@@ -1,5 +1,9 @@
 # Deploying Autonomy — environment surface
 
+This repository is public. What may and may not be committed about client
+organizations, and how content is removed from history and from every
+published copy, is in `deploy/PUBLIC-REPO-CLEANSE.md`.
+
 ## First-run initialization
 
 A fresh checkout becomes a working **empty** deployment with one command
@@ -91,7 +95,7 @@ is **required**, not an optional hardening choice. The node launches every agent
 session as a **host-level sibling container** through that socket, never as a
 child of a node-owned daemon. The reason is the session topology: a session
 image can run its own nested Docker daemon (`agents/Dockerfile.dind`, for
-project stacks such as the Anchore Widgets compose), and that nested daemon
+large product compose stacks), and that nested daemon
 falls back to the `vfs` storage driver because OverlayFS is not reliable inside
 a container. If the node were *also* a nested daemon, the session would sit two
 levels deep and its own daemon three — overlay-on-overlay, which does not work.

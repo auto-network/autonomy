@@ -287,15 +287,15 @@ def test_metadata_graph_project_exported(tmp_path, fake_creds, fake_crosstalk, c
     _run(
         output_dir=str(run_dir),
         metadata={"org": "anchore", "graph_project": "anchore",
-                  "graph_tags": ["enterprise", "ng"]},
+                  "graph_tags": ["widgets", "ng"]},
     )
     cmd = captured_run[0]
-    assert "GRAPH_TAGS=enterprise,ng" in cmd
+    assert "GRAPH_TAGS=widgets,ng" in cmd
 
     # Meta doc on disk also carries them.
     meta = json.loads((run_dir / "sessions" / ".session_meta.json").read_text())
     assert meta["graph_project"] == "anchore"
-    assert meta["graph_tags"] == ["enterprise", "ng"]
+    assert meta["graph_tags"] == ["widgets", "ng"]
 
 
 def test_graph_tags_string_passed_through_unchanged(tmp_path, fake_creds, fake_crosstalk, captured_run):
@@ -1694,7 +1694,7 @@ def test_no_hardcoded_license_mount(tmp_path, fake_creds, fake_crosstalk, captur
     monkeypatch.setattr(session_launcher.Path, "exists", lambda self: True)
     _run(output_dir=str(tmp_path / "run"))
     cmd = captured_run[0]
-    # No mount spec should embed an enterprise license overlay at the
+    # No mount spec should embed an widgets license overlay at the
     # workspace repo root or /etc/autonomy/artifacts — launch_session must
     # be agnostic to the artifact layer; callers inject mounts explicitly.
     assert not any("license.yaml" in s for s in cmd)

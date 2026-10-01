@@ -952,9 +952,8 @@ def _build_host_project_to_org() -> dict[str, str]:
     # The OPERATOR's home: a containerized observer's own home is not it.
     home = os.environ.get("AUTONOMY_HOST_HOME") or str(Path.home())
     by_cwd = {
-        f"{home}/workspace/widgets-ng": "anchore",
-        f"{home}/workspace/widgets": "anchore",
-        f"{home}/workspace/widgets-dev-compose-files": "anchore",
+        # Client-organization repos are not listed here: a deployment maps
+        # them through AUTONOMY_HOST_PROJECT_ORGS.
         # No ~/workspace/autonomy row: it named an org a fresh node lacks and
         # overrode the ruling below (a host terminal files under personal).
         # A deployment that wants it sets AUTONOMY_HOST_PROJECT_ORGS

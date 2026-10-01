@@ -604,9 +604,6 @@
         if (repo === 'autonomy') {
           return { name: 'Autonomy', initial: 'A', color: '#6366f1' };
         }
-        if (repo === 'enterprise' || repo === 'widgets_ng') {
-          return { name: 'Anchore', initial: 'A', color: '#2D7DD2' };
-        }
         const initial = repo ? repo.charAt(0).toUpperCase() : '?';
         return { name: repo || 'Unknown', initial, color: '#64748b' };
       },

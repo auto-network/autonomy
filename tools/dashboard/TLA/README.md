@@ -2,7 +2,7 @@
 
 Formal model of the per-file rollout ingestion FSM and its drain-ownership
 protocol.  `MODEL.md` is the abstraction ledger — read it before trusting
-any green run.  Method and provenance: the Anchore job-framework model
+any green run.  Method and provenance: an earlier private job-framework model
 (graph notes `c9258052-67e`, `523f9406-6ba`).
 
 ## Run

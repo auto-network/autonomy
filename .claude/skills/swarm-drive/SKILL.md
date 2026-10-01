@@ -87,7 +87,7 @@ verbatim refusal text and the `functional_check.sh` pipeline path.
 
 ## Memory & concurrency
 
-- `free -g` before each launch; hold a floor (back off when available < ~8GB). Dashboard/graph workspaces are LIGHT; never launch Anchore/enterprise workspaces for this — they're RAM hogs.
+- `free -g` before each launch; hold a floor (back off when available < ~8GB). Dashboard/graph workspaces are LIGHT; never launch heavy product workspaces for this — they're RAM hogs.
 - One bead per session, tight task, idle-nag on. Validators are short-lived — launch, prove, reap.
 
 ## Pitfalls (learned the hard way — see graph://a0b96bec-a5f)

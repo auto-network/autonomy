@@ -763,7 +763,7 @@ def test_createmeta_shaping(jira_env, monkeypatch):
 
     _mock(monkeypatch, handler)
     meta = api.createmeta(api.JiraConfig.resolve(), "PROJ", "Bug",
-                          version_prefix="Enterprise")
+                          version_prefix="Widgets")
     assert meta["severity"] == [{"id": "1", "value": "High"}]
     assert [v["id"] for v in meta["versions"]] == ["v2", "v1"]   # prefix-filtered, newest first
     assert meta["latest_released_version"] == {"id": "v1", "name": "Widgets 5.19"}
@@ -1001,7 +1001,7 @@ def _issue_type_handler(seen=None):
             return httpx.Response(200, json={"fields": {
                 "issuetype": {"id": "10002", "name": "Task", "subtask": False},
                 "project": {"key": "PROJ"}}})
-        if request.url.path == "/rest/api/3/project/ENTERPRISE":
+        if request.url.path == "/rest/api/3/project/PROJ":
             return httpx.Response(200, json={"issueTypes": [
                 {"id": "10001", "name": "Bug", "subtask": False},
                 {"id": "10002", "name": "Task", "subtask": False},
@@ -1071,7 +1071,7 @@ QUERY_OVERRIDES = {
          "query": "project = {project} AND assignee = currentUser() "
                   "AND statusCategory != Done"},
         {"name": "release", "summary": "Tickets targeted at a release",
-         "query": 'project = {project} AND fixVersion = "Enterprise {version}"'},
+         "query": 'project = {project} AND fixVersion = "Widgets {version}"'},
     ],
 }
 

@@ -187,7 +187,7 @@ severity ids and the latest released version.
 
 - **Confirm Plan** (custom field): step-by-step QA instructions to reproduce
   the bug and then prove the fix. Command-by-command with expected results;
-  common tools: `widgetctl`, `curl`, `psql`. Write it with
+  common tools: the product CLI, `curl`, `psql`. Write it with
   `jira-confirm-plan`, never as a comment.
 - **Comments**: narrative — root-cause findings, discussion, corrections,
   status. Write with `jira-comment`.

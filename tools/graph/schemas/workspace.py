@@ -247,7 +247,7 @@ class WorkspaceRepoV1(SettingSchema):
     )
     repo: str = field(
         required=False,
-        description="Owner and name on that host, e.g. anchore/widgetctl",
+        description="Owner and name on that host, e.g. octocat/hello-world",
     )
     user: str = field(
         required=False,
@@ -683,7 +683,7 @@ class WorkspaceRepoV2(SettingSchema):
     )
     repo: str = field(
         required=False,
-        description="Owner and name on that host, e.g. anchore/widgetctl",
+        description="Owner and name on that host, e.g. octocat/hello-world",
     )
     user: str = field(
         required=False,

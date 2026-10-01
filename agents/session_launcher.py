@@ -503,7 +503,7 @@ def _declared_credential_keys(capabilities) -> set:
 
 def _credential_keys_in_env(env_mapping) -> set:
     """The vault credential keys a plain env mapping (a workspace's ``env`` /
-    ``extra_env``) declares via a ``credential:<key>`` value. Anchore's six
+    ``extra_env``) declares via a ``credential:<key>`` value. A client organization's
     workspaces deliver their GitHub tokens through workspace ``env`` today; the
     migration rewrites those values in place to ``credential:<key>``, so the
     launch path resolves them here (ONLY the credential: scheme — every other
@@ -2571,7 +2571,7 @@ def launch_session(
     if extra_env:
         for k, v in extra_env.items():
             # Workspace env resolves ONLY the credential: scheme through the
-            # vault — Anchore's GH tokens live here as credential:<key> after the
+            # vault — client GH tokens live here as credential:<key> after the
             # migration. Every other value stays the literal it has always been;
             # a value like "host:8080" or "file:///x" must NOT be reinterpreted
             # as a source scheme (that is why this is not a blanket

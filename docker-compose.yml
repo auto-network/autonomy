@@ -171,7 +171,7 @@ services:
       # session as a HOST-LEVEL sibling container through this socket, never as
       # a child of a node-owned daemon — because session images can run their
       # own nested docker daemon (agents/Dockerfile.dind, for project stacks
-      # such as the Anchore Widgets compose), and nesting the node too would
+      # such as a large product compose stack), and nesting the node too would
       # make that DOUBLE docker-in-docker, which is unsupported. The launcher
       # (`docker run`), topology discovery (`docker inspect`) and secret-ramfs
       # provisioning all shell out to `docker` against this socket. It is

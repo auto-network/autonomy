@@ -716,7 +716,7 @@ def reserve_origin(
         # under its key and every later publish of the same name answered
         # reservation_released, so a name once stopped could never be used
         # again by the organization that owns it (live 2026-09-10:
-        # re-publishing oss-metrics). A released reservation now falls
+        # re-publishing a released label). A released reservation now falls
         # through to a fresh upsert under the same key -- same key because
         # the relay derives the host lease id from it -- so the normal
         # publish overwrites it whole: new created_at, no released_at, and

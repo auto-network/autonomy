@@ -118,7 +118,7 @@ class TestMountVisibility:
 
     def _subpath_row(self, **over) -> dict:
         row = {
-            "subpath": "anchore/anchore-enterprise",
+            "subpath": "anchore/anchore-widgets",
             "container_path": "/nfs",
             "kind": "dir",
         }

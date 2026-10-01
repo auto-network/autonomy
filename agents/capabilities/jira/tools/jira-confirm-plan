@@ -2,7 +2,7 @@
 # Usage: jira-confirm-plan ISSUE_KEY -f plan.md     (or pipe markdown on stdin)
 # Sets the ticket's "Confirm Plan" field — staged for operator approval;
 # blocks until decided. Confirm Plan holds step-by-step QA instructions to
-# reproduce the bug and prove the fix: command-by-command (widgetctl, curl,
+# reproduce the bug and prove the fix: command-by-command (the product CLI, curl,
 # psql, …) with expected results. Narrative/discussion belongs in a comment.
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"

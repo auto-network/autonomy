@@ -1,6 +1,6 @@
 # Autonomy Agent DinD (Docker-in-Docker) Intermediate Image
 # Extends autonomy-session (Ubuntu 24.04 base) with Docker CE + docker-compose
-# for project images that need to run a nested docker daemon (e.g. Anchore
+# for project images that need to run a nested docker daemon (e.g. a product
 # Enterprise compose stack).
 #
 # Also bakes in the shared entrypoint wrapper that runs a per-project

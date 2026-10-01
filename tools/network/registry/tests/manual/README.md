@@ -53,17 +53,16 @@ in a sandboxed opaque-origin frame, on this engine?**
 
 Composition is doctype + `<base href="about:srcdoc">` + the platform bootstrap,
 prepended to the coordinator's complete HTML and assigned as `srcdoc`. The page
-drives the **real** 1.87 MB Widget Metrics document, not a fixture — it has
-`<html lang>`, global `body{}` CSS, two `DOMContentLoaded` registrations, a
-`load` listener, 64 fragment anchors, and `scroll-behavior:smooth`.
+drives a **real** coordinator document (the recorded run used a 1.87 MB
+pillar site with `<html lang>`, global `body{}` CSS, two `DOMContentLoaded`
+registrations, a `load` listener, 64 fragment anchors, and
+`scroll-behavior:smooth`), not a synthetic fixture.
 
-Fetches `pillar-sample.html` from this directory. That fixture is committed and
-pinned: pillar `cfd645a0-09e5-4094-9010-6c1f9e946dd2`, revision
-`d81c4ef9-91c6-4d75-84fc-2da0f18fd4a2` (seq 2), 1 871 081 bytes, sha256
-`5d666db3fbded94234cf30432aa06dae6e5d7275fa90c086b3e164e31c2dc76a`. Re-export
-with `mission_control_db.get_current_pillar_site(<pillar_id>)["html"]` only if
-the pin is updated with it — an unpinned fixture makes the recorded result
-unreproducible.
+Fetches `pillar-sample.html` from this directory. That document is NOT
+committed: it is an organization's own content. Export one locally before
+running, with `mission_control_db.get_current_pillar_site(<pillar_id>)["html"]`,
+and record its pillar id, revision id, size and sha256 alongside any result you
+keep, so the run stays reproducible.
 
 Two phases, 14 checks each. Phase 2 replaces the document with
 `document.open/write/close` and re-runs every check on the replacement, plus

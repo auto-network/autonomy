@@ -137,20 +137,13 @@ def audit(rows) -> list[Finding]:
 #: bead is the one to reject. The gate exists to catch the NEXT one, and it
 #: cannot do that while it is red for the ones already tracked.
 KNOWN_OUTSTANDING = {
-    # auto-ehyoh (P0) — the operator's own GitHub credentials in Anchore's
-    # shared org store. They cannot move until the vault releases a secret
-    # with no human present (auto-a1pub). These entries are DELETED, not
-    # edited, when that migration lands.
-    ("autonomy.workspace", "anchore/widgets-data-feeds", "env.GH_TOKEN"),
-    ("autonomy.workspace", "anchore/widgets-data-feeds", "env.GITHUB_RELEASE_PULL_TOKEN"),
-    ("autonomy.workspace", "anchore/widgets-ng", "env.GH_TOKEN"),
-    ("autonomy.workspace", "anchore/widgets-ng", "env.GITHUB_RELEASE_PULL_TOKEN"),
-    ("autonomy.workspace", "anchore/metrics-data-service", "env.GH_TOKEN"),
-    ("autonomy.workspace", "anchore/metrics-data-service", "env.GITHUB_RELEASE_PULL_TOKEN"),
-    ("autonomy.workspace", "anchore/onsite-ui", "env.GH_TOKEN"),
-    ("autonomy.workspace", "anchore/onsite-ui", "env.GITHUB_RELEASE_PULL_TOKEN"),
-    ("autonomy.workspace", "anchore/bench-harness", "env.GH_TOKEN"),
-    ("autonomy.workspace", "anchore/bench-harness", "env.GITHUB_RELEASE_PULL_TOKEN"),
+    # auto-ehyoh (P0) — an operator's own GitHub credentials in a client
+    # organization's shared org store. They cannot move until the vault
+    # releases a secret with no human present (auto-a1pub). The client rows
+    # themselves are deployment-specific and live outside the repository:
+    # AUTONOMY_CREDENTIAL_HOMING_BASELINE names a JSON file holding a list of
+    # ``[set_id, "store/key", field_path]`` entries merged into this set.
+    # They are DELETED, not edited, when that migration lands.
 
     # auto-ehyoh item 4 — the invitation tokens. Org-homed with no band, in
     # anchore, autonomy and dynbench. Org-homing is PLAUSIBLY right here,
@@ -162,6 +155,28 @@ KNOWN_OUTSTANDING = {
     # churn every time one is minted.
     ("autonomy.network.link-grant", "*", "*"),
 }
+
+
+def _baseline_extension() -> set:
+    """Deployment-specific baseline rows from the file named by
+    ``AUTONOMY_CREDENTIAL_HOMING_BASELINE`` (a JSON list of three-element
+    lists); empty when unset. A malformed file is an error, not a silent
+    empty baseline."""
+    import json
+    import os
+    path = os.environ.get("AUTONOMY_CREDENTIAL_HOMING_BASELINE")
+    if not path:
+        return set()
+    with open(path, encoding="utf-8") as fh:
+        rows = json.load(fh)
+    if not isinstance(rows, list) or not all(
+            isinstance(r, list) and len(r) == 3 and all(isinstance(x, str) for x in r)
+            for r in rows):
+        raise ValueError(f"{path}: expected a JSON list of [set_id, store/key, field_path]")
+    return {tuple(r) for r in rows}
+
+
+KNOWN_OUTSTANDING |= _baseline_extension()
 
 
 def baseline_key(finding: "Finding") -> tuple[str, str, str]:
