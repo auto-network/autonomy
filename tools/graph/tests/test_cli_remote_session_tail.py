@@ -104,3 +104,17 @@ def test_read_of_a_note_version_is_not_sent_remote(monkeypatch):
     monkeypatch.setattr(cli, "_dashboard_json",
                         lambda *a, **k: pytest.fail("a note version went to the remote tail"))
     assert cli._remote_session_tail("f6c6c43e@1", None, None) is False
+
+
+@pytest.mark.parametrize("turn, message", [
+    ("last:abc", "Invalid 'last:N' value: 'last:abc'"),
+    ("last:0", "'last:N' requires N >= 1"),
+    ("last:-3", "'last:N' requires N >= 1"),
+])
+def test_a_bad_last_n_is_the_local_paths_error_not_every_turn(dashboard, capsys, turn, message):
+    calls, _ = dashboard
+    cli.cmd_context(argparse.Namespace(source="auto-0930-202034@SJC", turn=turn,
+                                       window=0, max_chars=0))
+    captured = capsys.readouterr()
+    assert message in captured.err
+    assert "first answer" not in captured.out and calls == []

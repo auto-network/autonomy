@@ -1757,9 +1757,21 @@ def cmd_context(args):
     """
     if _remote_session_address(args.source):
         raw = args.turn
-        if isinstance(raw, str) and raw.startswith("last"):
-            n = (int(raw.split(":", 1)[1]) if raw.startswith("last:")
-                 else max(1, 2 * (getattr(args, "window", 0) or 0) + 1))
+        if isinstance(raw, str) and raw.startswith("last:"):
+            # The local path's checks: last:abc and last:0 / last:-3 are
+            # errors, never a traceback or every turn.
+            try:
+                n = int(raw.split(":", 1)[1])
+            except ValueError:
+                print(f"Invalid 'last:N' value: {raw!r}", file=sys.stderr)
+                return
+            if n < 1:
+                print("'last:N' requires N >= 1", file=sys.stderr)
+                return
+            _remote_session_tail(args.source, n, getattr(args, "max_chars", None))
+            return
+        if raw == "last":
+            n = max(1, 2 * (getattr(args, "window", 0) or 0) + 1)
             _remote_session_tail(args.source, n, getattr(args, "max_chars", None))
             return
         print("  \u2717 a session on another machine has no turn numbers here; "
