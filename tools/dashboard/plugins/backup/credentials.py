@@ -114,3 +114,104 @@ def offsite_env(config: dict | None = None) -> tuple[dict | None, str]:
             value = value.rstrip("\r\n")
         env[variable] = value
     return env, STATUS_OK
+
+
+# ── release for the host's cron run (auto-5gdao) ────────────────────────────
+#
+# The capture run is a host cron job: a process that cannot open the vault.
+# So the dashboard, which can, RELEASES the credentials into the host's
+# ramfs key cache -- the same carrier the serving connector's key uses
+# (link_serving_supervisor._release_serving_key) -- and
+# tools/graph/backup-env.sh reads only those files. The values are never on
+# disk, and a reboot (which empties the ramfs) leaves offsite backup skipped
+# with `vault-cold` until the vault is unlocked again: "we don't need to be
+# running backups if we're not live".
+
+#: Subdirectory of the key cache the cron run reads.
+RELEASE_SUBDIR = "backup"
+#: vault row key -> released file name (one value per file).
+RELEASE_FILES = {
+    "backup.restic-password": "restic-password",
+    "backup.b2-key-id": "b2-key-id",
+    "backup.b2-application-key": "b2-application-key",
+}
+#: Non-secret configuration, released beside them so backup-env.sh needs no
+#: other source: provider and bucket.
+RELEASE_CONFIG_FILE = "offsite.env"
+
+
+def release_dir():
+    import os
+    from pathlib import Path
+
+    from agents.secret_ramfs import KEYCACHE_MOUNT
+
+    return Path(os.environ.get("AUTONOMY_KEYCACHE_MOUNT") or KEYCACHE_MOUNT) / RELEASE_SUBDIR
+
+
+def _write_released(directory, name: str, data: bytes) -> None:
+    import os
+
+    tmp = directory / f".{name}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+    finally:
+        os.close(fd)
+    os.replace(tmp, directory / name)
+
+
+def _clear_released(directory) -> None:
+    for name in (*RELEASE_FILES.values(), RELEASE_CONFIG_FILE):
+        try:
+            (directory / name).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def release_offsite(config: dict | None = None, *, directory=None,
+                    memory_check=None) -> str:
+    """Release the offsite credentials for the host cron run; the status.
+
+    ``ok``: every file written (0600, temp-then-rename, on ramfs only).
+    ``vault-cold``: nothing to read now -- files already released are kept
+    (they are still the right values; a reboot is what empties them).
+    ``disabled`` / ``unconfigured`` / ``unsealed``: offsite cannot run with
+    what is there, so any released files are removed. Never raises; never
+    logs a value. Decrypts: call off the event loop."""
+    try:
+        env, status = offsite_env(config)
+        directory = release_dir() if directory is None else directory
+        if status == STATUS_VAULT_COLD:
+            return status
+        if env is None:
+            if directory.exists():
+                _clear_released(directory)
+            return status
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if memory_check is None:
+            from tools.network.storagekit.memory_cache import assert_memory_backed
+
+            memory_check = assert_memory_backed
+        memory_check(directory)          # ramfs only: never tmpfs, never disk
+        for key, name in RELEASE_FILES.items():
+            _write_released(directory, name, env[CREDENTIAL_ENV[key]].encode("utf-8"))
+        _write_released(directory, RELEASE_CONFIG_FILE, (
+            f"BACKUP_PROVIDER={env['BACKUP_PROVIDER']}\n"
+            f"BACKUP_BUCKET={env['BACKUP_BUCKET']}\n").encode("utf-8"))
+        logger.info("backup: offsite credentials released for the host run")
+        return status
+    except Exception:
+        logger.exception("backup: offsite credential release failed")
+        return "release-failed"
+
+
+def release_offsite_in_background(config: dict | None = None) -> None:
+    """Run :func:`release_offsite` on a daemon thread (it decrypts)."""
+    import threading
+
+    threading.Thread(target=release_offsite, args=(config,),
+                     name="backup-credential-release", daemon=True).start()

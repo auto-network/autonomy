@@ -305,6 +305,11 @@ async def put_config(request: Request) -> JSONResponse:
             CONFIG_SET_ID, SCHEMA_REVISION, CONFIG_KEY, merged, org=MACHINE)
     except SchemaValidationError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    # Provider, bucket or enablement may have changed: re-release what the
+    # host's cron run reads (auto-5gdao).
+    from tools.dashboard.plugins.backup import credentials
+
+    credentials.release_offsite_in_background(merged)
     return JSONResponse({"ok": True, "config": merged})
 
 

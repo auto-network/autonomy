@@ -1336,6 +1336,7 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         # write is a cold delegate seal against the recipient just published.
         _ensure_sealed_settings_pepper()
         _schedule_settings_signing_pass()
+        _schedule_vault_releases()
     organization_recovery = await asyncio.to_thread(
         _accept_organization_kem_keys, organization_kem_keys)
     # Use the existing RAM-backed carrier at unlock as well as shutdown.
@@ -1478,6 +1479,19 @@ def _install_personal_audited_delegate(private_hex: str,
         store.put_delegate_audited_recipient(public_hex)
     settings_ops.set_personal_delegate_audited_key(private_hex)
     _VAULT_CACHE["audited_delegate"] = private_hex
+
+
+def _schedule_vault_releases() -> None:
+    """Once the audited delegate is warm, release vault values to the host
+    processes that cannot open the vault themselves (auto-5gdao): the
+    backup cron run's offsite credentials. Off the unlock's own path; never
+    fails the unlock."""
+    try:
+        from tools.dashboard.plugins.backup import credentials as backup_credentials
+
+        backup_credentials.release_offsite_in_background()
+    except Exception:  # noqa: BLE001
+        logger.warning("vault releases could not be scheduled", exc_info=True)
 
 
 def _schedule_settings_signing_pass() -> None:
@@ -1820,6 +1834,7 @@ def restore_vault_across_hot_reload() -> bool:
         _install_personal_audited_delegate(private_hex, public_hex)
         _ensure_sealed_settings_pepper()
         _schedule_settings_signing_pass()
+        _schedule_vault_releases()
         logger.info(
             "vault keys successfully hot-reloaded: personal recipient and %d "
             "recovered generation key(s)", len(generation_keys),

@@ -113,3 +113,71 @@ def test_config_schema_carries_provider_and_bucket():
     with pytest.raises(Exception):
         validate_payload(S.CONFIG_SET_ID, S.SCHEMA_REVISION,
                          {"offsite_provider": "gdrive"})
+
+
+# ── release for the host cron run (auto-5gdao) ─────────────────────────────
+
+ENV = {"BACKUP_PROVIDER": "b2", "BACKUP_BUCKET": "bkt",
+       "RESTIC_PASSWORD": "pw", "B2_KEY_ID": "kid", "B2_APPLICATION_KEY": "akey"}
+
+
+def _release(monkeypatch, tmp_path, result, checked=None):
+    from tools.dashboard.plugins.backup import credentials as c
+
+    monkeypatch.setattr(c, "offsite_env", lambda config=None: result)
+    return c.release_offsite(directory=tmp_path / "backup",
+                             memory_check=(checked.append if checked is not None
+                                           else (lambda d: None)))
+
+
+def test_release_writes_each_value_0600_for_the_cron_run(monkeypatch, tmp_path):
+    import stat
+
+    checked = []
+    assert _release(monkeypatch, tmp_path, (ENV, "ok"), checked) == "ok"
+    d = tmp_path / "backup"
+    assert checked == [d]                       # ramfs check before any write
+    assert (d / "restic-password").read_text() == "pw"
+    assert (d / "b2-key-id").read_text() == "kid"
+    assert (d / "b2-application-key").read_text() == "akey"
+    assert (d / "offsite.env").read_text() == "BACKUP_PROVIDER=b2\nBACKUP_BUCKET=bkt\n"
+    for f in d.iterdir():
+        assert stat.S_IMODE(f.stat().st_mode) == 0o600
+    assert not list(d.glob(".*.tmp"))
+
+
+def test_a_cold_vault_keeps_what_was_released(monkeypatch, tmp_path):
+    _release(monkeypatch, tmp_path, (ENV, "ok"))
+    assert _release(monkeypatch, tmp_path, (None, "vault-cold")) == "vault-cold"
+    assert (tmp_path / "backup" / "restic-password").exists()
+
+
+@pytest.mark.parametrize("status", ["disabled", "unconfigured", "unsealed"])
+def test_credentials_that_cannot_run_remove_the_released_files(monkeypatch, tmp_path, status):
+    _release(monkeypatch, tmp_path, (ENV, "ok"))
+    assert _release(monkeypatch, tmp_path, (None, status)) == status
+    assert sorted(p.name for p in (tmp_path / "backup").iterdir()) == []
+
+
+def test_a_release_that_cannot_reach_ramfs_writes_nothing(monkeypatch, tmp_path):
+    from tools.dashboard.plugins.backup import credentials as c
+
+    monkeypatch.setattr(c, "offsite_env", lambda config=None: (ENV, "ok"))
+
+    def not_ramfs(directory):
+        raise RuntimeError("tmpfs swaps to disk")
+
+    assert c.release_offsite(directory=tmp_path / "backup",
+                             memory_check=not_ramfs) == "release-failed"
+    assert not (tmp_path / "backup" / "restic-password").exists()
+
+
+def test_unlock_schedules_the_release(monkeypatch):
+    from tools.dashboard import unlock_routes
+    from tools.dashboard.plugins.backup import credentials as c
+
+    scheduled = []
+    monkeypatch.setattr(c, "release_offsite_in_background",
+                        lambda config=None: scheduled.append(config))
+    unlock_routes._schedule_vault_releases()
+    assert scheduled == [None]
