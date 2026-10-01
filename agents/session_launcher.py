@@ -2415,7 +2415,10 @@ def launch_session(
             )
             return None
         signins = {**signins, **vault_payloads}
-        signin_accounts.update(vault_accounts)
+        if carried is None:
+            # A carried launch records no accounts: a re-delivery after a
+            # reload would open THIS machine's vault for a member's session.
+            signin_accounts.update(vault_accounts)
 
     # Preflight EVERY input the docker run depends on that could be missing —
     # the image, the runtime, and every mount source (host binds AND

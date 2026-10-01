@@ -324,3 +324,48 @@ def test_the_start_worker_refuses_a_member_session_without_carried_credentials(
     server._run_project_session_start(
         LifecycleJob("start", "auto-mg", {"project_id": "dev", "attempt": 2}), writer)
     assert failed and "carried in its launch" in failed[0]
+
+
+# ── vault links on a member's launch (auto-2eqpb) ──────────────────────────
+
+def _link(vault="docker-config", required=True):
+    from agents.workspace_settings import VaultLink
+
+    return VaultLink(key=f"alpha:{vault}", vault=vault,
+                     path=f"/etc/autonomy/artifacts/{vault}", required=required)
+
+
+def test_home_carries_each_vault_link_from_its_own_vault(server, monkeypatch):
+    values = {"github.token": "ghp_HOME", "alpha:docker-config": "cfg"}
+    monkeypatch.setattr(sl, "_resolve_credential", lambda key: values.get(key))
+    monkeypatch.setattr(sl, "_resolve_credentials_via_substrate",
+                        lambda **_k: {"type": "token", "token": "tok", "harness_token": "a"})
+    carried = server._member_launch_credentials(
+        _proj(vault_links=(_link(), _link("optional-thing", required=False))), "claude", None)
+    assert carried["credentials"] == {"github.token": "ghp_HOME", "alpha:docker-config": "cfg"}
+
+
+def test_home_refuses_when_a_required_vault_link_will_not_open(server, monkeypatch):
+    monkeypatch.setattr(sl, "_resolve_credential",
+                        lambda key: "ghp_HOME" if key == "github.token" else None)
+    detail = server._member_launch_credentials(_proj(vault_links=(_link(),)), "claude", None)
+    assert isinstance(detail, str) and "alpha:docker-config" in detail
+
+
+def test_the_runner_refuses_an_uncarried_required_vault_link_before_registering(
+        server, monkeypatch):
+    proj = _proj(vault_links=(_link(), _link("optional-thing", required=False)))
+    status, data, seen = _member_launch(server, monkeypatch, _body(), {"dev": proj})
+    assert (status, data["refusal"]) == (403, "credential-refused")
+    assert "vault link alpha:docker-config was not carried" in data["error"]
+    assert "optional-thing" not in data["error"]
+    assert seen == {}                 # nothing registered
+
+
+def test_the_runner_accepts_a_carried_vault_link(server, monkeypatch):
+    proj = _proj(vault_links=(_link(),))
+    body = _body(credentials={
+        "credentials": {"github.token": "ghp_X", "alpha:docker-config": "cfg"},
+        "signins": {sl.CLAUDE_BUNDLE_FILENAME: base64.b64encode(b"{}").decode()}})
+    status, _data, seen = _member_launch(server, monkeypatch, body, {"dev": proj})
+    assert status == 202 and seen["carried"].credentials["alpha:docker-config"] == "cfg"

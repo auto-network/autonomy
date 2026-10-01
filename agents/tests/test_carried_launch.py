@@ -118,3 +118,25 @@ def test_requirements_name_credentials_host_env_and_refusals(tmp_path):
 def test_carried_repr_names_no_value():
     text = repr(_carried(env={"X": "secret-value"}))
     assert "ghp_CARRIED" not in text and "secret-value" not in text
+
+
+def test_a_carried_launch_records_no_vault_account_for_redelivery(
+        tmp_path, fake_crosstalk, monkeypatch, no_local_secrets):
+    """A pending record naming vault:<key> would make a reload's re-delivery
+    open THIS machine's vault for a member's session (auto-2eqpb review)."""
+    from agents.workspace_settings import VaultLink
+
+    monkeypatch.setattr(session_launcher, "_image_entrypoint",
+                        lambda image: ["/usr/local/bin/autonomy-entrypoint.sh"])
+    recorded = []
+    monkeypatch.setattr(session_launcher, "deliver_signins_in_background",
+                        lambda name, payloads, accounts=None: recorded.append(
+                            (sorted(payloads), dict(accounts or {}))))
+    link = VaultLink(key="alpha:docker-config", vault="docker-config",
+                     path="/etc/autonomy/artifacts/docker-config.json")
+    _run(name="auto-c", detach=False, output_dir=str(tmp_path / "run"), harness="claude",
+         vault_links=(link,),
+         carried=_carried(credentials={"alpha:docker-config": "cfg"}))
+    ((files, accounts),) = recorded
+    assert "vault.docker-config" in files
+    assert not any(str(v).startswith("vault:") for v in accounts.values())

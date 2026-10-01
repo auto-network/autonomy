@@ -9918,7 +9918,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             working_dir=working_dir,
             network_host=proj.network_host,
             capabilities=proj.capabilities,
-            vault_links=proj.vault_links,
+            vault_links=getattr(proj, "vault_links", ()),
             carried=carried,
         )
         carried = None
@@ -10234,7 +10234,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 resume_uuid=cfg["resume_uuid"],
                 network_host=proj.network_host,
                 capabilities=proj.capabilities,
-                vault_links=proj.vault_links,
+                vault_links=getattr(proj, "vault_links", ()),
             )
         else:
             cmd_str = launch_session(
@@ -10935,6 +10935,17 @@ def _member_launch_credentials(proj, harness: str, model: str | None) -> dict | 
         if value is None:
             return f"credential {key} could not be opened from this machine's vault"
         credentials[key] = value
+    # The workspace's vault links (auto-2eqpb) travel the same way: opened
+    # from this member's vault by the key the org's row derives, carried,
+    # and never read from the runner's vault.
+    for link in getattr(proj, "vault_links", ()) or ():
+        value = sl._resolve_credential(link.key)
+        if value is None:
+            if link.required:
+                return (f"vault link {link.key} could not be opened from this "
+                        "machine's vault")
+            continue
+        credentials[link.key] = value
     for name in host_names:
         value = os.environ.get(name)
         if value is not None:
@@ -11145,6 +11156,11 @@ async def _create_org_member_session(body: dict, caller) -> JSONResponse:
             proj.env, proj.env_from_host, proj.capabilities)
         missing = [f"credential {k} was not carried"
                    for k in sorted(keys) if k not in carried.credentials]
+        # A required vault link not carried refuses HERE, before the launch
+        # is registered -- not later in the lifecycle worker.
+        missing += [f"vault link {link.key} was not carried"
+                    for link in getattr(proj, "vault_links", ()) or ()
+                    if link.required and link.key not in carried.credentials]
         harness = body.get("harness") or proj.harness or "claude"
         if harness == "claude" and CLAUDE_BUNDLE_FILENAME not in carried.signins \
                 and "CLAUDE_CODE_OAUTH_TOKEN" not in carried.env:
