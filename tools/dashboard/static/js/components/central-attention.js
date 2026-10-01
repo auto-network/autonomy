@@ -119,6 +119,13 @@
       left.attentionState === right.attentionState;
   }
 
+  // Kinds reviewed in the shared approval dialog, which sits above every page
+  // layer, the session viewer included.
+  const SHARED_REVIEWS = new Set(['approval.dashboard_access.review',
+    'approval.fleet_machine_admission.review', 'approval.email_send.review',
+    'approval.vault_open.review', 'approval.link_publish.review', 'approval.link_revoke.review',
+    'approval.external_service_access.review', 'approval.mcp_crosstalk.review',
+    'approval.visitor_token.review', 'approval.jira_write.review', 'approval.vault_seal.review']);
   const POPPED_KEY = 'central.poppedApprovals';
   function poppedApprovals() {
     try { return new Set(JSON.parse(window.sessionStorage.getItem(POPPED_KEY) || '[]')); }
@@ -358,8 +365,11 @@
       popNextApproval() {
         if (this._destroyed || this._holdPop || this._sharedApprovalItem || this._popping) return;
         const popped = poppedApprovals();
+        // Only the shared dialog pops: a kind still on the legacy panel keeps
+        // its indicator, because that panel sits below the session viewer.
         const next = this.items.find(item => item.type === 'approval' &&
-          item.attentionState === 'needs_attention' && !popped.has(item.id));
+          item.attentionState === 'needs_attention' && SHARED_REVIEWS.has(item.rendererId) &&
+          !popped.has(item.id));
         if (!next) return;
         rememberPopped(next.id);
         this._popping = true;
@@ -381,12 +391,7 @@
         if (this._sharedApprovalItem && this._sharedApprovalItem.id === item.id) return true;
         item.decisionError = '';
         // Migrated reviews never flash the legacy right-hand detail panel.
-        const shared = ['approval.dashboard_access.review', 'approval.fleet_machine_admission.review',
-          'approval.email_send.review', 'approval.vault_open.review',
-          'approval.link_publish.review', 'approval.link_revoke.review',
-          'approval.external_service_access.review', 'approval.mcp_crosstalk.review',
-          'approval.visitor_token.review', 'approval.jira_write.review',
-          'approval.vault_seal.review'].includes(item.rendererId);
+        const shared = SHARED_REVIEWS.has(item.rendererId);
         this.selectedItem = shared ? null : item;
         try {
           const payload = await jsonRequest('/api/attention/items/' + encodeURIComponent(item.id));

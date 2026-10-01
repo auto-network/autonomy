@@ -13,7 +13,8 @@ function surface() {
   ui.openItem = async item => { opened.push(item.id); ui._sharedApprovalItem = item; return true; };
   return {ui, opened};
 }
-const approval = (id, state = 'needs_attention') => ({id, type: 'approval', attentionState: state});
+const approval = (id, state = 'needs_attention', rendererId = 'approval.jira_write.review') =>
+  ({id, type: 'approval', attentionState: state, rendererId});
 const settle = () => new Promise(r => setTimeout(r, 0));
 
 test('the first waiting approval opens, and the next opens when it closes', async () => {
@@ -42,4 +43,12 @@ test('a link to one approval holds the queue', async () => {
   ui.popNextApproval();
   await settle();
   assert.deepEqual(opened, []);
+});
+
+test('a kind still on the legacy panel never pops; the shared one behind it does', async () => {
+  const {ui, opened} = surface();
+  ui.items = [approval('sign', 'needs_attention', 'approval.commit_sign.review'), approval('jira')];
+  ui.popNextApproval();
+  await settle();
+  assert.deepEqual(opened, ['jira']);
 });
