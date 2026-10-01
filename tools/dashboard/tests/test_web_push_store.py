@@ -57,21 +57,22 @@ def substrate(tmp_path):
 
 
 class TestWebPushSubscriptionStore:
-    def test_schema_is_idempotent_and_defaults_applications_off(self, substrate):
+    def test_schema_is_idempotent_and_drops_the_retired_v2_tables(self, substrate):
         store, _custody, active, _tmp = substrate
         store.initialize()
         store.initialize()
-        assert store.preferences(OWNER_A, ("fleet", "dropbox")) == {
-            "fleet": "off",
-            "dropbox": "off",
+        connection = sqlite3.connect(store.db_path)
+        try:
+            tables = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+        finally:
+            connection.close()
+        assert "web_push_subscriptions" in tables
+        assert not tables & {
+            "web_push_preferences", "web_push_delivery_events",
+            "web_push_delivery_targets", "web_push_delivery_attempts",
         }
-        assert store.set_preference(OWNER_A, "fleet", "generic") == "generic"
-        assert store.preferences(OWNER_A, ("fleet", "dropbox")) == {
-            "fleet": "generic",
-            "dropbox": "off",
-        }
-        with pytest.raises(WebPushStoreError, match="invalid preference"):
-            store.set_preference(OWNER_A, "fleet", "urgent")
         assert len(active.public_key) == 87
 
     def test_control_labels_and_non_ascii_updater_tokens_fail_closed(self, substrate):
@@ -196,7 +197,6 @@ class TestWebPushSubscriptionStore:
             device_label="Private phone",
             **_subscription(active.key_id, "before"),
         )
-        store.set_preference(OWNER_A, "fleet", "descriptive")
         replacement = _subscription(active.key_id, "after")
         result = store.refresh(
             device_id=first.device_id,
@@ -212,7 +212,6 @@ class TestWebPushSubscriptionStore:
         listed = store.list_devices(OWNER_A)
         assert listed[0]["max_detail"] == "descriptive"
         assert listed[0]["device_label"] == "Private phone"
-        assert store.preferences(OWNER_A, ("fleet",)) == {"fleet": "descriptive"}
 
     def test_token_authenticated_null_refresh_retires_and_cancels(self, substrate):
         store, _custody, active, _tmp = substrate

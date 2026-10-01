@@ -28,7 +28,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.dashboard import api_auth
-from tools.dashboard import web_push_sender
+from tools.dashboard import web_push_routes, web_push_sender
 from tools.dashboard.dao import web_push as web_push_dao
 from tools.data_paths import resolve_store
 
@@ -45,8 +45,9 @@ _GRACE_SECONDS = 20.0
 _EVENT_TTL_SECONDS = 6 * 60 * 60
 _LEASE_SECONDS = 60.0
 _MAX_ATTEMPTS = 10
+_IDLE_SECONDS = 3600.0     # nothing due: wake only for the hourly cleanup
+_MIN_WAIT_SECONDS = 1.0    # due but unclaimable: do not spin
 _B64URL = re.compile(r"^[A-Za-z0-9_-]+$")
-_INSTALLATION_ID = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _EVENT_ID = re.compile(r"^[A-Za-z0-9:_-]{1,160}$")
 
 # Browser-selected services only. This makes a browser-supplied endpoint
@@ -120,22 +121,39 @@ CREATE TABLE IF NOT EXISTS web_push_attempts (
 
 _vapid_lock = threading.Lock()
 _vapid: dict[str, object] = {}
+_schema_lock = threading.Lock()
+_schema_ready: set[str] = set()
 _worker_task: asyncio.Task | None = None
 _worker_wake: asyncio.Event | None = None
 _worker_stop: asyncio.Event | None = None
 _worker_loop_ref: asyncio.AbstractEventLoop | None = None
 
 
-def _conn(db_path: Path | str | None = None) -> sqlite3.Connection:
-    path = Path(db_path) if db_path is not None else DB_PATH
-    web_push_dao.WebPushStore(path).initialize()
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _open(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(str(path), timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
-    connection.executescript(SCHEMA)
     return connection
+
+
+def _conn(db_path: Path | str | None = None) -> sqlite3.Connection:
+    # The schema is checked once per database per process, not on every
+    # connection: the per-connection DDL was most of this file's WAL traffic.
+    path = Path(db_path) if db_path is not None else DB_PATH
+    key = str(path.resolve())
+    if key not in _schema_ready:
+        with _schema_lock:
+            if key not in _schema_ready:
+                web_push_dao.WebPushStore(path).connect().close()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                connection = _open(path)
+                try:
+                    connection.executescript(SCHEMA)
+                finally:
+                    connection.close()
+                _schema_ready.add(key)
+    return _open(path)
 
 
 def init_db(db_path: Path | str | None = None) -> None:
@@ -189,47 +207,12 @@ def _application_server_key() -> str:
 
 
 def _stable_owner_id() -> str:
-    """Derive routing ownership from the stored personal root, never a SID."""
-    from tools.dashboard.identity_routes import resolve_stable_personal_root_public_key
+    """Derive routing ownership from the stored personal root, never a SID.
 
-    root_pub = resolve_stable_personal_root_public_key()
-    return hashlib.sha256(
-        b"autonomy:web-push-owner:v1\0" + bytes.fromhex(root_pub)
-    ).hexdigest()
-
-
-def _operator_only(request: Request) -> JSONResponse | None:
-    """Require the human browser principal; caller identity is never in JSON."""
-
-    principal = api_auth.principal_from_request(request)
-    if principal.kind is api_auth.ApiPrincipalKind.OPERATOR_COOKIE:
-        return None
-    # An intentionally disabled/unenrolled gate has no cookie principal. The
-    # browser is the operator in that deployment; org/local-session bearers are
-    # still positively identified and refused.
-    if principal.kind is api_auth.ApiPrincipalKind.COMPATIBILITY:
-        from tools.dashboard import unlock_routes
-        if not unlock_routes.gate_enforced():
-            return None
-        return JSONResponse({"error": "authentication required"}, status_code=401)
-    return JSONResponse({"error": "operator browser authority required"}, status_code=403)
-
-
-def _validated_request_origin(request: Request) -> str:
-    expected = urlsplit(str(request.base_url))
-    supplied_raw = request.headers.get("origin")
-    supplied = urlsplit(supplied_raw) if supplied_raw else expected
-    if (
-        supplied.scheme != "https"
-        or supplied.hostname != expected.hostname
-        or supplied.port != expected.port
-        or supplied.username
-        or supplied.password
-    ):
-        raise ValueError("same-origin HTTPS request required")
-    host = supplied.hostname.rstrip(".").lower()
-    port = supplied.port
-    return f"https://{host}" + (f":{port}" if port not in (None, 443) else "")
+    The same subject the device routes bind subscriptions to, so an
+    acknowledgement or test can only reach the operator's own devices.
+    """
+    return web_push_routes.stable_operator_subject()
 
 
 def _valid_push_host(host: str) -> bool:
@@ -301,63 +284,6 @@ def _json_request(request: Request, raw: bytes) -> dict:
     if not isinstance(body, dict):
         raise ValueError("body must be a JSON object")
     return body
-
-
-def _upsert_subscription(
-    *, owner_id: str, origin: str, installation_id: str, subscription: dict,
-    db_path: Path | str | None = None,
-) -> None:
-    if not _INSTALLATION_ID.fullmatch(installation_id):
-        raise ValueError("installation_id is invalid")
-    endpoint = subscription["endpoint"]
-    endpoint_hash = hashlib.sha256(endpoint.encode()).hexdigest()
-    parsed = urlsplit(endpoint)
-    endpoint_origin = f"{parsed.scheme}://{parsed.hostname}"
-    if parsed.port not in (None, 443):
-        endpoint_origin += f":{parsed.port}"
-    store = web_push_dao.WebPushStore(DB_PATH if db_path is None else db_path)
-    custody = web_push_dao.VapidKeyCustody(
-        store, key_dir=VAPID_DIR, legacy_key_path=VAPID_PATH,
-    )
-    try:
-        key = custody.ensure_active()
-        store.enroll(
-            operator_subject=owner_id,
-            device_id=installation_id,
-            endpoint=endpoint,
-            endpoint_hash=endpoint_hash,
-            endpoint_origin=endpoint_origin,
-            vapid_subject=origin,
-            p256dh=subscription["keys"]["p256dh"],
-            auth_secret=subscription["keys"]["auth"],
-            vapid_key_id=key.key_id,
-            expiration_time=subscription.get("expiration_time"),
-        )
-    except web_push_dao.WebPushStoreError as exc:
-        if exc.code in {"device_conflict", "endpoint_conflict"}:
-            raise PermissionError(
-                "this browser installation or push endpoint belongs to another operator"
-            ) from exc
-        raise
-
-
-def _retire_subscription(
-    installation_id: str, owner_id: str, reason: str,
-    *, db_path: Path | str | None = None,
-) -> bool:
-    store = web_push_dao.WebPushStore(DB_PATH if db_path is None else db_path)
-    return store.retire(
-        owner_id, installation_id, reason=reason,
-    )
-
-
-def _subscription_state(
-    owner_id: str, installation_id: str | None,
-    *, db_path: Path | str | None = None,
-) -> dict:
-    return web_push_dao.WebPushStore(
-        DB_PATH if db_path is None else db_path
-    ).state(owner_id, installation_id)
 
 
 def _register_attention(
@@ -854,6 +780,33 @@ def _cleanup(*, db_path: Path | str | None = None) -> None:
         connection.close()
 
 
+def _next_due_delay(*, db_path: Path | str | None = None) -> float | None:
+    """Seconds until the earliest sendable row is due, or None when none is.
+
+    Mirrors ``_claim_due``'s conditions so a row the claim would skip
+    (acknowledged, canceled, retired device) cannot keep the worker awake.
+    """
+    now = time.time()
+    connection = _conn(db_path)
+    try:
+        row = connection.execute(
+            "SELECT MIN(CASE WHEN o.state='leased' THEN o.lease_until "
+            "ELSE o.available_at END) AS due FROM web_push_outbox o "
+            "JOIN web_push_attention_events e ON e.event_id=o.event_id "
+            "AND e.event_version=o.event_version AND e.owner_id=o.owner_id "
+            "JOIN web_push_subscriptions s ON s.device_id=o.installation_id "
+            "WHERE o.state IN ('fallback_wait','pending','retry_wait','leased') "
+            "AND o.expires_at>? AND e.acknowledged_at IS NULL "
+            "AND e.canceled_at IS NULL AND s.status='active'",
+            (now,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None or row["due"] is None:
+        return None
+    return float(row["due"]) - now
+
+
 async def _worker_loop() -> None:
     assert _worker_stop is not None and _worker_wake is not None
     last_cleanup = 0.0
@@ -884,8 +837,18 @@ async def _worker_loop() -> None:
         if time.time() - last_cleanup > 3600:
             await asyncio.to_thread(_cleanup)
             last_cleanup = time.time()
+        # Sleep until the next row is due or a producer wakes us; nothing
+        # due means no timer at all beyond the hourly cleanup. A row that is
+        # due yet was not claimable is retried after a second, not spun on.
+        delay = await asyncio.to_thread(_next_due_delay)
+        if delay is None:
+            timeout = _IDLE_SECONDS
+        elif delay <= 0:
+            timeout = _MIN_WAIT_SECONDS
+        else:
+            timeout = min(delay, _IDLE_SECONDS)
         try:
-            await asyncio.wait_for(_worker_wake.wait(), timeout=5.0)
+            await asyncio.wait_for(_worker_wake.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             pass
         _worker_wake.clear()
@@ -936,89 +899,15 @@ def wake_worker() -> None:
             _worker_loop_ref.call_soon_threadsafe(_worker_wake.set)
 
 
-async def api_config(request: Request) -> JSONResponse:
-    refused = _operator_only(request)
-    if refused is not None:
-        return refused
-    try:
-        _validated_request_origin(request)
-        key = await asyncio.to_thread(_application_server_key)
-    except (OSError, RuntimeError, ValueError) as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
-    return JSONResponse({"ok": True, "application_server_key": key})
-
-
-async def api_state(request: Request) -> JSONResponse:
-    refused = _operator_only(request)
-    if refused is not None:
-        return refused
-    try:
-        owner_id = await asyncio.to_thread(_stable_owner_id)
-        installation_id = request.query_params.get("installation_id")
-        state = await asyncio.to_thread(
-            _subscription_state, owner_id, installation_id,
-        )
-    except RuntimeError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
-    return JSONResponse({"ok": True, **state})
-
-
-async def api_enroll(request: Request) -> JSONResponse:
-    refused = _operator_only(request)
-    if refused is not None:
-        return refused
-    try:
-        origin = _validated_request_origin(request)
-        body = _json_request(request, await request.body())
-        if set(body) != {"installation_id", "subscription"}:
-            raise ValueError("body must contain only installation_id and subscription")
-        if not isinstance(body["installation_id"], str):
-            raise ValueError("installation_id is invalid")
-        subscription = _validate_subscription(body["subscription"])
-        owner_id = await asyncio.to_thread(_stable_owner_id)
-        await asyncio.to_thread(
-            _upsert_subscription, owner_id=owner_id, origin=origin,
-            installation_id=body["installation_id"], subscription=subscription,
-        )
-    except TypeError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=415)
-    except OverflowError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=413)
-    except PermissionError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
-    except (RuntimeError, ValueError) as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=422)
-    return JSONResponse({"ok": True, "state": "subscribed"})
-
-
-async def api_retire(request: Request) -> JSONResponse:
-    refused = _operator_only(request)
-    if refused is not None:
-        return refused
-    installation_id = request.path_params["installation_id"]
-    if not _INSTALLATION_ID.fullmatch(installation_id):
-        return JSONResponse({"ok": False, "error": "installation_id is invalid"}, status_code=422)
-    try:
-        _validated_request_origin(request)
-        owner_id = await asyncio.to_thread(_stable_owner_id)
-        retired = await asyncio.to_thread(
-            _retire_subscription, installation_id, owner_id, "operator_retired",
-        )
-    except (RuntimeError, ValueError) as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=422)
-    wake_worker()
-    return JSONResponse({"ok": True, "retired": retired})
-
-
 async def api_ack(request: Request) -> JSONResponse:
-    refused = _operator_only(request)
+    refused = web_push_routes._operator_cookie_only(request)
     if refused is not None:
         return refused
     approval_id = request.path_params["event_id"]
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", approval_id):
         return JSONResponse({"ok": False, "error": "event_id is invalid"}, status_code=422)
     try:
-        _validated_request_origin(request)
+        web_push_routes._same_origin(request)
         body = _json_request(request, await request.body())
         if body != {"event_version": 1, "applied": True}:
             raise ValueError("ack must contain event_version=1 and applied=true")
@@ -1035,11 +924,11 @@ async def api_ack(request: Request) -> JSONResponse:
 
 
 async def api_test(request: Request) -> JSONResponse:
-    refused = _operator_only(request)
+    refused = web_push_routes._operator_cookie_only(request)
     if refused is not None:
         return refused
     try:
-        _validated_request_origin(request)
+        web_push_routes._same_origin(request)
         if await request.body() not in (b"", b"{}"):
             raise ValueError("test request body must be empty")
         event_id = f"diagnostic:{uuid.uuid4().hex}"
@@ -1065,12 +954,6 @@ async def api_test(request: Request) -> JSONResponse:
 
 
 ROUTES = [
-    Route("/api/web-push/state", api_state, methods=["GET"]),
-    Route("/api/web-push/subscriptions", api_enroll, methods=["POST"]),
-    Route(
-        "/api/web-push/subscriptions/{installation_id}", api_retire,
-        methods=["DELETE"],
-    ),
     Route(
         "/api/web-push/attention/{event_id}/ack", api_ack, methods=["POST"],
     ),

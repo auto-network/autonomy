@@ -21,13 +21,11 @@ import urllib.request
 
 import pytest
 
-from tools.dashboard.approval_kind_registry import PRODUCTION_APPROVAL_REGISTRY
 
 
 DASHBOARD = Path(__file__).resolve().parents[1]
 CONTROLLER = DASHBOARD / "static" / "js" / "web-push-register.js"
 WORKER = DASHBOARD / "static" / "service-worker.js"
-EVENT_ID = "A" * 43
 UPDATE_TOKEN = "t" * 43
 NEXT_UPDATE_TOKEN = "u" * 43
 
@@ -410,78 +408,54 @@ class TestWebPushServiceWorkerBrowser:
             "navigationCount": 1,
         }
 
-    def test_payload_validation_is_generic_deduped_and_route_bounded(
+    def test_every_push_shows_one_generic_alert_that_opens_activity(
         self, worker_origin,
     ):
         origin, _server = worker_origin
         _agent_browser("open", origin)
+        # What the sender in web_push.py actually sends, plus hostile and
+        # malformed payloads: none of them may change what the phone shows.
+        sent = {
+            "v": 1, "event_id": "0" * 32, "class": "approval_pending",
+            "app": "approvals", "route": "/activity?focus=approval&id=opaque_1",
+            "tag": "attention:" + "0" * 32, "issued_at": 1, "expires_at": 2,
+        }
+        payloads = {
+            "sent": json.dumps(sent),
+            "hostile": json.dumps({
+                **sent, "title": "Secret title from sender",
+                "route": "https://evil.example/steal",
+            }),
+            "malformed": "{",
+            "oversized": "x" * 4097,
+            "empty": None,
+        }
         result = _evaluate(
             f"""(async () => {{
               {_WORKER_COMMAND}
-              const base = {{
-                v: 1,
-                event_id: {json.dumps(EVENT_ID)},
-                class: 'approval.commit_sign.requested',
-                title: 'Secret title from sender',
-                body: 'Secret body from sender',
-                route: '/activity?focus=approval&id=opaque_1',
-                tag: 'attention:' + {json.dumps(EVENT_ID)},
-                issued_at: 1,
-                expires_at: 2,
-              }};
-              const valid = await workerCommand({{
-                type: 'test-payload', payload: JSON.stringify(base),
-              }});
-              const duplicate = await workerCommand({{
-                type: 'test-payload', payload: JSON.stringify(base),
-              }});
-              const unsafe = await workerCommand({{
-                type: 'test-payload', payload: JSON.stringify({{
-                  ...base, route: 'https://evil.example/steal',
-                }}),
-              }});
-              const malformed = await workerCommand({{
-                type: 'test-payload', payload: '{{',
-              }});
-              const future = await workerCommand({{
-                type: 'test-payload', payload: JSON.stringify({{...base, v: 2}}),
-              }});
-              const unknownClass = await workerCommand({{
-                type: 'test-payload', payload: JSON.stringify({{
-                  ...base, class: 'caller.chosen',
-                }}),
-              }});
-              const oversized = await workerCommand({{
-                type: 'test-payload', payload: 'x'.repeat(2049),
-              }});
-              return JSON.stringify({{
-                valid, duplicate, unsafe, malformed, future, unknownClass, oversized,
-              }});
+              const payloads = {json.dumps(payloads)};
+              const out = {{}};
+              for (const [name, payload] of Object.entries(payloads)) {{
+                out[name] = await workerCommand({{type: 'test-payload', payload}});
+              }}
+              return JSON.stringify(out);
             }})()"""
         )
-        assert result["valid"]["message"] == {
-            "title": "Autonomy needs your attention",
-            "body": "Open the dashboard to review.",
-            "route": "/activity?focus=approval&id=opaque_1",
-            "tag": f"attention:{EVENT_ID}",
-            "eventId": EVENT_ID,
-        }
-        assert result["valid"]["options"]["renotify"] is False
-        assert result["valid"]["options"]["requireInteraction"] is False
-        assert result["valid"]["options"].get("actions", []) in (
-            [], [{"action": "review", "title": "Review"}],
-        )
-        assert result["duplicate"]["message"]["tag"] == result["valid"]["message"]["tag"]
-        assert result["unsafe"]["message"]["route"] == "/activity"
-        fallback = {
+        generic = {
             "title": "Autonomy needs your attention",
             "body": "Open the dashboard to review.",
             "route": "/activity",
             "tag": "autonomy-attention",
-            "eventId": None,
         }
-        for key in ("malformed", "future", "unknownClass", "oversized"):
-            assert result[key]["message"] == fallback
+        for name in payloads:
+            assert result[name]["message"] == generic, name
+        options = result["sent"]["options"]
+        assert options["renotify"] is False
+        assert options["requireInteraction"] is False
+        assert options["data"] == {"route": "/activity"}
+        assert options.get("actions", []) in (
+            [], [{"action": "review", "title": "Review"}],
+        )
 
         with _notification_permission(origin):
             assert _evaluate(
@@ -490,15 +464,7 @@ class TestWebPushServiceWorkerBrowser:
             shown = _evaluate(
                 f"""(async () => {{
                   {_WORKER_COMMAND}
-                  const payload = JSON.stringify({{
-                    v: 1,
-                    event_id: {json.dumps(EVENT_ID)},
-                    class: 'approval.commit_sign.requested',
-                    route: '/activity?focus=approval&id=opaque_1',
-                    tag: 'attention:' + {json.dumps(EVENT_ID)},
-                    issued_at: 1,
-                    expires_at: 2,
-                  }});
+                  const payload = {json.dumps(payloads["sent"])};
                   const first = await workerCommand({{
                     type: 'test-show-payload', payload,
                   }});
@@ -511,9 +477,7 @@ class TestWebPushServiceWorkerBrowser:
         assert shown["permission"] == "granted"
         assert shown["first"]["count"] == 1
         assert shown["replacement"]["count"] == 1
-        assert shown["replacement"]["notifications"][0]["tag"] == (
-            f"attention:{EVENT_ID}"
-        )
+        assert shown["replacement"]["notifications"][0]["tag"] == "autonomy-attention"
         assert shown["replacement"]["notifications"][0]["title"] == (
             "Autonomy needs your attention"
         )
@@ -660,14 +624,12 @@ def test_controller_exports_only_the_normative_nine_states_and_current_api():
     assert "config lists only the current stable" in controller
 
 
-def test_worker_source_is_closed_to_registered_classes_and_nonsemantic_close():
+def test_worker_source_ignores_payloads_and_close_is_nonsemantic():
     worker = WORKER.read_text()
-    expected_classes = {
-        item.notification_class
-        for item in PRODUCTION_APPROVAL_REGISTRY.kinds.values()
-    }
-    declared_classes = set(re.findall(r"'((?:approval\.)[^']+\.requested)'", worker))
-    assert declared_classes == expected_classes
+    # No class allow-list: v1 alerts are generic, so nothing is parsed.
+    assert "REGISTERED_CLASSES" not in worker
+    assert "event.data.text()" not in worker
+    assert not re.findall(r"'approval\.[^']+\.requested'", worker)
     assert "self.registration.showNotification" in worker
     assert "renotify: false" in worker
     assert "requireInteraction: false" in worker

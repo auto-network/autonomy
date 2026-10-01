@@ -23,7 +23,6 @@ from tools.dashboard.approval_service import (
 from tools.dashboard.event_bus import EventBus
 from tools.graph.schemas.central_attention import (
     APPROVAL_REQUEST_SET_ID, APPROVAL_RESOLUTION_SET_ID,
-    ATTENTION_DELIVERY_SET_ID,
 )
 
 ROOT = "a" * 64
@@ -543,7 +542,7 @@ async def test_hub_refreshes_pages_on_approval_row_changes_from_any_thread():
     assert await asyncio.wait_for(queue.get(), timeout=1) == ("attention:refresh", {})
     for snapshot, org in (
         ({"set_id": APPROVAL_REQUEST_SET_ID, "schema_revision": 1, "key": "k"}, "other"),
-        ({"set_id": ATTENTION_DELIVERY_SET_ID, "schema_revision": 1, "key": "k"}, None),
+        ({"set_id": "dashboard.attention.delivery", "schema_revision": 1, "key": "k"}, None),
         ({"set_id": "dashboard.feature_flags", "schema_revision": 1, "key": "k"}, None),
     ):
         hub.emit_setting_change(operation="upsert", snapshot=snapshot, org=org)
@@ -602,10 +601,7 @@ def test_server_hook_diverts_all_private_sets(monkeypatch):
         attention_routes, "emit_setting_change",
         lambda **kwargs: delivered.append(kwargs),
     )
-    for set_id in (
-        APPROVAL_REQUEST_SET_ID, APPROVAL_RESOLUTION_SET_ID,
-        ATTENTION_DELIVERY_SET_ID,
-    ):
+    for set_id in (APPROVAL_REQUEST_SET_ID, APPROVAL_RESOLUTION_SET_ID):
         private = {
             "set_id": set_id, "schema_revision": 99, "key": "private-key",
             "publication_state": "raw", "deprecated": 0,
@@ -613,7 +609,7 @@ def test_server_hook_diverts_all_private_sets(monkeypatch):
         server._settings_emit_hook(
             operation="upsert", snapshot=private, org="wrong-org",
         )
-    assert len(delivered) == 3 and bus.all_cached_topics() == []
+    assert len(delivered) == 2 and bus.all_cached_topics() == []
     public = dict(private, set_id="dashboard.feature_flags", schema_revision=1)
     server._settings_emit_hook(operation="upsert", snapshot=public, org=None)
     assert bus.all_cached_topics() == ["setting.changed"]

@@ -5,25 +5,10 @@
 const DEVICE_DB = 'autonomy-web-push-v1';
 const DEVICE_STORE = 'device';
 const DEVICE_KEY = 'current';
-const MAX_PAYLOAD_BYTES = 2048;
 const GENERIC_TITLE = 'Autonomy needs your attention';
 const GENERIC_BODY = 'Open the dashboard to review.';
-const FALLBACK_TAG = 'autonomy-attention';
-const REGISTERED_CLASSES = new Set([
-  'approval.commit_sign.requested',
-  'approval.jira_write.requested',
-  'approval.email_send.requested',
-  'approval.link_publish.requested',
-  'approval.link_revoke.requested',
-  'approval.dashboard_access.requested',
-  'approval.visitor_token.requested',
-  'approval.secure_setting.requested',
-  'approval.mcp_peer_link.requested',
-  'approval.mcp_crosstalk.requested',
-  'approval.fleet_machine_admission.requested',
-  'approval.external_service_access.requested',
-  'approval.vault_open.requested',
-]);
+const NOTIFICATION_TAG = 'autonomy-attention';
+const NOTIFICATION_ROUTE = '/activity';
 let refreshChain = Promise.resolve();
 
 function serializeRefresh(operation) {
@@ -43,74 +28,16 @@ self.addEventListener('activate', (event) => {
   })());
 });
 
-function safeRoute(value) {
-  if (value === '/activity') return value;
-  if (typeof value !== 'string' || value.length > 320) return '/activity';
-  try {
-    const url = new URL(value, self.location.origin);
-    if (url.origin !== self.location.origin || url.pathname !== '/activity') {
-      return '/activity';
-    }
-    const keys = Array.from(url.searchParams.keys());
-    if (keys.length !== 2 || keys.some(key => key !== 'focus' && key !== 'id')) {
-      return '/activity';
-    }
-    if (url.searchParams.get('focus') !== 'approval') return '/activity';
-    const id = url.searchParams.get('id');
-    if (!id || !/^[A-Za-z0-9_-]{1,256}$/.test(id)) return '/activity';
-    return url.pathname + url.search;
-  } catch (_error) {
-    return '/activity';
-  }
-}
-
-function fallbackNotification() {
+// Every push shows the same generic notification that opens Activity. The
+// payload is never parsed: what to review is decided by the page, not by the
+// push service or a sender's strings, and one tag keeps a single alert up.
+function pushNotification(_event) {
   return {
     title: GENERIC_TITLE,
     body: GENERIC_BODY,
-    route: '/activity',
-    tag: FALLBACK_TAG,
-    eventId: null,
+    route: NOTIFICATION_ROUTE,
+    tag: NOTIFICATION_TAG,
   };
-}
-
-function pushNotification(event) {
-  const fallback = fallbackNotification();
-  if (!event.data) return fallback;
-  try {
-    const text = event.data.text();
-    if (typeof text !== 'string' || new TextEncoder().encode(text).length > MAX_PAYLOAD_BYTES) {
-      return fallback;
-    }
-    const value = JSON.parse(text);
-    if (
-      !value || value.v !== 1 ||
-      !/^[A-Za-z0-9_-]{43}$/.test(value.event_id) ||
-      !REGISTERED_CLASSES.has(value.class)
-    ) {
-      return fallback;
-    }
-    if (
-      typeof value.issued_at !== 'number' || !Number.isSafeInteger(value.issued_at) ||
-      typeof value.expires_at !== 'number' || !Number.isSafeInteger(value.expires_at) ||
-      value.issued_at < 0 || value.expires_at < value.issued_at
-    ) {
-      return fallback;
-    }
-    const expectedTag = 'attention:' + value.event_id;
-    if (value.tag !== expectedTag) return fallback;
-    return {
-      // Phase one is deliberately generic even if a future or compromised
-      // sender adds descriptive strings to an otherwise valid envelope.
-      title: GENERIC_TITLE,
-      body: GENERIC_BODY,
-      route: safeRoute(value.route),
-      tag: expectedTag,
-      eventId: value.event_id,
-    };
-  } catch (_error) {
-    return fallback;
-  }
 }
 
 function notificationOptions(message) {
@@ -121,7 +48,7 @@ function notificationOptions(message) {
     requireInteraction: false,
     icon: '/static/icon-192.png',
     badge: '/static/icon-192.png',
-    data: { route: message.route, event_id: message.eventId },
+    data: { route: message.route },
   };
   if (self.Notification && Number(self.Notification.maxActions) > 0) {
     options.actions = [{ action: 'review', title: 'Review' }];
@@ -140,9 +67,7 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const requested = event.notification && event.notification.data
-    ? event.notification.data.route : null;
-  const route = safeRoute(requested);
+  const route = NOTIFICATION_ROUTE;
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({
       type: 'window',
@@ -156,11 +81,7 @@ self.addEventListener('notificationclick', (event) => {
       sameOrigin.find(item => item.focused) || sameOrigin[0];
     if (client) {
       try {
-        client.postMessage({
-          type: 'web-push:navigate',
-          event_id: event.notification.data && event.notification.data.event_id,
-          route,
-        });
+        client.postMessage({ type: 'web-push:navigate', route });
         await client.navigate(route);
         return await client.focus();
       } catch (_error) {

@@ -37,7 +37,6 @@ from tools.dashboard.attention_registry import APPLICATIONS
 from tools.graph.schemas.central_attention import (
     APPROVAL_REQUEST_SET_ID,
     APPROVAL_RESOLUTION_SET_ID,
-    ATTENTION_DELIVERY_SET_ID,
 )
 
 
@@ -46,7 +45,6 @@ logger = logging.getLogger(__name__)
 PRIVATE_CENTRAL_SET_IDS = frozenset({
     APPROVAL_REQUEST_SET_ID,
     APPROVAL_RESOLUTION_SET_ID,
-    ATTENTION_DELIVERY_SET_ID,
 })
 _APPROVAL_SET_IDS = frozenset({APPROVAL_REQUEST_SET_ID, APPROVAL_RESOLUTION_SET_ID})
 _SSE_CLOSE = object()

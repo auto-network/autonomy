@@ -185,7 +185,7 @@ from tools.dashboard import network_routes
 from tools.dashboard import org_membership_routes
 from tools.dashboard import org_runners
 from tools.dashboard import remote_api
-from tools.dashboard import web_push, web_push_proof, web_push_routes, web_push_worker
+from tools.dashboard import web_push, web_push_proof, web_push_routes
 from tools.dashboard import image_build_worker
 from tools.dashboard import web_gateway_supervisor
 from tools.dashboard import service_certificate_manager
@@ -22934,8 +22934,6 @@ async def _on_startup():
         _mark("harness_credentials.migrate_plaintext_accounts")
         await web_push.start_worker()
         _mark("web_push.start_worker")
-        await web_push_worker.start_worker()
-        _mark("web_push_worker.start_worker")
         await image_build_worker.start_worker()
         _mark("image_build_worker.start_worker")
         await web_gateway_supervisor.start_worker(event_bus)
@@ -23530,10 +23528,6 @@ async def _on_shutdown():
     if _plain_listener is not None:
         listener, _plain_listener = _plain_listener, None
         await listener.stop()
-    try:
-        await web_push_worker.stop_worker()
-    except Exception:
-        logger.exception("error stopping the Central Web Push delivery worker")
     try:
         from tools.dashboard import design_thumbnails
         await design_thumbnails.queue.stop()

@@ -1,4 +1,4 @@
-"""Headless browser API for Web Push installations and preferences.
+"""Headless browser API for Web Push installations.
 
 The browser supplies locators and subscription material, never authority.
 Cookie-authenticated calls resolve the durable personal root at the server;
@@ -18,15 +18,10 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.dashboard import api_auth
-from tools.dashboard.attention_registry import APPLICATIONS
 from tools.dashboard.dao import web_push as web_push_dao
 from tools.dashboard.identity_routes import (
     StablePersonalIdentityUnavailable,
     resolve_stable_personal_root_public_key,
-)
-from tools.dashboard.web_push_delivery import (
-    WebPushDeliveryError,
-    WebPushDeliveryStore,
 )
 
 
@@ -115,22 +110,6 @@ async def _json_body(request: Request) -> dict:
     return value
 
 
-def _applications() -> tuple[dict, ...]:
-    from tools.dashboard.attention_routes import approval_runtime
-    live = {
-        scope
-        for registration in approval_runtime().approvals.registry.kinds.values()
-        if registration.runtime is not None
-        for scope in registration.application_scope_policy.applications
-    }
-    return tuple({"application": scope, "label": label, "enabled": scope in live}
-                 for scope, (label, _icon) in APPLICATIONS.items())
-
-
-def _registered_application(name: str) -> bool:
-    return any(item["application"] == name for item in _applications())
-
-
 def _subscription(value: object) -> dict:
     if not isinstance(value, dict) or set(value) != {
         "endpoint", "expiration_time", "keys", "vapid_key_id",
@@ -207,10 +186,6 @@ async def api_config(request: Request) -> JSONResponse:
         operator_subject = stable_operator_subject()
         store = _store()
         active = _custody(store).ensure_active()
-        applications = _applications()
-        preferences = store.preferences(
-            operator_subject, (item["application"] for item in applications),
-        )
         devices = store.list_devices(operator_subject)
     except Exception as exc:
         return _error(exc)
@@ -229,8 +204,6 @@ async def api_config(request: Request) -> JSONResponse:
             "notifications": True,
             "ios_home_screen_required": True,
         },
-        "applications": applications,
-        "preferences": preferences,
         "devices": devices,
     })
 
@@ -282,56 +255,6 @@ async def api_devices(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "devices": devices})
 
 
-async def api_diagnostics(request: Request) -> JSONResponse:
-    refused = _operator_cookie_only(request)
-    if refused is not None:
-        return refused
-    try:
-        store = _store()
-        diagnostics = WebPushDeliveryStore(
-            store, owner_subject=stable_operator_subject(),
-        ).diagnostics()
-    except StablePersonalIdentityUnavailable as exc:
-        return _error(exc)
-    except WebPushDeliveryError as exc:
-        return JSONResponse(
-            {"ok": False, "error": exc.code}, status_code=503,
-            headers={"Cache-Control": "no-store"},
-        )
-    except Exception:
-        return JSONResponse(
-            {"ok": False, "error": "unavailable"}, status_code=503,
-            headers={"Cache-Control": "no-store"},
-        )
-    return JSONResponse(
-        {"ok": True, "delivery": diagnostics},
-        headers={"Cache-Control": "no-store"},
-    )
-
-
-async def api_preference(request: Request) -> JSONResponse:
-    refused = _operator_cookie_only(request)
-    if refused is not None:
-        return refused
-    try:
-        _same_origin(request)
-        application = request.path_params["application"]
-        if not _registered_application(application):
-            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-        body = await _json_body(request)
-        if set(body) != {"mode"}:
-            raise ValueError("preference body must contain only mode")
-        mode = _store().set_preference(
-            stable_operator_subject(), application, body["mode"],
-        )
-    except Exception as exc:
-        return _error(exc)
-    from tools.dashboard import web_push, web_push_worker
-    web_push.wake_worker()
-    web_push_worker.wake_worker()
-    return JSONResponse({"ok": True, "application": application, "mode": mode})
-
-
 async def api_delete_device(request: Request) -> JSONResponse:
     refused = _operator_cookie_only(request)
     if refused is not None:
@@ -346,9 +269,8 @@ async def api_delete_device(request: Request) -> JSONResponse:
         return _error(exc)
     if not retired:
         return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-    from tools.dashboard import web_push, web_push_worker
+    from tools.dashboard import web_push
     web_push.wake_worker()
-    web_push_worker.wake_worker()
     return JSONResponse({"ok": True, "retired": True})
 
 
@@ -385,9 +307,8 @@ async def api_refresh_device(request: Request) -> JSONResponse:
     except Exception as exc:
         return _error(exc)
     if result is None:
-        from tools.dashboard import web_push, web_push_worker
+        from tools.dashboard import web_push
         web_push.wake_worker()
-        web_push_worker.wake_worker()
         return JSONResponse({"ok": True, "retired": True})
     return JSONResponse({
         "ok": True,
@@ -401,18 +322,12 @@ async def api_refresh_device(request: Request) -> JSONResponse:
 ROUTES = [
     Route("/api/web-push/config", api_config, methods=["GET"]),
     Route("/api/web-push/devices", api_devices, methods=["GET"]),
-    Route("/api/web-push/diagnostics", api_diagnostics, methods=["GET"]),
     Route("/api/web-push/devices/{device_id}", api_put_device, methods=["PUT"]),
     Route("/api/web-push/devices/{device_id}", api_delete_device, methods=["DELETE"]),
     Route(
         "/api/web-push/devices/{device_id}/refresh",
         api_refresh_device,
         methods=["POST"],
-    ),
-    Route(
-        "/api/web-push/preferences/{application}",
-        api_preference,
-        methods=["PATCH"],
     ),
 ]
 

@@ -1,7 +1,7 @@
 """Contract tests for the phase-one Central Attention Settings vocabulary.
 
 The schemas are deliberately data-only. Cross-row immutability, monotonic
-transitions, first-decision-wins, audience resolution, and delivery races are
+transitions, first-decision-wins, and audience resolution are
 trusted-service behavior covered by later beads, not by these validators.
 """
 
@@ -23,44 +23,9 @@ from tools.graph.schemas.registry import (
 
 
 SCHEMAS = {
-    ca.ATTENTION_DELIVERY_SET_ID: "keyed_per_entity",
     ca.APPROVAL_REQUEST_SET_ID: "append_only_log",
     ca.APPROVAL_RESOLUTION_SET_ID: "append_only_log",
 }
-
-
-def delivery_payload(*, state: str = "foreground_wait") -> dict:
-    payload = {
-        "event_id": "event_01j8v7ng5h6ya",
-        "attention_id": "attn_01j8v7ng5h6ya",
-        "source_version": 1,
-        "application_scope": "fleet",
-        "notification_class": "machine_admission",
-        "class_policy_revision": 3,
-        "delivery_class": "approval",
-        "budget_class": "operator_attention",
-        "coalesce_key": "event:event_01j8v7ng5h6ya",
-        "urgency": "high",
-        "privacy_renderer_id": "generic_attention",
-        "route_builder_id": "central_approval",
-        "destination_id": "activity",
-        "source_guard": {
-            "kind": "approval_state",
-            "ref": "approval:appr_01j8v7ng5h6ya",
-            "version": 1,
-        },
-        "created_at": 1_777_000_000.0,
-        "expires_at": 1_777_003_600.0,
-        "state": state,
-        "state_version": 1,
-        "updated_at": 1_777_000_000.0,
-    }
-    if state == "foreground_wait":
-        payload.update(
-            foreground_selected_at=1_777_000_000.0,
-            fallback_due_at=1_777_000_020.0,
-        )
-    return payload
 
 
 def request_payload() -> dict:
@@ -97,7 +62,6 @@ def resolution_payload() -> dict:
 
 
 CANONICAL = {
-    ca.ATTENTION_DELIVERY_SET_ID: delivery_payload,
     ca.APPROVAL_REQUEST_SET_ID: request_payload,
     ca.APPROVAL_RESOLUTION_SET_ID: resolution_payload,
 }
@@ -115,13 +79,16 @@ class TestRegistration:
     def test_all_are_visible_to_package_consumers(self):
         assert set(SCHEMAS) <= set(list_registered_set_ids())
 
+    def test_retired_delivery_latch_schema_is_gone(self):
+        assert not hasattr(ca, "ATTENTION_DELIVERY_SET_ID")
+        assert "dashboard.attention.delivery" not in list_registered_set_ids()
+
     def test_no_machine_execution_lease_schema_exists(self):
         assert "dashboard.approval.execution-lease" not in list_registered_set_ids()
 
     @pytest.mark.parametrize(
         "set_id, key_strategy, absent_payload_field",
         [
-            (ca.ATTENTION_DELIVERY_SET_ID, "delivery_id", "delivery_id"),
             (ca.APPROVAL_REQUEST_SET_ID, "approval_id", "approval_id"),
             (ca.APPROVAL_RESOLUTION_SET_ID, "approval_id", "approval_id"),
         ],
@@ -142,126 +109,11 @@ class TestCanonicalPayloads:
         payload = CANONICAL[set_id]()
         validate_payload(set_id, 1, json.loads(json.dumps(payload)))
 
-    @pytest.mark.parametrize(
-        "state, additions",
-        [
-            ("background_due", {}),
-            (
-                "background_due",
-                {
-                    "foreground_selected_at": 1_777_000_000.0,
-                    "fallback_due_at": 1_777_000_020.0,
-                    "updated_at": 1_777_000_020.0,
-                },
-            ),
-            (
-                "background_released",
-                {
-                    "released_at": 1_777_000_021.0,
-                    "updated_at": 1_777_000_021.0,
-                },
-            ),
-            (
-                "foreground_applied",
-                {
-                    "acknowledged_at": 1_777_000_022.0,
-                    "visibility_proof_epoch": 8,
-                    "ack_epoch": 12,
-                    "updated_at": 1_777_000_022.0,
-                },
-            ),
-            (
-                "foreground_applied",
-                {
-                    "foreground_selected_at": 1_777_000_000.0,
-                    "fallback_due_at": 1_777_000_020.0,
-                    "released_at": 1_777_000_021.0,
-                    "acknowledged_at": 1_777_000_022.0,
-                    "visibility_proof_epoch": 8,
-                    "ack_epoch": 12,
-                    "updated_at": 1_777_000_022.0,
-                },
-            ),
-            (
-                "ineligible",
-                {
-                    "released_at": 1_777_000_021.0,
-                    "cancel_reason": "source_resolved",
-                    "updated_at": 1_777_000_021.0,
-                },
-            ),
-            ("expired", {"cancel_reason": "ttl_expired"}),
-        ],
-    )
-    def test_delivery_accepts_each_durable_envelope(self, state, additions):
-        payload = delivery_payload(state=state)
-        payload.update(additions)
-        validate_payload(ca.ATTENTION_DELIVERY_SET_ID, 1, payload)
-
 
 def _mutate(base, mutation):
     payload = base()
     mutation(payload)
     return payload
-
-
-class TestDeliveryValidation:
-    @pytest.mark.parametrize(
-        "mutation",
-        [
-            lambda p: p.update(recipient="person:someone"),
-            lambda p: p.update(route="/activity"),
-            lambda p: p.update(expires_at=p["created_at"]),
-            lambda p: p.update(updated_at=p["expires_at"] + 1),
-            lambda p: p.update(state_version=0),
-            lambda p: p.update(source_version=-1),
-            lambda p: p.update(state="foreground_applied"),
-            lambda p: p.update(state="background_released"),
-            lambda p: p.update(state="background_due"),
-            lambda p: p.update(fallback_due_at=p["expires_at"] + 1),
-            lambda p: p.update(source_guard={"kind": "approval_state", "route": "/x"}),
-            lambda p: (
-                p.pop("fallback_due_at"),
-                p.update(state="background_due"),
-            ),
-            lambda p: (
-                p.pop("foreground_selected_at"),
-                p.update(state="background_due"),
-            ),
-            lambda p: p.update(
-                state="foreground_applied",
-                acknowledged_at=1_777_000_022.0,
-                visibility_proof_epoch=8,
-                ack_epoch=12,
-            ),
-            lambda p: p.update(
-                state="background_released",
-                released_at=1_777_000_021.0,
-            ),
-            lambda p: p.update(
-                state="background_released",
-                foreground_selected_at=1_777_000_000.0,
-                fallback_due_at=1_777_000_020.0,
-                released_at=1_777_000_019.0,
-                updated_at=1_777_000_020.0,
-            ),
-            lambda p: p.update(
-                state="foreground_applied",
-                released_at=1_777_000_022.0,
-                acknowledged_at=1_777_000_021.0,
-                visibility_proof_epoch=8,
-                ack_epoch=12,
-                updated_at=1_777_000_022.0,
-            ),
-        ],
-    )
-    def test_incoherent_or_unsafe_latch_shapes_are_rejected(self, mutation):
-        with pytest.raises(SchemaValidationError):
-            validate_payload(
-                ca.ATTENTION_DELIVERY_SET_ID,
-                1,
-                _mutate(delivery_payload, mutation),
-            )
 
 
 class TestApprovalValidation:

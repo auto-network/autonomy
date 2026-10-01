@@ -2,7 +2,7 @@
 
 These schemas describe durable records only. The trusted dashboard services
 own cross-row rules such as immutable identity fields, monotonic source/state
-versions, first-decision-wins, audience derivation, and delivery races.
+versions, first-decision-wins, and audience derivation.
 """
 
 from __future__ import annotations
@@ -18,12 +18,10 @@ from .registry import (
     append_only_log,
     field,
     home,
-    keyed_per_entity,
     publication_band,
 )
 
 
-ATTENTION_DELIVERY_SET_ID = "dashboard.attention.delivery"
 APPROVAL_REQUEST_SET_ID = "dashboard.approval.request"
 APPROVAL_RESOLUTION_SET_ID = "dashboard.approval.resolution"
 CENTRAL_ATTENTION_REVISION = 1
@@ -31,14 +29,13 @@ CENTRAL_ATTENTION_REVISION = 1
 
 SYNOPSIS = {
     "summary": (
-        "Personal Settings records for foreground/Web Push delivery latches "
-        "and central approval requests and resolutions."
+        "Personal Settings records for central approval requests and "
+        "resolutions."
     ),
     "nouns": [
         "central attention",
         "approval request",
         "approval resolution",
-        "notification delivery latch",
     ],
     "related_set_ids": [],
 }
@@ -214,242 +211,6 @@ def _bounded_json(
             _fail(cls, f"{name!r} contains non-JSON data")
 
     walk(value, 0)
-
-
-@home("personal")
-@publication_band(min="raw", max="raw")
-@keyed_per_entity(key_strategy="delivery_id")
-class AttentionDeliveryV1(SettingSchema):
-    """Transport-neutral latch for foreground-first attention delivery."""
-
-    set_id = ATTENTION_DELIVERY_SET_ID
-    schema_revision = CENTRAL_ATTENTION_REVISION
-
-    event_id: str = field(required=True, description="Stable registered-source event ID.")
-    attention_id: str = field(
-        required=True,
-        description="Attention projection addressed by this delivery latch.",
-    )
-    source_version: int = field(
-        required=True,
-        description="Exact registered-source version this latch represents.",
-    )
-    application_scope: str = field(
-        required=True,
-        description="Registered application whose policy created the latch.",
-    )
-    notification_class: str = field(
-        required=True,
-        description="Registered notification class frozen for this latch.",
-    )
-    class_policy_revision: int = field(
-        required=True,
-        description="Exact application class-policy revision frozen for delivery.",
-    )
-    delivery_class: str = field(
-        required=True,
-        description="Registered delivery behavior selected by class policy.",
-    )
-    budget_class: str = field(
-        required=True,
-        description="Registered interruption-budget class selected by policy.",
-    )
-    coalesce_key: str = field(
-        required=True,
-        description="Bounded code-derived key for transport-neutral coalescing.",
-    )
-    urgency: str = field(
-        required=True,
-        enum=["very-low", "low", "normal", "high"],
-        description="Frozen delivery urgency selected by class policy.",
-    )
-    privacy_renderer_id: str = field(
-        required=True,
-        description="Registered privacy renderer retained through latch expiry.",
-    )
-    route_builder_id: str = field(
-        required=True,
-        description="Registered route builder retained through latch expiry.",
-    )
-    destination_id: str = field(
-        required=True,
-        description="Registered destination selected by application policy.",
-    )
-    source_guard: dict = field(
-        required=True,
-        description="Closed reference used to recheck source eligibility.",
-    )
-    created_at: float = field(required=True, description="Latch creation timestamp.")
-    expires_at: float = field(required=True, description="Final latch expiry timestamp.")
-    state: str = field(
-        required=True,
-        enum=[
-            "foreground_wait",
-            "background_due",
-            "background_released",
-            "foreground_applied",
-            "ineligible",
-            "expired",
-        ],
-        description="Current transport-neutral delivery-latch state.",
-    )
-    state_version: int = field(
-        required=True,
-        description="Monotonic version of the trusted latch transition.",
-    )
-    updated_at: float = field(
-        required=True,
-        description="Timestamp of the latest trusted latch transition.",
-    )
-    foreground_selected_at: float = field(
-        required=False,
-        default=None,
-        description="When a qualifying visible client was selected.",
-    )
-    fallback_due_at: float = field(
-        required=False,
-        default=None,
-        description="Deadline after which background fallback becomes due.",
-    )
-    acknowledged_at: float = field(
-        required=False,
-        default=None,
-        description="When exact applied-and-rendered foreground acknowledgment arrived.",
-    )
-    visibility_proof_epoch: int = field(
-        required=False,
-        default=None,
-        description="Server-validated visible-client epoch bound to acknowledgment.",
-    )
-    ack_epoch: int = field(
-        required=False,
-        default=None,
-        description="Monotonic client acknowledgment epoch.",
-    )
-    released_at: float = field(
-        required=False,
-        default=None,
-        description="First time a background target crossed its final guard.",
-    )
-    cancel_reason: str | None = field(
-        required=False,
-        default=None,
-        description="Bounded code-owned reason delivery became terminal.",
-    )
-
-    @classmethod
-    def validate(cls, payload: Any) -> None:  # noqa: C901 — state envelopes are intentionally explicit
-        super().validate(payload)
-        if not isinstance(payload, dict):
-            return
-        _text(cls, payload, "event_id", maximum=128)
-        _text(cls, payload, "attention_id", maximum=128)
-        _integer(cls, payload, "source_version")
-        _slug(cls, payload, "application_scope")
-        _slug(cls, payload, "notification_class")
-        _integer(cls, payload, "class_policy_revision", minimum=1)
-        for name in (
-            "delivery_class",
-            "budget_class",
-            "privacy_renderer_id",
-            "route_builder_id",
-            "destination_id",
-        ):
-            _slug(cls, payload, name)
-        _text(cls, payload, "coalesce_key", maximum=256)
-        guard = _closed_object(
-            cls,
-            payload.get("source_guard"),
-            "source_guard",
-            allowed=_SOURCE_GUARD_FIELDS,
-            required=_SOURCE_GUARD_FIELDS,
-        )
-        _slug(cls, guard, "kind")
-        _text(cls, guard, "ref", maximum=256)
-        _integer(cls, guard, "version")
-
-        created = _timestamp(cls, payload, "created_at")
-        expires = _timestamp(cls, payload, "expires_at")
-        updated = _timestamp(cls, payload, "updated_at")
-        if expires <= created:
-            _fail(cls, "expires_at must be after created_at")
-        if not created <= updated <= expires:
-            _fail(cls, "updated_at must fall between created_at and expires_at")
-        _integer(cls, payload, "state_version", minimum=1)
-
-        selected = _optional_timestamp(cls, payload, "foreground_selected_at")
-        fallback = _optional_timestamp(cls, payload, "fallback_due_at")
-        acknowledged = _optional_timestamp(cls, payload, "acknowledged_at")
-        released = _optional_timestamp(cls, payload, "released_at")
-        if (selected is None) != (fallback is None):
-            _fail(
-                cls,
-                "foreground_selected_at and fallback_due_at form one envelope",
-            )
-        if selected is not None and not created <= selected <= expires:
-            _fail(cls, "foreground_selected_at is outside the latch lifetime")
-        if fallback is not None and not created < fallback <= expires:
-            _fail(cls, "fallback_due_at must be after creation and no later than expiry")
-        if selected is not None and fallback is not None and fallback < selected:
-            _fail(cls, "fallback_due_at cannot precede foreground_selected_at")
-        for name, value in (("acknowledged_at", acknowledged), ("released_at", released)):
-            if value is not None and not created <= value <= expires:
-                _fail(cls, f"{name} is outside the latch lifetime")
-        for name, value in (
-            ("foreground_selected_at", selected),
-            ("acknowledged_at", acknowledged),
-            ("released_at", released),
-        ):
-            if value is not None and updated < value:
-                _fail(cls, f"updated_at cannot precede {name}")
-        if fallback is not None and released is not None and released < fallback:
-            _fail(cls, "released_at cannot precede fallback_due_at")
-        if acknowledged is not None and released is not None and released > acknowledged:
-            _fail(cls, "released_at cannot follow acknowledged_at")
-        for name in ("visibility_proof_epoch", "ack_epoch"):
-            if payload.get(name) is not None:
-                _integer(cls, payload, name)
-        _optional_text(cls, payload, "cancel_reason", maximum=160)
-
-        state = payload.get("state")
-        has_ack_proof = all(
-            payload.get(name) is not None
-            for name in ("acknowledged_at", "visibility_proof_epoch", "ack_epoch")
-        )
-        any_ack_proof = any(
-            payload.get(name) is not None
-            for name in ("acknowledged_at", "visibility_proof_epoch", "ack_epoch")
-        )
-        if any_ack_proof and not has_ack_proof:
-            _fail(cls, "acknowledgment timestamp and both epochs form one envelope")
-        if state == "foreground_wait":
-            if selected is None or fallback is None:
-                _fail(cls, "foreground_wait requires selection and fallback deadline")
-            if any_ack_proof or released is not None or payload.get("cancel_reason") is not None:
-                _fail(cls, "foreground_wait cannot carry terminal/release fields")
-        elif state == "background_due":
-            if fallback is not None and updated < fallback:
-                _fail(
-                    cls,
-                    "background_due updated_at cannot precede fallback_due_at",
-                )
-            if any_ack_proof or released is not None or payload.get("cancel_reason") is not None:
-                _fail(cls, "background_due cannot carry ack, release, or cancel fields")
-        elif state == "background_released":
-            if released is None:
-                _fail(cls, "background_released requires released_at")
-            if any_ack_proof or payload.get("cancel_reason") is not None:
-                _fail(cls, "background_released cannot carry ack or cancel fields")
-        elif state == "foreground_applied":
-            if not has_ack_proof:
-                _fail(cls, "foreground_applied requires acknowledged_at and both epochs")
-            if payload.get("cancel_reason") is not None:
-                _fail(cls, "foreground_applied cannot carry cancel_reason")
-        elif state in ("ineligible", "expired"):
-            if not payload.get("cancel_reason"):
-                _fail(cls, f"{state} requires cancel_reason")
-            if any_ack_proof:
-                _fail(cls, f"{state} cannot carry acknowledgment fields")
 
 
 @home("personal")

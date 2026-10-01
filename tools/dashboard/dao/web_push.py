@@ -1,4 +1,4 @@
-"""Durable Web Push device, preference, and VAPID-key substrate.
+"""Durable Web Push device and VAPID-key substrate.
 
 This database is transport state only.  It is not an Activity inbox and it
 never stores approval request or decision bodies.  Browser installations,
@@ -15,12 +15,13 @@ import re
 import secrets
 import sqlite3
 import stat
+import threading
 import time
 import unicodedata
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -42,7 +43,6 @@ LEGACY_KEY_PATH = resolve_store("web_push_vapid")
 SCHEMA_VERSION = 3
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 KEY_ID_RE = re.compile(r"^[a-f0-9]{32}$")
-MODES = frozenset({"off", "generic", "descriptive"})
 DETAIL_LEVELS = frozenset({"generic", "descriptive"})
 KEY_STATES = frozenset({"active", "retiring", "retired"})
 NONTERMINAL_OUTBOX_STATES = (
@@ -53,6 +53,8 @@ NONTERMINAL_OUTBOX_STATES = (
     "retry_wait",
 )
 _TOKEN_DOMAIN = b"autonomy:web-push-device-token:v1\0"
+_INITIALIZED: set[str] = set()
+_INITIALIZE_LOCK = threading.Lock()
 
 
 class WebPushStoreError(RuntimeError):
@@ -172,14 +174,16 @@ CREATE INDEX idx_web_push_subscription_device
     ON web_push_subscriptions(device_id, status);
 """
 
+# Tables of the never-connected delivery-latch engine and its per-application
+# preferences, removed 2026-10-01 (operator: keep the sender that works).
+_RETIRED_TABLES = """
+DROP TABLE IF EXISTS web_push_delivery_attempts;
+DROP TABLE IF EXISTS web_push_delivery_targets;
+DROP TABLE IF EXISTS web_push_delivery_events;
+DROP TABLE IF EXISTS web_push_preferences;
+"""
+
 _SUBSTRATE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS web_push_preferences (
-    operator_subject TEXT NOT NULL,
-    application      TEXT NOT NULL,
-    mode             TEXT NOT NULL CHECK(mode IN ('off','generic','descriptive')),
-    updated_at       REAL NOT NULL,
-    PRIMARY KEY(operator_subject, application)
-);
 CREATE TABLE IF NOT EXISTS web_push_vapid_keys (
     key_id           TEXT PRIMARY KEY,
     public_key       TEXT NOT NULL,
@@ -192,90 +196,6 @@ CREATE TABLE IF NOT EXISTS web_push_vapid_keys (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_web_push_one_active_vapid
     ON web_push_vapid_keys(status) WHERE status='active';
 """
-
-_DELIVERY_SCHEMA = """
-CREATE TABLE IF NOT EXISTS web_push_delivery_events (
-    owner_subject       TEXT NOT NULL,
-    delivery_id         TEXT NOT NULL,
-    event_id            TEXT NOT NULL,
-    attention_id        TEXT NOT NULL,
-    source_version      INTEGER NOT NULL,
-    application_scope   TEXT NOT NULL,
-    notification_class  TEXT NOT NULL,
-    class_policy_revision INTEGER NOT NULL,
-    delivery_class      TEXT NOT NULL,
-    budget_class        TEXT NOT NULL,
-    coalesce_key        TEXT NOT NULL,
-    urgency             TEXT NOT NULL,
-    privacy_renderer_id TEXT NOT NULL,
-    route_builder_id    TEXT NOT NULL,
-    destination_id      TEXT NOT NULL,
-    source_guard_kind   TEXT NOT NULL,
-    source_guard_ref    TEXT NOT NULL,
-    source_guard_version INTEGER NOT NULL,
-    latch_created_at    REAL NOT NULL,
-    latch_expires_at    REAL NOT NULL,
-    latch_state         TEXT NOT NULL,
-    latch_state_version INTEGER NOT NULL,
-    latch_updated_at    REAL NOT NULL,
-    fallback_due_at     REAL,
-    budget_reserved_at  REAL,
-    projected_at        REAL NOT NULL,
-    PRIMARY KEY(owner_subject, delivery_id),
-    UNIQUE(owner_subject, event_id)
-);
-CREATE INDEX IF NOT EXISTS idx_web_push_delivery_event_budget
-    ON web_push_delivery_events(owner_subject,budget_class,budget_reserved_at);
-CREATE INDEX IF NOT EXISTS idx_web_push_delivery_event_coalesce
-    ON web_push_delivery_events(owner_subject,application_scope,coalesce_key,latch_created_at);
-
-CREATE TABLE IF NOT EXISTS web_push_delivery_targets (
-    target_id           TEXT PRIMARY KEY,
-    owner_subject       TEXT NOT NULL,
-    delivery_id         TEXT NOT NULL,
-    event_id            TEXT NOT NULL,
-    subscription_id     TEXT NOT NULL,
-    state               TEXT NOT NULL,
-    available_at        REAL NOT NULL,
-    expires_at          REAL NOT NULL,
-    attempt_count       INTEGER NOT NULL DEFAULT 0,
-    lease_token         TEXT,
-    lease_until         REAL,
-    release_token       TEXT,
-    guard_crossed_at    REAL,
-    accepted_at         REAL,
-    last_status         INTEGER,
-    last_reason         TEXT,
-    created_at          REAL NOT NULL,
-    updated_at          REAL NOT NULL,
-    UNIQUE(owner_subject,delivery_id,subscription_id),
-    FOREIGN KEY(owner_subject,delivery_id)
-        REFERENCES web_push_delivery_events(owner_subject,delivery_id)
-        ON DELETE CASCADE,
-    FOREIGN KEY(subscription_id) REFERENCES web_push_subscriptions(id)
-);
-CREATE INDEX IF NOT EXISTS idx_web_push_delivery_target_due
-    ON web_push_delivery_targets(state,available_at,lease_until);
-CREATE INDEX IF NOT EXISTS idx_web_push_delivery_target_event
-    ON web_push_delivery_targets(owner_subject,delivery_id,event_id,state);
-CREATE INDEX IF NOT EXISTS idx_web_push_delivery_target_subscription
-    ON web_push_delivery_targets(subscription_id,state);
-
-CREATE TABLE IF NOT EXISTS web_push_delivery_attempts (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    target_id           TEXT NOT NULL,
-    release_token       TEXT,
-    attempted_at        REAL NOT NULL,
-    outcome             TEXT NOT NULL,
-    status              INTEGER,
-    reason              TEXT,
-    FOREIGN KEY(target_id) REFERENCES web_push_delivery_targets(target_id)
-        ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_web_push_delivery_attempt_time
-    ON web_push_delivery_attempts(attempted_at);
-"""
-
 
 def _execute_ddl(connection: sqlite3.Connection, script: str) -> None:
     """Execute simple DDL without ``executescript``'s implicit commit.
@@ -292,7 +212,7 @@ def _execute_ddl(connection: sqlite3.Connection, script: str) -> None:
 
 
 class WebPushStore:
-    """SQLite owner for transport subscriptions and preferences."""
+    """SQLite owner for transport subscriptions and VAPID keys."""
 
     def __init__(self, db_path: Path | str | None = None):
         self.db_path = Path(db_path) if db_path is not None else DB_PATH
@@ -306,7 +226,14 @@ class WebPushStore:
         return connection
 
     def connect(self) -> sqlite3.Connection:
-        self.initialize()
+        # The schema is checked once per database per process, not on every
+        # connection: re-running the DDL each time wrote ~71 MB/day of WAL.
+        key = str(self.db_path.resolve())
+        if key not in _INITIALIZED:
+            with _INITIALIZE_LOCK:
+                if key not in _INITIALIZED:
+                    self.initialize()
+                    _INITIALIZED.add(key)
         return self._connect_raw()
 
     def initialize(self) -> None:
@@ -355,7 +282,7 @@ class WebPushStore:
                         "ON web_push_subscriptions(device_id,status);"
                     )
             _execute_ddl(connection, _SUBSTRATE_SCHEMA)
-            _execute_ddl(connection, _DELIVERY_SCHEMA)
+            _execute_ddl(connection, _RETIRED_TABLES)
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             connection.commit()
         except Exception:
@@ -629,17 +556,6 @@ class WebPushStore:
                 f"WHERE installation_id=? AND state IN ({placeholders})",
                 (reason, row["device_id"], *NONTERMINAL_OUTBOX_STATES),
             )
-        if connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='web_push_delivery_targets'"
-        ).fetchone():
-            connection.execute(
-                "UPDATE web_push_delivery_targets SET state='canceled',"
-                "last_reason=?,updated_at=? WHERE subscription_id=? "
-                "AND state IN ('fallback_wait','budget_wait','pending','leased',"
-                "'guard_crossed','retry_wait')",
-                (reason, timestamp, row["id"]),
-            )
 
     def retire(self, operator_subject: str, device_id: str, *, reason: str) -> bool:
         device_id = _device_id(device_id)
@@ -717,56 +633,6 @@ class WebPushStore:
                 }
                 for row in rows
             ]
-        finally:
-            connection.close()
-
-    def preferences(
-        self, operator_subject: str, applications: Iterable[str]
-    ) -> dict[str, str]:
-        names = tuple(applications)
-        connection = self.connect()
-        try:
-            stored = {
-                row["application"]: row["mode"]
-                for row in connection.execute(
-                    "SELECT application,mode FROM web_push_preferences "
-                    "WHERE operator_subject=?", (operator_subject,),
-                ).fetchall()
-            }
-        finally:
-            connection.close()
-        return {name: stored.get(name, "off") for name in names}
-
-    def set_preference(
-        self, operator_subject: str, application: str, mode: str
-    ) -> str:
-        if mode not in MODES:
-            raise WebPushStoreError("invalid_preference_mode")
-        connection = self.connect()
-        try:
-            connection.execute(
-                "INSERT INTO web_push_preferences(operator_subject,application,mode,updated_at) "
-                "VALUES(?,?,?,?) ON CONFLICT(operator_subject,application) DO UPDATE SET "
-                "mode=excluded.mode,updated_at=excluded.updated_at",
-                (operator_subject, application, mode, time.time()),
-            )
-            if mode == "off" and connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='web_push_delivery_targets'"
-            ).fetchone():
-                timestamp = time.time()
-                connection.execute(
-                    "UPDATE web_push_delivery_targets SET state='canceled',"
-                    "last_reason='preference_off',updated_at=? "
-                    "WHERE owner_subject=? AND delivery_id IN ("
-                    "SELECT delivery_id FROM web_push_delivery_events "
-                    "WHERE owner_subject=? AND application_scope=?) "
-                    "AND state IN ('fallback_wait','budget_wait','pending','leased',"
-                    "'guard_crossed','retry_wait')",
-                    (timestamp, operator_subject, operator_subject, application),
-                )
-            connection.commit()
-            return mode
         finally:
             connection.close()
 
@@ -863,8 +729,7 @@ class VapidKeyCustody:
 
     def ensure_active(self) -> VapidKeyRecord:
         self._secure_directory()
-        self.store.initialize()
-        connection = self.store._connect_raw()
+        connection = self.store.connect()
         created_path: Path | None = None
         try:
             connection.execute("BEGIN IMMEDIATE")

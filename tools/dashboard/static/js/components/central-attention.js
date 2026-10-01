@@ -242,28 +242,24 @@
         }
       },
 
-      syncApplications(labels) {
+      syncApplications() {
         const previous = Object.fromEntries(this.apps.map(app => [app.scope, app]));
         const scopes = new Set(Object.keys(this.counts.applications || {}));
         this.items.forEach(item => scopes.add(item.applicationScope));
-        (labels || []).forEach(item => scopes.add(item.application));
         this.apps = Array.from(scopes).sort().map(scope => {
           const meta = APP_META[scope] || {
             label: scope, glyph: scope.slice(0, 2).toUpperCase(), tone: 'violet',
           };
-          const supplied = (labels || []).find(item => item.application === scope) || {};
           const counts = (this.counts.applications || {})[scope] || {};
           const old = previous[scope] || {};
           return {
             scope,
-            label: supplied.label || old.label || meta.label,
+            label: old.label || meta.label,
             glyph: old.glyph || meta.glyph,
             tone: old.tone || meta.tone,
             needs: Number(counts.needs_attention || 0),
             waiting: Number(counts.waiting || 0),
             foreground: 'quiet',
-            pushMode: old.pushMode || 'off',
-            pushBusy: false,
           };
         });
       },
@@ -592,7 +588,6 @@
       },
 
       async refreshPush() {
-        let stateFailure = null;
         try {
           if (!window.AutonomyWebPush) {
             this.pushState = 'unsupported';
@@ -603,20 +598,8 @@
             this.pushLabel = state.label;
           }
         } catch (error) {
-          stateFailure = error;
           this.pushState = 'error';
           this.pushLabel = error.message || 'Phone alerts are temporarily unavailable.';
-        }
-        try {
-          const config = await jsonRequest('/api/web-push/config');
-          this.syncApplications(config.applications || []);
-          const preferences = config.preferences || {};
-          this.apps.forEach(app => { app.pushMode = preferences[app.scope] || 'off'; });
-        } catch (error) {
-          if (!stateFailure) {
-            this.pushState = 'error';
-            this.pushLabel = error.message || 'Phone alerts are temporarily unavailable.';
-          }
         }
       },
 
@@ -635,24 +618,16 @@
         }
       },
 
-      async setPushPreference(app, event) {
-        const requested = event.target.value;
-        const previous = app.pushMode;
-        app.pushMode = requested;
-        app.pushBusy = true;
+      async disablePush() {
+        if (!window.AutonomyWebPush || this.pushBusy) return;
+        this.pushBusy = true;
         try {
-          const payload = await jsonRequest('/api/web-push/preferences/' +
-            encodeURIComponent(app.scope), {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode: requested }),
-          });
-          app.pushMode = payload.mode;
+          await window.AutonomyWebPush.disable();
+          await this.refreshPush();
         } catch (error) {
-          app.pushMode = previous;
-          this.pushLabel = error.message || 'That phone-alert preference was not saved.';
+          this.pushLabel = error.message || 'Phone alerts could not be turned off.';
         } finally {
-          app.pushBusy = false;
+          this.pushBusy = false;
         }
       },
     };

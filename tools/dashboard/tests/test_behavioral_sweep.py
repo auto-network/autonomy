@@ -15249,14 +15249,6 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
             calls.push({kind: 'decision', body: JSON.parse(options.body || '{}')});
             return reply({resolution: {outcome: JSON.parse(options.body).outcome, resolved_at: now}});
         }
-        if (url.pathname === '/api/web-push/config') {
-            return reply({applications: [], preferences: {fleet: 'generic'}});
-        }
-        if (url.pathname.startsWith('/api/web-push/preferences/')) {
-            const body = JSON.parse(options.body || '{}');
-            calls.push({kind: 'preference', mode: body.mode});
-            return reply({mode: body.mode});
-        }
         return originalFetch(input, options);
     };
 
@@ -15375,10 +15367,11 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
         data.badgeCount = 6;
         data.settingsOpen = true; await tick();
         const settings = document.querySelector('[data-testid="central-attention-settings"]');
-        result.settings_is_production_copy = settings?.textContent.includes('How applications can reach you') &&
-            settings.textContent.includes('On this phone');
-        result.settings_has_phone_modes = Array.from(settings?.querySelectorAll('option') || [])
-            .some(option => option.textContent.includes('Generic alert'));
+        result.settings_is_production_copy = settings?.textContent.includes('Phone alerts') &&
+            !settings.textContent.includes('On this phone');
+        // One switch: no per-application mode menus, just on or off.
+        result.settings_is_one_switch = !settings?.querySelector('select') &&
+            Boolean(settings?.querySelector('[data-testid="central-attention-push"] button'));
         result.no_console_errors = errors.length === 0;
         return JSON.stringify(result);
     } catch (error) {
@@ -15525,7 +15518,7 @@ class TestCentralAttentionSurface:
         assert c.get("header_attention_after_search"), c
         assert c.get("tray_visible") and c.get("tray_does_not_force_full"), c
         assert c.get("desktop_center_visible"), c
-        assert c.get("settings_is_production_copy") and c.get("settings_has_phone_modes"), c
+        assert c.get("settings_is_production_copy") and c.get("settings_is_one_switch"), c
 
     def test_honest_counts_filters_and_messages(self):
         c = self.desktop

@@ -60,7 +60,7 @@ def _verify_cookie(value):
 
 def _app() -> Starlette:
     return Starlette(
-        routes=web_push_routes.ROUTES,
+        routes=[*web_push_routes.ROUTES, *web_push.ROUTES],
         middleware=[Middleware(
             api_auth.ApiIdentityMiddleware,
             authenticate_bearer=_authenticate_bearer,
@@ -125,17 +125,23 @@ class TestWebPushSubscriptionRoutes:
             "/api/web-push/config", headers={"Authorization": "Bearer local"},
         ).status_code == 403
 
-    def test_config_lists_closed_app_registry_with_off_defaults(self, client):
+    def test_config_carries_keys_and_devices_but_no_per_app_preferences(self, client):
         browser, _db = client
         config = _config(browser)
         assert config["application_server_key"] == config["vapid"]["public_key"]
         assert config["vapid_key_id"] == config["vapid"]["key_id"]
-        assert {item["application"] for item in config["applications"]} == {
-            "worktrees", "jira", "links", "sessions", "mission_control",
-            "vault", "relay", "fleet", "dropbox", "mailbox",
-        }
-        assert set(config["preferences"].values()) == {"off"}
+        assert "applications" not in config
+        assert "preferences" not in config
         assert "operator_subject" not in json.dumps(config)
+
+    def test_retired_v2_routes_are_gone(self, client):
+        browser, _db = client
+        assert browser.get("/api/web-push/diagnostics").status_code == 404
+        assert browser.patch(
+            "/api/web-push/preferences/fleet",
+            headers={"Origin": "https://dashboard.test"},
+            json={"mode": "generic"},
+        ).status_code in (404, 405)
 
     def test_enrollment_derives_owner_and_never_persists_cookie_or_body_identity(self, client):
         browser, db = client
@@ -222,44 +228,6 @@ class TestWebPushSubscriptionRoutes:
             assert forbidden not in wire
         assert response.json()["devices"][0]["device_label"] == "Jeremy's iPhone"
 
-    def test_delivery_diagnostics_are_operator_only_aggregate_and_no_store(self, client):
-        browser, _db = client
-        response = browser.get("/api/web-push/diagnostics")
-        assert response.status_code == 200
-        assert response.headers["cache-control"] == "no-store"
-        assert response.json()["delivery"] == {
-            "states": {},
-            "oldest_due_age_seconds": None,
-            "attempts_24h": {},
-            "budget_reservations_1h": 0,
-        }
-        assert ROOT not in response.text
-        browser.cookies.clear()
-        assert browser.get("/api/web-push/diagnostics").status_code == 401
-        assert browser.get(
-            "/api/web-push/diagnostics", headers={"Authorization": "Bearer org"},
-        ).status_code == 403
-
-    def test_preference_registry_and_explicit_modes(self, client):
-        browser, _db = client
-        changed = browser.patch(
-            "/api/web-push/preferences/fleet",
-            headers={"Origin": "https://dashboard.test"},
-            json={"mode": "generic"},
-        )
-        assert changed.status_code == 200
-        assert _config(browser)["preferences"]["fleet"] == "generic"
-        assert browser.patch(
-            "/api/web-push/preferences/unknown",
-            headers={"Origin": "https://dashboard.test"},
-            json={"mode": "generic"},
-        ).status_code == 404
-        assert browser.patch(
-            "/api/web-push/preferences/fleet",
-            headers={"Origin": "https://dashboard.test"},
-            json={"mode": "urgent"},
-        ).status_code == 422
-
     def test_background_refresh_rotates_token_and_replay_loses(self, client):
         browser, _db = client
         enrolled = _enroll(browser).json()
@@ -305,6 +273,58 @@ class TestWebPushSubscriptionRoutes:
             "/api/web-push/devices/device_1234567890",
             headers={"Origin": "https://dashboard.test"},
         ).status_code == 404
+
+    def test_test_alert_route_has_the_device_routes_auth(self, client):
+        browser, _db = client
+        assert _enroll(browser).status_code == 200
+        origin = {"Origin": "https://dashboard.test"}
+        queued = browser.post("/api/web-push/test", headers=origin)
+        assert queued.status_code == 200, queued.text
+        assert queued.json()["queued_installations"] == 1
+        # Same-origin is proved by the Origin header, not assumed without one.
+        assert browser.post("/api/web-push/test").status_code == 422
+        assert browser.post(
+            "/api/web-push/test", headers={"Origin": "https://evil.test"},
+        ).status_code == 422
+        browser.cookies.clear()
+        assert browser.post("/api/web-push/test", headers=origin).status_code == 401
+        for bearer in ("Bearer org", "Bearer local"):
+            assert browser.post(
+                "/api/web-push/test", headers={**origin, "Authorization": bearer},
+            ).status_code == 403
+
+    def test_ack_route_has_the_device_routes_auth_and_owner(self, client):
+        browser, db = client
+        assert _enroll(browser).status_code == 200
+        # Acks and sends bind to the same subject the device routes enroll.
+        assert web_push._stable_owner_id() == web_push_routes.stable_operator_subject()
+        assert web_push.register_approval_pending_sync("appr_1", "commit_sign") == 1
+        url = "/api/web-push/attention/appr_1/ack"
+        body = {"event_version": 1, "applied": True}
+        origin = {"Origin": "https://dashboard.test"}
+        assert browser.post(url, json=body).status_code == 422
+        browser.cookies.clear()
+        assert browser.post(url, json=body, headers=origin).status_code == 401
+        for bearer in ("Bearer org", "Bearer local"):
+            assert browser.post(
+                url, json=body, headers={**origin, "Authorization": bearer},
+            ).status_code == 403
+
+        def acknowledged():
+            connection = sqlite3.connect(db)
+            try:
+                return connection.execute(
+                    "SELECT acknowledged_at FROM web_push_attention_events"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+
+        assert acknowledged() is None
+        browser.cookies.set(COOKIE, "valid")
+        response = browser.post(url, json=body, headers=origin)
+        assert response.status_code == 200, response.text
+        assert response.json()["acknowledged"] is True
+        assert acknowledged() is not None
 
     def test_missing_personal_identity_is_bounded_409(self, client, monkeypatch):
         browser, _db = client

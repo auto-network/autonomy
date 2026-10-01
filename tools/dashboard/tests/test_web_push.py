@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -14,7 +15,9 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from tools.dashboard import web_push
+from tools.dashboard import web_push_routes
 from tools.dashboard import web_push_sender
+from tools.dashboard.dao import web_push as web_push_dao
 from tools.dashboard.dao import approval_requests
 
 
@@ -47,7 +50,7 @@ def transport(tmp_path, monkeypatch):
     monkeypatch.setattr(web_push, "VAPID_DIR", tmp_path / "web-push-keys")
     web_push._vapid.clear()
     monkeypatch.setattr(web_push, "_stable_owner_id", lambda: "a" * 64)
-    monkeypatch.setattr(web_push, "_operator_only", lambda _request: None)
+    monkeypatch.setattr(web_push_routes, "_operator_cookie_only", lambda _request: None)
     monkeypatch.setattr(approval_requests, "DB_PATH", tmp_path / "approvals.db")
     web_push.init_db()
     yield db_path
@@ -58,12 +61,19 @@ def _client() -> TestClient:
 
 
 def _enroll(*, owner="a" * 64, installation="install_1234567890", token="one"):
+    """Enroll a device the way the live device route does: through the store."""
     subscription = web_push._validate_subscription(_subscription(token=token))
-    web_push._upsert_subscription(
-        owner_id=owner,
-        origin="https://dashboard.test",
-        installation_id=installation,
-        subscription=subscription,
+    store = web_push_dao.WebPushStore(web_push.DB_PATH)
+    key = web_push_dao.VapidKeyCustody(
+        store, key_dir=web_push.VAPID_DIR, legacy_key_path=web_push.VAPID_PATH,
+    ).ensure_active()
+    store.enroll(
+        operator_subject=owner, device_id=installation,
+        endpoint=subscription["endpoint"],
+        endpoint_hash=hashlib.sha256(subscription["endpoint"].encode()).hexdigest(),
+        endpoint_origin="https://web.push.apple.com", vapid_subject="https://dashboard.test",
+        p256dh=subscription["keys"]["p256dh"], auth_secret=subscription["keys"]["auth"],
+        vapid_key_id=key.key_id, expiration_time=subscription.get("expiration_time"),
     )
 
 
@@ -115,54 +125,6 @@ def test_worker_sender_uses_claimed_subscription_key_and_bounded_headers(monkeyp
     assert captured["urgency"] == "normal"
     assert len(captured["topic"]) == 32
     assert json.loads(captured["payload"])["class"] == "approval_pending"
-
-
-def test_enrollment_binds_to_server_owner_and_state(transport):
-    response = _client().post(
-        "/api/web-push/subscriptions",
-        headers={"Origin": "https://dashboard.test"},
-        json={
-            "installation_id": "install_1234567890",
-            "subscription": _subscription(),
-        },
-    )
-    assert response.status_code == 200
-    state = _client().get(
-        "/api/web-push/state?installation_id=install_1234567890"
-    ).json()
-    assert state["active_installations"] == 1
-    assert state["this_installation"]["status"] == "active"
-
-    connection = sqlite3.connect(transport)
-    try:
-        row = connection.execute(
-            "SELECT operator_subject,vapid_subject FROM web_push_subscriptions"
-        ).fetchone()
-    finally:
-        connection.close()
-    assert row == ("a" * 64, "https://dashboard.test")
-
-
-def test_enrollment_refuses_body_identity_and_cross_owner_endpoint(transport):
-    bad = _client().post(
-        "/api/web-push/subscriptions",
-        headers={"Origin": "https://dashboard.test"},
-        json={
-            "installation_id": "install_1234567890",
-            "subscription": _subscription(),
-            "owner_id": "attacker",
-        },
-    )
-    assert bad.status_code == 422
-
-    _enroll(owner="a" * 64)
-    with pytest.raises(PermissionError, match="another operator"):
-        web_push._upsert_subscription(
-            owner_id="b" * 64,
-            origin="https://dashboard.test",
-            installation_id="install_abcdefghij",
-            subscription=web_push._validate_subscription(_subscription()),
-        )
 
 
 def test_foreground_applied_ack_cancels_every_unsent_device(transport):
@@ -314,7 +276,8 @@ def test_worker_is_generic_visible_and_click_route_is_bounded():
     assert "Autonomy needs your attention" in script
     assert "notificationclose" in script
     assert "addEventListener('notificationclose'" not in script
-    assert "url.pathname !== '/activity'" in script
+    assert "const NOTIFICATION_ROUTE = '/activity';" in script
+    assert "REGISTERED_CLASSES" not in script
     assert "addEventListener('fetch'" not in script
 
 
@@ -337,3 +300,100 @@ def test_main_activity_exposes_direct_gesture_controls_and_render_ack():
     central = (DASHBOARD / "static" / "js" / "components" / "central-attention.js").read_text()
     assert "focus === 'approval' && id" in central
     assert "acknowledgeApproval?.(item.id)" in central
+
+
+def test_worker_sleeps_until_the_grace_deadline_not_a_fixed_poll(transport):
+    assert web_push._next_due_delay() is None  # nothing queued: no timer
+    _enroll()
+    web_push._register_attention(
+        event_id="approval:due", event_version=1,
+        application="approvals", attention_class="approval_pending",
+        route="/activity", coalesce_key="approval:due",
+        delivery_class="normal", budget_class="operator_approval",
+        grace_seconds=20,
+    )
+    delay = web_push._next_due_delay()
+    assert delay is not None and 19 < delay <= 20
+    web_push._ack_attention("approval:due", 1, "a" * 64)
+    assert web_push._next_due_delay() is None  # acknowledged rows never wake it
+
+
+def _run_worker(monkeypatch, delays, on_wait):
+    """Drive _worker_loop with no sendable rows, recording each wait timeout."""
+    import asyncio
+
+    waits: list[float] = []
+    remaining = iter(delays)
+
+    async def scenario():
+        monkeypatch.setattr(web_push, "_claim_due", lambda: None)
+        monkeypatch.setattr(web_push, "_cleanup", lambda: None)
+        monkeypatch.setattr(web_push, "_next_due_delay", lambda: next(remaining))
+        real_wait_for = asyncio.wait_for
+
+        async def recording_wait_for(awaitable, timeout):
+            waits.append(timeout)
+            on_wait(len(waits))
+            return await real_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(web_push.asyncio, "wait_for", recording_wait_for)
+        web_push._worker_wake = asyncio.Event()
+        web_push._worker_stop = asyncio.Event()
+        web_push._worker_loop_ref = asyncio.get_running_loop()
+        try:
+            await real_wait_for(web_push._worker_loop(), timeout=5)
+        finally:
+            web_push._worker_wake = web_push._worker_stop = None
+            web_push._worker_loop_ref = None
+
+    asyncio.run(scenario())
+    return waits
+
+
+def _stop_after(count):
+    def on_wait(seen):
+        if seen == count:
+            web_push._worker_stop.set()
+        web_push.wake_worker()  # a producer arrives: the wait returns at once
+    return on_wait
+
+
+def test_worker_waits_exactly_until_the_next_due_row(transport, monkeypatch):
+    waits = _run_worker(monkeypatch, [25.0, None, 7200.0], _stop_after(3))
+    # Due in 25 s -> 25 s; nothing due -> only the hourly cleanup; never 5 s.
+    assert waits == [25.0, web_push._IDLE_SECONDS, web_push._IDLE_SECONDS]
+
+
+def test_due_but_unclaimable_waits_a_second_instead_of_spinning(transport, monkeypatch):
+    waits = _run_worker(monkeypatch, [-3.0], _stop_after(1))
+    assert waits == [web_push._MIN_WAIT_SECONDS]
+
+
+def test_schema_is_checked_once_per_process_not_per_connection(tmp_path, monkeypatch):
+    calls: list[str] = []
+    real = web_push_dao.WebPushStore.initialize
+
+    def counting(self):
+        calls.append(str(self.db_path))
+        return real(self)
+
+    monkeypatch.setattr(web_push_dao.WebPushStore, "initialize", counting)
+    monkeypatch.setattr(web_push, "_schema_ready", set())
+    monkeypatch.setattr(web_push_dao, "_INITIALIZED", set())
+    db_path = tmp_path / "once.db"
+    for _ in range(5):
+        web_push._conn(db_path).close()
+    store = web_push_dao.WebPushStore(db_path)
+    for _ in range(5):
+        store.connect().close()
+    assert calls == [str(db_path)]
+    connection = sqlite3.connect(db_path)
+    try:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+    finally:
+        connection.close()
+    assert {"web_push_outbox", "web_push_subscriptions"} <= tables
+    assert not {name for name in tables if name.startswith("web_push_delivery_")}
+    assert "web_push_preferences" not in tables
