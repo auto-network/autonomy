@@ -43,10 +43,41 @@ def _ws(
     )
 
 
+class _ApprovedScope:
+    """Stand in for the identity middleware, which these routes depend on.
+
+    ``X-Graph-Org`` is an INPUT to that middleware, never authority on its
+    own: it computes the effective organization (a bearer's org wins over a
+    conflicting header; a non-org-bound caller selects with the header) and
+    stamps it into request state, and
+    ``api_auth.organization_scope_from_request`` reads only that. Handlers are
+    forbidden from re-parsing headers, which is the plugin spoof 965225e5
+    closed.
+
+    A bare app has no middleware, so the approved scope was never set and
+    every caller looked unscoped — which is why the two filtering tests here
+    saw no filtering. This mimics the middleware's one relevant decision for a
+    caller with no bearer, so the routes are exercised against an approved
+    scope rather than against a raw header.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers") or ())
+            selected = headers.get(b"x-graph-org")
+            scope.setdefault("state", {})["api_organization"] = (
+                selected.decode("latin-1") if selected else None
+            )
+        await self.app(scope, receive, send)
+
+
 def _client() -> TestClient:
     """Mount the plugin's Routes on a bare Starlette app for testing."""
     app = Starlette(routes=primers_api.routes)
-    return TestClient(app)
+    return TestClient(_ApprovedScope(app))
 
 
 # ── Route 1: list workspaces ─────────────────────────────────────────────
