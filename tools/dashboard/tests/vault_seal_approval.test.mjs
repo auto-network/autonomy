@@ -114,3 +114,13 @@ test('linkifyInto keeps punctuation around a link as text, and a bare scheme sta
     [['https://x.test/p','https://x.test/p'],['https://y.test/q','https://y.test/q']]);
   assert.equal(el.textContent,'a https://x.test/p, then (https://y.test/q) and https://');
 });
+
+test('a link whose text could disguise its destination stays plain text',async()=>{
+  const {linkifyInto}=await import('../static/js/components/approval-experiment.js');
+  const el=document.createElement('p');
+  const text='lookalike https://gіthub.com/settings/tokens, userinfo https://github.com@evil.test/x, '+
+    'real https://github.com/settings/tokens';
+  linkifyInto(el,text);
+  assert.deepEqual([...el.querySelectorAll('a')].map(a=>a.href),['https://github.com/settings/tokens']);
+  assert.equal(el.textContent,text);
+});
