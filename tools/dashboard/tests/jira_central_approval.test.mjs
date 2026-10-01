@@ -35,8 +35,8 @@ const states = [
    'Change issue status?', 'Review the change before continuing.', 'Subject', 'PLAT-42', 'New statusIn review', null, null,
    ['Updating issue…', 'Issue updated', 'PLAT-42 was moved to In review.']],
   [{op: 'create', target: 'PLAT', project: 'PLAT', issue_type: 'Task', summary: 'Review the approval library'},
-   'Create this issue?', 'Review the change before continuing.', 'Project', 'PLAT', 'Issue typeTask', 'Issue summary', 'Review the approval library',
-   ['Creating issue…', 'Issue created', 'The issue was created in PLAT.']],
+   'Create Jira ticket?', '', '', '', 'ProjectPLATSummaryReview the approval libraryIssue typeTask', null, null,
+   ['Creating ticket…', 'Ticket created', 'The ticket was created in PLAT.']],
   [{op: 'set_field', target: 'PLAT-42', field: 'Summary', content: {complete: true, lines: ['Review approval library']}},
    'Update this issue?', 'Review the change before continuing.', '', 'PLAT-42', 'FieldSummaryNew valueReview approval library', null, null,
    ['Updating issue…', 'Issue updated', 'The summary of PLAT-42 was updated.']],
@@ -97,8 +97,19 @@ test('a create review shows the whole ticket: summary, type, every field and the
       {label: 'labels', value: '["approvals", "design"]'}],
     content: {complete: true, lines: ['Line one', 'Line two']},
   });
-  assert.deepEqual(review.facts, [['Summary', 'Review the library'], ['Issue type', 'Task'],
+  assert.deepEqual(review.facts, [['Project', 'PLAT'], ['Summary', 'Review the library'], ['Issue type', 'Task'],
     ['Priority', 'High'], ['Labels', 'approvals, design']]);
+  assert.equal(review.intro, '');
+  assert.equal(review.target, undefined);
   assert.equal(review.reviewLabel, 'Description');
   assert.equal(review.reviewText, 'Line one\nLine two');
+  assert.equal(review.reviewFormat, 'markdown');
+});
+
+test('the description comes after the table and before the requester', async () => {
+  await openJiraCentralApproval(item({op: 'create', target: 'PLAT', project: 'PLAT', issue_type: 'Task',
+    summary: 'S', content: {complete: true, lines: ['Body']}}));
+  const order = [...q('#review').children].map(el => el.id || el.className);
+  assert.ok(order.indexOf('facts') < order.indexOf('request-detail'));
+  assert.ok(order.indexOf('request-detail') < order.indexOf('requester-link'));
 });

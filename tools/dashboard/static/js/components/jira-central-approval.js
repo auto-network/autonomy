@@ -54,16 +54,14 @@ export function jiraReview(r) {
         facts: [['New status', r.to_status || r.transition || '']]},
         result: {working: 'Updating issue…', success: 'Issue updated', copy: `${key} was moved to ${r.to_status || r.transition || ''}.`}};
     case 'create': {
-      // The whole ticket: its summary, type and every other field, and its
-      // description in full (the operator asked to read the ticket first).
+      // The ticket as it will be created: one table of its fields, then its
+      // description rendered from the Markdown the agent wrote. No subtitle.
       const description = text(r);
-      const review = description
-        ? {facts: [['Summary', r.summary || ''], ['Issue type', r.issue_type || ''], ...createFacts(r)],
-          reviewLabel: 'Description', reviewText: description}
-        : {facts: [['Issue type', r.issue_type || ''], ...createFacts(r)],
-          reviewLabel: 'Issue summary', reviewText: r.summary || ''};
-      return {review: {title: 'Create this issue', target: {type: 'Project', name: r.project || key}, ...review},
-        result: {working: 'Creating issue…', success: 'Issue created', copy: `The issue was created in ${r.project || key}.`}};
+      return {review: {title: 'Create Jira ticket', intro: '',
+        facts: [['Project', r.project || key], ['Summary', r.summary || ''],
+          ['Issue type', r.issue_type || ''], ...createFacts(r)],
+        ...(description ? {reviewLabel: 'Description', reviewText: description, reviewFormat: 'markdown'} : {})},
+        result: {working: 'Creating ticket…', success: 'Ticket created', copy: `The ticket was created in ${r.project || key}.`}};
     }
     case 'set_field':
       return {review: {title: 'Update this issue', target: {name: key},
@@ -120,7 +118,7 @@ export async function openJiraCentralApproval(item, {onResolved = () => {}, onCl
   }
   const {review, result} = jiraReview(shown);
   // The design's wording where a state has no intro of its own.
-  review.intro = review.intro || 'Review the change before continuing.';
+  review.intro = review.intro ?? 'Review the change before continuing.';
 
   async function decide(outcome) {
     const response = await readJson(itemUrl + '/approval-decision', {
