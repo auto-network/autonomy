@@ -19,7 +19,16 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
-SUITES = sorted(HERE.glob("*.test.mjs"))
+# Older suites use the ``test_*.js`` name and plugin suites live beside their
+# plugin; both were missed by the ``*.test.mjs`` glob and never ran. The two
+# ceremony suites are named because their siblings take fixture arguments
+# from dedicated Python wrappers and cannot run bare.
+SUITES = sorted(
+    [*HERE.glob("*.test.mjs"), *HERE.glob("test_*.js")]
+) + sorted(REPO_ROOT.glob("tools/dashboard/plugins/*/tests/test_*.js")) + [
+    HERE.parent / "static/js/ceremony/tests/factor-policy.test.mjs",
+    HERE.parent / "static/js/ceremony/tests/organization.test.mjs",
+]
 
 
 def test_the_glob_finds_the_suites():
@@ -27,7 +36,7 @@ def test_the_glob_finds_the_suites():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-@pytest.mark.parametrize("suite", SUITES, ids=[p.name for p in SUITES])
+@pytest.mark.parametrize("suite", SUITES, ids=[p.name if p.parent == HERE else str(p.relative_to(REPO_ROOT)) for p in SUITES])
 def test_node_suite_passes(suite: Path):
     proc = subprocess.run(
         ["node", "--test", str(suite)],

@@ -1,8 +1,8 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
-# All three suites run by default. tools/graph/tests and agents/tests were
-# outside the default sweep for months and silently accumulated drift
+# Every suite runs by default; a new test directory belongs here the day it
+# lands. tools/graph/tests and agents/tests were outside the default sweep for months and silently accumulated drift
 # (typegen artifacts, schema synopses, launcher call-capture assumptions,
 # primer template changes) that ambushed whichever session ran them next.
-testpaths = ["tools/dashboard/tests", "tools/graph/tests", "tools/agent_test/tests", "agents/tests", "tools/network/idkit/tests", "tools/network/registry/tests", "tools/network/relaykit/tests", "tools/network/swarmkit/tests", "tools/init/tests", "tools/connectors/tests", "tools/browser_broker/tests", "tests/gates"]
+testpaths = ["tools/dashboard/tests", "tools/dashboard/plugins", "tools/dashboard/dao", "tools/dashboard/test_mcp_relay_routes.py", "tools/dashboard/static/js/ceremony/tests/test_node_signon.py", "tools/graph/tests", "tools/agent_test/tests", "agents/tests", "agents/capabilities/github/tests", "tools/network", "tools/init/tests", "tools/connectors/tests", "tools/browser_broker/tests", "tools/vault/tests", "tools/mcp_relay", "tools/shortcuts/tests", "tools/tests", "deploy/tests", "tests/gates"]
 addopts = "-n 8 --dist loadfile"

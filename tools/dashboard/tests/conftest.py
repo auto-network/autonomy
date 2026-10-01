@@ -1,5 +1,4 @@
 collect_ignore = [
-    "test_agent_tool_calls.py",  # broken import: SessionState removed from session_monitor
     # Manual-run mock-server bootstrap, not a test module. Its import
     # PERMANENTLY patches SessionMonitor._check_tmux for the worker
     # process, corrupting any module collected after it (seen as
