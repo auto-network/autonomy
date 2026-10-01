@@ -156,7 +156,10 @@ class _VaultLinkIssue:
         self.looked_in = "the operator's audited vault (autonomy.vault.audited)"
         self.severity = severity
         self.frame = "settings-store"
-        self.remediation_id = "workspace.env.credential.v1"
+        # Sealing fixes an absent entry; when the store could not be read the
+        # entry may already be sealed, so that finding offers no action.
+        self.remediation_id = ("workspace.env.credential.v1"
+                               if kind == "missing_vault_credential" else "")
         self.remediation_params = {}
 
 

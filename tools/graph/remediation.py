@@ -180,7 +180,10 @@ _spec(
     "manual",
 )
 _spec(
-    "workspace.env.credential.v1", ("missing_vault_credential", "unreadable_vault"),
+    # Seal a credential. Only for an ABSENT entry: when the vault store could
+    # not be read (unreadable_vault) the entry may already be sealed, so that
+    # finding carries no remediation rather than offer the wrong action.
+    "workspace.env.credential.v1", ("missing_vault_credential",),
     "vault_credential", "Provision workspace credential",
     "Provision the declared credential through the browser-only vault ceremony.",
     "operator_vault",

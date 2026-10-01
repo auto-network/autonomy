@@ -122,7 +122,9 @@ def test_an_unreadable_store_is_unreadable_vault_not_missing():
     assert finding.kind == "unreadable_vault"
     assert finding.subject == "anchore:docker-config"
     assert "database is locked" in finding.detail
-    assert finding.remediation_id == "workspace.env.credential.v1"
+    # No "seal it" offered: the entry may already be sealed.
+    assert (finding.remediation_id, finding.remediation_params) == ("", {})
     from tools.graph.remediation import get_remediation
 
-    assert "unreadable_vault" in get_remediation(finding.remediation_id).supported_finding_kinds
+    assert "unreadable_vault" not in get_remediation(
+        "workspace.env.credential.v1").supported_finding_kinds
