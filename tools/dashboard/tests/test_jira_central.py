@@ -188,6 +188,9 @@ def test_an_org_session_cannot_name_another_org_and_a_local_session_must_name_on
     {"op": "comment", "key": "ENT-1", "body_markdown": "  "},
     {"op": "comment", "key": "ENT-1", "body_markdown": "x", "audience": "sessions"},
     {"op": "create", "fields": {"summary": "no project"}},
+    # A description the operator could not read as text is never posted unseen.
+    {"op": "create", "fields": {"project": {"key": "ENT"}, "summary": "s",
+                                "description": {"type": "doc", "version": 1, "content": []}}},
     {"op": "attach", "key": "ENT-1", "filename": "a", "mime_type": "text/plain",
      "content_b64": "not base64!"},
     {"op": "set_field", "key": "ENT-1", "field_id": "a", "field_name": "b",

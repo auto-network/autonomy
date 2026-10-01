@@ -301,7 +301,11 @@ def plan_write(body: Mapping[str, Any]) -> tuple[dict, dict, bytes | None, str |
             if name != "description":
                 facts.append(_fact(name, json.dumps(value) if not isinstance(value, str) else value))
         description = create.get("description")
-        text = description if isinstance(description, str) else None
+        if description is not None and not isinstance(description, str):
+            # The operator reviews the description as text; one in any other
+            # form would be posted without being seen.
+            raise ValueError("fields.description is Markdown text")
+        text = description
         content = json.dumps(create, sort_keys=True).encode("utf-8")
     elif op == "attach":
         only("key", "filename", "mime_type", "content_b64", optional=("size",))

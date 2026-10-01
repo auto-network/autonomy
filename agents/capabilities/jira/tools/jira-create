@@ -4,7 +4,8 @@
 # payload.json = the Jira fields object, e.g.:
 #   {"fields": {"project": {"key": "PROJ"}, "issuetype": {"name": "Bug"},
 #               "summary": "...", "description": "markdown is fine here", ...}}
-# A plain-string description is converted to ADF host-side. Use
+# The description must be Markdown text (the operator reviews it rendered;
+# any other form is refused); it is converted to ADF host-side. Use
 # jira-createmeta for valid components/versions/priorities/severity.
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"

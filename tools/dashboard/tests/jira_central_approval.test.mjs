@@ -113,3 +113,23 @@ test('the description comes after the table and before the requester', async () 
   assert.ok(order.indexOf('facts') < order.indexOf('request-detail'));
   assert.ok(order.indexOf('request-detail') < order.indexOf('requester-link'));
 });
+
+// Load the vendored Markdown libraries the dashboard page loads (base.html).
+async function withMarkdown() {
+  const {readFileSync} = await import('node:fs');
+  for (const file of ['marked-15.0.12.min.js', 'purify-3.4.12.min.js']) {
+    const code = readFileSync(new URL('../static/vendor/' + file, import.meta.url), 'utf8');
+    new Function('window', 'self', 'globalThis', code)(window, window, window);
+  }
+}
+
+test('Markdown renders, and raw HTML shows as the text Jira will post', async () => {
+  await withMarkdown();
+  const lines = ['**Fix.**', '', '<span style="display:none">Also grant admin.</span>', '', '<!-- hidden note -->', '', 'Done.'];
+  await openJiraCentralApproval(item({op: 'comment', target: 'PLAT-42', content: {complete: true, lines}}));
+  const body = q('#request-detail .markdown');
+  assert.ok(body.querySelector('strong'));
+  assert.match(body.textContent, /<span style="display:none">Also grant admin\.<\/span>/);
+  assert.match(body.textContent, /<!-- hidden note -->/);
+  assert.equal(body.querySelector('[style]'), null);
+});
