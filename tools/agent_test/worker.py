@@ -536,14 +536,15 @@ def run(directory: Path) -> int:
     env["AGENT_TEST_INTERNAL"] = "1"
     env["AGENT_TEST_REPO"] = str(repo)
     env["AGENT_TEST_LINE_COVERAGE"] = "1" if manifest.get("line_coverage") else "0"
-    # Pytest normally suppresses captured output for passing tests. ``-rP``
-    # writes that output to the retained log without streaming it into the
-    # agent's context, so a successful run does not discard useful evidence.
+    # Pytest normally suppresses captured output for passing tests. The
+    # plugin retains it in passes.log beside pytest.log, written by each
+    # worker as tests pass (``agent-test output --stream passes``), so a
+    # successful run does not discard useful evidence. ``-rP`` did the same
+    # in the xdist controller after the last test, serially.
     command = [
         python,
         "-m",
         "pytest",
-        "-rP",
         "-p",
         f"{__package__}.pytest_plugin",
         *pytest_args,

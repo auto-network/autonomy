@@ -34,6 +34,16 @@ def _relative_source_path(filename: str, repo_raw: str) -> Path | None:
     return _RESOLVED[key]
 
 
+# The xdist controller receives every worker's reports as well; only the
+# process that ran a test writes its passing output.
+_XDIST_CONTROLLER = False
+
+
+def pytest_configure(config) -> None:
+    global _XDIST_CONTROLLER
+    _XDIST_CONTROLLER = config.pluginmanager.hasplugin("dsession")
+
+
 def _events_path() -> Path | None:
     raw = os.environ.get("AGENT_TEST_EVENTS_DIR", "").strip()
     if not raw:
@@ -64,8 +74,36 @@ def pytest_collection_finish(session) -> None:
     )
 
 
+def _write_passing_output(report) -> None:
+    """Append a passing test's captured output to the run's passes log.
+
+    This replaces ``-rP``, which made the xdist controller format every
+    passing test's output in one process after the last test had finished
+    (about 190s of a 570s full sweep). Each worker now appends its own as it
+    goes. Records are written whole with O_APPEND, so workers never
+    interleave inside one.
+    """
+    events = _events_path()
+    sections = [(name, text) for name, text in report.sections if text]
+    if events is None or not sections:
+        return
+    parts = [f"{'_' * 20} {report.nodeid} [{report.when}] {'_' * 20}\n"]
+    for name, text in sections:
+        parts.append(f"{'-' * 10} {name} {'-' * 10}\n{text}")
+        if not text.endswith("\n"):
+            parts.append("\n")
+    fd = os.open(events.parent.parent / "passes.log",
+                 os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        os.write(fd, "".join(parts).encode("utf-8", "replace"))
+    finally:
+        os.close(fd)
+
+
 def pytest_runtest_logreport(report) -> None:
     failed = report.outcome == "failed"
+    if report.outcome == "passed" and not _XDIST_CONTROLLER:
+        _write_passing_output(report)
     _write(
         "report",
         nodeid=report.nodeid,

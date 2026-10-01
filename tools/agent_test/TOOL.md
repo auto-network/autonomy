@@ -90,8 +90,10 @@ selectors are explicitly open-ended: their estimate covers previously seen
 descendants but remains a known-work floor because collection may discover
 new nodes.
 
-Pytest's captured output, including output from passing tests, is written to
-the retained run log. It is never streamed into the launching agent's context.
+Pytest's captured output is retained with the run and never streamed into the
+launching agent's context: failures and the summary in `pytest.log`, and the
+output of passing tests in `passes.log`, which each pytest worker appends as
+its tests pass (`agent-test output <run-id> --stream passes`).
 
 `plan` reads the current Python diff and ranks selectors using direct test
 naming, prior retained per-test line coverage, and bounded import/reference

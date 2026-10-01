@@ -79,7 +79,9 @@ def test_run_returns_immediately_and_retains_passing_result(project: Path, cli_e
     final = _wait_terminal(cli_env)
     assert final["status"] == "passed"
     assert final["summary"]["passed"] == 1
-    assert "ERROR is application noise" in Path(final["pytest_log"]).read_text()
+    passes = Path(final["pytest_log"]).with_name("passes.log").read_text()
+    assert "ERROR is application noise" in passes
+    assert "test_slow" in passes
 
 
 def test_failure_queries_are_bounded_and_do_not_execute(project: Path, cli_env: dict[str, str]):
@@ -153,6 +155,8 @@ def test_output_query_has_a_defaultable_hard_limit(project: Path, cli_env: dict[
         final["run_id"],
         "--limit-lines",
         "5",
+        "--stream",
+        "passes",
     )
     assert output.returncode == 0
     assert "line-29" in output.stdout

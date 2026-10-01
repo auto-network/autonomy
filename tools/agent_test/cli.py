@@ -881,7 +881,7 @@ def cmd_output(args: argparse.Namespace) -> int:
     if manifest is None:
         return 2
     directory = Path(manifest["_directory"])
-    name = "worker.log" if args.stream == "worker" else "pytest.log"
+    name = {"worker": "worker.log", "passes": "passes.log"}.get(args.stream, "pytest.log")
     path = directory / name
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -1049,7 +1049,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     output = sub.add_parser("output", help="show a bounded retained output stream")
     output.add_argument("run_id", nargs="?")
-    output.add_argument("--stream", choices=("pytest", "worker"), default="pytest")
+    output.add_argument("--stream", choices=("pytest", "worker", "passes"), default="pytest")
     output.add_argument("--limit-lines", type=int, default=DEFAULT_OUTPUT_LINES)
     output.set_defaults(func=cmd_output)
 
