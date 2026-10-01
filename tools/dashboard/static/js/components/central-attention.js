@@ -119,6 +119,18 @@
       left.attentionState === right.attentionState;
   }
 
+  const POPPED_KEY = 'central.poppedApprovals';
+  function poppedApprovals() {
+    try { return new Set(JSON.parse(window.sessionStorage.getItem(POPPED_KEY) || '[]')); }
+    catch (_) { return new Set(); }
+  }
+  function rememberPopped(id) {
+    try {
+      const ids = [...poppedApprovals(), id].slice(-200);
+      window.sessionStorage.setItem(POPPED_KEY, JSON.stringify(ids));
+    } catch (_) { /* no storage: the pop simply may repeat after a reload */ }
+  }
+
   function canonicalCategory(item) {
     if (!item) return 'apps';
     if (item.category === 'comms' || item.type === 'message') return 'comms';
@@ -160,10 +172,15 @@
       _events: null,
       _refreshTimer: null,
       _destroyed: false,
+      _popping: false,
+      _holdPop: false,
 
       async init() {
         this._openFromSession = (id, options) => this.openApprovalById(id, options);
         window.openCentralApproval = this._openFromSession;
+        // A link to one approval opens that one, not the next in line.
+        const linked = new URLSearchParams(window.location.search);
+        this._holdPop = linked.get('focus') === 'approval' && !!linked.get('id');
         await this.refresh();
         this.connectEvents();
         await this.refreshPush();
@@ -175,6 +192,8 @@
           const match = this.items.find(item => item.id === id);
           if (match) await this.openItem(match);
         }
+        this._holdPop = false;
+        if (!this._sharedApprovalItem) this.popNextApproval();
       },
 
       destroy() {
@@ -207,6 +226,7 @@
           this.syncApplications();
           this.unavailable = false;
           this.message = '';
+          this.popNextApproval();
         } catch (error) {
           this.unavailable = true;
           this.message = 'Attention is temporarily unavailable. Your items remain synchronized.';
@@ -332,6 +352,21 @@
         return this.view === 'recent' ? items.slice(0, 100) : items;
       },
 
+      // A waiting approval is the operator's next action wherever they are, so
+      // it opens by itself: one at a time, the next when this one closes. Each
+      // pops at most once per tab, so closing without deciding never loops.
+      popNextApproval() {
+        if (this._destroyed || this._holdPop || this._sharedApprovalItem || this._popping) return;
+        const popped = poppedApprovals();
+        const next = this.items.find(item => item.type === 'approval' &&
+          item.attentionState === 'needs_attention' && !popped.has(item.id));
+        if (!next) return;
+        rememberPopped(next.id);
+        this._popping = true;
+        this.inboxOpen = false;
+        this.openItem(next).catch(() => {}).finally(() => { this._popping = false; });
+      },
+
       async openApprovalById(id, {isCurrent = () => true} = {}) {
         const payload = await jsonRequest('/api/attention/items/' + encodeURIComponent(id));
         if(this._destroyed || !isCurrent()) return false;
@@ -343,6 +378,7 @@
 
       async openItem(item, isCurrent = () => true) {
         if (!item) return;
+        if (this._sharedApprovalItem && this._sharedApprovalItem.id === item.id) return true;
         item.decisionError = '';
         // Migrated reviews never flash the legacy right-hand detail panel.
         const shared = ['approval.dashboard_access.review', 'approval.fleet_machine_admission.review',
@@ -376,63 +412,63 @@
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = await openJiraCentralApproval(item, {
                 onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
-                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; this.popNextApproval(); },
               });
             } else if (item.rendererId === 'approval.visitor_token.review') {
               const { openVisitorCentralApproval } = await import('./visitor-central-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = await openVisitorCentralApproval(item, {
                 onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
-                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; this.popNextApproval(); },
               });
             } else if (item.rendererId === 'approval.mcp_crosstalk.review') {
               const { openCrosstalkCentralApproval } = await import('./crosstalk-central-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = await openCrosstalkCentralApproval(item, {
                 onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
-                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; this.popNextApproval(); },
               });
             } else if (item.rendererId === 'approval.external_service_access.review') {
               const { openExternalServiceCentralApproval } = await import('./external-service-central-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = await openExternalServiceCentralApproval(item, {
                 onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
-                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; this.popNextApproval(); },
               });
             } else if (item.rendererId === 'approval.link_publish.review' || item.rendererId === 'approval.link_revoke.review') {
               const { openLinkCentralApproval } = await import('./link-central-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = await openLinkCentralApproval(item, {
                 onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
-                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; this.popNextApproval(); },
               });
             } else if (item.rendererId === 'approval.vault_seal.review') {
               const { openVaultSealApproval } = await import('./vault-seal-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = openVaultSealApproval(item, {
                 onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
-                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; this.popNextApproval(); },
               });
             } else if (item.rendererId === 'approval.vault_open.review') {
               const { openVaultCentralApproval } = await import('./vault-central-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = await openVaultCentralApproval(item, {
                 onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
-                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; this.popNextApproval(); },
               });
             } else if (item.rendererId === 'approval.email_send.review') {
               const { openEmailApproval } = await import('./email-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = await openEmailApproval(item, {
                 onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
-                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; this.popNextApproval(); },
               });
             } else if (item.rendererId === 'approval.fleet_machine_admission.review') {
               const { openFleetApproval } = await import('./fleet-approval.js');
               this._sharedApprovalItem = item;
               this._sharedApprovalDialog = openFleetApproval(item, {
                 onResolved: () => { this._sharedApprovalItem = null; this.refresh().catch(() => {}); },
-                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; },
+                onClose: () => { this._sharedApprovalItem = null; this._sharedApprovalDialog = null; this.popNextApproval(); },
               });
             } else await this.openDashboardApproval(item);
           }
@@ -488,7 +524,7 @@
           decline: item.actions.includes('declined') ? () => decide('declined', {}) : null,
           result: { working: 'Allowing access', success: 'Access allowed',
             copy: '', fact: { ...requester, byline: 'Dashboard access for this session.', linkLabel: 'View requesting session' } },
-          onClose: () => { this._sharedApprovalDialog = null; this._sharedApprovalItem = null; },
+          onClose: () => { this._sharedApprovalDialog = null; this._sharedApprovalItem = null; this.popNextApproval(); },
         });
         this._sharedApprovalItem = item;
       },
