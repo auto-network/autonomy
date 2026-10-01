@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections import deque
 import os
 import re
 import sys
@@ -835,6 +836,63 @@ def section(key: str, *, slow_log_s: float | None = None):
                 key, wall_s, cpu_s, threading.current_thread().name, concurrent)
 
 
+# ── garbage collection timing ────────────────────────────────────────────
+#
+# Suspected (2026-10-01): after a restart, collections over a heap that grows
+# from ~440 MB to ~1.1 GB are charged to whichever thread allocated at the
+# wrong moment, so cheap functions show seconds of CPU. Recorded per
+# collection: generation, CPU and wall on the paying thread, and that thread.
+#
+# A gc callback can fire during any allocation, including inside JobStats'
+# lock or a logging handler on the same thread, so the callback only appends
+# to a deque (atomic under the GIL); the sampler thread drains it each second
+# into the job table under ``gc:gen<N>:<thread label>`` and logs SLOW-GC.
+# A collection inside an executor job or a section is also counted in that
+# job's totals: subtract it to see the job's own work.
+
+GC_SLOW_LOG_S = float(os.environ.get("DASHBOARD_PERF_GC_SLOW_S", "0.5"))
+_gc_events: "deque[tuple]" = deque(maxlen=100_000)
+_gc_local = threading.local()
+_gc_installed = False
+
+
+def _gc_callback(phase: str, info: dict) -> None:
+    if phase == "start":
+        _gc_local.started = (time.thread_time(), time.monotonic())
+        return
+    started = getattr(_gc_local, "started", None)
+    if started is None:
+        return
+    _gc_local.started = None
+    _gc_events.append((
+        info.get("generation"), time.thread_time() - started[0], time.monotonic() - started[1],
+        time.time(), threading.current_thread().name,
+        info.get("collected", 0), info.get("uncollectable", 0)))
+
+
+def install_gc_timing() -> None:
+    global _gc_installed
+    if not _gc_installed:
+        import gc
+        gc.callbacks.append(_gc_callback)
+        _gc_installed = True
+
+
+def drain_gc_timing(jobs: "JobStats") -> None:
+    """Move recorded collections into the job table; log the slow ones."""
+    while True:
+        try:
+            gen, cpu_s, wall_s, at, thread, collected, uncollectable = _gc_events.popleft()
+        except IndexError:
+            return
+        label = thread_label(thread)
+        jobs.end(f"gc:gen{gen}:{label}", cpu_s, wall_s, now=at)
+        if wall_s >= GC_SLOW_LOG_S:
+            logger.warning(
+                "SLOW-GC gen=%s wall=%.2fs cpu=%.2fs thread=%s collected=%d uncollectable=%d",
+                gen, wall_s, cpu_s, thread, collected, uncollectable)
+
+
 # ── process wiring ───────────────────────────────────────────────────────
 
 _telemetry: Telemetry | None = None
@@ -872,6 +930,7 @@ def start(*, heartbeat_age: Callable[[], float], loop_thread_ident: Callable[[],
             instrumented_executor(jobs, max_workers=min(32, (os.cpu_count() or 1) + 4)))
     except RuntimeError:
         logger.warning("perf telemetry: no running loop; executor jobs are not timed")
+    install_gc_timing()
     if stacks is not None:
         threading.Thread(target=stacks.run, name="perf-stack-sampler", daemon=True).start()
     threading.Thread(target=_run, args=(_telemetry,), name="perf-telemetry", daemon=True).start()
@@ -886,6 +945,8 @@ def _run(t: Telemetry) -> None:
     while True:
         next_at += SAMPLE_S
         try:
+            if t.jobs is not None:
+                drain_gc_timing(t.jobs)
             t.tick()
         except Exception:
             logger.debug("perf telemetry sample failed", exc_info=True)

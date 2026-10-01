@@ -323,3 +323,43 @@ def test_section_is_a_no_op_without_telemetry(monkeypatch):
     with pt.section("demo", slow_log_s=0.0):
         value = 1
     assert value == 1
+
+
+def test_gc_timing_records_collections_by_generation_and_thread(monkeypatch, caplog):
+    """2026-10-01: collections are recorded per generation and paying thread,
+    so a cheap job charged seconds of CPU can be checked against the
+    collector's share. The callback only queues; the sampler drains."""
+    import gc
+    import threading
+    from tools.dashboard import perf_telemetry as pt
+
+    monkeypatch.setattr(pt, "GC_SLOW_LOG_S", 0.0)
+    pt._gc_events.clear()
+    pt._gc_callback("start", {"generation": 2})
+    pt._gc_callback("stop", {"generation": 2, "collected": 5, "uncollectable": 0})
+    pt._gc_callback("stop", {"generation": 1})            # stop without a start: ignored
+    assert len(pt._gc_events) == 1
+
+    def in_pool_thread():
+        pt._gc_callback("start", {"generation": 0})
+        pt._gc_callback("stop", {"generation": 0, "collected": 0, "uncollectable": 0})
+    worker = threading.Thread(target=in_pool_thread, name="asyncio_7")
+    worker.start()
+    worker.join()
+
+    jobs = pt.JobStats()
+    with caplog.at_level("WARNING", logger="tools.dashboard.perf_telemetry"):
+        pt.drain_gc_timing(jobs)
+    assert jobs.calls == {"gc:gen2:MainThread": 1, "gc:gen0:asyncio": 1}
+    assert jobs.in_flight.get("gc:gen2:MainThread", 0) == 0
+    assert not pt._gc_events
+    assert any("SLOW-GC gen=2" in r.getMessage() and "thread=MainThread" in r.getMessage()
+               and "collected=5" in r.getMessage() for r in caplog.records)
+
+    before = len(gc.callbacks)
+    pt.install_gc_timing()
+    pt.install_gc_timing()
+    assert len(gc.callbacks) - before <= 1
+    if pt._gc_callback in gc.callbacks:
+        gc.callbacks.remove(pt._gc_callback)
+    monkeypatch.setattr(pt, "_gc_installed", False)
