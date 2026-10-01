@@ -327,13 +327,13 @@ def test_process_ticket_converts_all_adf(tmp_path):
 
 
 @pytest.fixture
-def jira_env(tmp_path, monkeypatch):
-    token_file = tmp_path / "jira_token"
-    token_file.write_text("sekret-token\n")
-    monkeypatch.setenv("JIRA_BASE_URL", "https://jira.test")
-    monkeypatch.setenv("JIRA_EMAIL", "op@example.com")
-    monkeypatch.setenv("JIRA_TOKEN_FILE", str(token_file))
-    return token_file
+def jira_env(monkeypatch):
+    """The REST-client tests need a resolved config, not the resolution: the
+    token's only source (the vault) is covered by the resolve tests below."""
+    cfg = api.JiraConfig(base_url="https://jira.test", email="op@example.com",
+                         token="sekret-token")
+    monkeypatch.setattr(api.JiraConfig, "resolve", classmethod(lambda cls, org=None: cfg))
+    return cfg
 
 
 def _mock(monkeypatch, handler):
@@ -373,31 +373,88 @@ def _stub_install_setting(monkeypatch, payload):
     monkeypatch.setattr(graph_ops, "read_set", fake_read_set)
 
 
-def test_config_missing_is_a_clear_error(monkeypatch, tmp_path):
+def _stub_vault(monkeypatch, row):
+    """The audited vault read: *row* is what read_set_key returns for the
+    key it is asked (None = absent)."""
+    from tools.graph import settings_ops
+
+    asked = []
+
+    def read_set_key(set_id, key, **kw):
+        asked.append((set_id, key))
+        return row
+    monkeypatch.setattr(settings_ops, "read_set_key", read_set_key)
+    return asked
+
+
+@pytest.fixture
+def no_env(monkeypatch):
+    for var in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_TOKEN", "JIRA_TOKEN_FILE"):
+        monkeypatch.delenv(var, raising=False)
+
+
+_INSTALL = {"contract": "issue_tracker",
+            "broker_config": {"base_url": "https://jira.example/", "email": "op@example.com"}}
+
+
+def test_config_missing_is_a_clear_error(monkeypatch, no_env):
     _stub_install_setting(monkeypatch, None)
-    monkeypatch.delenv("JIRA_BASE_URL", raising=False)
     monkeypatch.setenv("JIRA_EMAIL", "x@y")
-    monkeypatch.setenv("JIRA_TOKEN_FILE", str(tmp_path / "nope"))
     with pytest.raises(api.JiraError, match="base_url"):
         api.JiraConfig.resolve()
 
 
-def test_config_resolves_from_org_install_setting(monkeypatch, tmp_path):
-    """Non-secret config comes from the issue_tracker org install Setting;
-    the token comes from the host file the Setting points at."""
-    token_file = tmp_path / "tok"
-    token_file.write_text("sekret\n")
-    _stub_install_setting(monkeypatch, {
-        "contract": "issue_tracker",
-        "broker_config": {"base_url": "https://jira.example/",
-                          "email": "op@example.com",
-                          "token_file": str(token_file)},
-    })
-    for var in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_TOKEN_FILE"):
-        monkeypatch.delenv(var, raising=False)
-    cfg = api.JiraConfig.resolve(org="autonomy")
+def test_the_token_comes_from_the_orgs_audited_vault_entry(monkeypatch, no_env):
+    """auto-6la1b: the vault is the token's one source."""
+    _stub_install_setting(monkeypatch, _INSTALL)
+    asked = _stub_vault(monkeypatch, {"payload": {"value": "sekret\n"}, "vault_error": None})
+    cfg = api.JiraConfig.resolve(org="anchore")
     assert cfg == api.JiraConfig(base_url="https://jira.example",
                                  email="op@example.com", token="sekret")
+    assert asked == [("autonomy.vault.audited", "anchore:jira_token")]
+
+
+def test_an_absent_vault_entry_names_it_and_how_to_seal_it(monkeypatch, no_env):
+    _stub_install_setting(monkeypatch, _INSTALL)
+    _stub_vault(monkeypatch, None)
+    with pytest.raises(api.JiraError) as err:
+        api.JiraConfig.resolve(org="anchore")
+    assert "graph vault seal jira_token --org anchore" in str(err.value)
+
+
+def test_a_locked_vault_says_unlock_never_falls_back(monkeypatch, no_env):
+    _stub_install_setting(monkeypatch, _INSTALL)
+    _stub_vault(monkeypatch, {"payload": {}, "vault_error": object()})
+    with pytest.raises(api.JiraError, match="anchore:jira_token but the vault is locked"):
+        api.JiraConfig.resolve(org="anchore")
+
+
+def test_no_environment_variable_or_file_supplies_the_token(monkeypatch, tmp_path):
+    """The JIRA_TOKEN / JIRA_TOKEN_FILE overrides and the install row's
+    token_file are gone: with the vault entry absent, none of them is read."""
+    token_file = tmp_path / "jira_token"
+    token_file.write_text("plaintext\n")
+    monkeypatch.setenv("JIRA_TOKEN", "from-env")
+    monkeypatch.setenv("JIRA_TOKEN_FILE", str(token_file))
+    _stub_install_setting(monkeypatch, {
+        "contract": "issue_tracker",
+        "broker_config": {**_INSTALL["broker_config"], "token_file": str(token_file)}})
+    _stub_vault(monkeypatch, None)
+    with pytest.raises(api.JiraError, match="anchore:jira_token|graph vault seal"):
+        api.JiraConfig.resolve(org="anchore")
+
+
+def test_an_install_row_naming_a_token_file_is_refused():
+    from tools.graph.schemas.org_capability_install import OrgCapabilityInstallV1
+    from tools.graph.schemas.registry import SchemaValidationError
+
+    row = {"contract": "issue_tracker", "contract_version": 1,
+           "implementation": "jira", "implementation_version": 1,
+           "broker_config": {"base_url": "https://jira.example", "email": "op@example.com"}}
+    OrgCapabilityInstallV1.validate(row)
+    with pytest.raises(SchemaValidationError, match="token_file"):
+        OrgCapabilityInstallV1.validate(
+            {**row, "broker_config": {**row["broker_config"], "token_file": "~/.jira_token"}})
 
 
 def test_set_field_sends_adf_not_plain_string(jira_env, monkeypatch):

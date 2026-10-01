@@ -20,7 +20,6 @@ import os
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -44,14 +43,14 @@ class JiraConfig:
 
     @classmethod
     def resolve(cls, org: str | None = None) -> "JiraConfig":
-        """Resolve broker config. Non-secret values (base URL, account email,
-        token-file PATH) come from the org install Setting
-        ``autonomy.org.capability.install#1`` key=``issue_tracker`` in *org*'s
-        database — the designed home for org capability config; no literal
-        secret is ever in the graph. Environment variables (JIRA_BASE_URL,
-        JIRA_EMAIL, JIRA_TOKEN_FILE) override per value — the test seam. The
-        token itself is read from the host file and exists only in process
-        memory."""
+        """Resolve broker config. Non-secret values (base URL, account email)
+        come from the org install Setting ``autonomy.org.capability.install#1``
+        key=``issue_tracker`` in *org*'s database -- the designed home for org
+        capability config; no literal secret is ever in the graph. JIRA_BASE_URL
+        and JIRA_EMAIL override those two. The token has ONE source: the
+        operator's audited vault entry ``<org>:jira_token`` (operator ruling
+        2026-10-01, auto-6la1b). No environment variable and no file supplies
+        it; it exists only in process memory."""
         installed: dict = {}
         # No org named means there is no organization's configuration to
         # read. Asking anyway resolved to the operator's own store, where
@@ -76,22 +75,17 @@ class JiraConfig:
         email = os.environ.get("JIRA_EMAIL") or installed.get("email", "")
         # The API token is the operator's PERSONAL Atlassian credential, sealed
         # in their personal AUDITED vault under an org-writeback key
-        # (``<org>:jira_token``) — never in the org's shared store, and a read
+        # (``<org>:jira_token``) -- never in the org's shared store, and a read
         # scoped to this org can only ever see this org's own slot. Audited
         # releases inline/unattended: ``read_set`` opens the value in-process
         # when the delegate is warm, or returns a ``vault_error`` when the vault
-        # is locked (fail closed — never fall through to plaintext). The env
-        # vars stay as explicit test/override seams; the old implicit
-        # ``~/.jira_token`` default is gone (it never survived a recreate).
-        token = os.environ.get("JIRA_TOKEN") or ""
-        env_file = os.environ.get("JIRA_TOKEN_FILE")
-        if not token and env_file:
-            try:
-                token = Path(env_file).expanduser().read_text().strip()
-            except OSError:
-                pass
+        # is locked (fail closed -- never fall through to plaintext). It is the
+        # only source: the JIRA_TOKEN / JIRA_TOKEN_FILE overrides and the
+        # install row's token_file fallback (a plaintext ~/.jira_token, mode
+        # 644 on Home) are gone (auto-6la1b).
+        token = ""
         vault_locked = False
-        if not token and org:
+        if org:
             try:
                 from tools.graph import settings_ops
                 from tools.graph.schemas.vault_credential import (
@@ -111,11 +105,6 @@ class JiraConfig:
                 token = ((row.get("payload") or {}).get("value", "") or "").strip()
             elif row is not None:
                 vault_locked = True
-        if not token and installed.get("token_file"):
-            try:
-                token = Path(installed["token_file"]).expanduser().read_text().strip()
-            except OSError:
-                pass
         missing = [name for name, val in
                    [("base_url", base_url), ("email", email),
                     ("token", token)] if not val]
@@ -131,8 +120,8 @@ class JiraConfig:
                 where = ("set base_url/email on the issue_tracker org install "
                          f"Setting in {org!r}")
             else:
-                where = ("no org was named — name one, or set JIRA_BASE_URL / "
-                         "JIRA_EMAIL / JIRA_TOKEN[_FILE]")
+                where = ("no org was named -- the token is read only from "
+                         "<org>:jira_token in the vault, so name the org")
             raise JiraError(
                 f"jira broker is not configured: missing "
                 f"{', '.join(missing)} ({where})")

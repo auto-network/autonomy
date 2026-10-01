@@ -162,7 +162,8 @@ class OrgCapabilityInstallV1(SettingSchema):
         required=False,
         description=(
             "Non-secret host-broker settings (str -> str), e.g. base_url, "
-            "email, token_file PATH — never a literal secret"
+            "email -- never a secret, and never a path to one: a broker's "
+            "secret comes only from the vault (token_file is refused)"
         ),
     )
     notes: str = field(
@@ -206,6 +207,16 @@ class OrgCapabilityInstallV1(SettingSchema):
 
         for key in _BINDING_FIELDS:
             _validate_str_str_map(payload, key, cls.__name__)
+
+        # A broker's secret comes only from the vault (auto-6la1b): a
+        # token_file names a plaintext file on one machine's disk, so a row
+        # carrying one is refused rather than silently honoured.
+        if "token_file" in (payload.get("broker_config") or {}):
+            raise SchemaValidationError(
+                f"{cls.__name__}: broker_config.token_file is not accepted -- "
+                "the token is read only from the vault (seal it: graph vault "
+                "seal jira_token --org <org> --tier audited)"
+            )
 
         if "notes" in payload and not isinstance(payload["notes"], str):
             raise SchemaValidationError(
