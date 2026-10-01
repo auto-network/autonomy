@@ -27,7 +27,7 @@ from agents.secret_ramfs import (
     ProvisionError,
     deliver_secret_file,
 )
-from tools.dashboard.dao import vault_releases
+from tools.dashboard.dao import vault_audit
 
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -115,7 +115,7 @@ def deliver_payload(
 
     # host_path is an audit LOCATOR in the container-namespace frame: there is
     # no host path — the file lives only inside the container's private mount.
-    vault_releases.record_release(
+    vault_audit.record_release(
         id=release_id,
         session=session,
         setting_name=setting_name,
@@ -134,7 +134,7 @@ def deliver_payload(
         encoded = bytearray(value.encode("utf-8"))
         deliver_secret_file(session, credential_name, bytes(encoded))
     except (ProvisionError, OSError) as exc:
-        vault_releases.mark_shredded(
+        vault_audit.mark_shredded(
             release_id, reason="delivery_failed", now=delivered_at_ms,
         )
         raise VaultDeliveryError(

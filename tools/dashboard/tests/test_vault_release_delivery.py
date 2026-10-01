@@ -13,12 +13,12 @@ import json
 import pytest
 
 from tools.dashboard import vault_release_delivery as delivery
-from tools.dashboard.dao import vault_releases
+from tools.dashboard.dao import vault_audit
 
 
 @pytest.fixture(autouse=True)
 def _machine_store(tmp_path, monkeypatch):
-    """Release leases are machine-homed Settings; isolate via the data root."""
+    """Release audit rows are machine-homed Settings; isolate via the data root."""
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     (tmp_path / "orgs").mkdir(parents=True, exist_ok=True)
@@ -30,7 +30,7 @@ def helper(monkeypatch):
     calls: list[tuple] = []
 
     def fake_deliver(container, filename, data, **_kw):
-        calls.append((container, filename, data, vault_releases.get("release-1")))
+        calls.append((container, filename, data, vault_audit.get("release-1")))
         return f"/run/secrets/{filename}"
 
     monkeypatch.setattr(delivery, "deliver_secret_file", fake_deliver)
@@ -69,7 +69,7 @@ def test_record_first_then_private_write_returns_only_receipt(helper):
     assert data == secret.encode()
     # The durable record committed BEFORE the helper ran.
     assert record_at_write is not None
-    record = vault_releases.get("release-1")
+    record = vault_audit.get("release-1")
     assert record["container_path"] == "/run/secrets/mac.ssh"
     # No host path exists — the locator names the container namespace.
     assert record["host_path"].startswith("container-ns:auto-requester:")
@@ -95,7 +95,7 @@ def test_structured_payload_without_single_value_is_refused(helper):
             _row(), {"private_key": "no", "port": 22}, now=100.0,
         )
     assert helper == []
-    assert vault_releases.get("release-1") is None
+    assert vault_audit.get("release-1") is None
 
 
 def test_absent_ttl_defaults_to_lifespan(helper):
@@ -103,13 +103,13 @@ def test_absent_ttl_defaults_to_lifespan(helper):
     del row["request"]["ttl_seconds"]
     receipt = delivery.deliver_payload(row, {"value": "v"}, now=100.0)
     assert receipt["ttl_seconds"] == 0
-    assert vault_releases.get("release-1")["expires_at"] is None
+    assert vault_audit.get("release-1")["expires_at"] is None
 
 
 def test_positive_ttl_sets_a_deadline_from_delivery(helper):
     receipt = delivery.deliver_payload(_row(ttl_seconds=90), {"value": "v"}, now=100.0)
     assert receipt["ttl_seconds"] == 90
-    record = vault_releases.get("release-1")
+    record = vault_audit.get("release-1")
     assert record["expires_at"] == record["delivered_at"] + 90 * 1000
 
 
@@ -117,7 +117,7 @@ def test_negative_ttl_is_refused(helper):
     with pytest.raises(delivery.VaultDeliveryError, match="ttl_seconds"):
         delivery.deliver_payload(_row(ttl_seconds=-1), {"value": "v"}, now=100.0)
     assert helper == []
-    assert vault_releases.get("release-1") is None
+    assert vault_audit.get("release-1") is None
 
 
 def test_helper_failure_closes_the_ledger_as_delivery_failed(monkeypatch):
@@ -129,7 +129,7 @@ def test_helper_failure_closes_the_ledger_as_delivery_failed(monkeypatch):
     monkeypatch.setattr(delivery, "deliver_secret_file", refuse)
     with pytest.raises(delivery.VaultDeliveryError, match="not running"):
         delivery.deliver_payload(_row(), {"value": "v"}, now=100.0)
-    record = vault_releases.get("release-1")
+    record = vault_audit.get("release-1")
     assert record["shred_reason"] == "delivery_failed"
 
 
@@ -139,3 +139,17 @@ def test_unsafe_session_or_release_names_are_refused(helper):
     with pytest.raises(delivery.VaultDeliveryError, match="unsafe session"):
         delivery.deliver_payload(bad, {"value": "v"}, now=100.0)
     assert helper == []
+
+
+def test_one_delivery_writes_exactly_one_vault_audit_row(helper):
+    """auto-njfhs acceptance: a vault read writes one ``autonomy.vault.audit``
+    row in the machine store, and the old set id is not registered at all
+    (no compatibility alias)."""
+    from tools.graph import schemas, settings_ops
+    from tools.graph.schemas.vault_audit import VAULT_AUDIT_SET_ID
+
+    assert VAULT_AUDIT_SET_ID == "autonomy.vault.audit"
+    delivery.deliver_payload(_row(), {"value": "v"}, now=100.0)
+    rows = settings_ops.read_owned_set(VAULT_AUDIT_SET_ID, org="machine").members
+    assert [m.key for m in rows] == ["release-1"]
+    assert schemas.get_schema("autonomy.vault.release-lease", 1) is None

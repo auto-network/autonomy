@@ -16,7 +16,7 @@ One host ramfs mount the node needs, plus a per-container primitive:
     destroy, no per-uid subdirectory scheme, no sudo helper for sessions,
     and no sweeper reclaim — the kernel frees the private mount when the
     container dies. The old shared root (``/run/autonomy-secrets``) is
-    retired; only legacy lease rows may still name paths under it.
+    retired; only legacy audit rows may still name paths under it.
 
 Both MUST be ramfs, never tmpfs: tmpfs pages swap, and a swap slot cannot be
 wiped from userspace, so a secret on tmpfs can reach disk. ``RAMFS_MAGIC`` /
@@ -60,7 +60,7 @@ from tools.network.storagekit import (
     filesystem_magic,
 )
 
-#: RETIRED shared delivery root. Kept only so legacy lease rows and the
+#: RETIRED shared delivery root. Kept only so legacy audit rows and the
 #: transition sweeper can name it; nothing provisions or binds it anymore.
 LEGACY_DELIVERY_MOUNT = "/run/autonomy-secrets"
 #: The dashboard's own key cache (bound into the dashboard via rslave; never a session).
@@ -279,7 +279,7 @@ def destroy_secret_file(
 ) -> None:
     """Remove ONE delivered file from *container*'s private ramfs.
 
-    Addressed by exact (container, filename) from the durable lease — this
+    Addressed by exact (container, filename) from the durable audit row — this
     never enumerates a directory, so it cannot reach any other session's
     secret (the shared-root failure it replaces). If the container is not
     running, the kernel already freed its private mount, so absence is

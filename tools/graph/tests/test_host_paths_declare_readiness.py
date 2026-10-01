@@ -67,11 +67,11 @@ NOT_A_HOST_PATH = {
         "is @home('machine') to follow its bytes (auto-wilkh). A relative "
         "path is exempt from this sweep; it is not exempt from living with "
         "the file it names",
-    ("autonomy.vault.release-lease", "host_path"):
+    ("autonomy.vault.audit", "host_path"):
         "an operational ledger locator: the platform creates the delivered "
         "file and the sweeper destroys it; nothing is operator-provisioned "
         "there and a shredded lease's absent file is the CORRECT state",
-    ("autonomy.vault.release-lease", "container_path"):
+    ("autonomy.vault.audit", "container_path"):
         "inside the container, carried for the audit only",
 }
 

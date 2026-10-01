@@ -12,7 +12,7 @@ browser does), this proves:
   opens nothing and can be retried; a replay returns the same receipt;
 - it refuses a pending, declined, foreign-machine, drifted, or ended-session
   release, with fixed codes, and the content key never appears in a Central
-  row, the lease, a response, an error or a log line;
+  row, the audit row, a response, an error or a log line;
 - the requester's result is null until the receipt exists;
 - the production composition claims the kind and mounts the two routes.
 """
@@ -40,7 +40,7 @@ from tools.dashboard.approval_service import (
     HumanApprovalActor,
     InMemoryApprovalStore,
 )
-from tools.dashboard.dao import vault_releases
+from tools.dashboard.dao import vault_audit
 from tools.graph import ops, settings_ops
 from tools.graph.schemas.central_attention import ApprovalRequestV1
 from tools.graph.schemas.personal_identity import (
@@ -116,7 +116,7 @@ def env(tmp_path, monkeypatch):
         store.put_password_factor(world.identity.factor_id,
                                   world.identity.published.public_key, world.identity.armor)
     clock = Clock()
-    # Leases live in the worker's shared machine store: ids unique per test.
+    # Audit rows live in the worker's shared machine store: ids unique per test.
     run = secrets.token_hex(4)
     ids = iter(f"central-vault-{run}-{n:04d}" for n in range(1, 99))
     approvals = ApprovalService(
@@ -247,8 +247,8 @@ def test_a_granted_release_is_delivered_once_with_the_operators_key(env, caplog)
     assert env.delivery.deliver(approval_id, {"content_key": key}) == done
     assert env.delivered == {}
 
-    # The key and the value are nowhere: Central rows, lease, receipt, logs.
-    scanned = json.dumps([payload, status.resolution.payload, vault_releases.get(approval_id),
+    # The key and the value are nowhere: Central rows, audit row, receipt, logs.
+    scanned = json.dumps([payload, status.resolution.payload, vault_audit.get(approval_id),
                           done, env.notes])
     for needle in (key, value, env.world.opener_seeds[env.world.identity.factor_id].hex()):
         assert needle not in scanned
@@ -263,7 +263,7 @@ def test_a_wrong_key_opens_nothing_and_the_right_one_still_works(env, caplog):
     _grant(env, approval_id)
     wrong = secrets.token_hex(32)
     assert _code(env.delivery.deliver, approval_id, {"content_key": wrong}) == "open_failed"
-    assert vault_releases.get(approval_id) is None
+    assert vault_audit.get(approval_id) is None
     assert env.delivered == {}
     assert env.delivery.deliver(approval_id, {"content_key": key})["receipt"]["path"]
     assert wrong not in caplog.text and key not in caplog.text

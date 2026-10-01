@@ -12,7 +12,7 @@ The operator's browser runs the ceremony, holds the unwrapped content key
 (CEK) in memory, records the Grant, and then posts the CEK to this Dashboard's
 delivery endpoint (:class:`VaultOpenDelivery`). The endpoint opens the frozen
 revision, writes the value only into the requesting session's private ramfs,
-and records the value-free release lease as the receipt. Nothing here stores,
+and records the value-free vault audit row as the receipt. Nothing here stores,
 logs or echoes the CEK.
 
 - Only the accepting machine delivers: the Dashboard the requesting session
@@ -188,9 +188,9 @@ def _session_live(session: str | None) -> bool:
     return row is not None and derive_lifecycle_state(row) == "ACTIVE"
 
 
-def _lease(approval_id: str) -> dict | None:
-    from tools.dashboard.dao import vault_releases
-    return vault_releases.get(approval_id)
+def _audit_row(approval_id: str) -> dict | None:
+    from tools.dashboard.dao import vault_audit
+    return vault_audit.get(approval_id)
 
 
 def _notify(session: str | None, approval_id: str, *, status: str, summary: str, body: str) -> None:
@@ -218,7 +218,7 @@ class VaultOpenDelivery:
         approvals: ApprovalService,
         destination_resolver: Callable[[], str] = result_destination_id,
         session_live: Callable[[str | None], bool] = _session_live,
-        lease: Callable[[str], dict | None] = _lease,
+        audit_row: Callable[[str], dict | None] = _audit_row,
         deliver: Callable[[str, dict, dict, bytearray], dict] = vault.open_and_deliver,
         ceremony: Callable[[dict, dict], dict] = vault.ceremony_for,
         notify: Callable[..., None] = _notify,
@@ -226,7 +226,7 @@ class VaultOpenDelivery:
         self.approvals = approvals
         self._destination_resolver = destination_resolver
         self._session_live = session_live
-        self._lease = lease
+        self._audit_row = audit_row
         self._deliver = deliver
         self._ceremony = ceremony
         self._notify = notify
@@ -251,9 +251,9 @@ class VaultOpenDelivery:
             return PENDING if self._here(payload) else ELSEWHERE
         if resolution.payload.get("outcome") != "granted":
             return str(resolution.payload.get("outcome"))
-        lease = self._lease(status.request.approval_id)
-        if lease is not None:
-            return FAILED if lease.get("shred_reason") == "delivery_failed" else DELIVERED
+        row = self._audit_row(status.request.approval_id)
+        if row is not None:
+            return FAILED if row.get("shred_reason") == "delivery_failed" else DELIVERED
         if not self._here(payload):
             return ELSEWHERE
         requester = (payload.get("request") or {}).get("requester") or {}
@@ -262,9 +262,9 @@ class VaultOpenDelivery:
         return AWAITING
 
     @staticmethod
-    def _receipt(lease: Mapping[str, Any], request: Mapping[str, Any]) -> dict:
-        return {"release_id": lease["id"], "delivery": "session-ramfs",
-                "path": lease["container_path"],
+    def _receipt(row: Mapping[str, Any], request: Mapping[str, Any]) -> dict:
+        return {"release_id": row["id"], "delivery": "session-ramfs",
+                "path": row["container_path"],
                 "ttl_seconds": int(request.get("ttl_seconds") or 0)}
 
     def operator_result(self, status: ApprovalStatus) -> dict:
@@ -276,8 +276,8 @@ class VaultOpenDelivery:
             "machine_label": (payload.get("staged") or {}).get("machine_label") or "",
         }
         if state == DELIVERED:
-            lease = self._lease(status.request.approval_id) or {}
-            result["path"] = lease.get("container_path", "")
+            row = self._audit_row(status.request.approval_id) or {}
+            result["path"] = row.get("container_path", "")
         return result
 
     def requester_result(self, status: ApprovalStatus) -> dict | None:
@@ -285,8 +285,8 @@ class VaultOpenDelivery:
         state = self.state(status)
         request = status.request.payload.get("request") or {}
         if state == DELIVERED:
-            lease = self._lease(status.request.approval_id) or {}
-            return {"approved": True, "execution": {"ok": True, "receipt": self._receipt(lease, request)}}
+            row = self._audit_row(status.request.approval_id) or {}
+            return {"approved": True, "execution": {"ok": True, "receipt": self._receipt(row, request)}}
         if state == FAILED:
             return {"approved": True, "execution": {
                 "ok": False, "error": "the release could not be written to the session"}}
@@ -340,8 +340,8 @@ class VaultOpenDelivery:
             with self._lock:
                 state = self.state(status)
                 if state == DELIVERED:
-                    lease = self._lease(approval_id) or {}
-                    return {"receipt": self._receipt(lease, payload.get("request") or {})}
+                    row = self._audit_row(approval_id) or {}
+                    return {"receipt": self._receipt(row, payload.get("request") or {})}
                 if state == ELSEWHERE:
                     raise VaultOpenDeliveryError("elsewhere")
                 if state == SESSION_GONE:
@@ -361,7 +361,7 @@ class VaultOpenDelivery:
                     raise
                 except Exception as exc:
                     # Never the exception's text: it may quote the request body.
-                    if self._lease(approval_id) is not None:
+                    if self._audit_row(approval_id) is not None:
                         logger.warning("vault_open: delivery into the session failed for %s (%s)",
                                        approval_id, type(exc).__name__)
                         raise VaultOpenDeliveryError("delivery_failed") from None

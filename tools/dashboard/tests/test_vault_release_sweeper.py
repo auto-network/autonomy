@@ -1,4 +1,4 @@
-"""The lease ledger closes honestly, and closes NOTHING it cannot answer for.
+"""The vault audit table closes honestly, and closes NOTHING it cannot answer for.
 
 Reduced with the sweeper itself (2026-08-30): delivered secrets live in each
 container's private mount namespace and die with the container, so there is
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from tools.dashboard import vault_release_sweeper as sweeper
-from tools.dashboard.dao import vault_releases
+from tools.dashboard.dao import vault_audit
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +36,7 @@ def destroyed(monkeypatch):
 
 
 def _record(id, session, *, host_path, expires_at=None, container_path="/run/secrets/cred", now=0):
-    vault_releases.record_release(
+    vault_audit.record_release(
         id=id, session=session, setting_name="cred",
         release_mode="delivered", expires_at=expires_at,
         container_path=container_path, host_path=host_path, now=now,
@@ -49,7 +49,7 @@ def test_past_deadline_lease_destroys_the_exact_file_then_closes(destroyed):
     out = sweeper.sweep(session_exists=lambda s: True, now=2000)
     assert out == {"destroyed": 1, "closed": 1}
     assert destroyed == [("live", "fleet-key")]   # by exact address, never a scan
-    assert vault_releases.get("r")["shred_reason"] == "expired"
+    assert vault_audit.get("r")["shred_reason"] == "expired"
 
 
 def test_gone_session_before_deadline_closes_as_orphaned_no_destroy(destroyed):
@@ -58,7 +58,7 @@ def test_gone_session_before_deadline_closes_as_orphaned_no_destroy(destroyed):
     out = sweeper.sweep(session_exists=lambda s: False, now=1)
     assert out == {"destroyed": 0, "closed": 1}
     assert destroyed == []   # file already freed with the container's mount
-    assert vault_releases.get("r")["shred_reason"] == "orphaned"
+    assert vault_audit.get("r")["shred_reason"] == "orphaned"
 
 
 def test_live_session_before_deadline_is_left_outstanding(destroyed):
@@ -67,7 +67,7 @@ def test_live_session_before_deadline_is_left_outstanding(destroyed):
     out = sweeper.sweep(session_exists=lambda s: True, now=1)
     assert out == {"destroyed": 0, "closed": 0}
     assert destroyed == []
-    assert vault_releases.get("r")["shredded_at"] is None
+    assert vault_audit.get("r")["shredded_at"] is None
 
 
 def test_ambiguous_liveness_still_destroys_at_deadline_but_not_orphans(destroyed):
@@ -80,8 +80,8 @@ def test_ambiguous_liveness_still_destroys_at_deadline_but_not_orphans(destroyed
     out = sweeper.sweep(session_exists=None, now=2000)
     assert out == {"destroyed": 1, "closed": 1}
     assert destroyed == [("s", "k")]
-    assert vault_releases.get("past")["shred_reason"] == "expired"
-    assert vault_releases.get("fresh")["shredded_at"] is None
+    assert vault_audit.get("past")["shred_reason"] == "expired"
+    assert vault_audit.get("fresh")["shredded_at"] is None
 
 
 def test_session_end_closes_the_session_leases(destroyed):
@@ -90,11 +90,11 @@ def test_session_end_closes_the_session_leases(destroyed):
     out = sweeper.on_session_end("ending", now=5)
     assert out["closed"] == 1
     assert destroyed == []   # file died with the container; ledger-only close
-    assert vault_releases.get("r")["shred_reason"] == "session_end"
+    assert vault_audit.get("r")["shred_reason"] == "session_end"
 
 
 def test_legacy_shared_root_file_is_unlinked_at_deadline(monkeypatch, destroyed):
-    """A past-deadline legacy lease unlinks its real host path (not nsenter)."""
+    """A past-deadline legacy audit row unlinks its real host path (not nsenter)."""
     import pathlib as _pl
     unlinked = []
     monkeypatch.setattr(_pl.Path, "unlink",
@@ -104,5 +104,5 @@ def test_legacy_shared_root_file_is_unlinked_at_deadline(monkeypatch, destroyed)
     sweeper.sweep(session_exists=lambda s: True, now=2000)
     assert unlinked == ["/run/autonomy-secrets/oldsess/cred"]
     assert destroyed == []   # legacy path uses unlink, not the container helper
-    assert vault_releases.get("r")["shred_reason"] == "expired"
+    assert vault_audit.get("r")["shred_reason"] == "expired"
 

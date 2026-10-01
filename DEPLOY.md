@@ -398,7 +398,6 @@ live one.
 | `dashboard_identity_sessions.db` | `DASHBOARD_IDENTITY_SESSION_DB` | identity unlock-session store |
 | `dashboard-session.secret` | roots with `DASHBOARD_IDENTITY_SESSION_DB` | mode-0600 Dashboard session-token and local access-result destination key; moves with the identity-session realm |
 | `pending_joins.db` | `AUTONOMY_PENDING_JOINS_DB` | restart-safe invite-join progress (identifiers and counts only) |
-| `vault_releases.db` | `VAULT_RELEASES_DB` | durable record of secret releases (paths + deadlines, never plaintext) |
 | `network`/ | `AUTONOMY_NETWORK_KEY_DIR` | mode-0600 auto.network tunnel-serving delegate keys |
 | `repl-login.key` | `REPL_LOGIN_KEY_FILE` | mode-0600 X25519 private key — the HPKE recipient for browser-sealed secure-setting provisioning |
 | `web-push-proof-vapid.pem` | `WEB_PUSH_PROOF_VAPID_KEY` | mode-0600 VAPID sender key for the isolated Web Push proof |

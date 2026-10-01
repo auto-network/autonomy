@@ -92,7 +92,7 @@ from . import workspace_artifact  # noqa: F401 — autonomy.workspace.artifact#1
 from . import dispatch_limits  # noqa: F401 — autonomy.dispatch.limits#1
 from . import browser_defaults  # noqa: F401 — autonomy.browser.defaults#1
 from . import note_similarity  # noqa: F401 — autonomy.graph.note-similarity#1
-from . import vault_release_lease  # noqa: F401 — autonomy.vault.release-lease#1
+from . import vault_audit  # noqa: F401 — autonomy.vault.audit#1
 from . import workspace_provision  # noqa: F401 — autonomy.workspace.provision#1
 from . import workspace_image_build  # noqa: F401 — autonomy.workspace.image-build#1
 from . import artifact_path  # noqa: F401 — autonomy.artifact-path#1
