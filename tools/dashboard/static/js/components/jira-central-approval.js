@@ -47,7 +47,8 @@ export function jiraReview(r) {
   switch (r.op) {
     case 'comment':
       return {review: {title: 'Post this comment', intro: 'Review the text that will be added to this issue.',
-        target: {type: 'Subject', name: key}, facts: [], reviewLabel: 'Comment', reviewText: text(r)},
+        target: {type: 'Subject', name: key}, facts: [], reviewLabel: 'Comment', reviewText: text(r),
+        reviewFormat: 'markdown'},
         result: {working: 'Posting comment…', success: 'Comment posted', copy: `The comment was posted to ${key}.`}};
     case 'transition':
       return {review: {title: 'Change issue status', target: {type: 'Subject', name: key},
