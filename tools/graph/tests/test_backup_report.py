@@ -43,8 +43,8 @@ def synthetic(tmp_path):
     conn.execute("CREATE TABLE sources(id)")
     conn.commit()
     conn.close()
-    beads = root / ".beads"
-    beads.mkdir()
+    beads = root / ".beads"          # also a manifest store since auto-es7ja
+    beads.mkdir(exist_ok=True)
     (beads / "metadata.json").write_text(json.dumps({"dolt_database": "auto"}))
     backups = tmp_path / "backups"
     backups.mkdir()

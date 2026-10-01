@@ -61,6 +61,13 @@ class Store:
     #: variable moves it. Still contract-rooted — one knob, two stores —
     #: never coincidence rooting.
     roots_with: Optional[str] = None
+    #: A secret kept as a plaintext file ON PURPOSE, and why: it is needed
+    #: before the operator signs in -- sign-in is what warms the vault after
+    #: a reboot (operator ruling 2026-10-01, auto-es7ja: "keep the files on
+    #: disc that need to be accessible before login and move the rest into
+    #: the vault"). Every other node-generated secret is a vault row or a
+    #: ramfs file re-minted at start, and is not a store here.
+    pre_sign_in: Optional[str] = None
 
     def default(self, root: Optional[Path] = None) -> Path:
         base = Path(root) if root is not None else DEFAULT_DATA_ROOT
@@ -110,7 +117,8 @@ STORE_MANIFEST: tuple = (
     Store("dashboard_session_secret", "dashboard-session.secret", None, "file",
           "mode-0600 Dashboard session-token and local access-result destination key; "
           "moves with the identity-session realm",
-          roots_with="identity_sessions"),
+          roots_with="identity_sessions",
+          pre_sign_in="HMAC-signs the sign-in cookie itself (unlock_routes._session_secret)"),
     Store("pending_joins", "pending_joins.db", "AUTONOMY_PENDING_JOINS_DB", "db",
           "restart-safe invite-join progress (identifiers and counts only)"),
     Store("serving_keys", "network", "AUTONOMY_NETWORK_KEY_DIR", "dir",
@@ -124,13 +132,27 @@ STORE_MANIFEST: tuple = (
           "WEB_PUSH_PROOF_VAPID_KEY", "file",
           "mode-0600 VAPID sender key for the isolated Web Push proof"),
     Store("web_push_keys", "web-push-keys", "WEB_PUSH_KEY_DIR", "dir",
-          "mode-0700 VAPID keyring for Dashboard Web Push (mode-0600 key files)"),
+          "mode-0700 VAPID keyring for Dashboard Web Push (mode-0600 key files)",
+          pre_sign_in="the push worker signs pending-approval pushes from dashboard "
+                      "start, before sign-in; every subscription is pinned to the key"),
     Store("web_push_vapid", "web-push-vapid.pem", "WEB_PUSH_VAPID_KEY", "file",
-          "legacy mode-0600 Dashboard VAPID key (migration source only)"),
+          "legacy mode-0600 Dashboard VAPID key (migration source only)",
+          pre_sign_in="read by the keyring migration at dashboard start"),
     Store("tls_cert", "tls.crt", "AUTONOMY_TLS_CERT", "file",
           "TLS certificate (self-signed by default)"),
     Store("tls_key", "tls.key", "AUTONOMY_TLS_KEY", "file",
-          "TLS private key"),
+          "TLS private key",
+          pre_sign_in="uvicorn serves the unlock page over HTTPS with it"),
+    # The shared tracker and each org's (`orgs/<slug>/`): credentials.env (the
+    # per-org Dolt SQL user and password), config.yaml, metadata.json. The Dolt
+    # data lives in the dolt container's own volume, not here. BEADS_DIR is the
+    # variable every node reader already honours for this directory.
+    Store("beads", ".beads", "BEADS_DIR", "dir",
+          "beads tracker config — per-org Dolt SQL credentials (mode-0600 "
+          "`credentials.env`), `config.yaml`, `metadata.json`; backed up as "
+          "config files only, never Dolt data",
+          pre_sign_in="the dispatcher's bd polls Dolt from boot and the hourly "
+                      "host backup dumps beads, both while the vault is cold"),
     Store("agent_runs", "agent-runs", "DASHBOARD_AGENT_RUNS_DIR", "dir",
           "session artifacts"),
     Store("session_traces", "session-traces", "DASHBOARD_TRACE_DIR", "dir",

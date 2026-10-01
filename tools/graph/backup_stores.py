@@ -101,6 +101,10 @@ _DIR_ACTIONS = {
     "orgs": "orgs-sqlite",       # the secret store: one .backup per org DB
     "serving_keys": "verify",    # connector working files only; the keys are vault rows since 2026-09-20
     "web_push_keys": "copy",     # small key material — belongs in every tier
+    # Tracker config only (credentials.env, config.yaml, metadata.json at the
+    # root and per org): a restore needs the Dolt passwords to reach the
+    # restored server; the Dolt data itself is dumped as SQL (beads/*.sql).
+    "beads": "beads-config",
     "agent_runs": "verify",      # large; restic dedup handles it offsite
     "session_traces": "verify",  # large; restic dedup handles it offsite
     "dropbox": "verify",         # media; restic dedup handles it offsite
@@ -109,7 +113,8 @@ _DIR_ACTIONS = {
     "browser_profiles": "exclude",
 }
 
-_OPTIONAL = {"web_push_vapid", "web_push_proof_vapid"} | set(
+# beads: a machine running no Dolt (SJC-2) has no tracker directory.
+_OPTIONAL = {"web_push_vapid", "web_push_proof_vapid", "beads"} | set(
     os.environ.get("AUTONOMY_BACKUP_OPTIONAL_STORES", "").split()
 )
 

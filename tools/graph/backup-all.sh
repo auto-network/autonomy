@@ -193,6 +193,13 @@ while IFS=$'\t' read -r key kind action required rel resolved; do
             for org_db in "${org_dbs[@]}"; do
                 backup_sqlite "${rel}/$(basename "$org_db")" "$org_db"
             done ;;
+        beads-config)
+            # Tracker config files only — never Dolt data (dumped as SQL below).
+            for cfg in "$resolved"/{credentials.env,config.yaml,metadata.json} \
+                       "$resolved"/orgs/*/{credentials.env,config.yaml,metadata.json}; do
+                [[ -f "$cfg" ]] || continue
+                backup_copy "${rel}/${cfg#"$resolved"/}" "$cfg"
+            done ;;
         verify)
             echo "  ${key}: present (content captured by offsite kind=data)"
             row "$key" verify ok 0 ""

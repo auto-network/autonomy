@@ -406,10 +406,21 @@ live one.
 | `web-push-vapid.pem` | `WEB_PUSH_VAPID_KEY` | legacy mode-0600 Dashboard VAPID key (migration source only) |
 | `tls.crt` | `AUTONOMY_TLS_CERT` | TLS certificate (self-signed by default) |
 | `tls.key` | `AUTONOMY_TLS_KEY` | TLS private key |
+| `.beads`/ | `BEADS_DIR` | beads tracker config — per-org Dolt SQL credentials (mode-0600 `credentials.env`), `config.yaml`, `metadata.json`; backed up as config files only, never Dolt data |
 | `agent-runs`/ | `DASHBOARD_AGENT_RUNS_DIR` | session artifacts |
 | `session-traces`/ | `DASHBOARD_TRACE_DIR` | session traces |
 | `dropbox`/ | `AUTONOMY_DROPBOX_DIR` | machine-global operator dropbox objects and receipt metadata |
 | `browser-profiles`/ | `BROWSER_PROFILES_DIR` | persistent browser profiles by organization and workspace (`<org>/<workspace>/<name>`) — site sign-in state; not backed up |
+
+**Secret files kept on disk on purpose** (`pre_sign_in` in the manifest;
+operator ruling 2026-10-01, auto-es7ja): only those needed *before* the
+operator signs in, since sign-in is what warms the vault after a reboot —
+`tls.key` (serves the unlock page), `dashboard-session.secret` (signs the
+sign-in cookie), the VAPID keyring `web-push-keys/` and its legacy
+`web-push-vapid.pem` (pushes are signed from dashboard start), and the beads
+`credentials.env` files (the dispatcher and the backup reach Dolt while the
+vault is cold). Every other node-generated secret is a vault row or a ramfs
+file re-minted at start.
 
 Every row is **test-coupled** to `tools/data_paths.py::STORE_MANIFEST`,
 which is also what the resolvers read: `test_volume_contract.py` fails if a
