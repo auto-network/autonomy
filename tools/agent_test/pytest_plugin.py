@@ -78,6 +78,45 @@ def pytest_runtest_logreport(report) -> None:
     )
 
 
+def _start_monitoring(repo_raw: str, lines: dict[str, set[int]]) -> int | None:
+    """Record executed lines through ``sys.monitoring`` (PEP 669).
+
+    Each (code, line) reports once and is then disabled until the next test
+    re-arms it with ``restart_events``, so a hot loop costs one callback, not
+    one per iteration. ``sys.settrace`` called back on every executed line and
+    roughly doubled test time. Monitoring is process-wide, so lines run on
+    other threads (the app thread behind Starlette's TestClient) count too.
+    Returns the tool id, or None when another tool (coverage.py) holds it.
+    """
+    monitoring = getattr(sys, "monitoring", None)
+    if monitoring is None:
+        return None
+    tool = monitoring.COVERAGE_ID
+    try:
+        monitoring.use_tool_id(tool, "agent-test")
+    except ValueError:
+        return None
+    disable = monitoring.DISABLE
+
+    def line(code, line_number):
+        path = _relative_source_path(code.co_filename, repo_raw)
+        if path is not None:
+            lines.setdefault(path.as_posix(), set()).add(line_number)
+        return disable
+
+    monitoring.register_callback(tool, monitoring.events.LINE, line)
+    monitoring.set_events(tool, monitoring.events.LINE)
+    monitoring.restart_events()
+    return tool
+
+
+def _stop_monitoring(tool: int) -> None:
+    monitoring = sys.monitoring
+    monitoring.set_events(tool, 0)
+    monitoring.register_callback(tool, monitoring.events.LINE, None)
+    monitoring.free_tool_id(tool)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_protocol(item, nextitem):
     """Retain setup, call, and teardown lines without requiring pytest-cov."""
@@ -94,13 +133,18 @@ def pytest_runtest_protocol(item, nextitem):
                 lines.setdefault(path.as_posix(), set()).add(frame.f_lineno)
         return trace
 
-    if enabled and repo_raw and previous is None:
+    active = enabled and bool(repo_raw) and previous is None
+    tool = _start_monitoring(repo_raw, lines) if active else None
+    if active and tool is None:
         sys.settrace(trace)
     try:
         yield
     finally:
-        if enabled and repo_raw and previous is None:
-            sys.settrace(previous)
+        if active:
+            if tool is not None:
+                _stop_monitoring(tool)
+            else:
+                sys.settrace(previous)
             _write(
                 "line_coverage",
                 nodeid=item.nodeid,
