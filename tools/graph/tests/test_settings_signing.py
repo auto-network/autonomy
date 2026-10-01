@@ -326,3 +326,24 @@ def test_the_signer_is_prepared_before_the_write_lock(founded_org, monkeypatch):
     assert in_transaction and not any(in_transaction), in_transaction
     for row in _rows(ORG):
         verify_record(record_from_row(row, founded_org.genesis_id), row["signature"])
+
+
+def test_the_write_boundary_folds_with_the_current_time(founded_org, monkeypatch):
+    """Grant expiry is judged against the fold's clock; a fold with no clock
+    never expires a delegation. The boundary passes the current time."""
+    import tools.network.ledger as ledger_mod
+    from tools.network.clock import now_ms
+
+    settings_ops.install_signer_provider(_provider_for(founded_org))
+    seen = []
+    real_fold = ledger_mod.fold
+
+    def spy(ledger, heads=None, now=None):
+        seen.append(now)
+        return real_fold(ledger, heads, now)
+
+    monkeypatch.setattr(ledger_mod, "fold", spy)
+    authority._FOLD_CACHE.clear()
+    settings_ops.add_setting(SET_ID, 1, "k-now", {"label": "x"}, org=ORG)
+    assert seen, "the boundary folded nothing"
+    assert all(isinstance(n, int) and abs(n - now_ms()) < 60_000 for n in seen)
