@@ -621,9 +621,21 @@ def invalidate_sender_hrefs() -> None:
 
 
 def _sender_href_rows() -> list[dict]:
-    """Live sessions as ``{tmux_session, project}`` rows for the link map."""
-    from tools.dashboard.dao import sessions as _dao
-    return _dao.get_active_sessions()
+    """Live sessions as ``{tmux_session, project}`` rows for the link map.
+
+    Straight from the live-session rows, filtered to the types the Active
+    list shows. Not ``get_active_sessions``: that also joins credential
+    aliases (vault-sealed Settings, ~1.4 s CPU per call inside the worker),
+    board groups and orgs, none of which a link needs. Same map, 1.9 ms
+    against 184 ms standalone (2026-10-01).
+    """
+    from tools.dashboard.dao import dashboard_db
+    from tools.dashboard.dao.sessions import _ACTIVE_SESSION_TYPES
+    return [
+        {"tmux_session": r["tmux_name"], "project": r.get("project")}
+        for r in dashboard_db.get_live_sessions()
+        if r.get("tmux_name") and r.get("type", "") in _ACTIVE_SESSION_TYPES
+    ]
 
 
 def _sender_href(ct: dict) -> str:

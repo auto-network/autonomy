@@ -1334,3 +1334,23 @@ def test_sender_links_expire_on_registry_change_not_on_a_short_timer(monkeypatch
     clock[0] += 61                      # the safety net still expires it
     session_harness._sender_href({"from": "host-a"})
     assert len(builds) == 3
+
+
+def test_sender_link_rows_come_from_live_rows_without_credentials(monkeypatch):
+    """2026-10-01: the link map read get_active_sessions, whose credential
+    alias join cost ~1.4 s CPU per call inside the worker. Links need only
+    name and project, from the live rows the Active list filters."""
+    from tools.dashboard import session_harness
+    from tools.dashboard.dao import dashboard_db, sessions
+    monkeypatch.setattr(dashboard_db, "get_live_sessions", lambda: [
+        {"tmux_name": "host-a", "project": "host", "type": "host"},
+        {"tmux_name": "auto-b", "project": "repo", "type": "container"},
+        {"tmux_name": "dispatch-c", "project": "repo", "type": "dispatch"},
+        {"tmux_name": "", "project": "repo", "type": "host"},
+    ])
+    monkeypatch.setattr(sessions, "_claude_credentials_alias_map",
+                        lambda: (_ for _ in ()).throw(AssertionError("credentials read")))
+    assert session_harness._sender_href_rows() == [
+        {"tmux_session": "host-a", "project": "host"},
+        {"tmux_session": "auto-b", "project": "repo"},
+    ]
