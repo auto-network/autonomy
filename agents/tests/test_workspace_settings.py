@@ -762,3 +762,32 @@ def test_org_override_empty_icon_data_uri_is_none():
     # An empty string "unset" falls through like the other fields.
     ov = _org_override_from_payload("acme", {"name": "Acme", "icon_data_uri": ""})
     assert ov.icon_data_uri is None
+
+
+# ── vault links (auto-2eqpb) ────────────────────────────────────────────────
+
+def test_vault_links_are_keyed_by_the_org_that_carried_the_row():
+    """A row names an entry without an org; the key is always the carrying
+    org's, so a row can never reach another org's vault entry."""
+    workspace = _workspace_from_setting(
+        {"name": "Widgets NG", "image": "session-widgets-ng", "vault_links": [
+            {"vault": "docker-config", "path": "/etc/autonomy/artifacts/docker-config.json",
+             "name": "Docker config", "description": "registry auth", "help": "ask"},
+            {"vault": "enterprise-license", "path": "/etc/autonomy/artifacts/license.yaml",
+             "required": False},
+        ]},
+        workspace_id="widgets-ng", graph_project="anchore", artifacts=(), mounts={},
+    )
+    first, second = workspace.vault_links
+    assert (first.key, first.path, first.name, first.required) == (
+        "anchore:docker-config", "/etc/autonomy/artifacts/docker-config.json",
+        "Docker config", True)
+    assert (second.key, second.required) == ("anchore:enterprise-license", False)
+
+
+def test_a_workspace_without_vault_links_has_none():
+    workspace = _workspace_from_setting(
+        {"name": "Autonomy", "image": "autonomy-session-platform"},
+        workspace_id="autonomy", graph_project="autonomy", artifacts=(), mounts={},
+    )
+    assert workspace.vault_links == ()

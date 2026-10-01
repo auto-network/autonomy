@@ -22,6 +22,7 @@ Notes on shape:
 
 from __future__ import annotations
 
+import posixpath
 import re
 from typing import Any
 
@@ -60,6 +61,105 @@ SYNOPSIS = {
 # ── Repo mount entry ────────────────────────────────────────
 
 _VALID_HARNESSES = {"claude", "codex", "grok"}
+
+# ── vault links (auto-2eqpb) ────────────────────────────────────────────────
+#
+# A vault link names an entry in the operator's AUDITED vault tier and the
+# container path the program reads it from. The launcher opens it (no prompt:
+# audited), delivers it into the session's private ramfs (/run/secrets) and
+# links it into place with the same step that places the harness sign-ins --
+# one carrier, not a second one. The value never touches a disk or a row.
+#
+# `vault` is the entry name WITHOUT an org prefix: the launcher opens exactly
+# `<the workspace's org>:<vault>`, so a row can never reach another org's
+# entry. Added in place (optional, default empty), as `visibility` was added
+# to mounts: old readers refuse a row that carries it (unknown field), so a
+# row gains vault_links only after every machine reading the org runs this.
+
+_VAULT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_VAULT_LINK_FIELDS = {"vault", "path", "name", "description", "help", "required"}
+
+
+def _validate_vault_links(links: list, owner: str) -> None:
+    seen_vault: set[str] = set()
+    seen_path: set[str] = set()
+    for i, link in enumerate(links):
+        where = f"{owner}: vault_links[{i}]"
+        if not isinstance(link, dict):
+            raise SchemaValidationError(f"{where} must be an object")
+        extra = set(link) - _VAULT_LINK_FIELDS
+        if extra:
+            raise SchemaValidationError(f"{where} has unknown field(s): {sorted(extra)}")
+        vault = link.get("vault")
+        if not isinstance(vault, str) or not _VAULT_NAME_RE.fullmatch(vault):
+            raise SchemaValidationError(
+                f"{where}.vault must be a vault entry name without an org "
+                f"prefix (letters, digits, '.', '_', '-'), got {vault!r}")
+        path = link.get("path")
+        if (not isinstance(path, str) or not path.startswith("/")
+                or posixpath.normpath(path) != path or path == "/"
+                or any(part == ".." for part in path.split("/"))):
+            raise SchemaValidationError(
+                f"{where}.path must be an absolute, normalized container "
+                f"file path, got {path!r}")
+        for key in ("name", "description", "help"):
+            if key in link and not isinstance(link[key], str):
+                raise SchemaValidationError(f"{where}.{key} must be a string")
+        if len(link.get("name") or "") > 60:
+            raise SchemaValidationError(f"{where}.name is a short title (max 60 chars)")
+        if "required" in link and not isinstance(link["required"], bool):
+            raise SchemaValidationError(f"{where}.required must be a boolean")
+        if vault in seen_vault or path in seen_path:
+            raise SchemaValidationError(
+                f"{where} repeats a vault entry or a path another link uses")
+        seen_vault.add(vault)
+        seen_path.add(path)
+
+
+class _VaultLinkIssue:
+    """A readiness finding for one declared vault link, in the shape the
+    schema-declared readiness hook reads (settings_ops.inspect_setting)."""
+
+    __slots__ = ("kind", "detail", "field", "subject", "looked_in", "severity",
+                 "frame", "remediation_id", "remediation_params")
+
+    def __init__(self, *, detail, field, subject, severity):
+        self.kind = "missing_vault_credential"
+        self.detail = detail
+        self.field = field
+        self.subject = subject
+        self.looked_in = "the operator's audited vault (autonomy.vault.audited)"
+        self.severity = severity
+        self.frame = "settings-store"
+        self.remediation_id = "workspace.env.credential.v1"
+        self.remediation_params = {}
+
+
+def vault_link_findings(links, org: str, *, exists=None) -> list:
+    """``missing_vault_credential`` for each declared link whose entry is not
+    in the audited vault -- blocking when required, advisory otherwise. An
+    existence probe only (nothing decrypted), so it answers the same while
+    the vault is cold."""
+    if exists is None:
+        from tools.dashboard.vault_seal_central import existing_row_id
+        from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
+
+        def exists(key):
+            return existing_row_id(VAULT_AUDITED_SET_ID, key) is not None
+    findings = []
+    for i, link in enumerate(links or ()):
+        key = f"{org}:{link['vault']}"
+        if exists(key):
+            continue
+        what = " — ".join(t for t in (link.get("name"), link.get("description")) if t)
+        detail = (f"vault entry {key!r} for {link['path']} is not in the vault"
+                  + (f" ({what})" if what else ""))
+        if link.get("help"):
+            detail += f". {link['help']}"
+        findings.append(_VaultLinkIssue(
+            detail=detail, field=f"vault_links[{i}]", subject=key,
+            severity="blocking" if link.get("required", True) else "advisory"))
+    return findings
 
 
 #: Components of a derived local-repository path (org slug, workspace id).
@@ -258,6 +358,7 @@ class WorkspaceV1(SettingSchema):
         "env_from_host": list,
         "tags": list,
         "dispatch_labels": list,
+        "vault_links": list,
     }
 
     _field_metadata: dict[str, dict] = {
@@ -377,7 +478,38 @@ class WorkspaceV1(SettingSchema):
             "description": "Dispatch routing labels — beads matching any label dispatch here",
             "element": {"type": "string"},
         },
+        "vault_links": {
+            "type": "array",
+            "description": (
+                "Secret files this workspace reads, from the operator's audited "
+                "vault: each is delivered into the session's private ramfs "
+                "(/run/secrets) and linked at `path` before setup starts. "
+                "`vault` names the entry without an org prefix; the launcher "
+                "opens <this workspace's org>:<vault>. A required link whose "
+                "entry cannot be opened refuses the launch, by name."
+            ),
+            "element": {
+                "vault": {"type": "string", "required": True,
+                          "description": "Vault entry name, no org prefix (e.g. docker-config)"},
+                "path": {"type": "string", "required": True,
+                         "description": "Absolute container path the program reads"},
+                "name": {"type": "string", "description": "Short title, max 60 chars"},
+                "description": {"type": "string",
+                                "description": "What the secret is"},
+                "help": {"type": "string", "description": "How to obtain it"},
+                "required": {"type": "boolean", "default": True,
+                             "description": "Refuse the launch when it cannot be opened"},
+            },
+        },
     }
+
+    @classmethod
+    def readiness_findings(cls, *, key, payload, org, read):
+        """Each declared vault link whose entry the audited vault lacks."""
+        links = payload.get("vault_links") if isinstance(payload, dict) else None
+        if not links or not org:
+            return ()
+        return tuple(vault_link_findings(links, org))
 
     @classmethod
     def validate(cls, payload: Any) -> None:  # noqa: C901 — flat checks
@@ -430,6 +562,8 @@ class WorkspaceV1(SettingSchema):
         if "repos" in payload:
             for i, repo in enumerate(payload["repos"]):
                 cls._validate_repo_entry(repo, i)
+        if "vault_links" in payload:
+            _validate_vault_links(payload["vault_links"], cls.__name__)
         if "host_root_mount" in payload:
             hrm = payload["host_root_mount"]
             reason = hrm.get("reason")

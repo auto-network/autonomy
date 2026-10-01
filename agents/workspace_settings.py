@@ -349,6 +349,22 @@ class ArtifactSpec:
 
 
 @dataclass(frozen=True)
+class VaultLink:
+    """A secret file the workspace reads, from the operator's audited vault
+    (``vault_links`` on the workspace row, auto-2eqpb). ``key`` is
+    ``<workspace org>:<vault>`` -- built here from the org that carried the
+    row, never from the payload, so a row cannot reach another org's entry.
+    The launcher delivers it into /run/secrets and links it at ``path``."""
+    key: str
+    vault: str
+    path: str
+    name: str = ""
+    description: str = ""
+    help: str = ""
+    required: bool = True
+
+
+@dataclass(frozen=True)
 class MissingArtifact:
     """A required artifact whose resolved host path does not exist on disk."""
     artifact: ArtifactSpec
@@ -476,6 +492,7 @@ class WorkspaceV1:
     env: dict[str, str] = field(default_factory=dict)
     env_from_host: tuple[str, ...] = ()
     artifacts: tuple[ArtifactSpec, ...] = ()
+    vault_links: tuple[VaultLink, ...] = ()
     mounts: dict[str, ResolvedSetting] = field(default_factory=dict)
     capabilities: tuple[MaterializedCapability, ...] = ()
     capability_issues: tuple[CapabilityChainIssue, ...] = ()
@@ -647,6 +664,18 @@ def _workspace_from_setting(
             str(v) for v in (setting_payload.get("env_from_host") or ())
         ),
         artifacts=artifacts,
+        vault_links=tuple(
+            VaultLink(
+                key=f"{graph_project}:{link['vault']}",
+                vault=str(link["vault"]), path=str(link["path"]),
+                name=str(link.get("name") or ""),
+                description=str(link.get("description") or ""),
+                help=str(link.get("help") or ""),
+                required=bool(link.get("required", True)),
+            )
+            for link in (setting_payload.get("vault_links") or ())
+            if isinstance(link, dict) and link.get("vault") and link.get("path")
+        ),
         mounts=mounts,
         capabilities=capabilities,
         capability_issues=capability_issues,
