@@ -186,7 +186,7 @@ from tools.dashboard import network_routes
 from tools.dashboard import org_membership_routes
 from tools.dashboard import org_runners
 from tools.dashboard import remote_api
-from tools.dashboard import web_push, web_push_proof, web_push_routes
+from tools.dashboard import web_push, web_push_routes
 from tools.dashboard import image_build_worker
 from tools.dashboard import web_gateway_supervisor
 from tools.dashboard import service_certificate_manager
@@ -13350,9 +13350,6 @@ async def api_software_update(request):
     return JSONResponse(result)
 
 
-async def page_web_push_proof(request):
-    return HTMLResponse(_load_template("web-push-proof.html"))
-
 def _welcome_gate_open() -> bool:
     """True when the onboarding empty-state still holds (bead auto-inpkd).
 
@@ -22753,8 +22750,6 @@ routes = [
     Route("/pages/session-view", page_session_view_fragment),
     Route("/test/input", page_test_input),
     Route("/_admin/voice-smoke", page_voice_smoke),
-    Route("/web-push-proof", page_web_push_proof),
-    Route("/service-worker.js", web_push_proof.service_worker),
     # /api/test/* dev-prototype routes are registered below, ONLY under
     # DASHBOARD_MOCK — suppressed in production (auto-1wwpf.6).
 
@@ -22767,8 +22762,6 @@ routes = [
     Route("/api/internal/restart-notice", api_internal_restart_notice, methods=["POST"]),
     Route("/api/events", api_events),
     Route("/api/events/replay", api_events_replay),
-    Route("/api/web-push/proof/config", web_push_proof.api_config),
-    Route("/api/web-push/proof/send", web_push_proof.api_send, methods=["POST"]),
     *web_push_routes.ROUTES,
     *web_push.ROUTES,
 

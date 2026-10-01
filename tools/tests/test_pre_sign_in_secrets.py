@@ -13,9 +13,6 @@ REPO = Path(__file__).resolve().parents[2]
 
 #: The deliberate exceptions: needed before the operator signs in.
 PRE_SIGN_IN = {"dashboard_session_secret", "tls_key", "web_push_keys", "beads"}
-#: Node-secret stores the bead still moves out of the manifest (vault row or
-#: ramfs) or deletes. Each later landing removes its entry; empty = done.
-STILL_TO_MOVE = {"web_push_proof_vapid"}
 
 
 def test_exactly_the_recorded_exceptions_stay_files_and_each_says_why():
@@ -25,15 +22,15 @@ def test_exactly_the_recorded_exceptions_stay_files_and_each_says_why():
         assert len(STORES_BY_KEY[key].pre_sign_in) > 20, key
 
 
-def test_every_node_secret_store_is_an_exception_or_on_its_way_out():
+def test_every_node_secret_store_is_a_recorded_exception():
     """A secret store (key/secret/credential/VAPID in its name or relative
-    path) is either a recorded pre-sign-in exception or still listed to
-    move; nothing else may keep a secret on disk."""
+    path) is a recorded pre-sign-in exception; nothing else may keep a
+    secret on disk."""
     words = ("key", "secret", "vapid", "credential", "beads")
     secret_stores = {s.key for s in STORE_MANIFEST
                      if any(w in (s.key + s.relative).lower() for w in words)
                      and s.key not in ("serving_keys",)}   # holds no key material
-    assert secret_stores <= PRE_SIGN_IN | STILL_TO_MOVE, secret_stores - PRE_SIGN_IN - STILL_TO_MOVE
+    assert secret_stores <= PRE_SIGN_IN, secret_stores - PRE_SIGN_IN
 
 
 def test_the_beads_tracker_config_is_backed_up_optional_and_config_only():

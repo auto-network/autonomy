@@ -372,3 +372,18 @@ def test_stable_personal_root_resolution_refuses_ambiguity_and_anchor_mismatch(m
     monkeypatch.setattr(armor_module, "armor_root_pub", lambda _armor: "b" * 64)
     with pytest.raises(StablePersonalIdentityUnavailable, match="disagree"):
         identity_routes.resolve_stable_personal_root_public_key()
+
+
+def test_the_service_worker_is_served_at_the_root_for_push():
+    """web-push-register.js registers /service-worker.js; it must be served
+    with root scope (moved here when the Web Push proof was deleted)."""
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from tools.dashboard import web_push_routes
+
+    client = TestClient(Starlette(routes=list(web_push_routes.ROUTES)))
+    r = client.get("/service-worker.js")
+    assert r.status_code == 200
+    assert r.headers["service-worker-allowed"] == "/"
+    assert r.headers["content-type"].startswith("application/javascript")

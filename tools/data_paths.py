@@ -125,9 +125,6 @@ STORE_MANIFEST: tuple = (
           "the serving connectors' working files (certificate, log, control "
           "descriptor, lock); holds no key material since 2026-09-20, the "
           "serving keys are machine-vault rows (graph://67d0aa5f-885 D4)"),
-    Store("web_push_proof_vapid", "web-push-proof-vapid.pem",
-          "WEB_PUSH_PROOF_VAPID_KEY", "file",
-          "mode-0600 VAPID sender key for the isolated Web Push proof"),
     Store("web_push_keys", "web-push-keys", "WEB_PUSH_KEY_DIR", "dir",
           "mode-0700 VAPID keyring for Dashboard Web Push (mode-0600 key files)",
           pre_sign_in="the push worker signs pending-approval pushes from dashboard "

@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from tools.dashboard import api_auth
@@ -316,7 +316,24 @@ async def api_refresh_device(request: Request) -> JSONResponse:
     })
 
 
+async def service_worker(_request: Request) -> Response:
+    """The push service worker, served at the origin root so its scope is
+    the whole dashboard (web-push-register.js registers it)."""
+    script = Path(__file__).with_name("static").joinpath(
+        "service-worker.js"
+    ).read_text(encoding="utf-8")
+    return Response(
+        script,
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Service-Worker-Allowed": "/",
+        },
+    )
+
+
 ROUTES = [
+    Route("/service-worker.js", service_worker, methods=["GET"]),
     Route("/api/web-push/config", api_config, methods=["GET"]),
     Route("/api/web-push/devices", api_devices, methods=["GET"]),
     Route("/api/web-push/devices/{device_id}", api_put_device, methods=["PUT"]),

@@ -114,7 +114,7 @@ _DIR_ACTIONS = {
 }
 
 # beads: a machine running no Dolt (SJC-2) has no tracker directory.
-_OPTIONAL = {"web_push_proof_vapid", "beads"} | set(
+_OPTIONAL = {"beads"} | set(
     os.environ.get("AUTONOMY_BACKUP_OPTIONAL_STORES", "").split()
 )
 
