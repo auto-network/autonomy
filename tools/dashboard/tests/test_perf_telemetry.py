@@ -285,3 +285,41 @@ def test_job_key_unwraps_partials():
     ctx = contextvars.copy_context()
     assert pt.job_key(functools.partial(ctx.run, _spin, 1)).endswith("test_perf_telemetry._spin")
     assert pt.job_key(functools.partial(_spin, 1)).endswith("test_perf_telemetry._spin")
+
+
+def test_section_times_a_block_into_the_job_table(monkeypatch, caplog):
+    """2026-10-01: named sections measure suspected hot paths (the sender-href
+    refresh in transcript parsing) beside the executor jobs."""
+    import threading
+    from tools.dashboard import perf_telemetry as pt
+
+    class _T:
+        jobs = pt.JobStats()
+    monkeypatch.setattr(pt, "_telemetry", _T())
+    started, release = threading.Event(), threading.Event()
+
+    def slow():
+        with pt.section("demo", slow_log_s=0.0):
+            started.set()
+            release.wait(2)
+    other = threading.Thread(target=slow, name="other")
+    other.start()
+    started.wait(2)
+    with caplog.at_level("WARNING", logger="tools.dashboard.perf_telemetry"):
+        with pt.section("demo", slow_log_s=0.0):
+            assert _T.jobs.in_flight["section:demo"] == 2
+        release.set()
+        other.join(2)
+    assert _T.jobs.calls["section:demo"] == 2
+    assert _T.jobs.in_flight["section:demo"] == 0
+    assert "section:demo" in _T.jobs.cpu and "section:demo" in _T.jobs.max_wall
+    lines = [r.getMessage() for r in caplog.records if "SLOW-SECTION demo" in r.getMessage()]
+    assert any("thread=MainThread in_flight=2" in line for line in lines)
+
+
+def test_section_is_a_no_op_without_telemetry(monkeypatch):
+    from tools.dashboard import perf_telemetry as pt
+    monkeypatch.setattr(pt, "_telemetry", None)
+    with pt.section("demo", slow_log_s=0.0):
+        value = 1
+    assert value == 1

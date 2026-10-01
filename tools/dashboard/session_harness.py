@@ -630,19 +630,23 @@ def _sender_href(ct: dict) -> str:
     from urllib.parse import quote as _q
     now = _t.time()
     if now - _SENDER_HREF_CACHE["at"] > 5:
-        try:
-            from tools.dashboard.dao import sessions as _dao
-            rows = _dao.get_active_sessions()
-        except Exception:
-            rows = []
-        _SENDER_HREF_CACHE["map"] = {
-            r["tmux_session"]: (
-                f"/session/{_q(str(r.get('project') or 'session'), safe='')}"
-                f"/{_q(r['tmux_session'], safe='')}"
-                f"?tmux={_q(r['tmux_session'], safe='')}")
-            for r in rows if r.get("tmux_session")
-        }
-        _SENDER_HREF_CACHE["at"] = now
+        # Measured (2026-10-01): the suspected cause of the post-restart
+        # viewer stalls is this refresh running in every concurrent parse.
+        from tools.dashboard import perf_telemetry
+        with perf_telemetry.section("session_harness._sender_href.refresh", slow_log_s=1.0):
+            try:
+                from tools.dashboard.dao import sessions as _dao
+                rows = _dao.get_active_sessions()
+            except Exception:
+                rows = []
+            _SENDER_HREF_CACHE["map"] = {
+                r["tmux_session"]: (
+                    f"/session/{_q(str(r.get('project') or 'session'), safe='')}"
+                    f"/{_q(r['tmux_session'], safe='')}"
+                    f"?tmux={_q(r['tmux_session'], safe='')}")
+                for r in rows if r.get("tmux_session")
+            }
+            _SENDER_HREF_CACHE["at"] = now
     return _SENDER_HREF_CACHE["map"].get(tmux) or f"/session/{_q(tmux, safe='')}"
 
 

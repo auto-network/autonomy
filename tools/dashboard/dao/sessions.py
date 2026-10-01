@@ -114,15 +114,17 @@ def _claude_credentials_alias_map() -> dict[str, str]:
     ``{}`` so the harness_token still surfaces as the bare id rather than
     crashing the active-sessions endpoint.
     """
-    try:
-        from tools.graph import harness_credentials as hv
-        return {
-            acct.id: acct.get("alias")
-            for acct in hv.list_accounts("claude")
-            if acct.get("alias")
-        }
-    except Exception:
-        return {}
+    from tools.dashboard import perf_telemetry
+    with perf_telemetry.section("dao.sessions._claude_credentials_alias_map", slow_log_s=1.0):
+        try:
+            from tools.graph import harness_credentials as hv
+            return {
+                acct.id: acct.get("alias")
+                for acct in hv.list_accounts("claude")
+                if acct.get("alias")
+            }
+        except Exception:
+            return {}
 
 
 def get_active_sessions(threshold: int = 600) -> list[dict]:

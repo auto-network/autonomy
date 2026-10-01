@@ -33,6 +33,7 @@ What this module does, all from one daemon thread in the dashboard worker:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -797,6 +798,41 @@ def _rotate(path: Path, max_bytes: int = 20 * 1024 * 1024, backups: int = 3) -> 
         if src.exists():
             src.replace(path.with_name(f"{path.name}.{i + 1}"))
     path.replace(path.with_name(f"{path.name}.1"))
+
+
+# ── named code sections ──────────────────────────────────────────────────
+
+
+@contextlib.contextmanager
+def section(key: str, *, slow_log_s: float | None = None):
+    """Time one named block of code into the job table, under ``section:<key>``.
+
+    Calls, CPU (thread_time), wall, max wall and in-flight count land beside
+    the executor jobs, so they reach Prometheus and the spike dumps with no new
+    plumbing. A section inside a to_thread job is also counted in that job's
+    totals. With *slow_log_s*, a run longer than that logs one SLOW-SECTION
+    line naming the thread and how many runs of the key were in flight when
+    it started. A
+    no-op when telemetry is off.
+    """
+    t = _telemetry
+    jobs = t.jobs if t is not None else None
+    if jobs is None:
+        yield
+        return
+    k = "section:" + key
+    jobs.begin(k)
+    concurrent = jobs.in_flight.get(k, 1)
+    c0, w0 = time.thread_time(), time.monotonic()
+    try:
+        yield
+    finally:
+        cpu_s, wall_s = time.thread_time() - c0, time.monotonic() - w0
+        jobs.end(k, cpu_s, wall_s)
+        if slow_log_s is not None and wall_s >= slow_log_s:
+            logger.warning(
+                "SLOW-SECTION %s wall=%.2fs cpu=%.2fs thread=%s in_flight=%d",
+                key, wall_s, cpu_s, threading.current_thread().name, concurrent)
 
 
 # ── process wiring ───────────────────────────────────────────────────────
