@@ -194,6 +194,9 @@ class Account:
         if v is None:
             return None
         if part == "setup_minted_at":
+            # Stored as its expiry; derived back on the assumption that a
+            # setup token lives exactly SETUP_TOKEN_TTL (one year). If that
+            # life ever changes, store the minted time instead.
             return _ms_to_iso(v - int(SETUP_TOKEN_TTL.total_seconds() * 1000))
         if part == "scopes":
             return scopes_text(v) if isinstance(v, list) else None
