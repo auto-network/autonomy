@@ -1,6 +1,6 @@
 """auto-26e8a declared default: organization-shared inference accounts are
 for members' launches. Through the dashboard's settings routes, a caller that
-is not the operator in person reads them with every secret part redacted;
+is not the operator in person reads their credentials redacted;
 writes are open to agents (operator ruling 2026-10-02). The launcher opens them in-process, which is not a
 route (tests: agents/tests/test_org_shared_account_launch.py)."""
 
@@ -15,12 +15,16 @@ from starlette.testclient import TestClient
 
 from tools.dashboard import restricted_sets, unlock_routes
 from tools.dashboard.tests.test_remote_api_authority import OPERATOR, Principal, _org
-from tools.graph.schemas.vault_credential import ORG_HARNESS_ACCOUNTS_SET_ID as SET
+from tools.graph.schemas.harness_account import (
+    ORG_HARNESS_ACCOUNT_SET_ID as PUBLIC,
+    ORG_HARNESS_CREDENTIAL_SET_ID as SET,
+)
 
-ROWS = [{"id": "r1", "set_id": SET, "key": "claude.account.O1.access",
-         "payload": {"value": "at-SECRET"}},
-        {"id": "r2", "set_id": SET, "key": "claude.account.O1.alias",
-         "payload": {"value": "team"}}]
+ROWS = [{"id": "r1", "set_id": SET, "key": "claude:O1",
+         "payload": {"harness": "claude", "access": "at-SECRET"}},
+        {"id": "r2", "set_id": PUBLIC, "key": "claude:O1",
+         "payload": {"harness": "claude", "account_id": "O1", "alias": "team",
+                     "credential_state": "ok"}}]
 OTHER = {"id": "r3", "set_id": "autonomy.workspace", "key": "dev", "payload": {"value": "x"}}
 
 
@@ -47,7 +51,7 @@ def client(monkeypatch):
     monkeypatch.setattr(graph_ops, "remove_setting",
                         lambda target, **k: writes.append(("remove", target)))
     monkeypatch.setattr(graph_ops, "get_setting", lambda sid, **_k: SimpleNamespace(
-        set_id=SET if sid in ("r1", "r2") else "autonomy.workspace",
+        set_id={"r1": SET, "r2": PUBLIC}.get(sid, "autonomy.workspace"),
         to_dict=lambda: next(r for r in ROWS + [OTHER] if r["id"] == sid)))
     app = Starlette(routes=_settings_routes(), middleware=[Middleware(Principal)])
     with TestClient(app) as c:
@@ -62,10 +66,10 @@ def _as(principal):
 
 def test_a_session_reads_shared_accounts_with_secrets_redacted(client):
     _as(_org("acme"))
-    members = {m["key"]: m["payload"]["value"]
-               for m in client.get(f"/api/graph/settings/{SET}").json()["members"]}
-    assert members == {"claude.account.O1.access": "[redacted]",
-                       "claude.account.O1.alias": "team"}
+    [secret] = client.get(f"/api/graph/settings/{SET}").json()["members"]
+    assert secret["payload"] == {"value": "[redacted]"}
+    [public] = client.get(f"/api/graph/settings/{PUBLIC}").json()["members"]
+    assert public["payload"]["alias"] == "team"     # naming parts are public
     assert client.get("/api/graph/setting/r1").json()["payload"]["value"] == "[redacted]"
     # Other sets are untouched.
     assert client.get("/api/graph/settings/autonomy.workspace").json()["members"][0][
@@ -74,15 +78,14 @@ def test_a_session_reads_shared_accounts_with_secrets_redacted(client):
 
 def test_the_operator_in_person_reads_them_in_full(client):
     _as(OPERATOR)
-    members = client.get(f"/api/graph/settings/{SET}").json()["members"]
-    assert {m["payload"]["value"] for m in members} == {"at-SECRET", "team"}
+    [secret] = client.get(f"/api/graph/settings/{SET}").json()["members"]
+    assert secret["payload"]["access"] == "at-SECRET"
 
 
 @pytest.mark.parametrize("method, path, body, expected", [
-    ("POST", "/api/graph/setting", {"set_id": SET, "schema_revision": 1,
-                                    "key": "claude.account.O1.access", "payload": {"value": "x"}},
+    ("POST", "/api/graph/setting", {"set_id": SET, "schema_revision": 1, "key": "claude:O1",
+                                    "payload": {"harness": "claude", "access": "x"}},
      None),
-    ("POST", "/api/graph/setting/r1/override", {"payload": {"value": "x"}}, ("override", "r1")),
     ("DELETE", "/api/graph/setting/r1", None, ("remove", "r1")),
 ])
 def test_a_session_may_add_replace_or_remove_a_shared_account(client, method, path, body,
@@ -95,6 +98,7 @@ def test_a_session_may_add_replace_or_remove_a_shared_account(client, method, pa
         assert client.writes == [expected]
 
 
-def test_redaction_keeps_account_naming_parts():
+def test_redaction_hides_the_credential_and_leaves_the_public_row():
     out = restricted_sets.redact({"members": ROWS})
-    assert [m["payload"]["value"] for m in out["members"]] == ["[redacted]", "team"]
+    assert out["members"][0]["payload"] == {"value": "[redacted]"}
+    assert out["members"][1]["payload"]["alias"] == "team"

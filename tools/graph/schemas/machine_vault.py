@@ -25,10 +25,11 @@ unlock, opens it unattended on read. The ciphertext lives inline in the
 machine store. The organization sealer and its key generations are never
 consulted (``settings_ops._seal_vault_payload``).
 
-One value per row, as in ``autonomy.vault.audited``: a credential with
-several parts is one canonical JSON string here when it must be replayed
-atomically (the runtime credential), or several rows under compound keys
-when its parts are consumed separately.
+One value per row, as in ``autonomy.vault.audited``: these sets hold
+single-value secrets. A credential whose parts must be replayed together
+(the runtime credential) is one canonical JSON string here; a credential
+with several typed parts has its own defined set (as harness accounts do,
+``autonomy.vault.harness-credential``), never several rows of this one.
 """
 from __future__ import annotations
 

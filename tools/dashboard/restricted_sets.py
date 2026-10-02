@@ -2,16 +2,15 @@
 dashboard's settings routes (auto-26e8a). auto-u0q28 replaces this by never
 returning any vaulted value inline, and deletes this module.
 
-``autonomy.org.harness-accounts`` holds organization-shared inference
-accounts: the most portable secret in an organization vault. Its rows are
-for members' launches, which the launcher opens in-process. Through the
-settings routes:
-
-a caller that is not the operator in person -- the dashboard cookie or a host
-terminal (:func:`tools.dashboard.vault_routes.is_operator_terminal`) --
-receives each row of the set with its value redacted, except the parts that
-name an account (alias, email, organization name). Writes are open to agents
-(operator ruling 2026-10-02).
+``autonomy.org.vault.harness-credential`` holds the secrets of
+organization-shared inference accounts: the most portable secret in an
+organization vault. Its rows are for members' launches, which the launcher
+opens in-process. Through the settings routes, a caller that is not the
+operator in person -- the dashboard cookie or a host terminal
+(:func:`tools.dashboard.vault_routes.is_operator_terminal`) -- receives each
+row with its value redacted. The parts that name an account (alias, email,
+organization name) are in the public ``autonomy.org.harness.account`` set
+(auto-raepo). Writes are open to agents (operator ruling 2026-10-02).
 """
 
 from __future__ import annotations
@@ -21,10 +20,10 @@ import json
 
 from starlette.responses import JSONResponse
 
-from tools.graph.schemas.vault_credential import ORG_HARNESS_ACCOUNTS_SET_ID
+from tools.graph.schemas.harness_account import ORG_HARNESS_CREDENTIAL_SET_ID
 
 #: set_id -> key suffixes whose values are not secret.
-RESTRICTED = {ORG_HARNESS_ACCOUNTS_SET_ID: (".alias", ".email", ".org_name")}
+RESTRICTED = {ORG_HARNESS_CREDENTIAL_SET_ID: ()}
 REDACTED = "[redacted]"
 
 

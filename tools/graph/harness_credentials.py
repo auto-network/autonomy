@@ -760,3 +760,23 @@ def fold_vault_part_rows() -> dict[str, int]:
                 counts["rows_removed"] += 1
             counts["accounts"] += 1
     return counts
+
+
+def fold_where_due() -> dict[str, int] | None:
+    """Run :func:`fold_vault_part_rows` where it is due: the vault is open in
+    this process, and this machine is the Fleet tunnel server -- the same
+    single-machine check the Claude refresh uses, so one machine folds and
+    the others receive the result by sync. None when it does not run here."""
+    if not _vault_open_here():
+        return None
+    try:
+        from tools.network import fleet_tunnel_server
+        if not fleet_tunnel_server.state().allowed:
+            return None
+    except Exception:
+        logger.exception("harness accounts: could not tell whether this machine folds")
+        return None
+    counts = fold_vault_part_rows()
+    if any(counts.values()):
+        logger.info("harness accounts: folded the per-part vault rows %s", counts)
+    return counts

@@ -1500,6 +1500,10 @@ def _schedule_vault_releases() -> None:
 
         threading.Thread(target=node_ssh.release_node_ssh_key,
                          name="node-ssh-key-release", daemon=True).start()
+        from tools.graph import harness_credentials
+
+        threading.Thread(target=harness_credentials.fold_where_due,
+                         name="harness-account-fold", daemon=True).start()
     except Exception:  # noqa: BLE001
         logger.warning("vault releases could not be scheduled", exc_info=True)
 

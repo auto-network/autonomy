@@ -136,11 +136,9 @@ class VaultAuditedCredentialV1(SettingSchema):
     value: str = field(
         required=True,
         description=(
-            "The secret itself. A single string, always: every consumer of a "
-            "credential wants one value to put somewhere, and a credential "
-            "with several parts is several rows under compound keys "
-            "(claude.oauth.access, claude.oauth.refresh) rather than a "
-            "structure each consumer has to learn to take apart."
+            "The secret itself: a single-value secret. A credential with "
+            "several typed parts has its own defined set (as harness accounts "
+            "do, autonomy.vault.harness-credential), never several rows here."
         ),
     )
 
@@ -165,34 +163,4 @@ class VaultSecuredCredentialV1(SettingSchema):
     value: str = field(
         required=True,
         description="The secret itself, as in the audited set.",
-    )
-
-
-ORG_HARNESS_ACCOUNTS_SET_ID = "autonomy.org.harness-accounts"
-
-
-@home("organization")
-@publication_band(max="raw")
-@keyed_per_entity(key_strategy="setting_name")
-@vaulted("audited")
-class OrgHarnessAccountV1(SettingSchema):
-    """One part of an organization-shared inference account (bead
-    auto-26e8a; design graph://7eb29bc8-31a v6 D10 and §11).
-
-    Keyed exactly like the personal rows -- ``<harness>.account.<id>.<part>``
-    -- so one parser serves both. The organization's own vault seals every
-    row to its key generations: any current member opens it, a member removed
-    from the organization loses the next generation, and a runner resolves it
-    from its own replica of the organization store, so nothing is carried for
-    it. Any member may add or remove an account; the vault's sealing and
-    grants are the authorization.
-    """
-
-    set_id = ORG_HARNESS_ACCOUNTS_SET_ID
-    schema_revision = VAULT_CREDENTIAL_REVISION
-
-    value: str = field(
-        required=True,
-        description="One part of the account (a token, an alias, an email), as in "
-                    "the personal audited set.",
     )

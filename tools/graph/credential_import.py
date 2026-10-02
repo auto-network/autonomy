@@ -8,8 +8,8 @@ and brings it into the system, and a session starts with it; no browser
 when a token exists on the machine.
 
 The system's front door for a credential is the vault: a harness account is
-one record keyed by its account identity, held as sealed rows named in
-:mod:`tools.graph.harness_credentials` and nowhere else. This scan writes an
+one public row and one sealed credential keyed ``<harness>:<account_id>``,
+named in :mod:`tools.graph.harness_credentials` and nowhere else. This scan writes an
 imported sign-in into that record; the install command writes into the
 same record; the launcher, the pollers and the usage probe read it.
 

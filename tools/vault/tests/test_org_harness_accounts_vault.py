@@ -1,5 +1,6 @@
 """auto-26e8a: organization-shared inference accounts are rows of the
-organization's own vault (autonomy.org.harness-accounts, D10). The set is
+organization's own vault (autonomy.org.vault.harness-credential, D10;
+auto-raepo). The set is
 organization-homed, raw-band and audited-vaulted, so the production sealer
 seals it to the organization's key generations: every current member opens a
 shared account, a member removed from the organization cannot open the next
@@ -15,7 +16,7 @@ import sys
 from pathlib import Path
 
 from tools.graph.schemas import registry
-from tools.graph.schemas.vault_credential import ORG_HARNESS_ACCOUNTS_SET_ID as SET_ID
+from tools.graph.schemas.harness_account import ORG_HARNESS_CREDENTIAL_SET_ID as SET_ID
 from tools.network.storagekit.keycontrol import KeyControlStore
 from tools.vault.key_holder import VaultKeyCache, _scoped_db, build_key_holder
 from tools.vault.key_sealer import build_vault_sealer
@@ -32,7 +33,7 @@ if "sk_org_conftest" not in sys.modules:
 World = sys.modules["sk_org_conftest"].World
 
 ORG = "acme"
-KEY = "claude.account.org-A.access"
+KEY = "claude:org-A"
 
 
 def _ledger_provider(world):
@@ -87,7 +88,7 @@ def test_members_share_an_account_and_a_removed_member_loses_the_next_generation
     seal = build_vault_sealer(cache, lambda org: alice, _ledger_provider(world))
 
     loc1 = seal(set_id=SET_ID, schema_revision=1, key=KEY, setting_id="s-1",
-                payload={"value": "at-1"}, tier="audited", org=ORG)
+                payload={"harness": "claude", "access": "at-1"}, tier="audited", org=ORG)
     head = next(iter(cache.secrets))
 
     bob = world.admit(seed_index=40)
@@ -97,12 +98,12 @@ def test_members_share_an_account_and_a_removed_member_loses_the_next_generation
     _grant_head(world, alice, world.principals[bob.public_hex]["credential"], cache, head)
 
     # Both members open the shared account the first one added.
-    assert _member_reads(loc1, alice_kem) == {"value": "at-1"}
-    assert _member_reads(loc1, bob_kem) == {"value": "at-1"}
+    assert _member_reads(loc1, alice_kem) == {"harness": "claude", "access": "at-1"}
+    assert _member_reads(loc1, bob_kem) == {"harness": "claude", "access": "at-1"}
 
     # Bob leaves; the account's next revision is a generation he is not granted.
     world.remove(bob)
     loc2 = seal(set_id=SET_ID, schema_revision=1, key=KEY, setting_id="s-2",
-                payload={"value": "at-2"}, tier="audited", org=ORG)
-    assert _member_reads(loc2, alice_kem) == {"value": "at-2"}
-    assert _member_reads(loc2, bob_kem) != {"value": "at-2"}
+                payload={"harness": "claude", "access": "at-2"}, tier="audited", org=ORG)
+    assert _member_reads(loc2, alice_kem) == {"harness": "claude", "access": "at-2"}
+    assert _member_reads(loc2, bob_kem) != {"harness": "claude", "access": "at-2"}

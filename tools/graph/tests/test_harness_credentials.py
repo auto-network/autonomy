@@ -364,3 +364,45 @@ def test_the_fold_leaves_an_account_it_cannot_open(warm_vault):
     assert hv.fold_vault_part_rows()["cold"] == 1
     assert {m.key for m in settings_ops.read_set(
         hv.VAULT_AUDITED_SET_ID, org=None, peers=[]).members} == {"grok.account.default.auth"}
+
+
+def _tunnel(monkeypatch, allowed):
+    from types import SimpleNamespace
+
+    from tools.network import fleet_tunnel_server
+    monkeypatch.setattr(fleet_tunnel_server, "state",
+                        lambda: SimpleNamespace(allowed=allowed, reason="test"))
+
+
+def test_the_fold_runs_only_with_the_vault_open_on_the_tunnel_server(warm_vault, monkeypatch):
+    _seal_part("grok.account.default.auth", '{"t": 1}')
+    _tunnel(monkeypatch, allowed=False)
+    assert hv.fold_where_due() is None            # another machine folds; this one syncs
+    _tunnel(monkeypatch, allowed=True)
+    settings_ops.set_personal_delegate_audited_key(None)
+    assert hv.fold_where_due() is None            # cold: nothing it could open
+    settings_ops.set_personal_delegate_audited_key(warm_vault_key())
+    assert hv.fold_where_due()["accounts"] == 1
+    assert hv.read_account("grok", "default").get("auth") == '{"t": 1}'
+
+
+def warm_vault_key():
+    return derive_delegate_audited_recipient(bytes(range(32)))[0]
+
+
+def test_unlock_schedules_the_fold(monkeypatch):
+    from tools.dashboard import mcp_relay_routes, node_ssh, unlock_routes
+    from tools.dashboard.plugins.backup import credentials as backup_credentials
+
+    ran = []
+    monkeypatch.setattr(backup_credentials, "release_offsite_in_background", lambda: None)
+    monkeypatch.setattr(mcp_relay_routes, "release_relay_credentials", lambda: None)
+    monkeypatch.setattr(node_ssh, "release_node_ssh_key", lambda: None)
+    monkeypatch.setattr(hv, "fold_where_due", lambda: ran.append(1))
+    unlock_routes._schedule_vault_releases()
+    import time
+    for _ in range(100):
+        if ran:
+            break
+        time.sleep(0.01)
+    assert ran == [1]
