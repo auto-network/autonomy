@@ -1323,7 +1323,10 @@ def picker_seams(monkeypatch):
         creds = {r.key: r for r in session_launcher._credentials_rows()}
         out = [_account_from_rows(k, tokens.get(k), creds.get(k)) for k in sorted(set(tokens) | set(creds))]
         return [a for a in out if a.launchable]
-    monkeypatch.setattr(session_launcher, "_claude_accounts", accounts)
+    from tools.graph import harness_credentials as hv
+    monkeypatch.setattr(hv, "list_public", lambda harness, **kw: accounts() if harness == "claude" else [])
+    monkeypatch.setattr(hv, "read_credential", lambda harness, account_id, **kw: next(
+        (a for a in accounts() if a.id == account_id), None))
 
 
 @pytest.mark.usefixtures("picker_seams")
@@ -1531,9 +1534,14 @@ class TestSubstrateCredentialsPicker:
 
     def test_c_cold_vault_refuses_without_install(self, monkeypatch, freeze_now):
         from tools.graph import harness_credentials as hv
-        cold = hv.Account("claude", "org-A", {}, openable=False)
-        monkeypatch.setattr(session_launcher, "_claude_accounts", lambda: [])
-        monkeypatch.setattr(hv, "list_accounts", lambda harness, **kw: [cold])
+        # Recorded ok with a fresh setup token, but the credential does not
+        # open (the vault is cold): the one read refuses the launch.
+        listed = hv.Account("claude", "org-A", public={
+            "credential_state": "ok", "setup_expires_at": 9_999_999_999_999})
+        listed.opened = False
+        monkeypatch.setattr(hv, "list_public", lambda harness, **kw: [listed])
+        monkeypatch.setattr(hv, "read_credential", lambda harness, account_id, **kw:
+                            hv.Account("claude", account_id, openable=False))
 
         def _no_run(*a, **kw):
             raise AssertionError("no subprocess may run from the picker")
@@ -1843,6 +1851,15 @@ def _stub_vault(monkeypatch, harness_accounts: dict):
     )
     monkeypatch.setattr(
         hv, "read_account",
+        lambda harness, account_id, **kw: next(
+            (a for a in harness_accounts.get(harness, []) if a.id == account_id), None),
+    )
+    monkeypatch.setattr(
+        hv, "list_public",
+        lambda harness, **kw: list(harness_accounts.get(harness, [])),
+    )
+    monkeypatch.setattr(
+        hv, "read_credential",
         lambda harness, account_id, **kw: next(
             (a for a in harness_accounts.get(harness, []) if a.id == account_id), None),
     )
@@ -2427,17 +2444,17 @@ def test_accounts_migrate_pre_vault_rows_once_when_the_vault_is_empty(monkeypatc
     from tools.graph import harness_credentials as hv
     calls: list[str] = []
     state = {"accounts": []}
-    monkeypatch.setattr(hv, "list_accounts", lambda harness, **kw: list(state["accounts"]))
+    monkeypatch.setattr(hv, "list_public", lambda harness, **kw: list(state["accounts"]))
 
     def migrate():
         calls.append("migrate")
         state["accounts"] = [hv.Account("claude", "org-1", {"setup": "k"})]
         return {"claude": 1, "setup_tokens": 1, "codex": 0, "deprecated": 2}
     monkeypatch.setattr(hv, "migrate_plaintext_accounts", migrate)
-    assert [a.id for a in session_launcher._claude_accounts()] == ["org-1"]
+    assert session_launcher.choose("claude")[0].id == "org-1"
     assert calls == ["migrate"]
     # With accounts present the migration is not consulted again.
-    assert [a.id for a in session_launcher._claude_accounts()] == ["org-1"]
+    assert session_launcher.choose("claude")[0].id == "org-1"
     assert calls == ["migrate"]
 
 

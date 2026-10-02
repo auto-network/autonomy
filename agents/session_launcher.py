@@ -535,36 +535,19 @@ def _credentials_org() -> str:
     return "personal"
 
 
-def _accounts(harness: str) -> list[Any]:
-    """Every account of *harness* in the operator's vault (record v16 §10.9).
-
-    A node whose dashboard reloaded this code without restarting has not run
-    the startup migration yet; when the vault holds no account of the
-    harness, the pre-vault rows are migrated here, once, so a launch never
-    fails for want of a restart.
-    """
-    from tools.graph import harness_credentials as hv
-    accounts = hv.list_accounts(harness)
-    if not accounts:
-        try:
-            migrated = hv.migrate_plaintext_accounts()
-        except Exception:
-            logger.exception("session_launcher: pre-vault account migration failed")
-            migrated = {}
-        if migrated.get("deprecated"):
-            logger.info("session_launcher: migrated pre-vault rows %s", migrated)
-            accounts = hv.list_accounts(harness)
-    return accounts
-
-
-def _claude_accounts() -> list[Any]:
-    """Every launchable Claude account: a fresh setup token, or an OAuth
-    bundle the launcher can write into the container's credentials file."""
-    return [a for a in _accounts("claude") if a.launchable]
+def _usage_rows(harness: str) -> list[dict]:
+    """Live ``dashboard.harness.usage`` rows for *harness* (set 2)."""
+    if harness == "claude":
+        return _claude_usage_rows()
+    return _harness_usage_rows(harness)
 
 
 def _claude_usage_rows() -> list[dict]:
-    """Return live ``dashboard.harness.usage`` rows for Claude.
+    return _harness_usage_rows("claude")
+
+
+def _harness_usage_rows(harness: str) -> list[dict]:
+    """Return live ``dashboard.harness.usage`` rows for *harness*.
 
     Best-effort — failures (DB unavailable, settings substrate missing,
     etc.) collapse to ``[]`` so token selection falls back to random
@@ -586,7 +569,7 @@ def _claude_usage_rows() -> list[dict]:
         payload = member.payload
         if not isinstance(payload, dict):
             continue
-        if (payload.get("harness") or "").lower() != "claude":
+        if (payload.get("harness") or "").lower() != harness:
             continue
         payloads.append(payload)
     return payloads
@@ -687,18 +670,70 @@ def _reading_snapshot(payload: Any) -> dict | None:
     }
 
 
+def choose(harness: str, *, account_id: str | None = None, alias: str | None = None,
+           org: str | None = None, rng=None) -> tuple[Any, dict | None]:
+    """The account a launch of *harness* uses, and the record of why
+    (auto-raepo): one function for every harness, reading only the PUBLIC
+    account rows (set 1) and the usage readings (set 2) -- never the vault.
+
+    Candidates are the accounts whose recorded credential state is ok and
+    not expired. An explicit *account_id* is that account or a refusal; an
+    *alias* is that alias when it names one; otherwise the most remaining
+    headroom when every candidate has a fresh reading (skipping exhausted
+    ones), else a uniform random pick. ``(None, None)`` when nothing fits.
+    The caller then reads the chosen account's one credential."""
+    from tools.graph import harness_credentials as hv
+    accounts = hv.list_public(harness, org=org)
+    if not accounts and org is None:
+        # A dashboard that hot-reloaded this code has not run the startup
+        # migration of the pre-vault rows yet; migrate them here, once, so a
+        # launch never fails for want of a restart.
+        try:
+            migrated = hv.migrate_plaintext_accounts()
+        except Exception:
+            logger.exception("session_launcher: pre-vault account migration failed")
+            migrated = {}
+        if migrated.get("deprecated"):
+            logger.info("session_launcher: migrated pre-vault rows %s", migrated)
+            accounts = hv.list_public(harness, org=org)
+    candidates = [a for a in accounts if _selectable(harness, a)]
+    if not candidates:
+        return None, None
+    return _decide(harness, candidates, prefer_alias=alias, account_id=account_id,
+                   rng=rng or random)
+
+
+def _selectable(harness: str, acct: Any) -> bool:
+    """Whether an account listed from its public row can be chosen: its
+    recorded state is ok and not expired. A Claude account recorded ok
+    holds a fresh setup token or a refresh token (the state a write
+    records), and the session refreshes a lapsed access token itself, so it
+    is selectable whatever that token's expiry (coordinator decision
+    19:22Z). The chooser and the strict pre-launch check use this too."""
+    if harness == "claude" and acct.public.get("credential_state") == "ok":
+        return True
+    return acct.usable()
+
+
 def _choose_claude_account(accounts: list, *, prefer_alias: str | None,
                            account_id: str | None, rng) -> tuple[Any, dict | None]:
-    """The Claude picker's decision over *accounts* (the launchable ones) and
-    its record, without opening any credential: shared by the launch and the
-    chooser's ``recommended`` (auto-k784w). ``(None, None)`` when an explicit
-    *account_id* is not among them."""
+    """The Claude decision over *accounts* (the chooser's ``recommended``,
+    auto-k784w)."""
+    return _decide("claude", accounts, prefer_alias=prefer_alias,
+                   account_id=account_id, rng=rng)
+
+
+def _decide(harness: str, accounts: list, *, prefer_alias: str | None,
+            account_id: str | None, rng) -> tuple[Any, dict | None]:
+    """The decision over *accounts* and its record, from public data and
+    usage readings alone; harness-agnostic. ``(None, None)`` when an
+    explicit *account_id* is not among them."""
     # The readings the decision is made on, kept for the record (auto-dgr2c)
     # whichever branch decides: an alias pick ignores them, but what they
     # said at that moment is still the evidence a later question needs.
     now = datetime.now(timezone.utc)
     usage_by_org: dict[str, dict] = {}
-    for payload in _claude_usage_rows():
+    for payload in _usage_rows(harness):
         read_id = payload.get("account_id")
         if not isinstance(read_id, str) or not read_id:
             continue
@@ -720,8 +755,8 @@ def _choose_claude_account(accounts: list, *, prefer_alias: str | None,
         # substitute.
         chosen = next((a for a in accounts if a.id == account_id), None)
         if chosen is None:
-            logger.error("session_launcher: the chosen Claude account %s is not a "
-                         "launchable account in this vault", account_id)
+            logger.error("session_launcher: the chosen %s account %s is not a "
+                         "launchable account here", harness, account_id)
             return None, None
         method = "explicit"
     if chosen is None and prefer_alias:
@@ -752,7 +787,7 @@ def _choose_claude_account(accounts: list, *, prefer_alias: str | None,
             method += "-all-exhausted"
 
     selection = {
-        "harness": "claude", "account_id": chosen.id, "alias": chosen.get("alias"),
+        "harness": harness, "account_id": chosen.id, "alias": chosen.get("alias"),
         "method": method, "candidates": candidates, "excluded": excluded,
         "reading": _reading_snapshot(usage_by_org.get(chosen.id)),
         "at": now.isoformat(timespec="seconds"),
@@ -782,48 +817,35 @@ def _resolve_credentials_via_substrate(
     exhausted are skipped while any other remains. No launchable account
     is a refusal with the remedy logged; nothing interactive runs here.
     """
-    rng = rng or random
-    if account_org is not None:
-        # An organization-shared account (auto-26e8a): chosen explicitly only,
-        # from that organization's set; the auto-pick stays personal.
-        from tools.graph import harness_credentials as hv
-        accounts = [a for a in hv.list_accounts("claude", org=account_org) if a.launchable]
-        if not account_id:
-            return None
-    else:
-        accounts = _claude_accounts()
-    if not accounts and account_org is not None:
-        logger.error("session_launcher: organization %s has no launchable Claude "
-                     "account %s", account_org, account_id)
+    from tools.graph import harness_credentials as hv
+    if account_org is not None and not account_id:
+        # An organization-shared account (auto-26e8a) is chosen explicitly
+        # only; the auto-pick stays personal.
         return None
-    if not accounts:
-        from tools.graph import harness_credentials as hv
-        if any(not a.openable for a in hv.list_accounts("claude")):
-            # Accounts exist but the vault is cold: the operator has not
-            # unlocked since the dashboard started. The launch waits for the
-            # unlock (cold until unlock is the design).
-            logger.error(
-                "session_launcher: Claude accounts are in the vault but it is "
-                "not open; unlock the dashboard before launching",
-            )
-            return None
-        # No account at all. The two ways in are the operator's own acts
-        # (graph claude install, or a sign-in on the machine found by the
-        # Getting Started scan); neither can run unattended from here. A
-        # caller that imports one next (the host terminal's bootstrap) asks
-        # for INFO: the empty vault is its expected first step, and the
-        # ERROR belongs to its final result (auto-gksaw).
-        logger.log(
-            logging.INFO if empty_vault_expected else logging.ERROR,
-            "session_launcher: no Claude account in the vault; remedy: "
-            "`graph claude install --alias <name>`, or sign in to Claude on "
-            "this machine and run `graph credentials import`",
-        )
-        return None
-
-    chosen, selection = _choose_claude_account(
-        accounts, prefer_alias=prefer_alias, account_id=account_id, rng=rng)
+    chosen, selection = choose("claude", account_id=account_id, alias=prefer_alias,
+                               org=account_org, rng=rng or random)
     if chosen is None:
+        if account_id:
+            logger.error("session_launcher: the Claude account %s is not a usable "
+                         "account%s", account_id,
+                         f" of organization {account_org}" if account_org else "")
+        elif not hv.list_public("claude"):
+            # No account at all. The two ways in are the operator's own acts
+            # (graph claude install, or a sign-in on the machine found by the
+            # Getting Started scan); neither can run unattended from here. A
+            # caller that imports one next (the host terminal's bootstrap)
+            # asks for INFO: the empty vault is its expected first step
+            # (auto-gksaw).
+            logger.log(
+                logging.INFO if empty_vault_expected else logging.ERROR,
+                "session_launcher: no Claude account in the vault; remedy: "
+                "`graph claude install --alias <name>`, or sign in to Claude on "
+                "this machine and run `graph credentials import`",
+            )
+        else:
+            logger.error("session_launcher: no Claude account is usable (each "
+                         "account's credential is expired, missing or failed to "
+                         "refresh); remedy: `graph credentials import`")
         return None
     out: dict = {"harness_token": chosen.id}
     selection["source"] = account_org or "personal"
@@ -834,9 +856,18 @@ def _resolve_credentials_via_substrate(
     if alias:
         out["alias"] = alias
     if chosen.setup_token_fresh():
+        # The one vault read of this launch: the chosen account's credential.
+        acct = hv.read_credential("claude", chosen.id, org=account_org)
+        token = acct.get("setup") if acct is not None else None
+        if not token:
+            logger.error(
+                "session_launcher: the Claude account %s did not open (unlock the "
+                "dashboard, or run `graph credentials import`)", chosen.id)
+            return None
         out["type"] = "token"
-        out["token"] = chosen.get("setup")
+        out["token"] = token
     else:
+        # The OAuth bundle file is built from the same one row at delivery.
         out["type"] = "vault"
     return out
 
@@ -1149,13 +1180,11 @@ def _carried_env_files(env_values: dict[str, str]) -> dict[str, bytes]:
 
 
 def _pick_account(harness: str, rng: random.Random | None = None) -> Any | None:
-    """The account a Codex or Grok session launches with: the only
-    launchable one, or a uniform random pick among several (record v16
-    §10.9; no headroom reading exists for these harnesses yet)."""
-    accounts = [a for a in _accounts(harness) if a.launchable]
-    if not accounts:
-        return None
-    return (rng or random).choice(accounts) if len(accounts) > 1 else accounts[0]
+    """The Codex or Grok account a session launches with: :func:`choose`
+    over the public rows, then its one credential read."""
+    from tools.graph import harness_credentials as hv
+    chosen, _selection = choose(harness, rng=rng or random)
+    return hv.read_credential(harness, chosen.id) if chosen is not None else None
 
 
 def _own_selection(selection: dict) -> dict:
@@ -1170,19 +1199,11 @@ def _own_selection(selection: dict) -> dict:
     return own
 
 
-def _pick_selection(harness: str, acct: Any, candidates: int) -> dict:
-    """The record of a Codex or Grok pick (auto-dgr2c)."""
-    return {"harness": harness, "account_id": acct.id, "alias": acct.get("alias"),
-            "method": "only" if candidates == 1 else "random",
-            "candidates_count": candidates, "excluded": [],
-            "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-
-
 def _claude_bundle_doc(account_id: str, org: str | None = None) -> bytes | None:
     """``~/.claude/.credentials.json`` for the chosen account from its vault
     rows (an organization's shared set with *org*), opened at launch."""
     from tools.graph import harness_credentials as hv
-    acct = hv.read_account("claude", account_id, org=org)
+    acct = hv.read_credential("claude", account_id, org=org)
     if acct is None or not acct.has(*hv.CLAUDE_BUNDLE):
         logger.warning(
             "session_launcher: the Claude account %s has no openable OAuth "
@@ -1300,7 +1321,8 @@ def _open_signin(filename: str, account_id: str) -> bytes | None:
     harness = {CODEX_AUTH_FILENAME: "codex", GROK_AUTH_FILENAME: "grok"}.get(filename)
     if harness is None:
         return None
-    acct = next((a for a in _accounts(harness) if a.id == account_id), None)
+    from tools.graph import harness_credentials as hv
+    acct = hv.read_credential(harness, account_id)
     if acct is None:
         return None
     if filename == CODEX_AUTH_FILENAME:
@@ -2363,27 +2385,20 @@ def launch_session(
     elif harness == "claude" and creds is not None:
         selection = creds.get("selection") or {"method": "environment"}
     elif harness in ("codex", "grok"):
-        if account_org:
-            from tools.graph import harness_credentials as _hv
-            _launchable = [a for a in _hv.list_accounts(harness, org=account_org)
-                           if a.launchable]
-        else:
-            _launchable = [a for a in _accounts(harness) if a.launchable]
-        if account_id:
-            _acct = next((a for a in _launchable if a.id == account_id), None)
-            if _acct is None:
-                print(f"  ERROR: account-not-launchable: {harness} account {account_id} "
-                      f"is not a launchable account here (session '{name}')",
-                      file=sys.stderr)
-                return None
-        else:
-            _acct = _pick_account(harness)
-        if _acct is not None:
-            picked[harness] = _acct
-            selection = _pick_selection(harness, _acct, len(_launchable))
-            selection["source"] = account_org or "personal"
-            if account_id:
-                selection["method"] = "explicit"
+        from tools.graph import harness_credentials as _hv
+        _chosen, _sel = choose(harness, account_id=account_id, org=account_org)
+        if _chosen is None and account_id:
+            print(f"  ERROR: account-not-launchable: {harness} account {account_id} "
+                  f"is not a launchable account here (session '{name}')",
+                  file=sys.stderr)
+            return None
+        if _chosen is not None:
+            # The one vault read of this launch: the chosen account's credential.
+            _acct = _hv.read_credential(harness, _chosen.id, org=account_org)
+            if _acct is not None:
+                picked[harness] = _acct
+                selection = _sel
+                selection["source"] = account_org or "personal"
     if selection is not None and selection_out is not None:
         selection_out.update(selection)
     if selection is not None:

@@ -41,8 +41,8 @@ def test_an_empty_vault_logs_info_only_when_the_caller_imports_next(monkeypatch,
     account in the vault' at ERROR, and then succeeded through the bootstrap."""
     from tools.graph import harness_credentials as hv
 
-    monkeypatch.setattr(session_launcher, "_claude_accounts", lambda: [])
-    monkeypatch.setattr(hv, "list_accounts", lambda harness, **kw: [])
+    monkeypatch.setattr(hv, "list_public", lambda harness, **kw: [])
+    monkeypatch.setattr(hv, "migrate_plaintext_accounts", lambda: {})
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
 
     with caplog.at_level("INFO", logger="agents.session_launcher"):
@@ -104,6 +104,7 @@ def host_create(monkeypatch):
     monkeypatch.setattr(session_launcher, "_resolve_credentials", fake_resolve)
     monkeypatch.setattr(credential_import, "run_import", fake_import)
     monkeypatch.setattr(hv, "list_accounts", lambda harness, **kw: list(state["accounts"]))
+    monkeypatch.setattr(hv, "list_public", lambda harness, **kw: list(state["accounts"]))
     monkeypatch.setattr(server.dashboard_db, "session_exists", lambda _name: False)
     monkeypatch.setattr(server.session_trace, "trace", lambda *a, **kw: None)
     monkeypatch.setattr(server.session_monitor, "register_pending", fake_pending)

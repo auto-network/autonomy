@@ -76,15 +76,18 @@ def test_an_unavailable_row_claims_nothing_either_way():
 
 def _token(key):
     # A vault account with a setup token (bcb2d029 moved accounts into the
-    # vault; the picker reads them through _claude_accounts, auto-6oha0).
+    # vault; the picker reads their public rows through choose(), auto-raepo).
     from tools.graph.harness_credentials import Account
 
     return Account("claude", key, {"setup": f"tok-{key}"})
 
 
 def _accounts(monkeypatch, *keys):
-    monkeypatch.setattr(
-        session_launcher, "_claude_accounts", lambda: [_token(k) for k in keys])
+    from tools.graph import harness_credentials as hv
+    accounts = [_token(k) for k in keys]
+    monkeypatch.setattr(hv, "list_public", lambda harness, **kw: list(accounts))
+    monkeypatch.setattr(hv, "read_credential", lambda harness, account_id, **kw: next(
+        (a for a in accounts if a.id == account_id), None))
 
 
 @pytest.fixture

@@ -58,6 +58,11 @@ def _store(monkeypatch):
     real = hv.list_accounts
     monkeypatch.setattr(hv, "list_accounts",
                         lambda h, *, read_set=None, org=None: real(h, read_set=read_set_, org=org))
+    real_public = hv.list_public
+    monkeypatch.setattr(hv, "list_public",
+                        lambda h, *, org=None, read_set=None: real_public(h, org=org, read_set=read_set_))
+    monkeypatch.setattr(hv, "read_credential", lambda h, account_id, *, org=None: next(
+        (a for a in real(h, read_set=read_set_, org=org) if a.id == account_id), None))
     read_set_ = read_set
     monkeypatch.setattr(hv, "organization_slugs", lambda: ["acme"])
     return reads

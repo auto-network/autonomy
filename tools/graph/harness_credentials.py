@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import ssl
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -161,8 +162,19 @@ class Account:
         #: "personal" (the operator's own store) or the slug of the
         #: organization whose shared sets hold it (auto-26e8a).
         self.source = source
+        #: Whether the credential was read at all: False for an account
+        #: listed from its public row only (list_public), which knows the
+        #: credential's state but holds none of its secrets.
+        self.opened = True
         if parts:
             self.apply(parts)
+            if "credential_state" not in self.public:
+                # Described by its parts: record the state a write would.
+                state, expires = _credential_state(
+                    self, int(datetime.now(timezone.utc).timestamp() * 1000))
+                self.public["credential_state"] = state
+                if expires is not None:
+                    self.public.setdefault("credential_expires_at", expires)
 
     def __repr__(self) -> str:   # never the secrets
         return f"Account({self.harness!r}, {self.id!r}, source={self.source!r})"
@@ -207,6 +219,16 @@ class Account:
     def has(self, *parts: str) -> bool:
         return all(self.get(p) is not None for p in parts)
 
+    def usable(self, now_ms: int | None = None) -> bool:
+        """Selectable from its PUBLIC data alone: the credential's recorded
+        state is ok and its recorded expiry, when there is one, is ahead."""
+        if self.public.get("credential_state") != "ok":
+            return False
+        expires = self.public.get("credential_expires_at")
+        now_ms = now_ms if now_ms is not None else int(
+            datetime.now(timezone.utc).timestamp() * 1000)
+        return not isinstance(expires, int) or expires > now_ms
+
     @property
     def launchable(self) -> bool:
         if self.harness == "claude":
@@ -219,10 +241,15 @@ class Account:
         return expires_ms(self.get("expires"))
 
     def setup_token_fresh(self, now: datetime | None = None) -> bool:
-        """The setup token is present and not past setup_expires_at."""
+        """The setup token is present and not past setup_expires_at. For an
+        account listed from its public row only, the public setup_expires_at
+        stands for the token's presence."""
+        expires = self.public.get("setup_expires_at")
+        if not self.opened:
+            return isinstance(expires, int) and expires > int(
+                (now or datetime.now(timezone.utc)).timestamp() * 1000)
         if self.get("setup") is None:
             return False
-        expires = self.public.get("setup_expires_at")
         if not isinstance(expires, int):
             return True
         return expires > int((now or datetime.now(timezone.utc)).timestamp() * 1000)
@@ -339,6 +366,89 @@ def _payload(row: Any) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def list_public(harness: str, *, org: str | None = None,
+                read_set: Callable[..., Any] | None = None) -> list[Account]:
+    """Every account of *harness* from its PUBLIC row only -- identity,
+    label, the credential's state and expiry -- sorted by id. Never touches
+    the vault: this is what enumeration and selection read (auto-raepo)."""
+    if harness not in HARNESSES:
+        raise ValueError(f"unknown harness {harness!r}")
+    account_set, _ = _sets_for(org)
+    prefix = _prefix(harness)
+    try:
+        rows = _read_all(account_set, read_set, prefix=prefix, org=org)
+    except Exception:
+        logger.exception("harness accounts: could not list %s accounts", harness)
+        return []
+    out = []
+    for row in rows:
+        key = getattr(row, "key", None)
+        payload = _payload(row)
+        if not isinstance(key, str) or not key.startswith(prefix) or payload is None:
+            continue
+        acct = Account(harness, key[len(prefix):], public=dict(payload),
+                       public_id=getattr(row, "id", None), source=org or PERSONAL)
+        acct.opened = False
+        out.append(acct)
+    return sorted(out, key=lambda a: a.id)
+
+
+def _read_one(set_id: str, key: str, org: str | None) -> Any | None:
+    """Exactly the row *key* of *set_id* (no prefix match): a vaulted set
+    opens that one row and no other."""
+    from tools.graph import ops as graph_ops
+
+    if (_org_vault_open_here() or not _in_container()) if org is not None else (
+            _vault_open_here() or not _in_container()):
+        members = graph_ops.read_set(set_id, org=org, peers=[], key_equals=key).members
+        return next((m for m in members if getattr(m, "key", None) == key), None)
+    from tools.graph.client import _dict_to_resolved_setting
+    api = os.environ.get("GRAPH_API") or "https://localhost:8080"
+    headers = {"Accept": "application/json"}
+    if org is not None:
+        headers["X-Graph-Org"] = org
+    token = _bearer()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(
+        f"{api}/api/graph/settings/{set_id}/{urllib.parse.quote(key, safe='')}",
+        headers=headers)
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+            return _dict_to_resolved_setting(json.load(resp))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+
+
+def read_credential(harness: str, account_id: str, *,
+                    org: str | None = None) -> Account | None:
+    """The chosen account: its public row and exactly its one credential
+    row, opened. The single vault read of a launch (auto-raepo); None when
+    the account has no public row."""
+    key = account_key(harness, account_id)
+    account_set, credential_set = _sets_for(org)
+    public = _read_one(account_set, key, org)
+    payload = _payload(public) if public is not None else None
+    if payload is None:
+        return None
+    acct = Account(harness, account_id, public=dict(payload),
+                   public_id=getattr(public, "id", None), source=org or PERSONAL)
+    credential = _read_one(credential_set, key, org)
+    if credential is not None:
+        acct.credential_id = getattr(credential, "id", None)
+        opened = _payload(credential)
+        if opened is None:
+            acct.openable = False
+        else:
+            acct.secret = {k: v for k, v in opened.items() if k != "harness"}
+    return acct
+
+
 def list_accounts(
     harness: str, *, read_set: Callable[..., Any] | None = None,
     org: str | None = None,
@@ -410,6 +520,15 @@ def all_accounts(harness: str, *, orgs: Iterable[str] | None = None) -> list[Acc
     out = list_accounts(harness)
     for slug in (organization_slugs() if orgs is None else orgs):
         out.extend(list_accounts(harness, org=slug))
+    return out
+
+
+def all_public(harness: str, *, orgs: Iterable[str] | None = None) -> list[Account]:
+    """Like :func:`all_accounts`, from the public rows only: never opens a
+    credential."""
+    out = list_public(harness)
+    for slug in (organization_slugs() if orgs is None else orgs):
+        out.extend(list_public(harness, org=slug))
     return out
 
 

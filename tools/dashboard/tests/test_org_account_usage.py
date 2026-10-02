@@ -87,7 +87,7 @@ def _rows(monkeypatch, shared_readings):
     accounts = [hv.Account("claude", "P1", {"alias": "mine", "access": "a", "refresh": "r"}),
                 hv.Account("claude", "O1", {"alias": "team", "access": "a", "refresh": "r"},
                            source="acme")]
-    monkeypatch.setattr(hv, "all_accounts", lambda h: accounts)
+    monkeypatch.setattr(hv, "all_public", lambda h: accounts)
     monkeypatch.setattr(harness_accounts, "_readings", lambda h: {})
     monkeypatch.setattr(harness_accounts, "_org_readings",
                         lambda h, slugs: {"acme": shared_readings} if "acme" in slugs else {})

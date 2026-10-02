@@ -11141,7 +11141,8 @@ def _member_launch_credentials(proj, harness: str, model: str | None,
                     return "the chosen Claude account could not be opened"
                 signins.update(payloads)
         else:
-            picked = ({harness: next(a for a in sl._accounts(harness) if a.id == account)}
+            from tools.graph import harness_credentials as _hv
+            picked = ({harness: _hv.read_credential(harness, account)}
                       if account else None)
             signins.update(sl._signin_payloads(None, harness=harness, picked=picked) or {})
     return {"credentials": credentials, "env": env,

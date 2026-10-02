@@ -31,6 +31,10 @@ def _vault(monkeypatch, harness="claude", accounts=None):
         hv.Account("claude", "C", {"alias": "broken"}),
     ]
     monkeypatch.setattr(hv, "list_accounts", lambda h, **_k: [a for a in accounts if a.harness == h])
+    monkeypatch.setattr(hv, "list_public", lambda h, **_k: [a for a in accounts if a.harness == h])
+    monkeypatch.setattr(hv, "all_public", lambda h, **_k: [a for a in accounts if a.harness == h])
+    monkeypatch.setattr(hv, "read_credential", lambda h, i, **_k: next(
+        (a for a in accounts if a.harness == h and a.id == i), None))
     monkeypatch.setattr(hv, "read_account", lambda h, i, **_k: next(
         (a for a in accounts if a.harness == h and a.id == i), None))
 
