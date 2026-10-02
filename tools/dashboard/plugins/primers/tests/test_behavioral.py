@@ -42,7 +42,7 @@ window.__primersStubData = window.__primersStubData || {
     workspaces: [
         {id: 'autonomy',       name: 'Autonomy Network', org: 'autonomy',
          image: 'autonomy-session-platform',     writable: false},
-        {id: 'widgets-ng',  name: 'Widgets NG',    org: 'anchore',
+        {id: 'widgets-ng',  name: 'Widgets NG',       org: 'anchore',
          image: 'session-widgets-ng', writable: true},
     ],
     primers: {

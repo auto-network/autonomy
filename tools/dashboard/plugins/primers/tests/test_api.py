@@ -88,7 +88,7 @@ def test_list_workspaces_returns_loaded_set():
     ``load_workspaces()`` member with org metadata attached."""
     fake = {
         "autonomy":      _ws("autonomy",      name="Autonomy",       org="autonomy"),
-        "widgets-ng": _ws("widgets-ng", name="Widgets NG",  org="anchore",
+        "widgets-ng": _ws("widgets-ng", name="Widgets NG",     org="anchore",
                              writable=True),
     }
     with patch("agents.workspace_settings.load_workspaces",
