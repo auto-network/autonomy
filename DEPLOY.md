@@ -345,14 +345,22 @@ old signature is never treated as authorization for a rebuilt artifact.
 Session containers are not updated in place; newly launched sessions use the
 new verified session-image digests.
 
-#### Retention: the current release and the one before it
+#### Retention: keep every release; withdraw one deliberately
 
-Until 1.0, the registry keeps exactly two releases: the one just signed and
-the one before it, so a bad release rolls back by pointing at the previous
-lock. Every older version of every package is deleted once the new release is
-signed and verified. A tag is never moved to new content instead: releases
-are pinned and signed by digest, so a moved tag would match neither its lock
-nor its signature.
+Every signed release stays in the registry. Public packages cost nothing to
+store, an old image is the only exact evidence of what a release contained,
+and rollback can go back any number of releases. A rebuild from git is not a
+substitute: the build pulls fresh base images, so neither the bytes nor the
+digest match. A tag is never moved to new content: releases are pinned and
+signed by digest, so a moved tag would match neither its lock nor its
+signature.
+
+A release is deleted only to withdraw it: it leaked content that must not be
+public (as on 2026-10-02, see `deploy/PUBLIC-REPO-CLEANSE.md`), or it is
+broken or vulnerable and must not be installed. Withdrawing a release means
+deleting its package versions and deleting its lock file from
+`deploy/releases/` in the same change, so that directory lists only releases
+that can be installed; git history keeps the withdrawn lock as the record.
 
 The packages belong to the `auto-network` GitHub account, and deleting needs
 a token with `delete:packages`, which the publishing token does not carry.
@@ -367,16 +375,16 @@ gh auth login -h github.com -s read:packages,delete:packages --web
 ```
 
 Build the keep set before deleting anything. It is every image digest named
-in the current and the previous lock under `deploy/releases/`, plus every
-manifest reachable from those digests and from their `sha256-<digest>`
-signature tags. cosign v3 stores a signature as a tagged index whose child,
-the Sigstore bundle, is an **untagged** version: a rule that keeps tagged
-versions and deletes untagged ones deletes the signatures of the release
-being kept. Delete each version outside the keep set with
+in a lock that stays under `deploy/releases/`, plus every manifest reachable
+from those digests and from their `sha256-<digest>` signature tags. cosign v3
+stores a signature as a tagged index whose child, the Sigstore bundle, is an
+**untagged** version: a rule that keeps tagged versions and deletes untagged
+ones deletes the signatures of the releases being kept. Delete each version
+outside the keep set with
 `gh api -X DELETE /users/auto-network/packages/container/<package>/versions/<id>`,
-then run `deploy/verify-image.sh` on every digest in both kept locks, list
-each package's tags to confirm only the two releases remain, and sign out
-(`gh auth logout`) and remove the temporary configuration directory.
+then run `deploy/verify-image.sh` on every digest in every remaining lock,
+list each package's tags to confirm only the kept releases remain, and sign
+out (`gh auth logout`) and remove the temporary configuration directory.
 
 ### Volume layout & backup
 
