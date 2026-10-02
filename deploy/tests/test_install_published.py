@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -46,9 +47,8 @@ def _run(tmp_path: Path, lock: Path, *extra: str,
     fake.mkdir(exist_ok=True)
     log = tmp_path / "calls.log"
     # The stand-in daemon answers the engine API floor check (auto-8pohz) and
-    # records every other call.
-    _exe(fake / "docker", '#!/usr/bin/env bash\necho "docker $*" >>"$T_LOG"\n'
-         '[[ "$1" == version ]] && echo 1.47\nexit 0\n')
+    # records every other call; see _FAKE_DOCKER for the volumes.
+    _exe(fake / "docker", _FAKE_DOCKER.replace("PYTHON", sys.executable))
     _exe(
         fake / "cosign",
         f'#!/usr/bin/env bash\necho "cosign $*" >>"$T_LOG"\n'
@@ -66,6 +66,38 @@ def _run(tmp_path: Path, lock: Path, *extra: str,
         capture_output=True, text=True, env=env, timeout=60,
     )
     return result, log.read_text(encoding="utf-8") if log.exists() else ""
+
+
+# The volumes of the stand-in daemon are directories named by the environment:
+# T_CODE_VOLUME is the autonomy-code volume (absent: it does not exist yet, a
+# first install), T_RELEASE the node image's /app, T_DATA_VOLUME autonomy-data.
+# A one-shot `docker run` against a volume runs the installer's own shell
+# script with those directories in place of the container paths, so the git
+# rules are exercised on real repositories.
+_FAKE_DOCKER = r"""#!PYTHON
+import os, subprocess, sys
+args = sys.argv[1:]
+with open(os.environ["T_LOG"], "a") as log:
+    log.write("docker " + " ".join(args).replace("\n", " ") + "\n")
+if args[:1] == ["version"]:
+    print("1.47")
+if args[:2] == ["volume", "inspect"]:
+    sys.exit(0 if os.environ.get("T_CODE_VOLUME") else 1)
+if args[:1] == ["run"] and "--entrypoint" in args and "sh" in args:
+    env = dict(os.environ)
+    for i, a in enumerate(args):
+        if a == "-e":
+            k, _, v = args[i + 1].partition("=")
+            env[k] = v
+    if "autonomy-code:/volume" in args:
+        script = sys.stdin.read().replace(
+            "release=/app code=/volume",
+            f"release={env['T_RELEASE']} code={env['T_CODE_VOLUME']}")
+        sys.exit(subprocess.run(["sh", "-s"], input=script, text=True, env=env).returncode)
+    if "autonomy-data:/data" in args:
+        script = args[args.index("-c") + 1].replace("/data/", env["T_DATA_VOLUME"] + "/")
+        sys.exit(subprocess.run(["sh", "-c", script], env=env).returncode)
+"""
 
 
 def test_embedded_key_is_the_committed_project_key():
@@ -184,3 +216,168 @@ def test_missing_host_home_is_refused_before_any_pull(tmp_path):
     assert result.returncode == 2
     assert "does not exist" in result.stderr
     assert "docker pull" not in calls
+
+
+# ── upgrade: an existing node moves to a new release (auto-d8jf5.1) ─────────
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(cwd), *args], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _commit(repo: Path, name: str, text: str) -> str:
+    (repo / name).write_text(text, encoding="utf-8")
+    _git(repo, "add", name)
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example", "commit", "-qm", name)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _node(tmp_path: Path) -> dict:
+    """A node installed from release N, with the image of release N+1.
+
+    The release image's /app is a repository at the new commit with /app/VERSION
+    naming it; the code volume is a clone of it at the previous commit, the
+    shape a node seeded from the older image has."""
+    release = tmp_path / "release-app"
+    release.mkdir()
+    _git(release, "init", "-q")
+    old = _commit(release, "app.py", "old\n")
+    new = _commit(release, "app.py", "new\n")
+    (release / "VERSION").write_text(f"commit={new}\ncommit_date=2026-10-02\n", encoding="utf-8")
+    code = tmp_path / "code-volume"
+    subprocess.run(["git", "clone", "-q", str(release), str(code)], check=True)
+    _git(code, "reset", "-q", "--hard", old)
+    (code / "VERSION").write_text(f"commit={old}\n", encoding="utf-8")  # untracked, as seeded
+    data = tmp_path / "data-volume"
+    data.mkdir()
+    node = tmp_path / "node"
+    node.mkdir()
+    (node / ".env").write_text(
+        "AUTONOMY_IMAGE=ghcr.io/example/autonomy-node@sha256:" + "c" * 64 + "\n"
+        f"AUTONOMY_HOST_HOME={tmp_path}\n"
+        "DASHBOARD_PORT=9443\n"
+        "DASHBOARD_HTTP_PORT=8099\n"
+        "AUTONOMY_SUBNET=10.213.0.0/24\n"
+        "TZ=America/Los_Angeles\n", encoding="utf-8")
+    (node / "docker-compose.override.yml").write_text("services: {dashboard: {}}\n", encoding="utf-8")
+    return {"release": release, "code": code, "data": data, "node": node, "old": old, "new": new,
+            "env": {"T_RELEASE": str(release), "T_CODE_VOLUME": str(code), "T_DATA_VOLUME": str(data)}}
+
+
+def _ping_ok(tmp_path: Path) -> None:
+    (tmp_path / "bin").mkdir(exist_ok=True)
+    _exe(tmp_path / "bin" / "curl", '#!/usr/bin/env bash\necho "curl $*" >>"$T_LOG"\necho 200\n')
+
+
+def test_an_upgrade_keeps_the_nodes_values_and_override_and_updates_the_images(tmp_path):
+    n = _node(tmp_path)
+    override = (n["node"] / "docker-compose.override.yml").read_text(encoding="utf-8")
+    result, calls = _run(tmp_path, _lock(tmp_path), env_extra=n["env"])
+    assert result.returncode == 5, result.stderr  # fakes never answer /api/ping
+    env = _env_file(tmp_path)
+    assert env["AUTONOMY_IMAGE"] == f"ghcr.io/example/autonomy-node@sha256:{GOOD}"
+    assert env["AUTONOMY_SERVICE_GATEWAY_IMAGE"] == f"ghcr.io/example/autonomy-service-gateway@sha256:{GOOD}"
+    assert env["DASHBOARD_PORT"] == "9443"
+    assert env["DASHBOARD_HTTP_PORT"] == "8099"
+    assert env["AUTONOMY_SUBNET"] == "10.213.0.0/24"
+    assert env["AUTONOMY_HOST_HOME"] == str(tmp_path)
+    assert env["TZ"] == "America/Los_Angeles"
+    assert (n["node"] / "docker-compose.override.yml").read_text(encoding="utf-8") == override
+    assert "network_preflight" not in calls
+
+
+def test_an_explicit_flag_still_replaces_the_kept_value(tmp_path):
+    n = _node(tmp_path)
+    home = tmp_path / "other-home"
+    home.mkdir()
+    result, _ = _run(tmp_path, _lock(tmp_path), "--port", "9555", "--host-home", str(home),
+                     env_extra=n["env"])
+    assert result.returncode == 5, result.stderr
+    env = _env_file(tmp_path)
+    assert env["DASHBOARD_PORT"] == "9555"
+    assert env["AUTONOMY_HOST_HOME"] == str(home)
+
+
+def test_an_upgrade_moves_the_code_volume_to_the_release_commit_before_compose_up(tmp_path):
+    n = _node(tmp_path)
+    result, calls = _run(tmp_path, _lock(tmp_path), env_extra=n["env"])
+    assert result.returncode == 5, result.stderr
+    assert _git(n["code"], "rev-parse", "HEAD") == n["new"]
+    assert (n["code"] / "app.py").read_text(encoding="utf-8") == "new\n"
+    assert (n["code"] / "VERSION").read_text(encoding="utf-8") == (n["release"] / "VERSION").read_text(encoding="utf-8")
+    lines = calls.splitlines()
+    code_step = next(i for i, line in enumerate(lines) if "autonomy-code:/volume" in line)
+    compose_up = next(i for i, line in enumerate(lines) if line.startswith("docker compose up"))
+    assert code_step < compose_up
+    # As the volume's owner, never root, and from the image just verified.
+    assert "--user 1000:1000" in lines[code_step]
+    assert f"autonomy-node@sha256:{GOOD}" in lines[code_step]
+    assert f"code volume: {n['old']} -> {n['new']}" in result.stdout
+
+
+def _refused(tmp_path: Path, n: dict, result, calls: str) -> None:
+    assert result.returncode == 10, result.stderr
+    assert "compose up" not in calls
+    assert "docker cp" not in calls
+    assert _env_file(tmp_path)["AUTONOMY_IMAGE"].endswith("c" * 64)  # .env untouched
+    assert _git(n["code"], "rev-parse", "HEAD") != n["new"]
+
+
+def test_a_dirty_code_volume_is_refused_and_nothing_is_recreated(tmp_path):
+    n = _node(tmp_path)
+    (n["code"] / "app.py").write_text("a hand edit on the node\n", encoding="utf-8")
+    result, calls = _run(tmp_path, _lock(tmp_path), env_extra=n["env"])
+    _refused(tmp_path, n, result, calls)
+    assert "uncommitted changes" in result.stderr
+    assert (n["code"] / "app.py").read_text(encoding="utf-8") == "a hand edit on the node\n"
+
+
+def test_a_code_volume_with_local_commits_is_refused_and_nothing_is_recreated(tmp_path):
+    n = _node(tmp_path)
+    local = _commit(n["code"], "local.py", "a developer node's own commit\n")
+    result, calls = _run(tmp_path, _lock(tmp_path), env_extra=n["env"])
+    _refused(tmp_path, n, result, calls)
+    assert "is not an ancestor of release commit" in result.stderr
+    assert "--allow-downgrade" in result.stderr
+    assert _git(n["code"], "rev-parse", "HEAD") == local
+
+
+def test_a_downgrade_is_refused_unless_allowed(tmp_path):
+    n = _node(tmp_path)
+    newer = _commit(n["code"], "app.py", "newer than the release\n")
+    result, calls = _run(tmp_path, _lock(tmp_path), env_extra=n["env"])
+    _refused(tmp_path, n, result, calls)
+    assert _git(n["code"], "rev-parse", "HEAD") == newer
+    result, calls = _run(tmp_path, _lock(tmp_path), "--allow-downgrade", env_extra=n["env"])
+    assert result.returncode == 5, result.stderr
+    assert _git(n["code"], "rev-parse", "HEAD") == n["new"]
+
+
+def test_a_first_install_has_no_code_step(tmp_path):
+    result, calls = _run(tmp_path, _lock(tmp_path))
+    assert result.returncode == 5, result.stderr
+    assert "autonomy-code:/volume" not in calls
+    assert _env_file(tmp_path)["DASHBOARD_PORT"] == "8080"
+
+
+def test_the_installed_release_is_recorded_with_its_predecessor_kept(tmp_path):
+    n = _node(tmp_path)
+    _ping_ok(tmp_path)
+    first = _lock(tmp_path)
+    result, calls = _run(tmp_path, first, env_extra=n["env"])
+    assert result.returncode == 0, result.stderr
+    assert "https://localhost:9443/api/ping" in calls  # the kept port is the one waited on
+    installed = n["data"] / "release" / "installed.env"
+    body = installed.read_text(encoding="utf-8")
+    assert body.startswith(first.read_text(encoding="utf-8"))
+    assert re.search(r"^AUTONOMY_INSTALLED_AT=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$", body, re.M)
+
+    later = tmp_path / "later"
+    later.mkdir()
+    second = _lock(later)
+    second.write_text(second.read_text(encoding="utf-8").replace("RELEASE_TAG=test", "RELEASE_TAG=next"),
+                      encoding="utf-8")
+    result, _ = _run(tmp_path, second, env_extra=n["env"])
+    assert result.returncode == 0, result.stderr
+    assert "AUTONOMY_RELEASE_TAG=next" in installed.read_text(encoding="utf-8")
+    history = list((n["data"] / "release" / "history").iterdir())
+    assert [h.read_text(encoding="utf-8") for h in history] == [body]

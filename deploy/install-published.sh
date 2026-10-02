@@ -3,18 +3,27 @@
 #
 #   curl -fsSLO <this file>; bash install-published.sh --lock <image-lock.env URL or path>
 #
+# Rerun with a newer release's lock to upgrade the node in place: data,
+# identity, docker-compose.override.yml and every .env value except the image
+# references are kept, and the autonomy-code volume moves to the commit in the
+# release's node image (refused when the volume has uncommitted changes or its
+# HEAD is not an ancestor of that commit).
+#
 # Options:
 #   --lock URL|PATH      the release's image lock (required): image@sha256 digests
 #   --dir PATH           working directory for compose files and .env (default ~/autonomy)
-#   --port N             dashboard port (default 8080)
+#   --port N             dashboard port (default: the .env value, else 8080)
 #   --host-home PATH     the operator's home, where existing Claude/Codex/Grok
-#                        sign-ins are found (default: the invoking user's home,
-#                        also under sudo; never /root unless root is the user)
+#                        sign-ins are found (default: the .env value, else the
+#                        invoking user's home, also under sudo; never /root
+#                        unless root is the user)
 #   --install-docker     install Docker Engine + Compose from docker.com when absent
 #                        (apt; runs as root when invoked as root, else through sudo)
 #   --yes                do not pause for confirmation before mutating steps
 #   --http-port N        plain-HTTP first-screen port on localhost (default: the first free
 #                        of 80, 8088, 8089; recorded in .env as DASHBOARD_HTTP_PORT)
+#   --allow-downgrade    move the code volume to the release commit even when its
+#                        HEAD is not an ancestor of it (a downgrade, local commits)
 #
 # AUTONOMY_COSIGN_BIN=/path/to/cosign uses an existing cosign instead of the
 # pinned download (air-gapped hosts, tests); the embedded key is used either way.
@@ -34,7 +43,7 @@ COSIGN_VERSION=v3.1.3
 COSIGN_SHA256_AMD64=4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71
 COSIGN_SHA256_ARM64=c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a
 
-LOCK="" DIR="$HOME/autonomy" PORT=8080 HTTP_PORT="" INSTALL_DOCKER=0 YES=0 HOST_HOME=""
+LOCK="" DIR="$HOME/autonomy" PORT="" HTTP_PORT="" INSTALL_DOCKER=0 YES=0 HOST_HOME="" ALLOW_DOWNGRADE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --lock) LOCK="$2"; shift 2 ;;
@@ -44,11 +53,20 @@ while [[ $# -gt 0 ]]; do
         --install-docker) INSTALL_DOCKER=1; shift ;;
         --yes) YES=1; shift ;;
         --host-home) HOST_HOME="$2"; shift 2 ;;
-        -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+        --allow-downgrade) ALLOW_DOWNGRADE=1; shift ;;
+        -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 [[ -n "$LOCK" ]] || { echo "--lock is required" >&2; exit 2; }
+
+# An existing .env is a node being upgraded: a value it already holds is kept
+# unless its flag is passed again, so an upgrade never moves the dashboard
+# back to 8080 or points it at another home.
+env_value() { [[ -f "$DIR/.env" ]] && sed -n "s/^$1=//p" "$DIR/.env" | tail -1; }
+[[ -n "$PORT" ]] || PORT="$(env_value DASHBOARD_PORT || true)"
+PORT="${PORT:-8080}"
+[[ -n "$HOST_HOME" ]] || HOST_HOME="$(env_value AUTONOMY_HOST_HOME || true)"
 
 # The operator's home is where the Welcome page's sign-in scan looks for an
 # existing Claude, Codex or Grok sign-in. Under sudo, $HOME is root's home,
@@ -207,7 +225,47 @@ if [[ -n "${IMG[AUTONOMY_HOST_TERMINAL_IMAGE]:-}" ]]; then
     docker tag "${IMG[AUTONOMY_HOST_TERMINAL_IMAGE]}" autonomy-host-terminal
 fi
 
-# ── 5. Compose file from the verified node image ─────────────────────────────
+# ── 5. Code volume to the release commit (an existing node only) ─────────────
+# The image's ENTRYPOINT and CMD run from the autonomy-code volume, which Docker
+# seeds from the image only while it is empty: a new image over an existing
+# volume runs the old code. So the volume is moved to the commit the release's
+# node image carries, before any container is recreated and before anything in
+# $DIR changes, so a refusal leaves the node exactly as it was. A one-shot
+# container of the new image does it as autonomy (uid 1000, the volume's owner;
+# root would leave root-owned files behind), with the volume at a second path:
+# fetch the image's /app commit into the volume's repository, then
+# `git reset --keep`, which never discards a change.
+CODE_VOLUME=autonomy-code
+if docker volume inspect "$CODE_VOLUME" >/dev/null 2>&1; then
+    step "moving the $CODE_VOLUME volume to the release commit"
+    moved="$(docker run --rm -i --user 1000:1000 --network none -e HOME=/tmp \
+        -e AUTONOMY_ALLOW_DOWNGRADE="$ALLOW_DOWNGRADE" -v "$CODE_VOLUME:/volume" \
+        --entrypoint sh "${IMG[AUTONOMY_NODE_IMAGE]}" -s <<'CODE'
+set -eu
+release=/app code=/volume
+want="$(sed -n 's/^commit=//p' "$release/VERSION")"
+[ -n "$want" ] || { echo "the release node image names no commit in /app/VERSION" >&2; exit 1; }
+cd "$code"
+have="$(git rev-parse -q --verify HEAD)" || { echo "the autonomy-code volume holds no git repository" >&2; exit 1; }
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "refusing to upgrade: the autonomy-code volume has uncommitted changes (commit or discard them in the dashboard container's /app first)" >&2
+    exit 1
+fi
+git fetch -q "$release" HEAD
+[ "$(git rev-parse FETCH_HEAD)" = "$want" ] || { echo "the release node image's /app HEAD is not the commit in its /app/VERSION" >&2; exit 1; }
+if ! git merge-base --is-ancestor HEAD "$want" && [ "$AUTONOMY_ALLOW_DOWNGRADE" != 1 ]; then
+    echo "refusing to upgrade: the autonomy-code volume's HEAD $have is not an ancestor of release commit $want (a downgrade, or local commits); --allow-downgrade overrides" >&2
+    exit 1
+fi
+git reset -q --keep "$want"
+cp "$release/VERSION" "$code/VERSION"
+echo "$have $want"
+CODE
+    )" || exit 10
+    step "code volume: ${moved% *} -> ${moved#* }"
+fi
+
+# ── 6. Compose file from the verified node image ─────────────────────────────
 mkdir -p "$DIR"
 cid="$(docker create "${IMG[AUTONOMY_NODE_IMAGE]}")"
 docker cp "$cid:/app/docker-compose.yml" "$DIR/docker-compose.yml"
@@ -301,7 +359,7 @@ if ! grep -q '^AUTONOMY_SUBNET=' .env; then
     echo "$subnet_line" >>.env
 fi
 
-# ── 6. Start and wait for a real answer ──────────────────────────────────────
+# ── 7. Start and wait for a real answer ──────────────────────────────────────
 step "starting the node"
 docker compose up -d --no-build --quiet-pull
 for _ in $(seq 1 "${AUTONOMY_READY_TIMEOUT:-180}"); do
@@ -318,6 +376,24 @@ done
 [[ "${plain:-}" == 200 ]] || { echo "the plain-HTTP listener did not answer http://localhost:${HTTP_PORT}/api/ping with 200 (last: $plain)" >&2; docker compose ps >&2; exit 5; }
 windows_first_screen_check "$HTTP_PORT" "$PORT"
 step "dashboard is up"
+
+# ── 8. Record the installed release in the data volume ───────────────────────
+# release/installed.env is the lock this node now runs plus when it was
+# installed; the one it replaces moves to release/history/. Written only once
+# the dashboard answers, so it never names a release that did not start.
+INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+docker run --rm -i --user 1000:1000 --network none -e INSTALLED_AT="$INSTALLED_AT" \
+    -v autonomy-data:/data --entrypoint sh "${IMG[AUTONOMY_NODE_IMAGE]}" -c '
+set -eu
+d=/data/release
+mkdir -p "$d/history"
+if [ -f "$d/installed.env" ]; then
+    was="$(sed -n "s/^AUTONOMY_INSTALLED_AT=//p" "$d/installed.env" | tr -d :)"
+    mv "$d/installed.env" "$d/history/${was:-unknown-$INSTALLED_AT}.env"
+fi
+{ cat; echo "AUTONOMY_INSTALLED_AT=$INSTALLED_AT"; } >"$d/installed.env.tmp"
+mv "$d/installed.env.tmp" "$d/installed.env"' <"$TOOLS/image-lock.env" \
+    || echo "warning: could not record the installed release in the autonomy-data volume (release/installed.env)" >&2
 echo
 echo "Autonomy ${RELEASE_TAG} is running: open http://localhost:${HTTP_PORT}/"
 echo "  (from another machine: https://<this-host>:${PORT}/ — self-signed certificate, accept once)"
