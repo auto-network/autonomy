@@ -136,6 +136,9 @@ REQUEST_ID_LEN = 8
 #: id-tagged requests in flight on one channel. Viewer channels are opened by
 #: public link holders; before ids, the in-order loop was an implicit cap of 1.
 MAX_REQUESTS_IN_FLIGHT = 32
+#: The cap on a channel a public link holder (or a delegated-certificate
+#: viewer) opens, which before ids served one request at a time.
+VIEWER_MAX_REQUESTS_IN_FLIGHT = 2
 REFUSAL_REQUESTS_AT_CAP = "channel-requests-at-cap"
 REFUSAL_REQUEST_ID_IN_USE = "channel-request-id-in-use"
 REFUSAL_REQUEST_FAILED = "channel-request-failed"
@@ -247,7 +250,8 @@ async def serve_established_channel(
 
 
 async def _serve_channel_records(
-    crypto: ChannelCrypto, *, token: str, recv, send, handler, grant: str | None = None
+    crypto: ChannelCrypto, *, token: str, recv, send, handler, grant: str | None = None,
+    max_in_flight: int | None = None,
 ) -> None:
     """Serve one established E2E channel; ``send`` is already tagged.
 
@@ -286,6 +290,9 @@ async def _serve_channel_records(
     send_lock = asyncio.Lock()
     in_flight: dict[bytes, asyncio.Task] = {}
     stateful = factory is not None
+    # Peer pairs default to MAX_REQUESTS_IN_FLIGHT (read at call time, so a
+    # test can shrink it); a caller serving public viewers passes its own.
+    cap = MAX_REQUESTS_IN_FLIGHT if max_in_flight is None else max_in_flight
 
     async def send_response(response, request_id: bytes | None = None) -> None:
         response_messages = _response_messages(response)
@@ -350,10 +357,10 @@ async def _serve_channel_records(
                 # keeps that state single-threaded: it refuses ids.
                 if stateful:
                     await send_response(_channel_refusal(REFUSAL_IDS_UNSUPPORTED), request_id)
-                elif len(in_flight) >= MAX_REQUESTS_IN_FLIGHT:
+                elif len(in_flight) >= cap:
                     await send_response(_channel_refusal(
                         REFUSAL_REQUESTS_AT_CAP,
-                        f"{MAX_REQUESTS_IN_FLIGHT} requests already in flight"), request_id)
+                        f"{cap} requests already in flight"), request_id)
                 elif request_id in in_flight:
                     await send_response(_channel_refusal(REFUSAL_REQUEST_ID_IN_USE), request_id)
                 else:
@@ -411,6 +418,7 @@ async def _serve_authenticated_channel(*, org: str, token: str, recv, send,
         send=lambda payload: send(tag_viewer_message(VIEWER_KIND_RECORD, payload)),
         handler=handler,
         grant=grant,
+        max_in_flight=VIEWER_MAX_REQUESTS_IN_FLIGHT,
     )
     return True
 

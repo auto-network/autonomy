@@ -242,3 +242,68 @@ def test_a_tagged_request_on_a_stateful_channel_is_refused():
     assert request_id == b"12345678"
     assert relay_connector.REFUSAL_IDS_UNSUPPORTED.encode() in body
     assert sent[1] == b"ok" and seen == [b"{}"]
+
+
+def test_a_public_viewer_channel_holds_at_most_two_requests(monkeypatch):
+    """Review of f3c3ea9b9 finding 1: a channel a public link holder opens
+    gets VIEWER_MAX_REQUESTS_IN_FLIGHT, not the peer pairs' cap."""
+    assert relay_connector.VIEWER_MAX_REQUESTS_IN_FLIGHT == 2
+    seen = {}
+
+    async def fake_records(crypto, **kw):
+        seen.update(kw)
+
+    monkeypatch.setattr(relay_connector, "_serve_channel_records", fake_records)
+    monkeypatch.setattr(relay_connector, "parse_client_hello", lambda first: "eph")
+    monkeypatch.setattr(relay_connector.ChannelCrypto, "server",
+                        classmethod(lambda cls, *a: object()))
+    inbox = asyncio.Queue()
+    inbox.put_nowait(b"hello")
+
+    async def send(_out):
+        pass
+
+    served = asyncio.run(relay_connector._serve_authenticated_channel(
+        org="o", token="t", recv=inbox.get, send=send, handler=lambda *a: b"",
+        hello_builder=lambda eph: ("priv", b"server-hello", "th")))
+    assert served and seen["max_in_flight"] == relay_connector.VIEWER_MAX_REQUESTS_IN_FLIGHT
+
+
+def test_the_cap_is_enforced_per_channel():
+    class Crypto:
+        def open_record(self, record):
+            return record
+
+        def iter_seal_message(self, message, *, stream_final=True):
+            yield message
+
+    release = asyncio.Event()
+
+    async def slow(_token, _message):
+        await release.wait()
+        return b"done"
+
+    sent = []
+
+    async def run():
+        inbox = asyncio.Queue()
+        for n in range(3):
+            inbox.put_nowait(relay_connector.tag_message(b"%08d" % n, b"{}"))
+
+        async def recv():
+            if inbox.empty():
+                await asyncio.sleep(0.05)
+                release.set()
+                await asyncio.sleep(0.05)
+                return None
+            return await inbox.get()
+
+        async def send(out):
+            sent.append(relay_connector.split_request_id(out))
+
+        await relay_connector._serve_channel_records(
+            Crypto(), token="t", recv=recv, send=send, handler=slow, max_in_flight=2)
+
+    asyncio.run(run())
+    refused = [rid for rid, body in sent if b"channel-requests-at-cap" in body]
+    assert refused == [b"00000002"]

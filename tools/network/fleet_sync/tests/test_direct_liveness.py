@@ -20,6 +20,7 @@ complete; one that cannot complete a send in SERVE_SEND_STALL_S ends 1011.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import sqlite3
 import time
@@ -444,3 +445,83 @@ def test_the_silence_bound_is_judged_on_wake():
         with pytest.raises(asyncio.TimeoutError):
             await wait_bounded_on_wake(asyncio.sleep(10), 0.1)
     asyncio.run(run())
+
+
+# ── after the unpinged grace, a dead peer is freed; a live idle one stays ──
+
+def _post_reply_scenario(monkeypatch, *, answers_pings: bool):
+    """A reply is read in full, then the peer goes quiet past the unpinged
+    grace (SERVE_UNPINGED_AFTER_REPLY_S, shrunk here). The serving side then
+    pings: a peer that answers keeps its connection; one that does not is
+    freed (graph://9642ab99-bae rule 5 closes no healthy idle connection;
+    review of f3c3ea9b9 finding 2)."""
+    from tools.network.fleet_sync_channel import serve_fleet_transport
+
+    monkeypatch.setattr(channel_mod, "SERVE_UNPINGED_AFTER_REPLY_S", 0.1)
+    monkeypatch.setattr(channel_mod, "DIRECT_PING_INTERVAL_S", 0.05)
+    monkeypatch.setattr(channel_mod, "DIRECT_PING_TIMEOUT_S", 0.05)
+    root, server_key, client_key = KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+    entries = [enroll(root, machine_pub=server_key.public_hex), enroll(root, machine_pub=client_key.public_hex)]
+    server_auth = FleetAuthenticator(server_key, root_pub=root.public_hex, roster_entries=lambda: entries)
+    client_auth = FleetAuthenticator(client_key, root_pub=root.public_hex, roster_entries=lambda: entries)
+    session = "ef" * 16
+
+    async def run():
+        import json
+        from tools.network.relaykit.channel import ChannelCrypto
+        from tools.network.relaykit.viewer import read_viewer_record
+
+        to_server: asyncio.Queue = asyncio.Queue()
+        to_client: asyncio.Queue = asyncio.Queue()
+        closed: list = []
+
+        async def server_recv():
+            return await to_server.get()
+
+        async def server_send(payload):
+            await to_client.put(payload)
+
+        async def ping():
+            pong = asyncio.get_running_loop().create_future()
+            if answers_pings:
+                pong.set_result(None)
+            return pong
+
+        async def close(code, reason):
+            closed.append(code)
+
+        async def handler(_token, _message, _peer, **_kw):
+            return b"reply"
+
+        serve = asyncio.ensure_future(serve_fleet_transport(
+            token=session, recv=server_recv, send=server_send, handler=handler, close=close,
+            authenticator=server_auth, ping=ping))
+        private_key, hello = client_auth.build_client_hello(session, peer=server_key.public_hex)
+        await to_server.put(hello)
+        server_hello = read_viewer_record(await to_client.get())
+        server_eph, transcript = client_auth.verify_server(
+            server_hello, session=session, client_eph=json.loads(hello)["eph_pub"],
+            expected_machine_pub=server_key.public_hex)
+        crypto = ChannelCrypto.client(private_key, server_eph, transcript)
+        for record in crypto.seal_message(b"pull"):
+            await to_server.put(record)
+        await to_client.get()                       # the reply
+        await asyncio.sleep(0.6)                    # well past grace + ping timeout
+        outcome = (serve.done(), list(closed))
+        if not serve.done():
+            await to_server.put(None)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(serve, 2)
+        return outcome
+
+    return asyncio.run(run())
+
+
+def test_after_the_grace_a_dead_peer_is_freed(monkeypatch):
+    done, closed = _post_reply_scenario(monkeypatch, answers_pings=False)
+    assert done and closed == [1011]
+
+
+def test_after_the_grace_a_live_idle_peer_keeps_its_connection(monkeypatch):
+    done, closed = _post_reply_scenario(monkeypatch, answers_pings=True)
+    assert not done and closed == []

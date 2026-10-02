@@ -757,6 +757,16 @@ async def wait_alive(awaitable, *, ping, interval_s: float | None = None,
 
 
 
+#: After a reply has been written, the serving side waits this long WITHOUT
+#: pinging: the peer may be applying the tail of the reply from its socket
+#: buffers, and a ping timeout then would cut it off (reviewer
+#: auto-0925-123637, 2026-09-29). After it, the wait is ping-guarded, so a
+#: dead peer is freed and a live idle one keeps its connection: the serving
+#: side never closes a healthy connection for idleness (graph://9642ab99-bae,
+#: connection lifecycle rule 5).
+SERVE_UNPINGED_AFTER_REPLY_S = 900.0
+
+
 async def wait_bounded_on_wake(awaitable, bound_s: float):
     """Await *awaitable* for at most ``bound_s`` seconds, judged ON WAKE:
     when the timer fires after a stall of this event loop, the awaitable is
@@ -832,7 +842,14 @@ async def serve_fleet_transport(
         # connection lifecycle rule 5).
         if not replied:
             return await wait_alive(recv(), ping=ping)
-        return await recv()
+        # After a reply, wait unpinged for SERVE_UNPINGED_AFTER_REPLY_S, then
+        # ping: a live idle caller answers and keeps its connection, a dead
+        # one (lost power or network without closing) is freed.
+        task = asyncio.ensure_future(recv())
+        done, _pending = await asyncio.wait({task}, timeout=SERVE_UNPINGED_AFTER_REPLY_S)
+        if task in done:
+            return task.result()
+        return await wait_alive(task, ping=ping)
 
     async def bounded_send(payload: bytes) -> None:
         nonlocal replied
