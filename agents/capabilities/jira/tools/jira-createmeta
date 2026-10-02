@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # Usage: jira-createmeta [PROJECT [ISSUETYPE]]
 # Create-metadata (components, versions, priorities, severity) for ticket
-# creation. Defaults: $JIRA_PROJECT or PROJ, $JIRA_ISSUETYPE or Bug.
+# creation. PROJECT comes from the argument or $JIRA_PROJECT; there is no
+# built-in default. ISSUETYPE defaults to $JIRA_ISSUETYPE or Bug. Versions are
+# filtered to names starting with $JIRA_VERSION_PREFIX when it is set.
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
 
-PROJECT="${1:-${JIRA_PROJECT:-PROJ}}"
+PROJECT="${1:-${JIRA_PROJECT:-}}"
+[ -n "$PROJECT" ] || jira_fail "jira-createmeta: no project; pass PROJECT or set JIRA_PROJECT"
 ISSUETYPE="${2:-${JIRA_ISSUETYPE:-Bug}}"
 
-resp="$(jira_curl -sk "$DASH/api/jira/createmeta?project=$PROJECT&issuetype=$ISSUETYPE&version_prefix=Enterprise&org=$ORG")"
+resp="$(jira_curl -skG "$DASH/api/jira/createmeta" \
+  --data-urlencode "project=$PROJECT" \
+  --data-urlencode "issuetype=$ISSUETYPE" \
+  --data-urlencode "version_prefix=${JIRA_VERSION_PREFIX:-}" \
+  --data-urlencode "org=$ORG")"
 echo "$resp" | python3 -c 'import sys,json
 d=json.load(sys.stdin)
 if "error" in d: sys.exit("jira: " + str(d["error"]))

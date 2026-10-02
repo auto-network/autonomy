@@ -26,7 +26,8 @@ in-flight.
 ```bash
 jira-read PROJ-8385          # cleaned ticket: summary, status, description,
                                    # comments, attachments — ADF already markdown
-jira-createmeta                    # PROJ/Bug creation metadata (defaults)
+jira-createmeta                    # $JIRA_PROJECT/Bug creation metadata (no project
+                                   # default: fails if JIRA_PROJECT is unset)
 jira-createmeta PROJ Story         # any project/issuetype
 jira-fields PROJ-8385        # editable names, ids, types, allowed values
 jira-fields PROJ-8385 'Target Fix'  # narrow to a field-name fragment
@@ -181,7 +182,9 @@ a plain-string `description` may be markdown (converted host-side):
 ```
 
 Use `jira-createmeta` first — it returns the valid component/version/priority/
-severity ids and the latest released version.
+severity ids and the latest released version. The project is the argument or
+`$JIRA_PROJECT` (there is no built-in default); versions are filtered to names
+starting with `$JIRA_VERSION_PREFIX` when it is set, and unfiltered otherwise.
 
 ## Ticket schema — which field holds what
 

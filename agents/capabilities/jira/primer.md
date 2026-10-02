@@ -9,7 +9,8 @@ outcome or the decline).
 - `jira-query --list` / `jira-query NAME [k=v …]` — this workspace's named
   queries (standardized triage/sprint views, taught per-workspace as data)
 - `jira-search 'JQL'` — raw JQL search; terse rows, `--page TOKEN` to paginate
-- `jira-createmeta [PROJECT [ISSUETYPE]]` — valid components/versions/priorities/severity for creation
+- `jira-createmeta [PROJECT [ISSUETYPE]]` — valid components/versions/priorities/severity for creation;
+  PROJECT defaults to `$JIRA_PROJECT` (no built-in default), versions filter on `$JIRA_VERSION_PREFIX` if set
 - `jira-fields KEY [FILTER]` — read-only editable field names, ids, schema
   types, and allowed values; use before guessing custom fields or select values
 - `jira-attachment ID [-o FILE]` — download an attachment (ids in `jira-read`)

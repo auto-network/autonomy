@@ -61,7 +61,8 @@ range.
   files: replaced with the synthetic `tail1234.ts.net` form.
 
 Operator action after deploying this commit, on every node that routed
-host sessions for client repositories or ran the homing audit:
+host sessions for client repositories, ran the homing audit, or runs Jira
+sessions:
 
 ```bash
 # host-session routing, formerly hardcoded in tools/graph/ingest.py
@@ -69,6 +70,11 @@ export AUTONOMY_HOST_PROJECT_ORGS='{"/home/<user>/workspace/<repo>": "<org>"}'
 # credential-homing baseline, formerly hardcoded in audit_credential_homing.py
 export AUTONOMY_CREDENTIAL_HOMING_BASELINE=/path/outside/the/repo/baseline.json
 # baseline.json: [["autonomy.workspace", "<org>/<workspace>", "env.GH_TOKEN"], ...]
+# jira-createmeta: the Jira project it queries (no built-in default; the tool
+# fails without it) and, optionally, the prefix that filters its version list
+# (unset means every version). Set in the workspace env of Jira sessions.
+export JIRA_PROJECT=<project key>
+export JIRA_VERSION_PREFIX=<version name prefix>
 ```
 
 ## Removing it from history and from every copy
