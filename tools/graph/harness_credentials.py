@@ -359,11 +359,20 @@ def _remove(row_id: str, org: str | None = None) -> None:
 # ── reading ──────────────────────────────────────────────────
 
 
+#: What the dashboard's settings routes return in place of a credential a
+#: caller may not read (tools.dashboard.restricted_sets.REDACTED).
+_REDACTED = {"value": "[redacted]"}
+
+
 def _payload(row: Any) -> dict[str, Any] | None:
+    """The row's opened payload, or None when it did not open -- a vault
+    refusal, or the routes' redaction marker, which is never a credential."""
     if getattr(row, "vault_error", None) is not None:
         return None
     payload = getattr(row, "payload", None)
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or payload == _REDACTED:
+        return None
+    return payload
 
 
 def list_public(harness: str, *, org: str | None = None,

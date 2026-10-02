@@ -92,3 +92,22 @@ def test_a_codex_or_grok_launch_opens_exactly_its_one_credential(
     payloads = sl._signin_payloads(None, harness=harness)
     assert filename in payloads
     assert opened == [key]
+
+
+def test_a_redacted_credential_is_not_taken_for_a_token(monkeypatch):
+    """Review of 25a4a16a2: through the settings routes a non-operator
+    receives an organization credential as the redaction marker; it reads
+    as not openable, never as a secret."""
+    from types import SimpleNamespace
+
+    from tools.dashboard import restricted_sets
+
+    rows = {"autonomy.org.harness.account": SimpleNamespace(
+                key="claude:O1", id="p", vault_error=None,
+                payload={"harness": "claude", "account_id": "O1", "credential_state": "ok"}),
+            "autonomy.org.vault.harness-credential": SimpleNamespace(
+                key="claude:O1", id="c", vault_error=None,
+                payload={"value": restricted_sets.REDACTED})}
+    monkeypatch.setattr(hv, "_read_one", lambda set_id, key, org: rows[set_id])
+    acct = hv.read_credential("claude", "O1", org="acme")
+    assert acct.openable is False and acct.secret == {}
