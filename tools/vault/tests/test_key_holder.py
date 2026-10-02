@@ -77,7 +77,7 @@ def test_production_holder_opens_a_really_sealed_secret(graph_db, vaulted_set, t
     # The stored database never holds the plaintext — only a locator.
     assert SECRET.encode() not in graph_db.read_bytes()
 
-    resolved = settings_ops.read_set(SET_ID, org=None)
+    resolved = settings_ops.read_set(SET_ID, org=None, key_equals=KEY)
     row = resolved.to_dict()[KEY]
     assert row.payload == {"secret_value": SECRET}
     assert row.vault_error is None
@@ -93,7 +93,7 @@ def test_empty_cache_fails_closed_not_with_a_missing_holder(graph_db, vaulted_se
     register_key_holder(cache)
 
     settings_ops.add_setting(SET_ID, 1, KEY, {"secret_value": SECRET}, org=None, state="raw")
-    resolved = settings_ops.read_set(SET_ID, org=None)
+    resolved = settings_ops.read_set(SET_ID, org=None, key_equals=KEY)
     row = resolved.to_dict()[KEY]
     # Fail closed, and assert the POSITIVE contract, not just "the secret is
     # absent": a vault member that does not open resolves to a
@@ -149,7 +149,7 @@ def test_a_vault_read_and_write_leave_no_content_store_open(graph_db, vaulted_se
 
     settings_ops.add_setting(SET_ID, 1, KEY, {"secret_value": SECRET}, org=None, state="raw")
     for _ in range(3):
-        resolved = settings_ops.read_set(SET_ID, org=None)
+        resolved = settings_ops.read_set(SET_ID, org=None, key_equals=KEY)
         assert resolved.members[0].payload["secret_value"] == SECRET
 
     reads = [store for store in opened if store is not harness_store]

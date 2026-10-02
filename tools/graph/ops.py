@@ -66,6 +66,7 @@ from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
     migrate_setting_revisions,
     resolve_setting_strict,
     read_set_key,
+    read_set_member,
     chain_setting,
     contested_keys,
     check_setting,

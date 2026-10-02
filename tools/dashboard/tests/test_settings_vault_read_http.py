@@ -148,8 +148,8 @@ def test_a_vault_secret_resolves_identically_in_process_and_over_http(
         json.loads(_row_payload(graph_db_env, setting_id))
     ), "the row holds a locator, so the plaintext below came from step six"
 
-    local = settings_ops.read_set(VAULT_SET, org=ORG).to_dict()["default"]
-    over_http = remote.read_set(VAULT_SET, org=ORG).to_dict()["default"]
+    local = settings_ops.read_set(VAULT_SET, org=ORG, key_equals="default").to_dict()["default"]
+    over_http = remote.read_set_member(VAULT_SET, "default", org=ORG)
 
     assert local.payload == payload
     assert over_http.payload == payload
@@ -162,15 +162,21 @@ def test_a_vault_secret_resolves_identically_in_process_and_over_http(
 def test_the_wire_carries_the_value_and_never_the_locator(
     graph_db_env, vault_schema, vault, remote
 ):
-    """The response body itself, before any client-side reconstruction."""
+    """The response body itself, before any client-side reconstruction. A
+    keyed read carries the value; a whole-set read carries no value at all."""
     ops.add_setting(VAULT_SET, 1, "default", {"access_token": SECRET}, org=ORG)
-    body = remote._request(
-        "GET", f"/api/graph/settings/{VAULT_SET}", headers={"X-Graph-Org": ORG},
+    member = remote._request(
+        "GET", f"/api/graph/settings/{VAULT_SET}/default", headers={"X-Graph-Org": ORG},
     )
-    member = body["members"][0]
     assert member["payload"] == {"access_token": SECRET}
     assert not is_vault_locator(member["payload"])
-    assert "autonomy.vault.v1." not in json.dumps(body)
+    assert "autonomy.vault.v1." not in json.dumps(member)
+    whole = remote._request(
+        "GET", f"/api/graph/settings/{VAULT_SET}", headers={"X-Graph-Org": ORG},
+    )
+    assert [m["key"] for m in whole["members"]] == ["default"]
+    assert whole["members"][0]["payload"] is None
+    assert SECRET not in json.dumps(whole)
 
 
 def test_a_refusal_reaches_the_http_caller_as_the_same_named_error(
@@ -182,8 +188,8 @@ def test_a_refusal_reaches_the_http_caller_as_the_same_named_error(
     ops.add_setting(VAULT_SET, 1, "default", {"access_token": SECRET}, org=ORG)
     settings_ops.set_vault_key_holder(None)
 
-    local = settings_ops.read_set(VAULT_SET, org=ORG).to_dict()["default"]
-    over_http = remote.read_set(VAULT_SET, org=ORG).to_dict()["default"]
+    local = settings_ops.read_set(VAULT_SET, org=ORG, key_equals="default").to_dict()["default"]
+    over_http = remote.read_set_member(VAULT_SET, "default", org=ORG)
 
     assert local.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
     assert over_http.vault_error == local.vault_error
@@ -202,8 +208,9 @@ def test_one_unopenable_secret_still_answers_for_the_rest_over_http(
         "decryption_failed",
     )
 
-    resolved = remote.read_set(VAULT_SET, org=ORG).to_dict()
-    assert sorted(resolved) == ["alpha", "beta", "gamma"]
+    assert sorted(m.key for m in remote.read_set(VAULT_SET, org=ORG).members) == [
+        "alpha", "beta", "gamma"]
+    resolved = {k: remote.read_set_member(VAULT_SET, k, org=ORG) for k in ("alpha", "beta", "gamma")}
     assert resolved["alpha"].payload == {"t": "alpha"}
     assert resolved["gamma"].payload == {"t": "gamma"}
     assert resolved["beta"].vault_error.reason == settings_ops.VAULT_DECRYPTION_FAILED

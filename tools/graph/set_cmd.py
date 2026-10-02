@@ -571,8 +571,10 @@ def cmd_set_read(args) -> None:
                           ttl_seconds=int(getattr(args, "ttl", 0) or 0))
         print(receipt["path"])
         return
-    members = client.read_set(set_id, org=org)
-    for m in members.members:
+    # Read the one key: a whole-set read of a vaulted set returns metadata
+    # only, and this command prints the value.
+    found = client.read_set_member(set_id, key, org=org)
+    for m in ([found] if found is not None else []):
         if m.key == key:
             # A vault secret that did not open has no payload, and printing
             # its `null` would read as "this setting's value is null" — the

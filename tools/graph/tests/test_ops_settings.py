@@ -586,8 +586,11 @@ def test_key_equals_matches_full_read_vault_refusal(graph_db_env, tmp_path):
         assert m.payload is None
         assert m.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
         assert "sk-must-not-leak" not in json.dumps(m.to_dict())
-        assert _ser(narrowed.members) == _ser(
-            _full_then_filter(vset, "default", org=None))
+        # A whole-set read of a vaulted set opens nothing: the same member
+        # comes back as metadata only, with no payload and no refusal.
+        full = _full_then_filter(vset, "default", org=None)
+        assert len(full) == 1
+        assert full[0].payload is None and full[0].vault_error is None
     finally:
         world.close()
         clear_seams()

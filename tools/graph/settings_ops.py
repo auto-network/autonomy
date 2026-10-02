@@ -4520,6 +4520,17 @@ def resolve_setting_strict(
     return None
 
 
+def read_set_member(
+    set_id: str, key: str, *, org: "str | None | _CallerOrgSentinel",
+) -> "ResolvedSetting[Any] | None":
+    """The one member of *set_id* under *key*, opened as :func:`read_set`
+    opens it; None when absent. The in-process twin of
+    ``GraphClient.read_set_member`` (the single-key route), so a caller that
+    needs a vault value names its key either way."""
+    members = read_set(set_id, org=org, key_equals=key).members
+    return members[0] if members else None
+
+
 def read_set_key(
     set_id: str,
     key: str,
