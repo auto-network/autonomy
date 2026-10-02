@@ -309,9 +309,10 @@ def resolve(entries, *, anchor_root_pub: str) -> dict[str, RosterEntry]:
     """The current roster: machine_pub -> the ENROLL entry that currently
     holds it, for every machine that is enrolled and not kicked.
 
-    Pure function of the entry set (any order, any duplicates). Verifies every
-    entry against the anchor and silently drops the unverifiable — a foreign
-    or tampered row never affects the result. Then, per machine:
+    Pure function of the entry set (any order, any duplicates). Entries are
+    verified where they enter a store — the write paths and fleet-sync ingest
+    (``fleet_sync.materialize._verify_roster_row``) — and never here; an entry
+    under a different root is ignored. Then, per machine:
 
     * A KICK is absorbing UNLESS a re-enrolment cites it (``supersedes`` =
       that kick's ``entry_id``). An uncited kick revokes the machine.
@@ -320,13 +321,7 @@ def resolve(entries, *, anchor_root_pub: str) -> dict[str, RosterEntry]:
     * A re-enrolment that cites a kick escapes exactly that kick; a fresh
       enrol that cites nothing cannot overcome a kick.
     """
-    verified = []
-    for e in entries:
-        try:
-            verify(e, anchor_root_pub=anchor_root_pub)
-        except FleetRosterError:
-            continue
-        verified.append(e)
+    verified = [e for e in entries if e.personal_root_pub == anchor_root_pub]
 
     by_machine: dict[str, list[RosterEntry]] = {}
     for e in verified:

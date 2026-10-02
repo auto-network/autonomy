@@ -569,6 +569,8 @@ def _insert(conn: sqlite3.Connection, table: str, row: dict[str, object]) -> Non
 
 
 LEDGER_EVENT_SET_ID = "autonomy.org.ledger-event"
+FLEET_ROSTER_SET_ID = "autonomy.fleet.roster"
+PERSONAL_IDENTITY_SET_ID = "autonomy.identity.personal"
 
 
 def store_genesis_id(conn: sqlite3.Connection) -> str | None:
@@ -699,6 +701,30 @@ def _verify_settings_row(row: dict[str, object], genesis: str | None) -> str | N
     return None
 
 
+def _verify_roster_row(conn: sqlite3.Connection, row: dict[str, object]) -> str | None:
+    """A fleet roster entry carries its own personal-root signature in its
+    payload, not the settings envelope. It is verified here, once, as it
+    arrives, so a fleet member cannot add a machine the root never signed
+    for; readers never verify it again. None when it verifies; otherwise the
+    quarantine reason (pending until this store holds the personal root)."""
+    from tools.network import fleet_roster
+
+    identity = conn.execute(
+        "SELECT payload FROM settings WHERE set_id = ? AND deprecated = 0 "
+        "ORDER BY key != 'default', key LIMIT 1",
+        (PERSONAL_IDENTITY_SET_ID,),
+    ).fetchone()
+    root_pub = json.loads(identity[0]).get("root_pub") if identity else None
+    if not root_pub:
+        return "settings_signature_pending"
+    try:
+        entry = fleet_roster._entry_from_payload(json.loads(str(row["payload"])))
+        fleet_roster.verify(entry, anchor_root_pub=root_pub)
+    except (fleet_roster.FleetRosterError, ValueError, TypeError, KeyError):
+        return "settings_signature_invalid"
+    return None
+
+
 def _judge_settings_row(conn: sqlite3.Connection, row: dict[str, object], fold) -> str | None:
     """Steps 2 to 6 of the boundary (design of record, "Verification, at
     the boundaries") for a row whose signature already verified. *fold* is
@@ -804,6 +830,13 @@ def materialize(
                     deleted += 1
                     continue
                 row = _row(mutation)
+                if table == "settings" and row.get("set_id") == FLEET_ROSTER_SET_ID:
+                    verdict = _verify_roster_row(conn, row)
+                    if verdict is not None:
+                        rejected.append(
+                            (mutation.table, tuple(mutation.address), verdict)
+                        )
+                        continue
                 if table == "settings" and row.get("signature") is not None:
                     verdict = _verify_settings_row(row, genesis)
                     if verdict is None:

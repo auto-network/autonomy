@@ -716,13 +716,7 @@ def _revoked_entries(
     root_pub: str,
     active_public_keys: set[str],
 ) -> list[fleet_roster.RosterEntry]:
-    verified: list[fleet_roster.RosterEntry] = []
-    for entry in entries:
-        try:
-            fleet_roster.verify(entry, anchor_root_pub=root_pub)
-        except fleet_roster.FleetRosterError:
-            continue
-        verified.append(entry)
+    verified = [entry for entry in entries if entry.personal_root_pub == root_pub]
     by_machine: dict[str, list[fleet_roster.RosterEntry]] = {}
     for entry in verified:
         by_machine.setdefault(entry.machine_pub, []).append(entry)

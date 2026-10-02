@@ -117,21 +117,18 @@ def test_a_reenrolment_citing_an_old_kick_does_not_escape_a_newer_kick():
     assert m not in roster
 
 
-def test_a_foreign_or_tampered_entry_never_affects_the_roster():
+def test_a_foreign_entry_never_affects_the_roster():
+    """Signatures are verified where an entry enters a store, not here
+    (tampering is refused at sync ingest: test_signed_settings_boundary);
+    resolve still ignores an entry under another operator's root."""
     root = _fleet()
     anchor = root.public_hex
     m = _machine()
     good = fleet_roster.enroll(root, machine_pub=m, seq=0)
+    foreign = fleet_roster.enroll(_fleet(), machine_pub=_machine(), seq=0)
 
-    # An entry signed by a DIFFERENT personal root (another operator's fleet).
-    foreign_root = _fleet()
-    foreign = fleet_roster.enroll(foreign_root, machine_pub=_machine(), seq=0)
-    # A tampered good entry: machine swapped after signing.
-    from dataclasses import replace
-    tampered = replace(good, machine_pub=_machine())
-
-    roster = fleet_roster.resolve([good, foreign, tampered], anchor_root_pub=anchor)
-    assert set(roster) == {m}, "only the operator's own verified entry survives"
+    roster = fleet_roster.resolve([good, foreign], anchor_root_pub=anchor)
+    assert set(roster) == {m}, "only the operator's own entry survives"
 
 
 def test_verify_rejects_a_foreign_anchor_by_name_and_a_bad_signature():

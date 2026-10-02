@@ -571,3 +571,49 @@ def test_an_unsigned_row_parked_on_an_organization_store_is_re_judged_once_then_
     assert _quarantine(b_db) == [("settings_unsigned", 1)]
     assert b.drain_pending_signatures() == 0
     assert _quarantine(b_db) == [("settings_unsigned", 1)]
+
+
+def test_a_roster_entry_is_verified_once_as_it_arrives(tmp_path):
+    """A fleet roster entry carries its own personal-root signature, not the
+    envelope. Sync ingest verifies it against the receiving store's personal
+    root and refuses a tampered or foreign entry; readers never verify it."""
+    from dataclasses import replace
+
+    from tools.network import fleet_roster
+
+    root = KeyPair.generate()
+    good = fleet_roster.enroll(root, machine_pub=KeyPair.generate().public_hex, seq=0)
+    tampered = replace(good, machine_pub=KeyPair.generate().public_hex)
+    foreign = fleet_roster.enroll(
+        KeyPair.generate(), machine_pub=KeyPair.generate().public_hex, seq=0,
+    )
+    a_db, a = _open(tmp_path / "personal-a.db", "a" * 64)
+    b_db, b = _open(tmp_path / "personal.db", "b" * 64)
+    try:
+        with b.transaction(50, "identity"):
+            b_db.conn.execute(
+                "INSERT INTO settings (id,set_id,schema_revision,key,payload,publication_state)"
+                " VALUES (?,'autonomy.identity.personal',1,'default',?,'raw')",
+                (str(uuid.uuid4()), json.dumps({"root_pub": root.public_hex})),
+            )
+        with a.transaction(100, "roster"):
+            for entry in (good, tampered, foreign):
+                a_db.conn.execute(
+                    "INSERT INTO settings (id,set_id,schema_revision,key,payload,publication_state)"
+                    " VALUES (?,'autonomy.fleet.roster',2,?,?,'raw')",
+                    (str(uuid.uuid4()), str(uuid.uuid4()),
+                     json.dumps(fleet_roster._entry_payload(entry))),
+                )
+        _exchange(a, "a" * 64, b)
+        landed = [
+            json.loads(p)["machine_pub"] for (p,) in b_db.conn.execute(
+                "SELECT payload FROM settings WHERE set_id='autonomy.fleet.roster'"
+            )
+        ]
+        assert landed == [good.machine_pub]
+        assert _quarantine(b_db) == [
+            ("settings_signature_invalid", 0), ("settings_signature_invalid", 0),
+        ]
+    finally:
+        a_db.close()
+        b_db.close()
