@@ -345,6 +345,39 @@ old signature is never treated as authorization for a rebuilt artifact.
 Session containers are not updated in place; newly launched sessions use the
 new verified session-image digests.
 
+#### Retention: the current release and the one before it
+
+Until 1.0, the registry keeps exactly two releases: the one just signed and
+the one before it, so a bad release rolls back by pointing at the previous
+lock. Every older version of every package is deleted once the new release is
+signed and verified. A tag is never moved to new content instead: releases
+are pinned and signed by digest, so a moved tag would match neither its lock
+nor its signature.
+
+The packages belong to the `auto-network` GitHub account, and deleting needs
+a token with `delete:packages`, which the publishing token does not carry.
+Sign in for this one run with a separate `gh` configuration, so the
+operator's own login is untouched:
+
+```bash
+export GH_CONFIG_DIR="$(mktemp -d)"
+gh auth login -h github.com -s read:packages,delete:packages --web
+# the operator enters the printed code at github.com/login/device,
+# signed in as auto-network
+```
+
+Build the keep set before deleting anything. It is every image digest named
+in the current and the previous lock under `deploy/releases/`, plus every
+manifest reachable from those digests and from their `sha256-<digest>`
+signature tags. cosign v3 stores a signature as a tagged index whose child,
+the Sigstore bundle, is an **untagged** version: a rule that keeps tagged
+versions and deletes untagged ones deletes the signatures of the release
+being kept. Delete each version outside the keep set with
+`gh api -X DELETE /users/auto-network/packages/container/<package>/versions/<id>`,
+then run `deploy/verify-image.sh` on every digest in both kept locks, list
+each package's tags to confirm only the two releases remain, and sign out
+(`gh auth logout`) and remove the temporary configuration directory.
+
 ### Volume layout & backup
 
 One named volume, `autonomy-data`, mounted at `/app/data`, holds **all**
