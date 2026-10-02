@@ -1128,6 +1128,19 @@ def declared_union(set_id: str) -> tuple[str, dict[str, type]] | None:
     return newest._union_discriminator, dict(shapes)
 
 
+def payload_schema(schema: type | None, payload: Any) -> type | None:
+    """The class whose declared fields describe *payload*: for a
+    payload_union set, the shape its discriminator names (None when it names
+    none); for every other schema, the schema itself. Every reader of a
+    set's declared fields (defaults, undeclared-field dropping, references,
+    readiness) resolves through this so a union's shapes are seen."""
+    union = getattr(schema, "_union_shapes", None)
+    if not union:
+        return schema
+    tag = payload.get(schema._union_discriminator) if isinstance(payload, dict) else None
+    return union.get(tag) if isinstance(tag, str) else None
+
+
 VALID_SIGNER_TIERS = ("persona", "delegate")
 
 

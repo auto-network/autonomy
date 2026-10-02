@@ -1441,6 +1441,7 @@ def unresolved_references(
     out: list[tuple[str, str]] = []
 
     def walk(schema: Any, value: Any) -> None:
+        schema = schemas.payload_schema(schema, value)
         meta = getattr(schema, "_field_metadata", None) or {}
         if not isinstance(value, dict):
             return
@@ -1870,6 +1871,7 @@ def check_setting(
         return field_spec.get("severity") or "blocking"
 
     def walk(schema_cls, value, path_prefix: str) -> None:
+        schema_cls = schemas.payload_schema(schema_cls, value)
         meta = getattr(schema_cls, "_field_metadata", None) or {}
         if not isinstance(value, dict):
             return
@@ -2569,7 +2571,7 @@ def _drop_undeclared_fields(set_id: str, revision: int, payload: dict) -> dict:
     untouched -- so this never guesses at a shape it cannot see. A schema
     declaring no fields enforces nothing on write and is likewise untouched.
     """
-    schema = schemas.get_schema(set_id, int(revision))
+    schema = schemas.payload_schema(schemas.get_schema(set_id, int(revision)), payload)
     if schema is None or not isinstance(payload, dict):
         return payload
     meta = getattr(schema, "_field_metadata", None) or {}
@@ -2608,7 +2610,7 @@ def _apply_declared_defaults(set_id: str, revision: int, payload: dict) -> dict:
     consults first then decides the answer, which is how a workspace that
     asked for a nested Docker daemon under the older name stops getting one.
     """
-    schema = schemas.get_schema(set_id, int(revision))
+    schema = schemas.payload_schema(schemas.get_schema(set_id, int(revision)), payload)
     if schema is None or not isinstance(payload, dict):
         return payload
     meta = getattr(schema, "_field_metadata", None) or {}

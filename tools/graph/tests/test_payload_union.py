@@ -156,3 +156,52 @@ def test_a_union_set_declares_no_fields_of_its_own():
         @payload_union(discriminator="harness", shapes=(_Grok,))
         class Bad(SettingSchema):
             extra: str = field(required=True, description="belongs on a shape")
+
+
+# ── readers of declared fields resolve the shape ───────────
+
+
+class _Defaulted(SettingSchema):
+    harness: Literal["d"] = field(required=True, description="which harness")
+    plan: str = field(default="free", description="a defaulted field")
+
+
+@pytest.fixture
+def defaulted_set():
+    @payload_union(discriminator="harness", shapes=(_Defaulted, _Grok))
+    class ProbeDefaults(SettingSchema):
+        set_id = "probe.payload-union.defaults"
+        schema_revision = 1
+
+    yield ProbeDefaults
+    registry.unregister_schema("probe.payload-union.defaults", 1)
+
+
+def test_read_fills_a_shapes_default_and_drops_its_undeclared_fields(defaulted_set):
+    from tools.graph import settings_ops
+
+    sid = "probe.payload-union.defaults"
+    assert settings_ops._apply_declared_defaults(sid, 1, {"harness": "d"}) == {
+        "harness": "d", "plan": "free"}
+    # another shape's payload gets none of this shape's defaults
+    assert settings_ops._apply_declared_defaults(
+        sid, 1, {"harness": "grok", "account_id": "g"}) == {"harness": "grok", "account_id": "g"}
+    # an unknown discriminator is returned untouched rather than guessed at
+    assert settings_ops._apply_declared_defaults(sid, 1, {"harness": "x"}) == {"harness": "x"}
+
+
+def test_payload_schema_resolves_the_shape(defaulted_set, union_set):
+    from tools.graph.schemas import payload_schema
+
+    assert payload_schema(defaulted_set, {"harness": "d"}) is _Defaulted
+    assert payload_schema(defaulted_set, {"harness": "nope"}) is None
+    assert payload_schema(union_set, "not a dict") is None
+    assert payload_schema(_Grok, {"harness": "grok"}) is _Grok   # not a union: itself
+
+
+def test_read_drops_fields_the_named_shape_does_not_declare(defaulted_set):
+    from tools.graph import settings_ops
+
+    sid = "probe.payload-union.defaults"
+    assert settings_ops._drop_undeclared_fields(
+        sid, 1, {"harness": "d", "plan": "pro", "gone": 1}) == {"harness": "d", "plan": "pro"}
