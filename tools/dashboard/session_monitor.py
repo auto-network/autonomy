@@ -202,6 +202,14 @@ def _publish_codex_harness_usage_setting(
         identity_id=identity_id,
         identity_label=identity_label,
     )
+    org = _harness_usage_settings.account_source(row)
+    if org is not None:
+        # An organization-shared account: its reading belongs to the
+        # organization, where every member reads it (auto-elxua).
+        return _harness_usage_settings.publish_org_reading(
+            org, key, payload,
+            read_key=graph_ops.read_set_key, upsert_by_key=graph_ops.upsert_by_key,
+        )
     # publish_if_NEWER, not publish_if_changed: every live Codex session
     # tails its own transcript and writes this one row, so a session holding
     # an older reading must not roll it backwards.

@@ -3998,7 +3998,64 @@ async def api_harness_accounts(request):
         return JSONResponse({"error": f"harness must be one of {', '.join(HARNESSES)}"},
                             status_code=400)
     rows = await asyncio.to_thread(harness_accounts.account_rows, harness)
+    if harness == "claude":
+        # Whoever looks refreshes (auto-elxua): a shared account's stale
+        # reading is probed once in the background; the new reading reaches
+        # every open chooser through setting.changed.
+        for row in harness_accounts.stale_shared_accounts(rows):
+            _schedule_org_claude_probe(row["source"], row["account_id"])
     return JSONResponse({"harness": harness, "accounts": rows})
+
+
+#: (organization, account id) -> monotonic time of the last probe started.
+_org_claude_probe_started: dict[tuple[str, str], float] = {}
+
+
+def _schedule_org_claude_probe(org: str, account_id: str) -> bool:
+    """Start one background probe of a shared Claude account unless one
+    started within harness_accounts.PROBE_MIN_INTERVAL_S."""
+    from tools.dashboard import harness_accounts
+
+    now = time.monotonic()
+    last = _org_claude_probe_started.get((org, account_id))
+    if last is not None and now - last < harness_accounts.PROBE_MIN_INTERVAL_S:
+        return False
+    _org_claude_probe_started[(org, account_id)] = now
+    asyncio.get_running_loop().create_task(
+        asyncio.to_thread(_probe_org_claude_account, org, account_id))
+    return True
+
+
+def _probe_org_claude_account(org: str, account_id: str) -> bool:
+    """One usage reading of organization *org*'s shared Claude account,
+    taken with the same one-token probe the personal poller uses, written to
+    the organization's usage set when newer than the stored one."""
+    from tools.graph import harness_credentials as hv
+
+    try:
+        acct = hv.read_account("claude", account_id, org=org)
+    except Exception:
+        logger.exception("org claude usage: account read failed org=%s", org)
+        return False
+    if acct is None or not acct.openable:
+        return False
+    alias = acct.get("alias")
+    identity_id = f"org:{account_id}"
+    row_key = _harness_usage_settings.make_harness_usage_key("claude", identity_id)
+    updated_at = _now_iso()
+    if acct.setup_token_fresh():
+        payload = _claude_usage_via_probe(
+            acct.get("setup") or "", org_uuid=account_id, alias=alias, row_key=row_key,
+            identity_id=identity_id, updated_at=updated_at)
+    else:
+        payload = _claude_usage_via_bundle(
+            {"alias": alias, "access_token": acct.get("access")}, org_uuid=account_id,
+            alias=alias, row_key=row_key, identity_id=identity_id, updated_at=updated_at)
+    if payload is None:
+        return False
+    return _harness_usage_settings.publish_org_reading(
+        org, row_key, payload,
+        read_key=graph_ops.read_set_key, upsert_by_key=graph_ops.upsert_by_key)
 
 
 async def api_harness_usage(request):
@@ -23674,6 +23731,16 @@ async def _on_startup():
                     False)
         except Exception:
             logger.warning("presence sync notice failed", exc_info=True)
+        # A shared account's usage reading taken by another member: open
+        # launch choosers update live (auto-elxua).
+        try:
+            org_usage = _harness_usage_settings.ORG_HARNESS_USAGE_SET_ID
+            if gap or any(getattr(a, "set_id", None) == org_usage for a in addresses):
+                _materialization_loop.call_soon_threadsafe(
+                    event_bus.broadcast_sync, "setting.changed",
+                    {"set_id": org_usage, "operation": "sync"}, False)
+        except Exception:
+            logger.warning("org usage sync notice failed", exc_info=True)
 
     set_settings_materialization_hook(_settings_sync_materialized)
     # The scheduler itself starts at ACTIVATION (see _activate_worker): it

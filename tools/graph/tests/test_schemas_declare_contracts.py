@@ -257,6 +257,10 @@ _KEY_DUPLICATION_GRANDFATHERED = {
     ("autonomy.network.ledger-state", 1, "genesis_id"),
     ("dashboard.harness.usage", 1, "harness"),
     ("dashboard.harness.usage", 1, "identity_id"),
+    # auto-elxua: the organization's copy of the row above carries the
+    # identical payload, so one parser and one usage view serve both.
+    ("autonomy.org.harness-usage", 1, "harness"),
+    ("autonomy.org.harness-usage", 1, "identity_id"),
     ("dashboard.plugin-owned-setting", 1, "plugin_id"),
     ("dashboard.plugin-owned-setting", 1, "set_id"),
     ("dashboard.presentation.deck", 1, "design_id"),

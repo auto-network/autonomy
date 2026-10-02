@@ -42,6 +42,21 @@ def _readings(harness: str) -> dict[str, dict]:
     return out
 
 
+def usage_identity(harness: str, account_id: str) -> str:
+    """The usage row's identity for an account: Claude rows are keyed by the
+    organization UUID as ``org:<id>``, Codex rows by the account id."""
+    return f"org:{account_id}" if harness == "claude" else account_id
+
+
+def _org_readings(harness: str, slugs) -> dict[str, dict[str, dict]]:
+    """Each organization's shared-account readings (auto-elxua)."""
+    from tools.dashboard import harness_usage_settings as hus
+    from tools.graph import settings_ops
+
+    return {slug: hus.org_readings(slug, harness, read_set=settings_ops.read_set)
+            for slug in slugs}
+
+
 def _usage_view(reading: dict | None) -> dict | None:
     if not isinstance(reading, dict):
         return None
@@ -80,12 +95,14 @@ def account_rows(harness: str) -> list[dict]:
 
     accounts = hv.all_accounts(harness)
     readings = _readings(harness)
+    shared = _org_readings(harness, {a.source for a in accounts if a.source != hv.PERSONAL})
     now = datetime.now(timezone.utc)
     launchable = [a for a in accounts if a.launchable and a.source == hv.PERSONAL]
     recommended = _recommended(harness, launchable)
     rows = []
     for acct in accounts:
-        reading = readings.get(acct.id) if acct.source == hv.PERSONAL else None
+        reading = (readings.get(acct.id) if acct.source == hv.PERSONAL else
+                   shared.get(acct.source, {}).get(usage_identity(harness, acct.id)))
         rows.append({
             "account_id": acct.id,
             "harness": harness,
@@ -101,6 +118,30 @@ def account_rows(harness: str) -> list[dict]:
     rows.sort(key=lambda r: (not r["recommended"], r["exhausted"], not r["launchable"],
                              (r["alias"] or r["account_id"]).lower()))
     return rows
+
+
+#: A shared account's reading older than this is refreshed when a member
+#: opens the chooser (auto-elxua; operator 2026-09-30: "stale if it's older
+#: than 15 mins").
+STALE_AFTER_S = 15 * 60
+#: A shared account is not probed again within this long, whoever asks.
+PROBE_MIN_INTERVAL_S = 60
+
+
+def stale_shared_accounts(rows: list[dict], *, now: datetime | None = None) -> list[dict]:
+    """The shared, launchable accounts whose reading is missing or more than
+    STALE_AFTER_S old: what a chooser open refreshes."""
+    from tools.dashboard import harness_usage_settings as hus
+
+    now_epoch = (now or datetime.now(timezone.utc)).timestamp()
+    out = []
+    for row in rows:
+        if row["source"] == "personal" or not row["launchable"]:
+            continue
+        taken = hus.reading_epoch({"updated_at": (row.get("usage") or {}).get("as_of")})
+        if taken is None or now_epoch - taken > STALE_AFTER_S:
+            out.append(row)
+    return out
 
 
 def check_account(harness: str, account_id: str,

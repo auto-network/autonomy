@@ -737,3 +737,78 @@ def _coerce_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+# ── Organization-shared accounts (auto-26e8a, auto-elxua) ──────────────────
+
+#: Usage readings of an organization's shared inference accounts, homed in
+#: the organization so every member reads the same reading (graph://7eb29bc8-31a
+#: v6 §11 Delta 6). Same payload as the personal row.
+ORG_HARNESS_USAGE_SET_ID = "autonomy.org.harness-usage"
+
+
+@publication_band(min="raw", max="raw")
+@home("organization")
+@keyed_per_entity(key_strategy="harness:identity_id")
+class OrgHarnessUsageV1(DashboardHarnessUsageV1):
+    """A usage reading of one organization-shared account. Any member's
+    machine may write it -- the Codex transcript publisher where the session
+    runs, a Claude probe when a member opens the launch chooser on a stale
+    reading -- and a reading is written only when it is newer than the one
+    stored, so the newest reading wins whoever took it."""
+
+    set_id = ORG_HARNESS_USAGE_SET_ID
+    schema_revision = HARNESS_USAGE_SCHEMA_REVISION
+
+
+def publish_org_reading(
+    org: str,
+    key: str,
+    payload: dict[str, Any],
+    *,
+    read_key: Callable[..., Any],
+    upsert_by_key: Callable[..., Any],
+) -> bool:
+    """Write *payload* to organization *org*'s usage set when it is newer than
+    the stored reading (or nothing is stored). Ordering is against the STORED
+    row, not this process's memory: another member's machine may have written
+    a newer reading since."""
+    taken = reading_epoch(payload)
+    with _publish_lock:
+        try:
+            stored = (read_key(ORG_HARNESS_USAGE_SET_ID, key, org=org, peers=[]) or {}).get("payload")
+        except Exception:
+            stored = None
+        stored_at = reading_epoch(stored) if isinstance(stored, dict) else None
+        if taken is not None and stored_at is not None and taken <= stored_at:
+            return False
+        upsert_by_key(ORG_HARNESS_USAGE_SET_ID, HARNESS_USAGE_SCHEMA_REVISION, key, payload,
+                      org=org, state="raw")
+        return True
+
+
+def org_readings(org: str, harness: str, *, read_set: Callable[..., Any]) -> dict[str, dict]:
+    """Organization *org*'s stored readings for *harness*, by identity id."""
+    try:
+        members = read_set(ORG_HARNESS_USAGE_SET_ID, org=org, peers=[])
+    except Exception:
+        return {}
+    out = {}
+    for member in getattr(members, "members", []) or []:
+        payload = getattr(member, "payload", None)
+        if isinstance(payload, dict) and payload.get("harness") == harness:
+            out[str(payload.get("identity_id") or "")] = payload
+    return out
+
+
+def account_source(row: dict[str, Any]) -> str | None:
+    """The organization whose shared account a session launched on, from the
+    selection record the launcher stored on its row (auto-dgr2c); None for a
+    personal account or no record."""
+    raw = row.get("account_selection") if isinstance(row, dict) else None
+    try:
+        selection = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return None
+    source = selection.get("source") if isinstance(selection, dict) else None
+    return source if isinstance(source, str) and source and source != "personal" else None
