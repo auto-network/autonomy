@@ -1,0 +1,19 @@
+# Free-threaded CPython 3.14 base image for deploy/Dockerfile:
+#   docker build -f deploy/Dockerfile.python-freethreaded -t autonomy-python:3.14t-slim .
+#   docker build --build-arg BASE_IMAGE=autonomy-python:3.14t-slim -f deploy/Dockerfile .
+# Docker Hub publishes no free-threaded python image, so this installs uv's
+# CPython 3.14 free-threaded build and exposes it as python3/python/pip, the
+# names deploy/Dockerfile and its entrypoint use. uv marks its Pythons
+# EXTERNALLY-MANAGED; here it is the image's system Python, so the marker goes.
+FROM debian:trixie-slim
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 UV_PYTHON_INSTALL_DIR=/opt/python
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+    && uv python install 3.14t \
+    && py="$(uv python find 3.14t)" \
+    && rm -f "$(dirname "$py")"/../lib/python3.14t/EXTERNALLY-MANAGED \
+    && "$py" -m ensurepip \
+    && ln -s "$py" /usr/local/bin/python3 && ln -s "$py" /usr/local/bin/python \
+    && printf '#!/bin/sh\nexec %s -m pip "$@"\n' "$py" > /usr/local/bin/pip && chmod +x /usr/local/bin/pip \
+    && python3 -c "import sys; assert not sys._is_gil_enabled(); print(sys.version)"

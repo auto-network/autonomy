@@ -1,0 +1,10 @@
+# WebRTC packages the dormant ICE viewer upgrade (aiortc) needs, installed by
+# deploy/Dockerfile only on a Python WITH a GIL. On free-threaded Python they
+# are left out (operator ruling 2026-10-02): pylibsrtp ships only cp310-abi3
+# wheels and upstream does not build for free-threaded Python ("Do not build
+# wheels for free-threaded Python", pylibsrtp 1.0.0), and google-crc32c's C
+# extension re-enables the GIL when imported. The WebRTC upgrade code stays;
+# on a free-threaded image it fails when invoked, and viewers use the relay.
+aiortc==1.15.0
+pylibsrtp==1.0.0
+google-crc32c==1.8.0

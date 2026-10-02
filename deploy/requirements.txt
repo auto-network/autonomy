@@ -56,11 +56,10 @@ dnspython==2.8.0
 # distribute nothing. STANDING RULE: av never ships inside an artifact we
 # publish (prebuilt images exclude it or install it first-boot on the
 # user's side). Revisit only if that rule ever has to break.
-aiortc==1.15.0
+# aiortc, pylibsrtp and google-crc32c: deploy/requirements.webrtc.txt
+# (installed only on a Python with a GIL; see that file).
 aioice==0.10.2
 av==17.1.0
-pylibsrtp==1.0.0
 pyee==13.0.1
 ifaddr==0.2.0
-google-crc32c==1.8.0
 pyOpenSSL==26.4.0

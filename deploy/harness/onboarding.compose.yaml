@@ -1,7 +1,7 @@
 name: autonomy-onboarding
 
 x-dashboard: &dashboard
-  image: autonomy-node:onboarding
+  image: ${SIM_NODE_IMAGE:-autonomy-node:onboarding}
   init: true
   environment: &dashboard-env
     AUTONOMY_DATA_ROOT: /app/data
@@ -30,7 +30,7 @@ x-dashboard: &dashboard
 # Dashboards and sidecars mount the Docker socket exactly as a node does, so
 # the simulated product can launch its own session containers.
 x-tmux: &tmux
-  image: autonomy-node:onboarding
+  image: ${SIM_NODE_IMAGE:-autonomy-node:onboarding}
   init: true
   command: [tmux, -D]
   healthcheck:
@@ -41,7 +41,7 @@ x-tmux: &tmux
 
 services:
   relay:
-    image: autonomy-node:onboarding
+    image: ${SIM_NODE_IMAGE:-autonomy-node:onboarding}
     entrypoint: [python, -m, tools.network.registry]
     command: [--db, /registry/registry.db, --host, 0.0.0.0, --port, '8477', --base-url, 'https://${SIM_RELAY_HOST:?Run workflow.mjs}:${SIM_RELAY_PORT:-19477}', --ssl-certfile, /simulation-tls/server.crt, --ssl-keyfile, /simulation-tls/server.key, --log-level, info]
     volumes:

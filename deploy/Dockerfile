@@ -157,8 +157,11 @@ RUN curl -fsSL -o /tmp/dolt.tgz \
 WORKDIR /app
 
 # Python deps first — cache layer survives source edits.
-COPY deploy/requirements.txt /app/deploy/requirements.txt
-RUN pip install --no-cache-dir -r /app/deploy/requirements.txt
+COPY deploy/requirements.txt deploy/requirements.webrtc.txt /app/deploy/
+RUN pip install --no-cache-dir -r /app/deploy/requirements.txt \
+    && if python3 -c "import sys; sys.exit(0 if getattr(sys, '_is_gil_enabled', lambda: True)() else 1)"; then \
+        pip install --no-cache-dir -r /app/deploy/requirements.webrtc.txt; \
+    fi
 
 # The tailwind binary the entrypoint's --watch needs at runtime; reuse the one
 # the builder already fetched instead of downloading it again.

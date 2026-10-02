@@ -281,9 +281,14 @@ try{
   const preparationStarted=Date.now();
   // Source is mounted directly. Rebuild only when the installed runtime's
   // dependency declarations differ (or the runtime image is missing).
-  const runtimeFiles=['deploy/requirements.txt','deploy/Dockerfile'];
+  // SIM_NODE_IMAGE / SIM_BASE_IMAGE run the same workflows on another base
+  // image (e.g. free-threaded Python) without replacing the default image.
+  const nodeImage=process.env.SIM_NODE_IMAGE||'autonomy-node:onboarding';
+  process.env.SIM_NODE_IMAGE=nodeImage;
+  const baseImage=process.env.SIM_BASE_IMAGE;
+  const runtimeFiles=['deploy/requirements.txt','deploy/requirements.webrtc.txt','deploy/Dockerfile'];
   const expected=runtimeFiles.map(path=>createHash('sha256').update(readFileSync(repository+path)).digest('hex'));
-  const installed=spawnSync('docker',['run','--rm','--entrypoint','sha256sum','autonomy-node:onboarding',
+  const installed=spawnSync('docker',['run','--rm','--entrypoint','sha256sum',nodeImage,
     ...runtimeFiles.map(path=>'/app/'+path)],{encoding:'utf8',timeout:30000});
   const actual=(installed.stdout||'').trim().split('\n').map(line=>line.split(/\s+/)[0]);
   if(installed.status!==0 || JSON.stringify(actual)!==JSON.stringify(expected)){
@@ -301,7 +306,7 @@ try{
   }
   command('rsync',['-a','--delete','--exclude=.git','--exclude=.venv','--exclude=node_modules',
     '--exclude=data','--exclude=.browser_profile','--exclude=__pycache__','--exclude=.pytest_cache',repository,buildDirectory+'/']);
-  const build=spawnSync('docker',['build','-f',buildDirectory+'/deploy/Dockerfile','-t','autonomy-node:onboarding',buildDirectory],
+  const build=spawnSync('docker',['build',...(baseImage?['--build-arg','BASE_IMAGE='+baseImage]:[]),'-f',buildDirectory+'/deploy/Dockerfile','-t',nodeImage,buildDirectory],
     {encoding:'utf8',timeout:1200000,maxBuffer:16*1024*1024});
   writeFileSync(output+'/build.log',(build.stdout||'')+(build.stderr||''));
   if(build.status!==0)throw new Error('Image build failed; see '+output+'/build.log');
@@ -317,7 +322,7 @@ try{
   for(const mountpoint of ['orgs','attachments'])mkdirSync(repository+mountpoint,{recursive:true});
   process.env.SIM_SOURCE_DIR=repository;
   evidence.build={source:repository,mode:'bind-mounted-current-worktree',includesUncommittedChanges:true,
-    image:command('docker',['image','inspect','autonomy-node:onboarding','--format','{{.Id}}']).trim()};
+    image:command('docker',['image','inspect',nodeImage,'--format','{{.Id}}']).trim()};
   evidence.preparationMs=Date.now()-preparationStarted;
   console.log('Current source ready in '+evidence.preparationMs+'ms; starting services.');
   command('openssl',['req','-x509','-newkey','rsa:2048','-sha256','-noenc','-days','7',
