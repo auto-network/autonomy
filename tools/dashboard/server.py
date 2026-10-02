@@ -9970,6 +9970,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         where = _session_machine_context(tmux_name)
         extra_env.update(_machine_env(where))
         extra_env = extra_env or None
+        selection: dict = {}
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         run_dir = DATA_ROOT / "agent-runs" / f"{tmux_name}-{ts}"
@@ -10001,8 +10002,11 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             capabilities=proj.capabilities,
             vault_links=getattr(proj, "vault_links", ()),
             carried=carried,
+            selection_out=selection,
         )
         carried = None
+        if selection:
+            dashboard_db.set_account_selection(tmux_name, selection)
         _remaining_step_timeout(launch_deadline, "launching")
         if not cmd_str:
             raise RuntimeError(f"launch_session failed for project '{proj.id}'")

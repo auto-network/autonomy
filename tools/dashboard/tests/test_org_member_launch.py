@@ -368,3 +368,30 @@ def test_the_runner_accepts_a_carried_vault_link(server, monkeypatch):
         "signins": {sl.CLAUDE_BUNDLE_FILENAME: base64.b64encode(b"{}").decode()}})
     status, _data, seen = _member_launch(server, monkeypatch, body, {"dev": proj})
     assert status == 202 and seen["carried"].credentials["alpha:docker-config"] == "cfg"
+
+
+def test_the_start_worker_stores_the_full_account_selection_on_the_row(server, monkeypatch, tmp_path):
+    """auto-dgr2c: the full record (other accounts, their readings) lives on
+    the dashboard's row, not in the meta file the session can read."""
+    from tools.dashboard.session_lifecycle_worker import LifecycleJob, SessionLifecycleStateWriter
+
+    dashboard_db.insert_session(tmux_name="auto-sr", session_type="container",
+                                project="dev", harness="claude")
+    proj = _proj(name="Dev", default_tags=[], startup=None, working_dir="/workspace/repo",
+                 image="img", needs_nested_docker=False, session_runtime="standard",
+                 network_host=False, capability_issues=(), env={})
+    monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _p: proj)
+    monkeypatch.setattr(server.workspace_settings, "materialize_startup_script", lambda *_a: None)
+    monkeypatch.setattr(server, "render_workspace_primer", lambda *_a, **_k: "primer")
+    monkeypatch.setattr(server, "prepare_session_mounts", lambda *_a, **_k: {})
+    monkeypatch.setattr(server, "DATA_ROOT", tmp_path)
+    record = {"account_id": "B", "method": "headroom", "candidates": ["A", "B"], "excluded": []}
+
+    def fake_launch(**kw):
+        kw["selection_out"].update(record)
+        return None
+
+    monkeypatch.setattr(server, "launch_session", fake_launch)
+    server._run_project_session_start(LifecycleJob("start", "auto-sr", {"project_id": "dev"}),
+                                      SessionLifecycleStateWriter())
+    assert json.loads(dashboard_db.get_session("auto-sr")["account_selection"]) == record

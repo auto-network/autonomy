@@ -544,7 +544,11 @@ def init_db(db_path: Path | None = None) -> None:
     # retried launch return the session it already started. owner_persona is
     # the organization member whose launch started it on this runner (the
     # persona the org hello proved); only that member may stop it remotely.
-    for column in ("launched_by", "home_machine", "launch_op_id", "owner_persona"):
+    for column in ("launched_by", "home_machine", "launch_op_id", "owner_persona",
+                   # auto-dgr2c: the full account-selection record (JSON),
+                   # kept here because the session's own meta file is
+                   # readable inside its container.
+                   "account_selection"):
         try:
             _conn.execute(f"SELECT {column} FROM tmux_sessions LIMIT 0")
         except sqlite3.OperationalError:
@@ -564,6 +568,14 @@ def set_launch_provenance(
         "launch_op_id = ?, owner_persona = ? WHERE tmux_name = ?",
         (launched_by, home_machine, launch_op_id, owner_persona, tmux_name),
     )
+    conn.commit()
+
+
+def set_account_selection(tmux_name: str, selection: dict) -> None:
+    """Record the account decision a launch made (auto-dgr2c)."""
+    conn = get_conn()
+    conn.execute("UPDATE tmux_sessions SET account_selection = ? WHERE tmux_name = ?",
+                 (json.dumps(selection, sort_keys=True), tmux_name))
     conn.commit()
 
 

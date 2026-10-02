@@ -69,17 +69,26 @@ def test_an_alias_pick_still_records_the_reading(monkeypatch):
     assert sel["reading"]["windows"]["short"]["used_percent"] == 70
 
 
-def test_the_session_meta_holds_the_decision_and_no_secret(tmp_path, monkeypatch, fake_crosstalk,
-                                                          captured_run):
-    _claude_accounts(monkeypatch, "A")
-    _readings(monkeypatch, [_reading("A", 12)])
+def test_the_session_meta_holds_only_its_own_account_and_the_caller_gets_the_rest(
+        tmp_path, monkeypatch, fake_crosstalk, captured_run):
+    """The meta file is mounted into the session: it names this session's
+    account and reading and only counts the others; the full record goes to
+    the caller (the dashboard stores it on the session row)."""
+    _claude_accounts(monkeypatch, "A", "B", "C")
+    _readings(monkeypatch, [_reading("A", 100), _reading("B", 12), _reading("C", 50)],
+              exhausted={"A"})
+    full = {}
     run = tmp_path / "run"
-    _run(name="auto-sel", output_dir=str(run), harness="claude")
+    _run(name="auto-sel", output_dir=str(run), harness="claude", selection_out=full)
     meta = json.loads((run / "sessions" / ".session_meta.json").read_text())
-    assert meta["harness_token"] == "A"
-    assert meta["account_selection"]["account_id"] == "A"
-    assert meta["account_selection"]["reading"]["windows"]["short"]["used_percent"] == 12
-    assert "at-SECRET" not in json.dumps(meta)
+    own = meta["account_selection"]
+    assert meta["harness_token"] == own["account_id"] == "B"
+    assert own["reading"]["windows"]["short"]["used_percent"] == 12
+    assert (own["candidates_count"], own["excluded_count"]) == (3, 1)
+    text = json.dumps(meta)
+    assert '"A"' not in text and '"C"' not in text and "alias-C" not in text
+    assert "at-SECRET" not in text
+    assert full["candidates"] == ["A", "B", "C"] and full["excluded"][0]["account_id"] == "A"
 
 
 def test_a_codex_session_records_the_account_it_was_given(tmp_path, monkeypatch, fake_crosstalk,
@@ -100,4 +109,5 @@ def test_a_codex_session_records_the_account_it_was_given(tmp_path, monkeypatch,
     assert delivered[session_launcher.CODEX_AUTH_FILENAME].decode() == meta["harness_token"]
     assert meta["account_selection"] == {**meta["account_selection"], "harness": "codex",
                                          "account_id": meta["harness_token"],
-                                         "method": "random", "candidates_count": 2}
+                                         "method": "random", "candidates_count": 2,
+                                         "excluded_count": 0}

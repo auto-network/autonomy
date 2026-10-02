@@ -1117,6 +1117,18 @@ def _pick_account(harness: str, rng: random.Random | None = None) -> Any | None:
     return (rng or random).choice(accounts) if len(accounts) > 1 else accounts[0]
 
 
+def _own_selection(selection: dict) -> dict:
+    """The part of a selection record a session may read about itself: its
+    account, how it was chosen, its reading, and only the COUNTS of the other
+    accounts considered and excluded."""
+    own = {k: v for k, v in selection.items()
+           if k in ("harness", "account_id", "alias", "method", "reading", "at")}
+    own["candidates_count"] = selection.get("candidates_count",
+                                            len(selection.get("candidates") or ()))
+    own["excluded_count"] = len(selection.get("excluded") or ())
+    return own
+
+
 def _pick_selection(harness: str, acct: Any, candidates: int) -> dict:
     """The record of a Codex or Grok pick (auto-dgr2c)."""
     return {"harness": harness, "account_id": acct.id, "alias": acct.get("alias"),
@@ -2089,6 +2101,7 @@ def launch_session(
     claude_alias: str | None = None,
     carried: CarriedCredentials | None = None,
     vault_links: tuple = (),
+    selection_out: dict | None = None,
 ) -> str | None:
     """Launch an agent container session.
 
@@ -2163,6 +2176,10 @@ def launch_session(
                     missing.
         claude_alias: Prefer this Claude account (by alias) when resolving
                     credentials; the usual pick otherwise.
+        selection_out: When given, receives the full account-selection record
+                    (candidates, excluded accounts and their readings) for the
+                    caller to store where the session cannot read it; the
+                    session's own meta file carries only its own account.
         carried: An organization member's launch on this runner: every secret
                     comes from here, and nothing from this machine's vault,
                     account picker, host environment or host files. A
@@ -2291,6 +2308,8 @@ def launch_session(
             picked[harness] = _acct
             selection = _pick_selection(
                 harness, _acct, sum(1 for a in _accounts(harness) if a.launchable))
+    if selection is not None and selection_out is not None:
+        selection_out.update(selection)
     if selection is not None:
         logger.info(
             "account selection: session=%s harness=%s account=%s method=%s "
@@ -2353,7 +2372,9 @@ def launch_session(
         elif harness in picked:
             meta_doc["harness_token"] = picked[harness].id
         if selection is not None:
-            meta_doc["account_selection"] = selection
+            # The meta file is mounted into the session: it names only this
+            # session's account and reading, never the other accounts.
+            meta_doc["account_selection"] = _own_selection(selection)
         if metadata:
             meta_doc.update(metadata)
         (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
