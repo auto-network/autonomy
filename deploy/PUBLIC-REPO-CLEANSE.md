@@ -31,13 +31,13 @@ that looks like a real one is fine; a real value in a test is a leak.
 
 ## What the 2026-10-01 commit removed
 
-Range reviewed: `effd6489..5366c6a8` (378 unpushed commits) plus the whole
+Range reviewed: the 378 commits then waiting to be pushed, plus the whole
 tree at the tip, because the rule applies to the tree, not only to the
 range.
 
 - `tools/network/registry/tests/manual/pillar-sample.html`: a complete
   client project briefing exported from Mission Control and committed on
-  2026-08-11 (`dc87de27`) as a WebKit compose fixture. Deleted; the path is
+  2026-08-11 as a WebKit compose fixture. Deleted; the path is
   now gitignored and the harness README says to export a document locally.
 - The client's Jira project key, ticket keys, and product version names in
   the Jira capability, its tools, and test fixtures: replaced with `PROJ`,
@@ -118,8 +118,8 @@ git rev-list --count master         # a few less than before: the commits
                                     # file are dropped as empty
 ```
 
-`--replace-message` covers commit bodies such as `51749106` (a persona
-label and root-key suffix) and the Home commit that names a client ticket.
+`--replace-message` covers commit bodies too, such as one that named a
+persona label and root-key suffix and one that named a client ticket.
 If a replaced blob was the only change in a commit, the commit is kept with
 the replaced content; only commits left with no change are dropped.
 
@@ -147,9 +147,9 @@ deleted before the request, or they keep the objects reachable.
 ### 3. Rebuild and replace the published images
 
 `deploy/publish-images.sh` clones the tree into the node image, so every
-published release carries the working copy of the tree at its commit. The
-2026.09.26 release (`deploy/releases/2026.09.26-0d46057.env`) contains the
-deleted document.
+published release carries the working copy of the tree at its commit, so
+every release built before the rewrite must be withdrawn (see "Retention" in
+DEPLOY.md).
 
 ```bash
 # from the rewritten checkout, after step 2
