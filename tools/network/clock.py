@@ -181,6 +181,13 @@ FLEET_RUNTIME_DELEGATION_TTL_SECONDS = 30 * 24 * 60 * 60
 #: key-control plane is HLC/millisecond-based).
 DEFAULT_DELEGATE_TTL_MS = 12 * 60 * 60 * 1000
 
+#: How long the settings authority fold (tools/network/settingskit/
+#: authority.py) is reused for writes, milliseconds. Grant expiry is judged
+#: against the fold's own clock, so this bounds how long an EXPIRED delegation
+#: keeps signing: a slow refold keeps an expired credential alive, the
+#: validity-interval direction.
+SETTINGS_AUTHORITY_FOLD_WINDOW_MS = 60_000
+
 #: Registry binding TTLs, seconds (spec §4.2: default 30d).
 DEFAULT_BINDING_TTL = 30 * 86_400
 MIN_BINDING_TTL = 3_600

@@ -34,12 +34,10 @@ PERSONA_KEY_STRATEGIES = frozenset({
 #: the key is the set's own dimensions, so a persona holds many rows.
 PERSONA_PREFIX_KEY_STRATEGIES = frozenset({"persona_pub:*"})
 
-#: (store path) -> (depth key, FoldState | None)
+#: (store path) -> (depth key, FoldState | None). A fold is reused for writes
+#: within clock.SETTINGS_AUTHORITY_FOLD_WINDOW_MS, which bounds how long an
+#: expired delegation keeps signing.
 _FOLD_CACHE: dict[str, tuple[tuple, object]] = {}
-#: A fold is reused for writes within this window; grant expiry is judged
-#: against the fold's own clock, so the window bounds how long an expired
-#: delegation keeps signing.
-FOLD_CACHE_WINDOW_MS = 60_000
 
 
 def signing_key_strategy(set_id: str, schema_revision: int) -> str:
@@ -91,7 +89,7 @@ def store_fold(conn: sqlite3.Connection):
     from tools.network.ledger import Event, Ledger, fold
     from tools.network.ledger.settings_bridge import read_event_wires
 
-    from tools.network.clock import now_ms
+    from tools.network.clock import SETTINGS_AUTHORITY_FOLD_WINDOW_MS, now_ms
 
     depth = ledger_depth(conn)
     path = _store_path(conn)
@@ -99,7 +97,7 @@ def store_fold(conn: sqlite3.Connection):
     # Grant expiry is judged against ``now``, so a cached fold is reused only
     # within the same minute: a delegation that expires is refused within a
     # minute of its expiry without refolding on every write.
-    cache_key = (depth, now // FOLD_CACHE_WINDOW_MS)
+    cache_key = (depth, now // SETTINGS_AUTHORITY_FOLD_WINDOW_MS)
     cached = _FOLD_CACHE.get(path)
     if cached is not None and cached[0] == cache_key:
         return cached[1]
