@@ -1362,12 +1362,18 @@ class TestSubstrateCredentialsPicker:
             prefer_alias=None,
         )
 
+        selection = result.pop("selection")
         assert result == {
             "type": "token",
             "token": "raw-B",
             "harness_token": "org-B",
             "alias": "auto-network",
         }
+        # auto-dgr2c: the decision and the reading it was made on.
+        assert (selection["account_id"], selection["method"]) == ("org-B", "headroom")
+        assert selection["candidates"] == ["org-A", "org-B"] and selection["excluded"] == []
+        assert selection["reading"]["windows"]["short"]["used_percent"] == 5.0
+        assert "raw-B" not in repr(selection)
 
     def test_a_repeats_pick_across_calls(self, monkeypatch, freeze_now):
         """Same usage state → same pick. Determinism (no rng involvement)."""
@@ -2389,6 +2395,7 @@ def test_picker_takes_the_bundle_when_the_setup_token_is_stale(monkeypatch):
     _claude_vault(monkeypatch, setup="k", minted_at="2020-01-01T00:00:00Z")
     monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
     creds = session_launcher._resolve_credentials_via_substrate(prefer_alias=None)
+    assert creds.pop("selection")["method"] == "only"
     assert creds == {"harness_token": "org-1", "alias": "dev", "type": "vault"}
     assert session_launcher._setup_auth_docker_args(creds, Path("/tmp")) == []
 

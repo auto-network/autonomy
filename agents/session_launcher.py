@@ -672,6 +672,21 @@ def _is_usage_usable(payload: dict) -> bool:
     )
 
 
+def _reading_snapshot(payload: Any) -> dict | None:
+    """The non-secret part of a usage reading a selection was made on: when
+    it was taken, its status, and each window's used_percent and resets_at."""
+    if not isinstance(payload, dict):
+        return None
+    windows = payload.get("windows") if isinstance(payload.get("windows"), dict) else {}
+    return {
+        "updated_at": payload.get("updated_at"),
+        "status": payload.get("status"),
+        "windows": {name: {"used_percent": w.get("used_percent"),
+                           "resets_at": w.get("resets_at")}
+                    for name, w in windows.items() if isinstance(w, dict)},
+    }
+
+
 def _resolve_credentials_via_substrate(
     *, prefer_alias: str | None,
     rng: random.Random | None = None,
@@ -719,43 +734,61 @@ def _resolve_credentials_via_substrate(
         )
         return None
 
+    # The readings the decision is made on, kept for the record (auto-dgr2c)
+    # whichever branch decides: an alias pick ignores them, but what they
+    # said at that moment is still the evidence a later question needs.
+    now = datetime.now(timezone.utc)
+    usage_by_org: dict[str, dict] = {}
+    for payload in _claude_usage_rows():
+        account_id = payload.get("account_id")
+        if not isinstance(account_id, str) or not account_id:
+            continue
+        if _reading_window_open(payload, now=now):
+            usage_by_org[account_id] = payload
+            continue
+        if _is_usage_stale(payload, now=now):
+            continue
+        if not _is_usage_usable(payload):
+            continue
+        usage_by_org[account_id] = payload
+    candidates = [a.id for a in accounts]
+    excluded: list[dict] = []
     chosen = None
+    method = None
     if prefer_alias:
         for acct in accounts:
             if acct.get("alias") == prefer_alias:
-                chosen = acct
+                chosen, method = acct, "alias"
                 break
     if chosen is None:
-        usage_rows = _claude_usage_rows()
-        now = datetime.now(timezone.utc)
-        usage_by_org: dict[str, dict] = {}
-        for payload in usage_rows:
-            account_id = payload.get("account_id")
-            if not isinstance(account_id, str) or not account_id:
-                continue
-            if _reading_window_open(payload, now=now):
-                usage_by_org[account_id] = payload
-                continue
-            if _is_usage_stale(payload, now=now):
-                continue
-            if not _is_usage_usable(payload):
-                continue
-            usage_by_org[account_id] = payload
         exhausted = {
             a.id for a in accounts
             if _usage_exhausted(usage_by_org.get(a.id), now=now)
         }
         if exhausted and len(exhausted) < len(accounts):
+            excluded = [{"account_id": a, "reason": "exhausted",
+                         "reading": _reading_snapshot(usage_by_org.get(a))}
+                        for a in sorted(exhausted)]
             accounts = [a for a in accounts if a.id not in exhausted]
-        if all(a.id in usage_by_org for a in accounts):
-            chosen = max(
+        if len(accounts) == 1:
+            chosen, method = accounts[0], "only"
+        elif all(a.id in usage_by_org for a in accounts):
+            chosen, method = max(
                 accounts,
                 key=lambda a: (_token_headroom_score(usage_by_org.get(a.id, {})), a.id),
-            )
+            ), "headroom"
         else:
-            chosen = rng.choice(accounts)
+            chosen, method = rng.choice(accounts), "random"
+        if exhausted and len(exhausted) == len(candidates):
+            method += "-all-exhausted"
 
     out: dict = {"harness_token": chosen.id}
+    out["selection"] = {
+        "harness": "claude", "account_id": chosen.id, "alias": chosen.get("alias"),
+        "method": method, "candidates": candidates, "excluded": excluded,
+        "reading": _reading_snapshot(usage_by_org.get(chosen.id)),
+        "at": now.isoformat(timespec="seconds"),
+    }
     alias = chosen.get("alias")
     if alias:
         out["alias"] = alias
@@ -1084,6 +1117,14 @@ def _pick_account(harness: str, rng: random.Random | None = None) -> Any | None:
     return (rng or random).choice(accounts) if len(accounts) > 1 else accounts[0]
 
 
+def _pick_selection(harness: str, acct: Any, candidates: int) -> dict:
+    """The record of a Codex or Grok pick (auto-dgr2c)."""
+    return {"harness": harness, "account_id": acct.id, "alias": acct.get("alias"),
+            "method": "only" if candidates == 1 else "random",
+            "candidates_count": candidates, "excluded": [],
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+
+
 def _claude_bundle_doc(account_id: str) -> bytes | None:
     """``~/.claude/.credentials.json`` for the chosen account from its vault
     rows, opened at launch while the operator is unlocked."""
@@ -1130,13 +1171,18 @@ def _codex_auth_doc(acct) -> bytes:
 
 def _signin_payloads(claude_account: str | None,
                      accounts_out: dict | None = None,
-                     *, harness: str | None = None) -> dict[str, bytes] | None:
+                     *, harness: str | None = None,
+                     picked: dict | None = None) -> dict[str, bytes] | None:
     """Every sign-in this launch delivers, ``{filename: content}``.
 
     Only the sign-in of the session's own *harness* (auto-9hu6y, default
     decided by host-0927-113441): a Claude session no longer carries Codex
     and Grok tokens it does not use. ``harness=None`` keeps every one, for
     callers that do not know it.
+
+    *picked*, when given, holds the Codex or Grok account the launcher
+    already chose (``{harness: account}``) and recorded, so the sign-in
+    delivered is that account's, not a second pick (auto-dgr2c).
 
     *accounts_out*, when given, receives ``{filename: account id}`` for each
     included sign-in: the key selection only, never the secret, so a
@@ -1152,7 +1198,7 @@ def _signin_payloads(claude_account: str | None,
         return harness is None or harness == name
 
     if wants("codex"):
-        codex = _pick_account("codex")
+        codex = picked["codex"] if picked and "codex" in picked else _pick_account("codex")
         if codex is None:
             logger.warning(
                 "session_launcher: no Codex account in the vault — the session "
@@ -1170,7 +1216,8 @@ def _signin_payloads(claude_account: str | None,
         payloads[CLAUDE_BUNDLE_FILENAME] = bundle
         if accounts_out is not None:
             accounts_out[CLAUDE_BUNDLE_FILENAME] = claude_account
-    grok = _pick_account("grok") if wants("grok") else None
+    grok = ((picked["grok"] if picked and "grok" in picked else _pick_account("grok"))
+            if wants("grok") else None)
     if grok is not None:
         auth = grok.get("auth")
         if auth:
@@ -2229,6 +2276,28 @@ def launch_session(
             )
             return None
 
+    # The account decision, recorded once per launch (auto-dgr2c). A Codex or
+    # Grok account is picked ONCE here and the same pick is delivered as the
+    # sign-in, so the record names the account the session actually holds.
+    picked: dict[str, Any] = {}
+    selection: dict | None = None
+    if carried is not None:
+        selection = {"method": "carried"}
+    elif harness == "claude" and creds is not None:
+        selection = creds.get("selection") or {"method": "environment"}
+    elif harness in ("codex", "grok"):
+        _acct = _pick_account(harness)
+        if _acct is not None:
+            picked[harness] = _acct
+            selection = _pick_selection(
+                harness, _acct, sum(1 for a in _accounts(harness) if a.launchable))
+    if selection is not None:
+        logger.info(
+            "account selection: session=%s harness=%s account=%s method=%s "
+            "reading=%s excluded=%s", name, harness, selection.get("account_id"),
+            selection.get("method"), json.dumps(selection.get("reading")),
+            [e.get("account_id") for e in selection.get("excluded") or ()])
+
     # ── Session directory setup ────────────────────────────────
     if resume_uuid and not output_dir:
         print(
@@ -2281,10 +2350,10 @@ def launch_session(
             # of the vault record this session launched with (record v16
             # §10.9). The dashboard joins it to the account's alias.
             meta_doc["harness_token"] = creds["harness_token"]
-        elif harness in ("codex", "grok") and carried is None:
-            _acct = _pick_account(harness)
-            if _acct is not None:
-                meta_doc["harness_token"] = _acct.id
+        elif harness in picked:
+            meta_doc["harness_token"] = picked[harness].id
+        if selection is not None:
+            meta_doc["account_selection"] = selection
         if metadata:
             meta_doc.update(metadata)
         (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
@@ -2383,7 +2452,7 @@ def launch_session(
         signins = _signin_payloads(
             creds.get("harness_token")
             if creds is not None and creds.get("type") == "vault" else None,
-            accounts_out=signin_accounts, harness=harness)
+            accounts_out=signin_accounts, harness=harness, picked=picked)
     if signins is None:
         print(
             f"  ERROR: refusing to launch session '{name}': a sign-in "
