@@ -54,39 +54,6 @@ def _count_setting_rows(db_path, set_id: str, key: str) -> int:
         conn.close()
 
 
-def test_normalize_claude_usage_payload_uses_org_identity():
-    payload = hus.normalize_claude_usage_payload(
-        bundle={
-            "subscription_type": "max",
-            "rate_limit_tier": "default_scale_tier",
-        },
-        usage_body={
-            "five_hour": {
-                "utilization": 78.0,
-                "resets_at": "2026-05-02T20:40:00+00:00",
-            },
-            "seven_day": {
-                "utilization": 25.0,
-                "resets_at": "2026-05-05T15:00:00+00:00",
-            },
-        },
-        org_id="478d4828-69e3-4aec-837d-ab25b5c799c4",
-        updated_at="2026-05-02T19:03:00Z",
-        alias="primary",
-    )
-
-    assert payload["identity_id"] == "478d4828-69e3-4aec-837d-ab25b5c799c4"
-    assert payload["identity_label"] == "org 478d4828"
-    assert payload["account_id"] == "478d4828-69e3-4aec-837d-ab25b5c799c4"
-    assert payload["alias"] == "primary"
-    assert payload["windows"]["short"]["used_percent"] == 78.0
-    assert payload["windows"]["short"]["window_minutes"] == 300
-    assert payload["windows"]["short"]["resets_at"] == 1777754400
-    assert payload["windows"]["long"]["used_percent"] == 25.0
-    assert payload["windows"]["long"]["window_minutes"] == 10080
-    assert payload["windows"]["long"]["resets_at"] == 1777993200
-
-
 def test_harness_usage_setting_visible_via_api(graph_db_env, test_client):
     payload = hus.normalize_codex_usage_payload({
         "source": "transcript",
@@ -660,12 +627,6 @@ def test_publish_harness_usage_snapshot_skips_when_operator_is_idle(monkeypatch)
     server._publish_harness_usage_snapshot()
 
 
-_CLAUDE_USAGE_BODY = {
-    "five_hour": {"utilization": 12.0, "resets_at": "2026-05-04T20:00:00+00:00"},
-    "seven_day": {"utilization": 40.0, "resets_at": "2026-05-10T20:00:00+00:00"},
-}
-
-
 _ACCOUNTS: dict[str, "hv.Account"] = {}
 
 
@@ -1103,12 +1064,9 @@ def test_schema_migration_declarative_field_metadata():
 
 def test_schema_migration_accepts_alias_field():
     """Acceptance criterion #7 (positive): payload with alias='primary' validates."""
-    payload = hus.normalize_claude_usage_payload(
-        bundle={"subscription_type": "max"},
-        usage_body=_CLAUDE_USAGE_BODY,
-        org_id="org-uuid-XYZ",
-        updated_at="2026-05-04T13:00:00Z",
-        alias="primary",
+    payload = hus.normalize_claude_probe_headers(
+        dict(_PROBE_HEADERS_200), http_status=200, org_id="org-uuid-XYZ",
+        updated_at="2026-05-04T13:00:00Z", alias="primary",
     )
     # No exception → schema accepts the new field.
     hus.DashboardHarnessUsageV1.validate(payload)
@@ -1119,12 +1077,9 @@ def test_schema_migration_rejects_unknown_field():
     """Acceptance criterion #7 (negative): unknown field → SchemaValidationError."""
     from tools.graph.schemas.registry import SchemaValidationError
 
-    payload = hus.normalize_claude_usage_payload(
-        bundle={"subscription_type": "max"},
-        usage_body=_CLAUDE_USAGE_BODY,
-        org_id="org-uuid-XYZ",
-        updated_at="2026-05-04T13:00:00Z",
-        alias="primary",
+    payload = hus.normalize_claude_probe_headers(
+        dict(_PROBE_HEADERS_200), http_status=200, org_id="org-uuid-XYZ",
+        updated_at="2026-05-04T13:00:00Z", alias="primary",
     )
     payload["unknown_field"] = "boom"
     with pytest.raises(SchemaValidationError):
@@ -1134,10 +1089,8 @@ def test_schema_migration_rejects_unknown_field():
 def test_schema_migration_rejects_missing_required_field():
     from tools.graph.schemas.registry import SchemaValidationError
 
-    payload = hus.normalize_claude_usage_payload(
-        bundle={"subscription_type": "max"},
-        usage_body=_CLAUDE_USAGE_BODY,
-        org_id="org-uuid-XYZ",
+    payload = hus.normalize_claude_probe_headers(
+        dict(_PROBE_HEADERS_200), http_status=200, org_id="org-uuid-XYZ",
         updated_at="2026-05-04T13:00:00Z",
     )
     del payload["harness"]
@@ -1148,10 +1101,8 @@ def test_schema_migration_rejects_missing_required_field():
 def test_schema_migration_rejects_invalid_enum_value():
     from tools.graph.schemas.registry import SchemaValidationError
 
-    payload = hus.normalize_claude_usage_payload(
-        bundle={"subscription_type": "max"},
-        usage_body=_CLAUDE_USAGE_BODY,
-        org_id="org-uuid-XYZ",
+    payload = hus.normalize_claude_probe_headers(
+        dict(_PROBE_HEADERS_200), http_status=200, org_id="org-uuid-XYZ",
         updated_at="2026-05-04T13:00:00Z",
     )
     payload["harness"] = "definitely-not-a-real-harness"
@@ -1162,10 +1113,8 @@ def test_schema_migration_rejects_invalid_enum_value():
 def test_schema_migration_preserves_existing_window_substructure():
     from tools.graph.schemas.registry import SchemaValidationError
 
-    payload = hus.normalize_claude_usage_payload(
-        bundle={"subscription_type": "max"},
-        usage_body=_CLAUDE_USAGE_BODY,
-        org_id="org-uuid-XYZ",
+    payload = hus.normalize_claude_probe_headers(
+        dict(_PROBE_HEADERS_200), http_status=200, org_id="org-uuid-XYZ",
         updated_at="2026-05-04T13:00:00Z",
     )
     payload["windows"]["short"]["unexpected_subfield"] = "boom"

@@ -425,40 +425,6 @@ def normalize_codex_usage_payload(
     )
 
 
-def normalize_claude_usage_payload(
-    *,
-    bundle: dict[str, Any],
-    usage_body: dict[str, Any],
-    org_id: str | None,
-    updated_at: str,
-    alias: str | None = None,
-) -> dict[str, Any]:
-    """Build a Claude harness-usage row payload.
-
-    ``alias`` is the operator-facing friendly name from the matching
-    account's vault record (the same field operators set
-    via ``graph claude install --alias <name>``). Stamped onto every
-    row so the dashboard can render the friendly name without a join.
-    """
-    identity = _resolve_claude_identity(org_id)
-    return _build_usage_payload(
-        harness="claude",
-        identity_id=identity["identity_id"],
-        identity_label=identity["identity_label"],
-        account_id=identity["account_id"],
-        alias=alias,
-        status="ok",
-        source="oauth_usage",
-        updated_at=updated_at,
-        plan_type=_string_or(bundle.get("subscription_type")),
-        tier=_string_or(bundle.get("rate_limit_tier")),
-        windows=_build_windows({
-            "short": _normalize_claude_usage_window(usage_body.get("five_hour"), 300),
-            "long": _normalize_claude_usage_window(usage_body.get("seven_day"), 10080),
-        }),
-    )
-
-
 def reading_still_valid(payload: object, *, now_epoch: int | None = None) -> bool:
     """Whether a stored usage reading is still true.
 
