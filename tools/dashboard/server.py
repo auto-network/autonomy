@@ -19717,8 +19717,8 @@ async def api_graph_setting_create(request):
         # That left the vault with NO write path over HTTP — sealing was
         # reachable only from inside the dashboard process — which is not a
         # decision anybody made, just the blast radius of the upsert fix.
-        # ``write_by_key`` dispatches on the set: append for a log, seal-then-
-        # override for a vault set, upsert for everything else. Library callers
+        # ``write_by_key`` dispatches on the set: append for a log, a sealed
+        # replacement row for a vault set, upsert for everything else. Library callers
         # that legitimately append (surface pings, keyed by uuid4) call
         # settings_ops directly and are unaffected.
         sid = graph_ops.write_by_key(
@@ -19775,7 +19775,6 @@ async def api_graph_setting_override(request):
         sid = graph_ops.override_setting(
             target_id, body["payload"], state=body.get("state", "raw"),
             org=org or graph_ops.CALLER_ORG,
-            vault_policy_class_id=body.get("vault_policy_class_id"),
         )
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)

@@ -924,9 +924,9 @@ def ensure_pepper_minted() -> bool:
         return False
     # add_setting, not upsert_by_key: vault rows are encrypted object
     # revisions and the substrate refuses in-place rewrites of them. The
-    # ensure-if-absent check above is what makes this a first-write; any
-    # later change would be override_setting, which this function must never
-    # grow — a rotated pepper orphans every store address.
+    # ensure-if-absent check above is what makes this a first-write; a later
+    # change would be a replacement (write_by_key), which this function must
+    # never make — a rotated pepper orphans every store address.
     settings_ops.add_setting(
         VAULT_AUDITED_SET_ID,
         VAULT_CREDENTIAL_REVISION,

@@ -13,13 +13,13 @@ content object under the organization's current key generation
 material and no ciphertext: a row carrying either would put the secret back in
 the file this exists to keep it out of.
 
-**The mapping.** A setting is already an immutable record — a change appends a
-superseding row rather than editing (``settings_ops.override_setting``), and
-``read_set`` composes at read time — which is exactly what the contract
-requires of an object. So one setting is one object and one row is one
-revision, and both identifiers are DERIVED rather than stored: every revision
-of one setting must land on the same object, and two nodes must agree on which
-without asking each other.
+**The mapping.** One setting is one object and one row is one revision, and
+both identifiers are DERIVED rather than stored: the object from genesis,
+set_id and key, the revision from the row id. A change REPLACES the row -- a
+new row for the same key is the same object at a new revision, and the old
+row is removed in the same transaction (``settings_ops.write_by_key``); a
+vaulted setting is never stacked under overrides. Two nodes agree on the
+object without asking each other.
 
 **Two tiers, nested in this order** (§9.2). The storage state governs
 membership — holding its secret means "I am an authorized member of this

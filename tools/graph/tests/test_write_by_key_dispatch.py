@@ -75,22 +75,22 @@ def test_a_vault_sets_first_value_is_minted(monkeypatch, calls):
     assert [c[0] for c in calls] == ["add"]
 
 
-def test_a_vault_set_that_already_has_the_key_overrides(monkeypatch, calls):
-    """THE ONE THAT MATTERS.
+def test_a_vault_set_that_already_has_the_key_replaces_its_row(monkeypatch, calls):
+    """THE ONE THAT MATTERS (auto-z4582).
 
-    Not merely 'does not raise' — asserts the *specific* call, because
-    ``add_setting`` here would succeed and quietly produce a second base for a
-    key whose rows nobody can eyeball.
+    A vaulted value is replaced whole, never stacked: a new row is added
+    that ``replaces`` the existing one in the same transaction. Asserts the
+    specific call, because a bare ``add_setting`` would quietly produce a
+    second base for a key whose rows nobody can eyeball, and an override
+    would stack.
     """
     _arrange(monkeypatch, tier="audited", existing="base-1")
-    assert _write() == "ov-id"
-    assert [c[0] for c in calls] == ["override"]
+    assert _write() == "new-id"
+    assert [c[0] for c in calls] == ["add"]
     name, args, kwargs = calls[0]
-    assert args[0] == "base-1", "must override the existing base, not a new row"
-    assert args[1] == {"value": "v"}, (
-        "a vault override carries the COMPLETE payload, not a patch — the "
-        "writer may hold no factor to open the plaintext it would merge onto"
-    )
+    assert kwargs.get("replaces") == "base-1", "must replace the existing row"
+    assert args[3] == {"value": "v"}, "a vault value is the COMPLETE payload"
+
 
 
 def test_a_cold_vault_is_not_worked_around(monkeypatch):

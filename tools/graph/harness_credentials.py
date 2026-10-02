@@ -245,21 +245,19 @@ def _read_all(read_set: Callable[..., Any] | None = None, *, prefix: str,
         return list(getattr(members, "members", []) or [])
 
 
-def _write(key: str, value: str, existing_id: str | None, org: str | None = None) -> str:
+def _write(key: str, value: str, org: str | None = None) -> str:
+    """Seal *value* as the row for *key*, replacing any row it had (a vault
+    value is replaced whole, never stacked: auto-z4582). A container writes
+    through the dashboard's setting-write route, which is write_by_key."""
     payload = {"value": value}
     set_id = _set_for(org)
     if _in_container():
         from tools.graph.client import get_client
-        client = get_client()
-        if existing_id:
-            return client.override_setting(existing_id, payload, org=org, state="raw")
-        return client.add_setting(
+        return get_client().add_setting(
             set_id, VAULT_CREDENTIAL_REVISION, key, payload, org=org, state="raw",
         )
     from tools.graph import ops as graph_ops
-    if existing_id:
-        return graph_ops.override_setting(existing_id, payload, org=org, state="raw")
-    return graph_ops.add_setting(
+    return graph_ops.write_by_key(
         set_id, VAULT_CREDENTIAL_REVISION, key, payload, org=org, state="raw",
     )
 
@@ -363,9 +361,9 @@ def write_account(harness: str, account_id: str, parts: dict[str, str | None],
                   *, org: str | None = None) -> Account:
     """Seal *parts* into the account's rows; a ``None`` clears the part.
 
-    A vault row is an encrypted object revision and is never rewritten: the
-    first value of a part is added, a change appends a revision over the
-    existing row, and resolution takes the newest.
+    Each part's row is replaced whole: a change seals a new row for the key
+    and removes the old one in the same transaction (write_by_key), so a part
+    is always exactly one row.
     """
     existing = (read_account(harness, account_id, org=org)
                 or Account(harness, account_id, source=org or PERSONAL))
@@ -374,9 +372,7 @@ def write_account(harness: str, account_id: str, parts: dict[str, str | None],
         text = NONE if value is None else str(value)
         if not text:
             text = NONE
-        row_id = existing.row_ids.get(part)
-        new_id = _write(key, text, row_id, org)
-        existing.row_ids[part] = row_id or new_id
+        existing.row_ids[part] = _write(key, text, org)
         existing.parts[part] = text
     return existing
 

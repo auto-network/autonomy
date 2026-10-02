@@ -58,7 +58,7 @@ def test_write_read_and_change_an_account(warm_vault):
     assert acct.get("setup") == "sk-ant-oat01-A"
     assert hv.scopes_list(acct.get("scopes")) == ["user:profile", "user:inference"]
     assert acct.expires_ms() == 9000
-    # a change appends a revision; the newest resolves
+    # a change replaces the part's row; the new value resolves
     hv.write_account("claude", "org-A", {"access": "at-2", "error": None})
     acct = hv.read_account("claude", "org-A")
     assert acct.get("access") == "at-2"
@@ -66,6 +66,48 @@ def test_write_read_and_change_an_account(warm_vault):
     assert acct.get("error") is None and acct.parts["error"] == hv.NONE
     assert [a.id for a in hv.list_accounts("claude")] == ["org-A"]
     assert hv.list_accounts("codex") == []
+
+
+def test_rewriting_a_part_keeps_exactly_one_row_per_part(warm_vault):
+    """auto-z4582: the 4-hourly refresh rewrote access/refresh/expires and
+    stacked 47 rows per part. A rewrite now replaces the row: one row per
+    part, no override rows, whatever the number of rotations."""
+    for n in range(5):
+        hv.write_account("claude", "org-B", {
+            "access": f"at-{n}", "refresh": f"rt-{n}", "expires": str(1000 + n),
+        })
+    conn = sqlite3.connect(str(warm_vault))
+    try:
+        rows = conn.execute(
+            "SELECT key, supersedes FROM settings WHERE key LIKE 'claude.account.org-B.%'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert sorted(k for k, _ in rows) == [
+        "claude.account.org-B.access", "claude.account.org-B.expires",
+        "claude.account.org-B.refresh"]
+    assert all(sup is None for _, sup in rows)
+    acct = hv.read_account("claude", "org-B")
+    assert (acct.get("access"), acct.get("refresh"), acct.expires_ms()) == ("at-4", "rt-4", 1004)
+
+
+def test_a_container_writes_through_the_dashboard_write_route(monkeypatch):
+    """In a container the write goes to the dashboard's setting-write route
+    (add_setting over HTTP, served by write_by_key), never an override."""
+    calls = []
+
+    class Client:
+        def add_setting(self, *args, **kwargs):
+            calls.append(("add", args, kwargs))
+            return "sid"
+
+        def override_setting(self, *args, **kwargs):  # pragma: no cover - must not run
+            raise AssertionError("a vault value is never overridden")
+
+    monkeypatch.setenv("GRAPH_API", "https://dashboard.example")
+    monkeypatch.setattr("tools.graph.client.get_client", lambda: Client())
+    assert hv._write("claude.account.x.access", "v") == "sid"
+    assert calls[0][1][2] == "claude.account.x.access" and calls[0][1][3] == {"value": "v"}
 
 
 def test_rows_hold_no_plaintext(warm_vault):

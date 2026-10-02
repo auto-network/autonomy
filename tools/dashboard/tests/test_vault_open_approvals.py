@@ -415,8 +415,9 @@ def test_a_drifted_setting_is_refused_before_the_key_touches_it(env):
     approval_id = _request(env, key="test.drift")
     key = _content_key(env, env.delivery.bootstrap(approval_id)["bundle"])
     _grant(env, approval_id)
-    settings_ops.override_setting(setting_id, {"value": "second"}, org=None,
-                                  vault_policy_class_id=env.world.policy_class.class_id)
+    settings_ops.write_by_key(VAULT_SECURED_SET_ID, VAULT_CREDENTIAL_REVISION,
+                              "autonomy:test.drift", {"value": "second"}, org=None,
+                              vault_policy_class_id=env.world.policy_class.class_id)
     assert _code(env.delivery.deliver, approval_id, {"content_key": key}) in {"binding_drift", "open_failed"}
     assert env.delivered == {}
 

@@ -137,8 +137,9 @@ def stored_payload(db_path: Path, setting_id: str):
 def test_vault_chain_presence_follows_lifecycle_without_opening(
     graph_db_env, vault_schema, vault, monkeypatch, lifecycle
 ):
-    base = settings_ops.add_setting(VAULT_SET, 1, "presence", {"v": SECRET}, org=None)
-    settings_ops.override_setting(base, {"v": "renewed-test-secret"}, org=None)
+    first = settings_ops.add_setting(VAULT_SET, 1, "presence", {"v": SECRET}, org=None)
+    base = settings_ops.write_by_key(VAULT_SET, 1, "presence", {"v": "renewed-test-secret"}, org=None)
+    assert base != first   # replaced, not stacked
     if lifecycle == "deprecated":
         settings_ops.deprecate_setting(base, org=None)
     elif lifecycle == "excluded":
@@ -154,7 +155,7 @@ def test_vault_chain_presence_follows_lifecycle_without_opening(
     assert (chain is not None) == (lifecycle == "active")
     if chain:
         assert is_vault_locator(chain["final"])
-        assert len(chain["layers"]) == 2
+        assert len(chain["layers"]) == 1
 
 
 def test_a_vault_secret_resolves_to_plaintext_through_read_set(
@@ -189,59 +190,48 @@ def test_a_resolved_secret_carries_no_trace_of_having_been_encrypted(
     assert set(over_the_wire["members"][0]) == set(plain)
 
 
-def test_the_override_wins_and_what_opened_was_one_write_entire(
+def test_a_replacement_is_the_same_object_at_a_new_revision_in_one_row(
     graph_db_env, vault_schema, vault
 ):
-    """A locator is a scalar, so a merge replaces it whole. The negative is
-    the point: no field of the resolved locator came from the base row."""
-    base_id = ops.add_setting(
+    """A change replaces the row (auto-z4582): the key keeps exactly one
+    row, the object is the same, the revision is new, and the old row is
+    gone rather than shadowed."""
+    first_id = ops.add_setting(
         VAULT_SET, 1, "default", {"access_token": "one"}, org=ops.CALLER_ORG,
     )
-    override_id = settings_ops.override_setting(
-        base_id, {"access_token": "two"}, org=None,
+    first = parse_locator(stored_payload(graph_db_env, first_id))
+    second_id = settings_ops.write_by_key(
+        VAULT_SET, 1, "default", {"access_token": "two"}, org=None,
     )
+    second = parse_locator(stored_payload(graph_db_env, second_id))
 
-    base = parse_locator(stored_payload(graph_db_env, base_id))
-    override = parse_locator(stored_payload(graph_db_env, override_id))
-    assert base["revision_id"] != override["revision_id"]
-
+    assert second["object_id"] == first["object_id"]
+    assert second["revision_id"] != first["revision_id"]
     assert member_of(VAULT_SET).payload == {"access_token": "two"}
-    merged = settings_ops.json_merge_patch(
-        stored_payload(graph_db_env, base_id),
-        stored_payload(graph_db_env, override_id),
-    )
-    # Every field of what step six opened came from the override row, and
-    # none of it from the base — there is no splice to find.
-    assert parse_locator(merged) == override
-    assert not any(
-        merged_value == base[name] and base[name] != override[name]
-        for name, merged_value in parse_locator(merged).items()
-    )
+    import sqlite3
+
+    conn = sqlite3.connect(graph_db_env)
+    try:
+        rows = conn.execute(
+            "SELECT id, supersedes FROM settings WHERE set_id = ? AND key = ?",
+            (VAULT_SET, "default"),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [(second_id, None)]
 
 
-def test_a_partial_locator_cannot_be_expressed_by_an_override(
-    graph_db_env, vault_schema, vault
-):
-    """Trying to override one field of the locator does not store a fragment:
-    an override of a vaulted set re-seals its payload, so what lands is a
-    whole locator naming a whole revision."""
+def test_a_vaulted_row_cannot_be_overridden(graph_db_env, vault_schema, vault):
+    """There is no override of a vaulted Setting (operator ruling 2026-10-02):
+    a patch, even of one locator field, is refused and stores nothing."""
     base_id = ops.add_setting(
         VAULT_SET, 1, "default", {"access_token": "one"}, org=ops.CALLER_ORG,
     )
-    base = parse_locator(stored_payload(graph_db_env, base_id))
-    override_id = settings_ops.override_setting(
-        base_id, {"object_id": "an-object-nobody-wrote"}, org=None,
-    )
-
-    override = parse_locator(stored_payload(graph_db_env, override_id))
-    assert override["object_id"] == base["object_id"], (
-        "the object is derived from the setting's identity, not from a payload"
-    )
-    assert override["revision_id"] != base["revision_id"]
-    assert member_of(VAULT_SET).payload == {"object_id": "an-object-nobody-wrote"}
-
-
-# ── an earlier generation still opens ─────────────────────────────────────
+    with pytest.raises(ValueError, match="vaulted set"):
+        settings_ops.override_setting(
+            base_id, {"object_id": "an-object-nobody-wrote"}, org=None,
+        )
+    assert member_of(VAULT_SET).payload == {"access_token": "one"}
 
 
 def _write_under_an_earlier_generation(vault):
@@ -545,8 +535,8 @@ def test_a_frozen_secured_setting_opens_to_plaintext_at_the_one_chokepoint(
         org=None,
     ) == {"access_token": SECRET}
 
-    settings_ops.override_setting(
-        setting_id, {"access_token": "replacement"}, org=None,
+    settings_ops.write_by_key(
+        SECURED_SET, 1, "default", {"access_token": "replacement"}, org=None,
     )
     with pytest.raises(VaultError, match="changed before approval"):
         settings_ops.open_secured_setting(

@@ -197,35 +197,91 @@ def test_a_vault_secret_leaves_no_ciphertext_and_no_plaintext_in_its_row(
     ) == payload
 
 
-def test_the_same_setting_written_twice_is_one_object_and_two_revisions(
+def row_ids(db_path, set_id: str, key: str) -> list:
+    """Every row of one key, as (id, supersedes), read outside the ops layer."""
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(
+            "SELECT id, supersedes FROM settings WHERE set_id = ? AND key = ?",
+            (set_id, key),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_a_change_replaces_the_row_same_object_new_revision(
     graph_db_env, vault_schema, vault
 ):
-    """Changing a setting appends a superseding row — the same way an ordinary
-    setting changes (design §9), and the reason a setting maps onto an object
-    with no translation layer."""
+    """Changing a vaulted setting REPLACES its row (auto-z4582): one row for
+    the key, the same object at a new revision, and the earlier row gone
+    rather than shadowed under an override."""
     first_id = ops.add_setting(
         "autonomy.test.vaulted", 1, "default", {"access_token": "one"},
         org=ops.CALLER_ORG,
     )
-    second_id = settings_ops.override_setting(
-        first_id, {"access_token": "two"}, org=None
+    first = json.loads(stored_row(graph_db_env, first_id)["payload"])
+    second_id = settings_ops.write_by_key(
+        "autonomy.test.vaulted", 1, "default", {"access_token": SECRET}, org=None,
     )
     assert first_id != second_id
+    assert row_ids(graph_db_env, "autonomy.test.vaulted", "default") == [(second_id, None)]
+    assert SECRET.encode() not in db_bytes(graph_db_env)
 
-    first = parse_locator(json.loads(stored_row(graph_db_env, first_id)["payload"]))
-    second = parse_locator(json.loads(stored_row(graph_db_env, second_id)["payload"]))
-    assert first["object_id"] == second["object_id"]
-    assert first["revision_id"] != second["revision_id"]
+    second = json.loads(stored_row(graph_db_env, second_id)["payload"])
+    assert parse_locator(first)["object_id"] == parse_locator(second)["object_id"]
+    assert parse_locator(first)["revision_id"] != parse_locator(second)["revision_id"]
+    assert open_revision(
+        second, holdings=vault.holdings(), content_store=vault.store,
+    ) == {"access_token": SECRET}
 
-    held = vault.holdings()
+
+def test_a_failed_replacement_leaves_the_old_row(graph_db_env, vault_schema, vault):
+    """Delete-then-insert is one transaction: when the insert raises, the
+    delete rolls back and the key keeps its old row and value."""
+    first_id = ops.add_setting(
+        "autonomy.test.vaulted", 1, "default", {"access_token": "one"},
+        org=ops.CALLER_ORG,
+    )
+    import sqlite3
+
+    # The INSERT itself fails, after the DELETE already ran in the transaction.
+    conn = sqlite3.connect(graph_db_env)
+    conn.execute(
+        "CREATE TRIGGER refuse_insert BEFORE INSERT ON settings "
+        "WHEN NEW.set_id = 'autonomy.test.vaulted' "
+        "BEGIN SELECT RAISE(ABORT, 'insert failed'); END"
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(sqlite3.IntegrityError, match="insert failed"):
+        settings_ops.write_by_key(
+            "autonomy.test.vaulted", 1, "default", {"access_token": "two"}, org=None,
+        )
+    assert row_ids(graph_db_env, "autonomy.test.vaulted", "default") == [(first_id, None)]
     assert open_revision(
         json.loads(stored_row(graph_db_env, first_id)["payload"]),
-        holdings=held, content_store=vault.store,
+        holdings=vault.holdings(), content_store=vault.store,
     ) == {"access_token": "one"}
-    assert open_revision(
-        json.loads(stored_row(graph_db_env, second_id)["payload"]),
-        holdings=held, content_store=vault.store,
-    ) == {"access_token": "two"}
+
+
+def test_replaces_refuses_another_key_or_a_missing_row(graph_db_env, vault_schema, vault):
+    other_id = ops.add_setting(
+        "autonomy.test.vaulted", 1, "other", {"access_token": "x"}, org=ops.CALLER_ORG,
+    )
+    with pytest.raises(ValueError, match="replaces only its own key"):
+        settings_ops.add_setting(
+            "autonomy.test.vaulted", 1, "default", {"access_token": "y"},
+            org=None, replaces=other_id,
+        )
+    with pytest.raises(LookupError, match="not found"):
+        settings_ops.add_setting(
+            "autonomy.test.vaulted", 1, "default", {"access_token": "y"},
+            org=None, replaces="no-such-row",
+        )
+    assert row_ids(graph_db_env, "autonomy.test.vaulted", "other") == [(other_id, None)]
+    assert row_ids(graph_db_env, "autonomy.test.vaulted", "default") == []
 
 
 def test_a_different_key_of_the_same_set_is_a_different_object(
@@ -296,56 +352,6 @@ def test_a_vault_row_is_never_rewritten_in_place(graph_db_env, vault_schema, vau
     assert SECRET.encode() not in db_bytes(graph_db_env)
 
 
-def test_an_override_supersedes_without_touching_what_it_supersedes(
-    graph_db_env, vault_schema, vault
-):
-    """The earlier revision stays exactly as written, and both still open —
-    which is what "immutable object, assembled by the reader" means."""
-    first_id = ops.add_setting(
-        "autonomy.test.vaulted", 1, "default", {"access_token": "one"},
-        org=ops.CALLER_ORG,
-    )
-    before = stored_row(graph_db_env, first_id)["payload"]
-    second_id = settings_ops.override_setting(
-        first_id, {"access_token": SECRET}, org=None
-    )
-
-    assert stored_row(graph_db_env, first_id)["payload"] == before
-    assert stored_row(graph_db_env, second_id)["supersedes"] == first_id
-    assert SECRET.encode() not in db_bytes(graph_db_env)
-
-    held = vault.holdings()
-    assert open_revision(
-        json.loads(before), holdings=held, content_store=vault.store
-    ) == {"access_token": "one"}
-    assert open_revision(
-        json.loads(stored_row(graph_db_env, second_id)["payload"]),
-        holdings=held, content_store=vault.store,
-    ) == {"access_token": SECRET}
-
-
-def test_the_surviving_locator_after_a_merge_is_one_write_entire(
-    graph_db_env, vault_schema, vault
-):
-    """Resolution merges rows with RFC 7386 before anything is decrypted; a
-    scalar locator can only be replaced whole, never spliced."""
-    first_id = ops.add_setting(
-        "autonomy.test.vaulted", 1, "default", {"access_token": "one"},
-        org=ops.CALLER_ORG,
-    )
-    second_id = settings_ops.override_setting(
-        first_id, {"access_token": "two"}, org=None
-    )
-    base = json.loads(stored_row(graph_db_env, first_id)["payload"])
-    override = json.loads(stored_row(graph_db_env, second_id)["payload"])
-
-    merged = settings_ops.json_merge_patch(base, override)
-    assert merged == override
-    assert open_revision(
-        merged, holdings=vault.holdings(), content_store=vault.store
-    ) == {"access_token": "two"}
-
-
 def test_the_payload_is_still_held_to_its_schema(graph_db_env, vault):
     """Encryption is what happens to a value, not a reason to stop checking it."""
 
@@ -370,12 +376,10 @@ def test_the_payload_is_still_held_to_its_schema(graph_db_env, vault):
     assert vault.calls == [], "the sealer ran on a payload that never validated"
 
 
-def test_a_one_row_per_key_set_appends_rather_than_rewriting(
+def test_a_one_row_per_key_vaulted_set_is_replaced_not_appended(
     graph_db_env, vault
 ):
-    """A set declared one-row-per-key normally collapses an override into a
-    rewrite of the row. A vaulted row cannot be rewritten — its revision is
-    already committed — so the amendment appends instead."""
+    """A one-row-per-key vaulted set holds one row per key after a change."""
 
     @schemas.vaulted("audited")
     @schemas.keyed_per_entity(key_strategy="secret_name")
@@ -385,19 +389,18 @@ def test_a_one_row_per_key_set_appends_rather_than_rewriting(
 
     schemas.register_schema("autonomy.test.vaulted-keyed", 1, KeyedVaultedV1)
 
-    first_id = ops.add_setting(
+    ops.add_setting(
         "autonomy.test.vaulted-keyed", 1, "default", {"access_token": "one"},
         org=ops.CALLER_ORG,
     )
-    second_id = settings_ops.override_setting(
-        first_id, {"access_token": "two"}, org=None
+    second_id = settings_ops.write_by_key(
+        "autonomy.test.vaulted-keyed", 1, "default", {"access_token": "two"}, org=None,
     )
-    assert second_id != first_id
-    assert stored_row(graph_db_env, second_id)["supersedes"] == first_id
+    assert row_ids(graph_db_env, "autonomy.test.vaulted-keyed", "default") == [(second_id, None)]
     assert open_revision(
-        json.loads(stored_row(graph_db_env, first_id)["payload"]),
+        json.loads(stored_row(graph_db_env, second_id)["payload"]),
         holdings=vault.holdings(), content_store=vault.store,
-    ) == {"access_token": "one"}
+    ) == {"access_token": "two"}
 
 
 def test_a_reader_with_no_vault_gets_a_refusal_and_never_the_value(

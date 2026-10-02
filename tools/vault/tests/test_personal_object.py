@@ -181,7 +181,7 @@ def test_personal_secured_replacement_opens_under_its_own_revision(personal_worl
     assert replacement_id != base_id
 
     member = settings_ops.read_set(SET_ID, org=None, peers=[]).members[0]
-    assert member.id == base_id, "the resolved Setting retains its stable base id"
+    assert member.id == replacement_id, "the replacement IS the row now (auto-z4582)"
     digest = hashlib.sha256(canonical_json(member.sealed_content_key)).hexdigest()
     # B-1: server hands the browser the open bundle, the browser runs open_cek,
     # only the resulting single-revision CEK returns to open_secured_setting.

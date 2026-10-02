@@ -156,16 +156,12 @@ def test_every_write_path_signs(founded_org):
     settings_ops.install_signer_provider(_provider_for(founded_org))
     base = settings_ops.upsert_by_key(SET_ID, 1, "k2", {"label": "base"}, org=ORG)
     first = settings_ops.override_setting(base, {"label": "patched"}, org=ORG)
-    second = settings_ops.override_setting(base, {"label": "patched again"}, org=ORG, deprecate_previous=True)
     excluded = settings_ops.exclude_setting(base, org=ORG) if hasattr(settings_ops, "exclude_setting") else None
     rows = {r["id"]: r for r in _rows(ORG)}
     for row in rows.values():
         assert row["signing_key"] == key.public_hex and row["terminal_persona"] == persona, row["key"]
         verify_record(record_from_row(row, founded_org.genesis_id), row["signature"])
-    assert rows[first]["supersedes"] == base and rows[second]["supersedes"] == base
-    # The collapsed layer was re-signed AS deprecated, naming its successor.
-    assert rows[first]["deprecated"] == 1 and rows[first]["successor_id"] == second
-    assert rows[second]["deprecated"] == 0
+    assert first in rows
     if excluded is not None:
         assert rows[excluded]["excludes"] == base
     # An upsert over an existing signed base row re-signs it over the new payload.
@@ -322,7 +318,6 @@ def test_the_signer_is_prepared_before_the_write_lock(founded_org, monkeypatch):
     base = settings_ops.upsert_by_key(SET_ID, 1, "k9", {"label": "new"}, org=ORG)
     settings_ops.upsert_by_key(SET_ID, 1, "k9", {"label": "over an existing row"}, org=ORG)
     settings_ops.override_setting(base, {"label": "layer"}, org=ORG)
-    settings_ops.override_setting(base, {"label": "collapse"}, org=ORG, deprecate_previous=True)
     assert in_transaction and not any(in_transaction), in_transaction
     for row in _rows(ORG):
         verify_record(record_from_row(row, founded_org.genesis_id), row["signature"])

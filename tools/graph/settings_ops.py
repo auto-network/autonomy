@@ -2227,115 +2227,6 @@ def orphans_of(set_id: str, *, org: str) -> list[CheckFinding]:
     return findings
 
 
-@dataclass
-class CompactCandidate:
-    """One override row whose contribution is fully shadowed by a later
-    override on the same base -- read_set's field-by-field merge already
-    ignores it, so deprecating it changes nothing any resolve returns.
-
-    Not just "keep only the newest": json_merge_patch is field-level, so an
-    older override can still be the last word on a field a newer one never
-    touches. A row only qualifies here when every field it sets is also set
-    by something written after it in the same override group.
-    """
-    id: str
-    key: str
-    created_at: str
-    #: The row (in the same group) that renders every one of this row's
-    #: fields moot -- passed to deprecate_setting() as the successor.
-    shadowed_by: str
-    fields: tuple[str, ...]
-
-
-def compact_candidates(
-    set_id: str, *, key: str | None = None, org: str,
-) -> list[CompactCandidate]:
-    """Override rows in *set_id* safe to deprecate without changing any
-    resolved value -- the cleanup command's read-only survey.
-
-    Groups live (non-deprecated) overrides by the base they supersede, in
-    read_set's own apply order (created_at, then insertion order). A row
-    qualifies when every field name in its payload also appears in some
-    STRICTLY LATER row in its group; the newest row in a group never
-    qualifies, since nothing comes after it to shadow it. An unparseable
-    payload is left alone rather than guessed about.
-
-    Pure read -- makes no changes. Pass the result to compact_apply() to
-    actually deprecate them.
-    """
-    org = _resolve_org_arg(org)
-    db = _open(org, set_id, for_read=True)
-    try:
-        query = (
-            "SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? "
-            "  AND supersedes IS NOT NULL AND deprecated = 0"
-        )
-        params: tuple = (set_id,)
-        if key is not None:
-            query += " AND key = ?"
-            params = (set_id, key)
-        rows = db.conn.execute(query, params).fetchall()
-    finally:
-        db.close()
-
-    def _payload_fields(payload_text: str) -> tuple[str, ...] | None:
-        # A vaulted row's payload is an opaque sealed-locator STRING (a
-        # whole-value token, not a JSON object) -- json.loads gives back a
-        # str, not a dict. There are no field names to compare; the entire
-        # sealed value is replaced whole by any later write in the group, so
-        # treat it as exactly one field under a fixed sentinel name. A plain
-        # settings payload decodes to a real dict, whose actual keys are
-        # compared field-by-field as usual.
-        try:
-            parsed = json.loads(payload_text)
-        except (TypeError, ValueError):
-            return None
-        if isinstance(parsed, dict):
-            return tuple(parsed.keys())
-        return ("__opaque_value__",)
-
-    groups: dict[tuple[str, str], list] = {}
-    for row in rows:
-        groups.setdefault((row["key"], row["supersedes"]), []).append(row)
-
-    candidates: list[CompactCandidate] = []
-    for (grp_key, _base_id), group_rows in groups.items():
-        ordered = sorted(
-            group_rows, key=lambda r: (r["created_at"] or "", r["_rowid"])
-        )
-        if len(ordered) < 2:
-            continue
-        for i, row in enumerate(ordered[:-1]):
-            fields = _payload_fields(row["payload"])
-            if fields is None:
-                continue
-            later_fields: set[str] = set()
-            for later in ordered[i + 1:]:
-                later_parsed = _payload_fields(later["payload"])
-                if later_parsed is not None:
-                    later_fields.update(later_parsed)
-            if fields and set(fields).issubset(later_fields):
-                candidates.append(CompactCandidate(
-                    id=row["id"], key=grp_key,
-                    created_at=row["created_at"] or "",
-                    shadowed_by=ordered[-1]["id"],
-                    fields=fields,
-                ))
-    return candidates
-
-
-def compact_apply(candidates: list[CompactCandidate], *, org: str) -> int:
-    """Deprecate every candidate compact_candidates() found.
-
-    Reversible (undeprecate_setting) -- payloads are untouched, only
-    publication_state's deprecated flag and successor_id change. Returns
-    the count deprecated.
-    """
-    for c in candidates:
-        deprecate_setting(c.id, successor_id=c.shadowed_by, org=org)
-    return len(candidates)
-
-
 def _assert_home(set_id: str | None, org: str | None) -> None:
     """Refuse a Setting routed to a database its schema does not live in.
 
@@ -3052,6 +2943,7 @@ def add_setting(
     org: "str | None | _CallerOrgSentinel",
     state: str = "raw",
     vault_policy_class_id: str | None = None,
+    replaces: str | None = None,
 ) -> str:
     """Create a base Setting in org's DB.
 
@@ -3076,6 +2968,13 @@ def add_setting(
     derivation :func:`write_by_key` applies, so a direct ``add_setting`` (the
     audited seal path) and a ``write_by_key`` land in the same place. A no-op
     for every other set and for a personal/scopeless caller.
+
+    ``replaces`` names the row this one REPLACES (a vaulted value's change,
+    via :func:`write_by_key`): in the same transaction the old row is deleted
+    first -- the one-live-base index is checked per statement -- and the new
+    one inserted, so the key never has two live rows or none. The old row
+    must exist in this store, be raw, and carry the same set and key, as
+    :func:`remove_setting` requires; a failed insert rolls back and leaves it.
     """
     org = _resolve_org_arg(org)
     key, org = _apply_org_writeback(set_id, key, org)
@@ -3105,8 +3004,32 @@ def add_setting(
     now = _now_iso()
     expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
     db = _open(org, set_id)
+    replaced_snapshot = None
     try:
         envelope = _envelope_columns(db, org, set_id, schema_revision, key, state, stored_payload)
+        if replaces is not None:
+            db.conn.execute("BEGIN IMMEDIATE")
+            old = db.conn.execute(
+                "SELECT set_id, schema_revision, key, publication_state, deprecated "
+                "FROM settings WHERE id = ?", (replaces,),
+            ).fetchone()
+            if old is None:
+                raise LookupError(f"setting to replace not found: {replaces!r}")
+            if old["set_id"] != set_id or old["key"] != key:
+                raise ValueError(
+                    f"{replaces!r} is {old['set_id']}/{old['key']}, not "
+                    f"{set_id}/{key}; a row replaces only its own key"
+                )
+            if old["publication_state"] != "raw":
+                raise ValueError(
+                    f"can only replace raw Settings; {replaces!r} is "
+                    f"{old['publication_state']!r}"
+                )
+            replaced_snapshot = _make_snapshot(
+                old["set_id"], old["schema_revision"], old["key"],
+                old["publication_state"], old["deprecated"],
+            )
+            db.conn.execute("DELETE FROM settings WHERE id = ?", (replaces,))
         db.conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
             "publication_state, created_at, updated_at, expires_at, "
@@ -3116,8 +3039,13 @@ def add_setting(
              state, now, now, expires_at, *envelope),
         )
         db.conn.commit()
+    except BaseException:
+        db.conn.rollback()
+        raise
     finally:
         db.close()
+    if replaced_snapshot is not None:
+        _call_emit_hook(operation="delete", snapshot=replaced_snapshot, org=org)
     _call_emit_hook(
         operation="write",
         snapshot=_make_snapshot(set_id, schema_revision, key, state, False),
@@ -3271,14 +3199,12 @@ def upsert_by_key(
         # A vaulted row's revision identifier is derived from the row id, so
         # rewriting the row in place would address the revision already
         # committed — and a committed revision admits only a byte-identical
-        # replay (``storagekit.store``, contract Invariant 7). The value is
-        # not lost by appending instead: settings are already append-only and
-        # resolution takes the most recent base.
+        # replay (``storagekit.store``, contract Invariant 7). A change is a
+        # new row that replaces the old one (write_by_key).
         raise ValueError(
             f"{set_id} is a vault set: its rows are encrypted object "
-            f"revisions and are never rewritten. Write the first value with "
-            f"add_setting() and change it with override_setting(), which "
-            f"appends a new revision and leaves the old one as it was."
+            f"revisions and are never rewritten in place. Write it with "
+            f"write_by_key(), which replaces the row with a new revision."
         )
     schemas.validate_payload(set_id, schema_revision, payload)
     schemas.validate_key(set_id, schema_revision, key)
@@ -3647,14 +3573,6 @@ def _collapse_amendment(
         return None
     if not _is_own_row(target["id"], org):
         return None
-    if schemas.declared_vault_tier(target["set_id"]) is not None:
-        # A vaulted row is an encrypted object revision, and its identity is
-        # derived from the row id — so rewriting the row in place would
-        # address the revision already committed, which admits only a
-        # byte-identical replay. The amendment appends instead. This is the
-        # same reason a patch row remains for another organization's row: what
-        # forces one is physics, not intent.
-        return None
     merged = json_merge_patch(json.loads(target["payload"]), payload_overrides)
     upsert_by_key(
         target["set_id"], int(target["schema_revision"]), target["key"],
@@ -3758,11 +3676,10 @@ def write_by_key(
 
     * ``append_only_log`` — :func:`add_setting` always. Every write is a new
       row; that is what the pattern means.
-    * a vault set — :func:`add_setting` for the FIRST value, since it mints and
-      seals the initial revision, then :func:`override_setting` to change it,
-      which seals a fresh revision of the same object and leaves the old one as
-      it was. ``override_setting`` takes the complete payload on a vault set,
-      not a patch, so passing this one straight through is correct.
+    * a vault set — :func:`add_setting`, sealing the value into a new row. On
+      a change it ``replaces`` the existing row in the same transaction, so
+      the key holds exactly one row: the same object at a new revision. A
+      vaulted value is never stacked under overrides (auto-z4582).
     * everything else — :func:`upsert_by_key`, unchanged, so the fix that
       introduced it still holds.
 
@@ -3793,14 +3710,10 @@ def write_by_key(
             set_id, schema_revision, key, payload, org=org, state=state,
             vault_policy_class_id=vault_policy_class_id,
         )
-    # Reached only for a vaulted set with an existing base — a whole-value
-    # re-seal, own-org (after writeback). That is exactly the case where the
-    # prior override is dead weight, so write_by_key is the deliberate opt-in
-    # wrapper that collapses the fan; the cert bundle writer rides this path.
-    return override_setting(
-        existing, payload, org=org, state=state,
-        vault_policy_class_id=vault_policy_class_id,
-        deprecate_previous=True,
+    # A vaulted set with an existing row: the new value replaces it whole.
+    return add_setting(
+        set_id, schema_revision, key, payload, org=org, state=state,
+        vault_policy_class_id=vault_policy_class_id, replaces=existing,
     )
 
 
@@ -3810,8 +3723,6 @@ def override_setting(
     *,
     org: "str | None | _CallerOrgSentinel",
     state: str = "raw",
-    vault_policy_class_id: str | None = None,
-    deprecate_previous: bool = False,
 ) -> str:
     """Create a Setting with ``supersedes=target_id`` and partial payload.
 
@@ -3822,27 +3733,9 @@ def override_setting(
     expected way to adapt shared primitives to a local org. Raises
     ``LookupError`` only when the target exists nowhere (own or peers).
 
-    On a ``@vaulted`` set this is how a secret CHANGES: the target's stored
-    payload is an opaque locator, so the merge replaces it whole and what this
-    row carries is the complete new value — validated as such, sealed into a
-    fresh revision of the same object, and stored as its own locator. A
-    partial patch is not available there and would not be meaningful anyway:
-    the writer cannot merge onto a plaintext it may hold no factor to open.
-
-    ``deprecate_previous`` (opt-in, default off) collapses the override fan in
-    the SAME transaction as the insert: every other live override this org
-    holds on the chosen base is deprecated with ``successor_id`` = the new row,
-    leaving exactly one live override (this one). It is opt-in, not the default,
-    for two reasons. First, only a **whole-value replacement** may discard the
-    prior override — a set that layers *compositional* patches (each override
-    setting different fields) would lose earlier layers; the caller asserts, by
-    opting in, that each write replaces the whole value (the vault case, where
-    the payload is one opaque locator). Second, it deprecates only rows in the
-    caller's OWN database, so a shared peer base overridden independently by
-    several orgs is never touched — each org's overrides live in its own store.
-    Off by default, the append-only behavior is byte-for-byte unchanged; the
-    read-side sweep (``graph set compact``) remains the cure for accumulation
-    that predates opt-in or comes from callers that do not opt in.
+    A ``@vaulted`` set has no overrides: a secret is replaced whole by
+    :func:`write_by_key`, never stacked (operator ruling 2026-10-02,
+    auto-z4582). Overriding a row of a vaulted set raises ``ValueError``.
 
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
@@ -3853,6 +3746,11 @@ def override_setting(
     target = _fetch_setting_any_org(target_id, org)
     if target is None:
         raise LookupError(f"override target not found: {target_id!r}")
+    if schemas.declared_vault_tier(target["set_id"]) is not None:
+        raise ValueError(
+            f"{target['set_id']} is a vaulted set: a secret is replaced whole "
+            f"(write_by_key), never overridden"
+        )
     _assert_allows_resolution_layers(target)
 
     # Resolution applies ONLY overrides whose ``supersedes`` points at the
@@ -3906,35 +3804,13 @@ def override_setting(
         )
         sid = str(uuid4())
         stored_payload = payload_overrides
-        vault_tier = schemas.declared_vault_tier(target["set_id"])
-        if vault_tier is not None:
-            # A vaulted target's stored payload is an opaque locator, so the
-            # merge above replaced it whole: what this row supersedes it with
-            # is the WHOLE new value, which is why validation just held the
-            # override to the complete schema rather than to a patch. It is
-            # sealed into its own revision of the same object; the row stores
-            # the new locator, and the previous revision stays exactly as it
-            # was written.
-            stored_payload = _seal_vault_payload(
-                set_id=target["set_id"],
-                schema_revision=int(target["schema_revision"]),
-                key=target["key"],
-                setting_id=sid,
-                payload=merged,
-                tier=vault_tier,
-                org=org,
-                policy_class_id=vault_policy_class_id,
-            )
         now = _now_iso()
         expires_at = schemas.cache_expires_at(
             target["set_id"], int(target["schema_revision"]), now,
         )
-        # The signer is prepared (its fold read) before the write lock; the
-        # deprecations signed below, inside it, reuse it.
-        prepared = prepare_signer(db, org)
         envelope = _envelope_columns(
             db, org, target["set_id"], target["schema_revision"], target["key"], state,
-            stored_payload, prepared=prepared,
+            stored_payload,
         )
         db.conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
@@ -3945,50 +3821,6 @@ def override_setting(
              target["key"], json.dumps(stored_payload),
              state, target_id, now, now, expires_at, *envelope),
         )
-        if deprecate_previous:
-            # Collapse the fan in-transaction: every OTHER live override this
-            # org holds on the chosen base (all share ``supersedes = base``)
-            # becomes deprecated, successor = the row just inserted. Scoped to
-            # this connection's own DB, so peer/other-org overrides on a shared
-            # base are never touched; ``id != sid`` spares the new row. read_set
-            # already excludes ``deprecated = 1`` rows, so this simply drops the
-            # stale layers the newest revision replaced.
-            stale = db.conn.execute(
-                "SELECT id, payload, publication_state, signing_key FROM settings "
-                "WHERE set_id = ? AND key = ? AND supersedes = ? "
-                "  AND id != ? AND deprecated = 0",
-                (target["set_id"], target["key"], target_id, sid),
-            ).fetchall()
-            for old_row in stale:
-                old_id, old_payload, old_state, old_signer = old_row
-                if old_signer is None:
-                    db.conn.execute(
-                        "UPDATE settings SET deprecated = 1, successor_id = ?, "
-                        "updated_at = ?, expires_at = ? WHERE id = ?",
-                        (sid, now, expires_at, old_id),
-                    )
-                    continue
-                # A signed layer: its deprecation is a new statement by ITS
-                # signer (deprecated and successor are inside the signature).
-                # This process re-signs only its own rows; another signer's
-                # row stays as written and resolution's signed_at order
-                # already prefers the newer revision.
-                if old_signer != envelope[1]:
-                    continue
-                old_payload_obj = json.loads(old_payload) if isinstance(old_payload, str) else old_payload
-                re_signed = _envelope_columns(
-                    db, org, target["set_id"], target["schema_revision"], target["key"],
-                    old_state, old_payload_obj, deprecated=True, successor_id=sid,
-                    prepared=prepared,
-                )
-                if re_signed[1] is None:
-                    continue
-                db.conn.execute(
-                    "UPDATE settings SET deprecated = 1, successor_id = ?, "
-                    "updated_at = ?, expires_at = ?, signed_at = ?, signing_key = ?, "
-                    "signature = ?, witness = ?, terminal_persona = ? WHERE id = ?",
-                    (sid, now, expires_at, *re_signed, old_id),
-                )
         db.conn.commit()
     finally:
         db.close()
@@ -6238,13 +6070,6 @@ def read_set(
             # explicit order, two overrides patching the same key resolve by
             # whatever order SQLite happened to return rows in.
             merged_payload = json.loads(chosen_row["payload"])
-            # A vaulted locator authenticates the UUID of the physical row that
-            # created it. Overrides replace a vaulted payload whole, so once one
-            # wins the merge the effective locator belongs to that override—not
-            # to the base row whose identity the resolved Setting exposes. Keep
-            # those two identities distinct or every updated audited/secured
-            # value is opened against the base UUID and fails authentication.
-            effective_payload_row_id = chosen_row["id"]
             for (_, ov_row) in sorted(
                 overrides.get(key, []),
                 key=lambda om: (om[1]["created_at"] or "", om[1]["_rowid"]),
@@ -6252,17 +6077,18 @@ def read_set(
                 if ov_row["supersedes"] == chosen_row["id"]:
                     ov_payload = json.loads(ov_row["payload"])
                     merged_payload = json_merge_patch(merged_payload, ov_payload)
-                    effective_payload_row_id = ov_row["id"]
 
             resolved = _row_to_resolved(chosen_row, org=chosen_org)
 
-            # Step six — the merged locator, opened.
+            # Step six — the vaulted locator, opened.
             if declared_tier is not None:
                 opened, sealed, failure = _unwrap_vault_locator(
                     merged_payload,
                     set_id=set_id,
                     key=key,
-                    setting_id=effective_payload_row_id,
+                    # A vaulted set has no overrides (auto-z4582): its value
+                    # is opened against the one row that holds it, the base.
+                    setting_id=chosen_row["id"],
                     declared_tier=declared_tier,
                     org=chosen_org,
                     cache=key_control_cache,
