@@ -102,6 +102,8 @@ def vaulted_keys(org_uuid: str) -> dict:
     """``{vault_key: member}`` for every serving key of *org_uuid* in the vault."""
     return {
         member.key: member
-        for member in settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine")
-        if member.key.startswith(f"serving-key.{org_uuid}.")
+        for member in settings_ops.read_set(
+            MACHINE_VAULT_AUDITED_SET_ID, org="machine",
+            key_prefix=f"serving-key.{org_uuid}.",
+        )
     }

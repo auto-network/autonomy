@@ -116,14 +116,14 @@ def test_the_runtime_credential_seals_cold_into_the_machine_store_and_opens_warm
     assert personal_rows == 0
 
     # Cold read fails closed: no warm delegate, no plaintext.
-    member = _row(settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine"), RUNTIME_CREDENTIAL_KEY)
+    member = _row(settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine", key_equals=RUNTIME_CREDENTIAL_KEY), RUNTIME_CREDENTIAL_KEY)
     assert member.payload is None
     assert member.vault_error is not None
     assert member.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
 
     # Warm read: the delegate's private half opens it unattended, whole.
     settings_ops.set_personal_delegate_audited_key(private_hex)
-    member = _row(settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine"), RUNTIME_CREDENTIAL_KEY)
+    member = _row(settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine", key_equals=RUNTIME_CREDENTIAL_KEY), RUNTIME_CREDENTIAL_KEY)
     assert member.vault_error is None
     assert json.loads(member.payload["value"])["serving_machine_private_seeds"] == {"uuid-anchore": "11" * 32}
 
@@ -140,7 +140,7 @@ def test_a_replacement_opens_with_the_row_that_created_it(cold_vault):
         RUNTIME_CREDENTIAL_KEY, {"value": "second"}, org="machine",
     )
     settings_ops.set_personal_delegate_audited_key(private_hex)
-    member = _row(settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine"), RUNTIME_CREDENTIAL_KEY)
+    member = _row(settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine", key_equals=RUNTIME_CREDENTIAL_KEY), RUNTIME_CREDENTIAL_KEY)
     assert member.vault_error is None
     assert member.payload == {"value": "second"}
 
@@ -182,8 +182,8 @@ def test_an_organization_homed_vaulted_row_in_the_personal_scope_seals_as_a_pers
         "ab" * 16, {"seed": seed}, org="personal",
     )
     assert isinstance(setting_id, str) and setting_id
-    member = _row(settings_ops.read_set(NETWORK_LINK_CHANNEL_KEY_SET_ID, org="personal"), "ab" * 16)
+    member = _row(settings_ops.read_set(NETWORK_LINK_CHANNEL_KEY_SET_ID, org="personal", key_equals="ab" * 16), "ab" * 16)
     assert member.payload is None and member.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
     settings_ops.set_personal_delegate_audited_key(private_hex)
-    member = _row(settings_ops.read_set(NETWORK_LINK_CHANNEL_KEY_SET_ID, org="personal"), "ab" * 16)
+    member = _row(settings_ops.read_set(NETWORK_LINK_CHANNEL_KEY_SET_ID, org="personal", key_equals="ab" * 16), "ab" * 16)
     assert member.vault_error is None and member.payload["seed"] == seed

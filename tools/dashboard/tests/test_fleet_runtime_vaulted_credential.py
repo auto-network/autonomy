@@ -75,7 +75,8 @@ def _vaulted_credential():
     from tools.graph.schemas.machine_vault import (
         MACHINE_VAULT_AUDITED_SET_ID, RUNTIME_CREDENTIAL_KEY,
     )
-    rows = {s.key: s for s in settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine")}
+    rows = {s.key: s for s in settings_ops.read_set(
+        MACHINE_VAULT_AUDITED_SET_ID, org="machine", key_equals=RUNTIME_CREDENTIAL_KEY)}
     return rows.get(RUNTIME_CREDENTIAL_KEY)
 
 

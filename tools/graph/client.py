@@ -814,6 +814,22 @@ class HttpClient:
             dropped=DropAccounting(**(result.get("dropped") or {})),
         )
 
+    def read_set_member(self, set_id, key, *, org):
+        """The one member of *set_id* under *key*, opened as ``read_set``
+        opens it; None when absent. A whole-set read of a vaulted set returns
+        metadata only, so a caller that needs a vault value names its key."""
+        org = _resolve_client_org_arg(org)
+        try:
+            result = self._request(
+                "GET",
+                f"/api/graph/settings/{urllib.parse.quote(set_id, safe='')}/"
+                f"{urllib.parse.quote(key, safe='')}",
+                headers=_settings_headers(org),
+            )
+        except LookupError:
+            return None
+        return _dict_to_resolved_setting(result)
+
     #: How long to wait for the OPERATOR to approve, independent of the
     #: credential's ramfs lifetime. Approval is a human tapping a phone; it
     #: must not be rushed by ``ttl_seconds`` (which governs how long the

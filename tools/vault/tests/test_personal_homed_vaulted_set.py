@@ -105,14 +105,14 @@ def test_ehyoh_can_store_the_operators_github_token(cold_vault):
     assert isinstance(setting_id, str) and setting_id
 
     # Cold read fails closed — no warm delegate, no plaintext.
-    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None))
+    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None, key_equals="github.token"))
     assert member.payload is None
     assert member.vault_error is not None
     assert member.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
 
     # Warm read: the delegate private half releases the token unattended.
     settings_ops.set_personal_delegate_audited_key(private_hex)
-    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None))
+    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None, key_equals="github.token"))
     assert member.vault_error is None
     assert member.payload["value"] == token
 
@@ -145,7 +145,7 @@ def test_audited_replacement_opens_with_the_revision_that_created_it(cold_vault)
     )
 
     settings_ops.set_personal_delegate_audited_key(private_hex)
-    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None))
+    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None, key_equals="github.token"))
     assert member.vault_error is None
     assert member.payload == {"value": "replacement"}
     assert member.id == replacement_id, "the replacement IS the row now"
@@ -173,11 +173,13 @@ def test_org_writes_audited_cold_under_its_namespace_operator_reads(cold_vault):
     assert "anchore:jira_token" in members
     assert "jira_token" not in members, "the bare name is not written; the org prefix is"
     # Cold read fails closed — no warm delegate, no plaintext.
-    assert members["anchore:jira_token"].vault_error is not None
+    cold = settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None, key_equals="anchore:jira_token")
+    assert cold.members[0].vault_error is not None
 
     # Operator context (warm delegate) reads the org-namespaced value.
     settings_ops.set_personal_delegate_audited_key(private_hex)
-    opened = {m.key: m for m in settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None)}
+    opened = {m.key: m for m in settings_ops.read_set(
+        VAULT_AUDITED_SET_ID, org=None, key_equals="anchore:jira_token")}
     assert opened["anchore:jira_token"].vault_error is None
     assert opened["anchore:jira_token"].payload == {"value": "ghp_anchore"}
 
@@ -204,11 +206,13 @@ def test_audited_org_read_is_isolated_to_its_own_namespace(cold_vault):
 
     auto = {m.key: m for m in settings_ops.read_set(VAULT_AUDITED_SET_ID, org="autonomy")}
     assert set(auto) == {"autonomy:jira_token"}, "an org sees only its own namespace"
-    assert auto["autonomy:jira_token"].payload == {"value": "AUTONOMY"}
+    assert settings_ops.read_set(VAULT_AUDITED_SET_ID, org="autonomy", key_equals="autonomy:jira_token"
+                                 ).members[0].payload == {"value": "AUTONOMY"}
 
     anchore = {m.key: m for m in settings_ops.read_set(VAULT_AUDITED_SET_ID, org="anchore")}
     assert set(anchore) == {"anchore:jira_token"}
-    assert anchore["anchore:jira_token"].payload == {"value": "ANCHORE"}
+    assert settings_ops.read_set(VAULT_AUDITED_SET_ID, org="anchore", key_equals="anchore:jira_token"
+                                 ).members[0].payload == {"value": "ANCHORE"}
 
     operator = {m.key: m for m in settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None)}
     assert {"github.token", "anchore:jira_token", "autonomy:jira_token"} <= set(operator)
@@ -242,7 +246,7 @@ def test_sequential_vault_reseals_leave_exactly_one_row(cold_vault):
     assert len(rows) == 1 and rows[0]["supersedes"] is None and not rows[0]["deprecated"]
 
     settings_ops.set_personal_delegate_audited_key(private_hex)
-    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None))
+    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None, key_equals="github.token"))
     assert member.vault_error is None
     assert member.payload == {"value": "fourth"}
 
@@ -278,7 +282,7 @@ def test_sealed_settings_pepper_mints_once_and_never_rotates(cold_vault):
 
     def _pepper_value():
         member = {s.key: s for s in settings_ops.read_set(
-            VAULT_AUDITED_SET_ID, org=None)}[PEPPER_KEY]
+            VAULT_AUDITED_SET_ID, org=None, key_equals=PEPPER_KEY)}[PEPPER_KEY]
         assert member.vault_error is None
         return member.payload["value"]
 

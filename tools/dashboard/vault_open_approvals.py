@@ -293,7 +293,9 @@ def freeze_request(
 
     routed_key, read_org = _setting_route(principal, set_id, key,
                                           operator_org=operator_org)
-    members = settings_ops.read_set(set_id, org=read_org, peers=[]).members
+    members = settings_ops.read_set(
+        set_id, org=read_org, peers=[], key_equals=routed_key,
+    ).members
     member = next(
         (candidate for candidate in members if candidate.key == routed_key), None,
     )

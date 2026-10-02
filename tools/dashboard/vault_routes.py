@@ -740,7 +740,7 @@ async def share_vault_credential(request: Request):
 
     # The launcher's read: org=None routes to the personal store with no
     # prefix filter, and the delegate opens audited rows in-process.
-    members = settings_ops.read_set(set_id, org=None, peers=[])
+    members = settings_ops.read_set(set_id, org=None, peers=[], key_equals=source_key)
     source = next(
         (m for m in (getattr(members, "members", None) or []) if getattr(m, "key", None) == source_key),
         None,
@@ -842,7 +842,7 @@ async def deliver_vault_credential(request: Request):
             message = "vault_deliver " + message[len("vault_open "):]
         return JSONResponse({"error": message}, status_code=400)
 
-    members = settings_ops.read_set(set_id, org=None, peers=[])
+    members = settings_ops.read_set(set_id, org=None, peers=[], key_equals=routed_key)
     source = next(
         (m for m in (getattr(members, "members", None) or []) if getattr(m, "key", None) == routed_key),
         None,

@@ -274,6 +274,10 @@ def test_client_backend_resolves_org_prefixed_sealed_index(monkeypatch):
             ]
             self.opened_with = None
 
+        def read_set_member(self, set_id, key, *, org):
+            return next((m for m in self.read_set(set_id, org=org).members
+                         if m.key == key), None)
+
         def read_set(self, set_id, *, org):
             assert org is None  # bearer-derived scope, never "personal"
             return SimpleNamespace(members=self._members)
@@ -329,6 +333,10 @@ def test_cold_is_read_from_the_structured_reason_not_the_error_prose(monkeypatch
             self._member = SimpleNamespace(
                 key=key, payload=None, vault_error=vault_error)
             self._raises = raises
+
+        def read_set_member(self, set_id, key, *, org):
+            return next((m for m in self.read_set(set_id, org=org).members
+                         if m.key == key), None)
 
         def read_set(self, set_id, *, org):
             return SimpleNamespace(members=[self._member])
@@ -409,6 +417,10 @@ def test_client_backend_reuses_released_sealed_index_without_reapproval(monkeypa
     class StubClient:
         def __init__(self):
             self.opened = False
+
+        def read_set_member(self, set_id, key, *, org):
+            return next((m for m in self.read_set(set_id, org=org).members
+                         if m.key == key), None)
 
         def read_set(self, set_id, *, org):
             return SimpleNamespace(members=[
@@ -571,6 +583,10 @@ def test_client_backend_pepper_get_or_create_by_suffix(monkeypatch):
             self.rows = {}          # key -> value hex
             self.minted = 0
 
+        def read_set_member(self, set_id, key, *, org):
+            return next((m for m in self.read_set(set_id, org=org).members
+                         if m.key == key), None)
+
         def read_set(self, set_id, *, org):
             members = [SimpleNamespace(key=k, payload={"value": v}, vault_error=None)
                        for k, v in self.rows.items()]
@@ -607,11 +623,12 @@ def test_ops_backend_in_process_roundtrip(monkeypatch):
         ROWS = "autonomy.sealed-settings.row"
         def __init__(self):
             self.store = {self.VAULT: {}, self.ROWS: {}}
-        def read_set(self, set_id, *, org, peers=None):
+        def read_set(self, set_id, *, org, peers=None, key_equals=None):
             from types import SimpleNamespace
             members = [SimpleNamespace(key=k, payload={"value": v} if set_id==self.VAULT
                                        else {"ciphertext": v}, vault_error=None)
-                       for k, v in self.store[set_id].items()]
+                       for k, v in self.store[set_id].items()
+                       if key_equals is None or k == key_equals]
             return SimpleNamespace(members=members)
         def write_by_key(self, set_id, rev, key, payload, *, org, state):
             derived = f"{org}:{key}" if org else key   # server derives prefix

@@ -5244,7 +5244,7 @@ def _freeze_secured_locator(
         raise VaultError(f"{set_id!r} is not a secured vault set")
 
     current = next(
-        (member for member in read_set(set_id, org=org, peers=[]).members
+        (member for member in read_set(set_id, org=org, peers=[], key_equals=key).members
          if member.key == key),
         None,
     )
@@ -6091,6 +6091,15 @@ def read_set(
                     merged_payload = json_merge_patch(merged_payload, ov_payload)
 
             resolved = _row_to_resolved(chosen_row, org=chosen_org)
+
+            # A vaulted set read without naming a key returns metadata only:
+            # listing a vault never opens (decrypts) the values in it. A caller
+            # that needs a value names its key (key_equals, key_prefix, prefix).
+            if (declared_tier is not None and key_equals is None
+                    and not key_prefix and not prefix):
+                resolved.payload = None
+                members.append(resolved)
+                continue
 
             # Step six — the vaulted locator, opened.
             if declared_tier is not None:

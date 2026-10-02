@@ -622,9 +622,13 @@ class ClientBackend:
     def _read_pepper_row(self) -> bytes | None:
         # The audited read is org-scoped server-side, so this returns only the
         # caller's own rows; the pepper is matched by suffix.
-        members = self._client.read_set(VAULT_AUDITED_SET_ID, org=None)
-        member = next(
-            (m for m in members.members if _bare_key(m.key) == PEPPER_KEY), None
+        listed = self._client.read_set(VAULT_AUDITED_SET_ID, org=None)
+        stored = next(
+            (m.key for m in listed.members if _bare_key(m.key) == PEPPER_KEY), None
+        )
+        member = (
+            self._client.read_set_member(VAULT_AUDITED_SET_ID, stored, org=None)
+            if stored is not None else None
         )
         if member is None:
             return None
@@ -665,11 +669,16 @@ class ClientBackend:
         # error prose: a substring probe classified any message containing
         # "no key" as COLD, so unrelated failures were reported as a cold vault
         # and sent operators chasing a lock that was not there.
-        failure = next(
-            (m.vault_error for m in members.members
+        stored = next(
+            (m.key for m in members.members
              if m.key.endswith(f":{address}") or m.key == address),
             None,
         )
+        opened = (
+            self._client.read_set_member(VAULT_SECURED_SET_ID, stored, org=None)
+            if stored is not None else None
+        )
+        failure = getattr(opened, "vault_error", None)
         # A secured row awaiting its ceremony carries sealed_content_key and NO
         # vault_error, so this fires only on a genuine failure — and then a
         # ceremony would be futile: the row cannot be opened at all.
@@ -838,10 +847,13 @@ class OpsBackend:
         return pepper
 
     def _read_pepper_row(self, ops) -> bytes | None:
-        members = ops.read_set(VAULT_AUDITED_SET_ID, org=self._org, peers=[])
-        member = next(
-            (m for m in members.members if _bare_key(m.key) == PEPPER_KEY), None
+        listed = ops.read_set(VAULT_AUDITED_SET_ID, org=self._org, peers=[])
+        stored = next(
+            (m.key for m in listed.members if _bare_key(m.key) == PEPPER_KEY), None
         )
+        member = next(iter(ops.read_set(
+            VAULT_AUDITED_SET_ID, org=self._org, peers=[], key_equals=stored,
+        ).members), None) if stored is not None else None
         if member is None:
             return None
         failure = getattr(member, "vault_error", None)

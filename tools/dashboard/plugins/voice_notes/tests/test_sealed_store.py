@@ -15,10 +15,11 @@ class FakeOps:
     def __init__(self):
         self.store = {self.AUDITED: {}, self.ROWS: {}}
 
-    def read_set(self, set_id, *, org, peers=None):
+    def read_set(self, set_id, *, org, peers=None, key_equals=None):
         val_field = "value" if set_id == self.AUDITED else "ciphertext"
         members = [SimpleNamespace(key=k, payload={val_field: v}, vault_error=None)
-                   for k, v in self.store.get(set_id, {}).items()]
+                   for k, v in self.store.get(set_id, {}).items()
+                   if key_equals is None or k == key_equals]
         return SimpleNamespace(members=members)
 
     def read_set_key(self, set_id, key, *, org, peers=None):

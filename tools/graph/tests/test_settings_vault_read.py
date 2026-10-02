@@ -113,7 +113,7 @@ def vault(tmp_path):
 
 
 def member_of(set_id: str, key: str = "default"):
-    return settings_ops.read_set(set_id, org=None).to_dict()[key]
+    return settings_ops.read_set(set_id, org=None, key_equals=key).to_dict()[key]
 
 
 def stored_payload(db_path: Path, setting_id: str):
@@ -186,7 +186,7 @@ def test_a_resolved_secret_carries_no_trace_of_having_been_encrypted(
     assert "vault_error" not in vaulted
     assert "sealed_content_key" not in vaulted
     # Same for the serialized shape the API sends.
-    over_the_wire = settings_ops.read_set(VAULT_SET, org=None).as_payload()
+    over_the_wire = settings_ops.read_set(VAULT_SET, org=None, key_equals="default").as_payload()
     assert set(over_the_wire["members"][0]) == set(plain)
 
 
@@ -264,7 +264,7 @@ def test_an_object_written_under_an_earlier_generation_opens_through_bridges(
     graph_db_env, vault_schema, vault
 ):
     earlier = _write_under_an_earlier_generation(vault)
-    resolved = settings_ops.read_set(VAULT_SET, org=None).to_dict()
+    resolved = settings_ops.read_set(VAULT_SET, org=None, key_equals="default").to_dict()
 
     assert parse_locator(
         stored_payload(graph_db_env, resolved["default"].id)
@@ -379,21 +379,21 @@ def test_one_unopenable_secret_does_not_take_the_set_with_it(
 ):
     """A resolver serves every consumer of a set at once. One secret that
     cannot be opened must cost that member and nothing else."""
-    for key in ("alpha", "beta", "gamma"):
-        ops.add_setting(VAULT_SET, 1, key, {"t": key}, org=ops.CALLER_ORG)
-    broken = settings_ops.read_set(VAULT_SET, org=None).to_dict()["beta"]
+    for key in ("t.alpha", "t.beta", "t.gamma"):
+        ops.add_setting(VAULT_SET, 1, key, {"t": key[2:]}, org=ops.CALLER_ORG)
+    broken = settings_ops.read_set(VAULT_SET, org=None).to_dict()["t.beta"]
     vault.tamper(
         parse_locator(stored_payload(graph_db_env, broken.id))["object_id"],
         "decryption_failed",
     )
 
-    resolved = settings_ops.read_set(VAULT_SET, org=None).to_dict()
-    assert sorted(resolved) == ["alpha", "beta", "gamma"], (
+    resolved = settings_ops.read_set(VAULT_SET, org=None, key_prefix="t.").to_dict()
+    assert sorted(resolved) == ["t.alpha", "t.beta", "t.gamma"], (
         "the refused member was dropped, which a caller reads as no such setting"
     )
-    assert resolved["alpha"].payload == {"t": "alpha"}
-    assert resolved["gamma"].payload == {"t": "gamma"}
-    assert resolved["beta"].vault_error.reason == settings_ops.VAULT_DECRYPTION_FAILED
+    assert resolved["t.alpha"].payload == {"t": "alpha"}
+    assert resolved["t.gamma"].payload == {"t": "gamma"}
+    assert resolved["t.beta"].vault_error.reason == settings_ops.VAULT_DECRYPTION_FAILED
 
 
 def test_a_refusal_survives_a_model_that_would_have_dropped_it(
@@ -413,7 +413,7 @@ def test_a_refusal_survives_a_model_that_would_have_dropped_it(
     )
     settings_ops.set_vault_key_holder(None)
 
-    result = settings_ops.read_set(VAULT_SET, org=None, model=Model)
+    result = settings_ops.read_set(VAULT_SET, org=None, model=Model, key_equals="default")
     assert len(result) == 1
     assert result.members[0].vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
 
@@ -679,11 +679,11 @@ def test_the_key_holder_is_consulted_once_for_a_whole_set(
 ):
     """Not once per member: one read of one organization's set asks for its
     key control once, however many secrets it resolves."""
-    for key in ("a", "b", "c"):
+    for key in ("k.a", "k.b", "k.c"):
         ops.add_setting(VAULT_SET, 1, key, {"k": key}, org=ops.CALLER_ORG)
     vault.holder_calls.clear()
 
-    assert len(settings_ops.read_set(VAULT_SET, org=None)) == 3
+    assert len(settings_ops.read_set(VAULT_SET, org=None, key_prefix="k.")) == 3
     assert vault.holder_calls == [(VAULT_SET, None)]
 
 

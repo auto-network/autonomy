@@ -288,7 +288,7 @@ def _resolve_row_or_none(set_id: str, key: str, org: str | None) -> Row | None:
     the event represents a delete operation — handlers don't fire on
     deletes (matches the pre-collapse mediator's behavior).
     """
-    members = settings_ops.read_set(set_id, org=org, peers=[])
+    members = settings_ops.read_set(set_id, org=org, peers=[], key_equals=key)
     for m in members.members:
         if m.key == key:
             return _resolved_to_row(m)

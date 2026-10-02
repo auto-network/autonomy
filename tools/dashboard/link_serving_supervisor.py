@@ -232,7 +232,9 @@ def serving_key_hex(state: dict) -> str:
     from tools.graph.schemas.machine_vault import MACHINE_VAULT_AUDITED_SET_ID
 
     vault_key = state.get("vault_key")
-    members = settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine")
+    members = settings_ops.read_set(
+        MACHINE_VAULT_AUDITED_SET_ID, org="machine", key_equals=vault_key,
+    )
     for member in members:
         if member.key != vault_key:
             continue

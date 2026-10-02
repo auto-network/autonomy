@@ -512,7 +512,10 @@ def _load_runtime_credential() -> "tuple[dict | None, str | None]":
     )
 
     rows = {
-        s.key: s for s in settings_ops.read_set(MACHINE_VAULT_AUDITED_SET_ID, org="machine")
+        s.key: s for s in settings_ops.read_set(
+            MACHINE_VAULT_AUDITED_SET_ID, org="machine",
+            key_equals=RUNTIME_CREDENTIAL_KEY,
+        )
     }
     row = rows.get(RUNTIME_CREDENTIAL_KEY)
     if row is None:

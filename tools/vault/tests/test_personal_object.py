@@ -118,7 +118,7 @@ def test_personal_secured_setting_seals_cold_and_opens_only_with_factor(
     assert SECRET not in stored
     assert outer_objects == 0, "personal secured writes must bypass the org outer layer"
 
-    member = settings_ops.read_set(SET_ID, org=None, peers=[]).members[0]
+    member = settings_ops.read_set(SET_ID, org=None, peers=[], key_equals="autonomy:mac.ssh.disposable-proof").members[0]
     assert member.payload is None
     assert member.vault_error is None
     assert member.sealed_content_key["policy_class_id"] == policy_class.class_id
@@ -180,7 +180,7 @@ def test_personal_secured_replacement_opens_under_its_own_revision(personal_worl
     )
     assert replacement_id != base_id
 
-    member = settings_ops.read_set(SET_ID, org=None, peers=[]).members[0]
+    member = settings_ops.read_set(SET_ID, org=None, peers=[], key_equals=key).members[0]
     assert member.id == replacement_id, "the replacement IS the row now (auto-z4582)"
     digest = hashlib.sha256(canonical_json(member.sealed_content_key)).hexdigest()
     # B-1: server hands the browser the open bundle, the browser runs open_cek,
@@ -219,13 +219,13 @@ def test_personal_locator_cannot_be_moved_to_another_setting(personal_world):
         org=None,
         vault_policy_class_id=policy_class.class_id,
     )
-    member = settings_ops.read_set(SET_ID, org=None, peers=[]).members[0]
+    member = settings_ops.read_set(SET_ID, org=None, peers=[], key_equals="one").members[0]
     assert member.sealed_content_key is not None
 
     with sqlite3.connect(db_path) as db:
         db.execute("UPDATE settings SET key = 'two' WHERE id = ?", (member.id,))
 
-    moved = settings_ops.read_set(SET_ID, org=None, peers=[]).members[0]
+    moved = settings_ops.read_set(SET_ID, org=None, peers=[], key_equals="two").members[0]
     assert moved.payload is None
     assert moved.sealed_content_key is None
     assert moved.vault_error.reason == settings_ops.VAULT_DECRYPTION_FAILED
@@ -333,7 +333,7 @@ def test_personal_audited_setting_seals_cold_with_published_delegate(
     assert "delegate_sealed_cek" in env and "sealed_cek" not in env
 
     # READ cold: no warm delegate private key -> fails closed, never plaintext.
-    member = settings_ops.read_set(AUD_SET, org=None, peers=[]).members[0]
+    member = settings_ops.read_set(AUD_SET, org=None, peers=[], key_equals="anchore:bench-harness.ssh").members[0]
     assert member.payload is None
     assert member.sealed_content_key is None
     assert member.vault_error is not None
@@ -342,7 +342,7 @@ def test_personal_audited_setting_seals_cold_with_published_delegate(
     # READ warm: the delegate private half opens it unattended, inline.
     settings_ops.set_personal_delegate_audited_key(priv_hex)
     try:
-        member = settings_ops.read_set(AUD_SET, org=None, peers=[]).members[0]
+        member = settings_ops.read_set(AUD_SET, org=None, peers=[], key_equals="anchore:bench-harness.ssh").members[0]
         assert member.vault_error is None
         assert member.sealed_content_key is None
         assert member.payload == {"value": SECRET}
