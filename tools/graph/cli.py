@@ -3366,31 +3366,9 @@ def cmd_tag_remove(args):
 def cmd_move(args):
     """Move a source to another org, leaving a moved stub behind."""
     client = get_client()
-    if isinstance(client, HttpClient):
-        resolved_id = args.source_id
-        title = args.source_id
-    else:
-        db = GraphDB(_get_db_path(args.from_org))
-        try:
-            src = db.resolve_source_strict(args.source_id)
-        finally:
-            db.close()
-        if src is None:
-            print(
-                f"Error: no source found in org {args.from_org!r} matching "
-                f"{args.source_id!r}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        if isinstance(src, list):
-            print(
-                f"Error: multiple sources in org {args.from_org!r} match "
-                f"{args.source_id!r}; use a longer prefix",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        resolved_id = src["id"]
-        title = src.get("title") or resolved_id
+    resolved_id, title = _resolve_source_for_tag(client, args.source_id)
+    if resolved_id is None:
+        sys.exit(1)
     from . import ops as _ops
     try:
         moved = client.move_source(
