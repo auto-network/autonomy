@@ -215,32 +215,25 @@ for name in "${!IMG[@]}"; do
     step "pulling ${IMG[$name]}"
     docker pull -q "${IMG[$name]}" >/dev/null
 done
-# The session launcher starts sessions from these local names.
-docker tag "${IMG[AUTONOMY_SESSION_IMAGE]}" autonomy-session
-docker tag "${IMG[AUTONOMY_SESSION_PLATFORM_IMAGE]}" autonomy-session-platform
-docker tag "${IMG[AUTONOMY_SESSION_DIND_IMAGE]}" autonomy-session-dind
-# Releases cut after the in-node host terminal (deploy/publish-images.sh)
-# carry its image; a release whose node predates it has none and needs none.
-if [[ -n "${IMG[AUTONOMY_HOST_TERMINAL_IMAGE]:-}" ]]; then
-    docker tag "${IMG[AUTONOMY_HOST_TERMINAL_IMAGE]}" autonomy-host-terminal
-fi
 
 # ── 5. Code volume to the release commit (an existing node only) ─────────────
 # The image's ENTRYPOINT and CMD run from the autonomy-code volume, which Docker
 # seeds from the image only while it is empty: a new image over an existing
 # volume runs the old code. So the volume is moved to the commit the release's
-# node image carries, before any container is recreated and before anything in
-# $DIR changes, so a refusal leaves the node exactly as it was. A one-shot
-# container of the new image does it as autonomy (uid 1000, the volume's owner;
-# root would leave root-owned files behind), with the volume at a second path:
-# fetch the image's /app commit into the volume's repository, then
-# `git reset --keep`, which never discards a change.
+# node image carries. A one-shot container of the new image does it as
+# autonomy (uid 1000, the volume's owner; root would leave root-owned files
+# behind), with the volume at a second path: fetch the image's /app commit
+# into the volume's repository, then `git reset --keep`, which never discards
+# a change. It runs twice: first only the checks, so a refusal comes before
+# anything the node uses has changed (its code, its session image tags, $DIR);
+# then, with the node's containers stopped, the move, because the dashboard
+# hot-reloads from the volume and would otherwise run the new code on the old
+# image until `compose up` recreates it.
 CODE_VOLUME=autonomy-code
-if docker volume inspect "$CODE_VOLUME" >/dev/null 2>&1; then
-    step "moving the $CODE_VOLUME volume to the release commit"
-    moved="$(docker run --rm -i --user 1000:1000 --network none -e HOME=/tmp \
-        -e AUTONOMY_ALLOW_DOWNGRADE="$ALLOW_DOWNGRADE" -v "$CODE_VOLUME:/volume" \
-        --entrypoint sh "${IMG[AUTONOMY_NODE_IMAGE]}" -s <<'CODE'
+code_step() {  # code_step check|move ; prints "<old HEAD> <release commit>"
+    docker run --rm -i --user 1000:1000 --network none -e HOME=/tmp \
+        -e AUTONOMY_CODE_STEP="$1" -e AUTONOMY_ALLOW_DOWNGRADE="$ALLOW_DOWNGRADE" \
+        -v "$CODE_VOLUME:/volume" --entrypoint sh "${IMG[AUTONOMY_NODE_IMAGE]}" -s <<'CODE'
 set -eu
 release=/app code=/volume
 want="$(sed -n 's/^commit=//p' "$release/VERSION")"
@@ -257,12 +250,41 @@ if ! git merge-base --is-ancestor HEAD "$want" && [ "$AUTONOMY_ALLOW_DOWNGRADE" 
     echo "refusing to upgrade: the autonomy-code volume's HEAD $have is not an ancestor of release commit $want (a downgrade, or local commits); --allow-downgrade overrides" >&2
     exit 1
 fi
-git reset -q --keep "$want"
-cp "$release/VERSION" "$code/VERSION"
+if [ "$AUTONOMY_CODE_STEP" = move ]; then
+    git reset -q --keep "$want"
+    cp "$release/VERSION" "$code/VERSION"
+fi
 echo "$have $want"
 CODE
-    )" || exit 10
+}
+if docker volume inspect "$CODE_VOLUME" >/dev/null 2>&1; then
+    step "checking the $CODE_VOLUME volume against the release commit"
+    code_step check >/dev/null || exit 10
+    # Every container of the node's Compose project (name: autonomy in
+    # docker-compose.yml), found by label so a node whose project directory
+    # is elsewhere (built from a checkout) is stopped too.
+    running="$(docker ps -q --filter label=com.docker.compose.project=autonomy)"
+    if [[ -n "$running" ]]; then
+        step "stopping the node's containers"
+        # shellcheck disable=SC2086
+        docker stop $running >/dev/null
+    fi
+    step "moving the $CODE_VOLUME volume to the release commit"
+    moved="$(code_step move)" || {
+        echo "the node is stopped and its code volume was not moved; nothing else changed: 'docker compose up -d' in the node's Compose project directory restarts the previous release" >&2
+        exit 10
+    }
     step "code volume: ${moved% *} -> ${moved#* }"
+fi
+
+# The session launcher starts sessions from these local names.
+docker tag "${IMG[AUTONOMY_SESSION_IMAGE]}" autonomy-session
+docker tag "${IMG[AUTONOMY_SESSION_PLATFORM_IMAGE]}" autonomy-session-platform
+docker tag "${IMG[AUTONOMY_SESSION_DIND_IMAGE]}" autonomy-session-dind
+# Releases cut after the in-node host terminal (deploy/publish-images.sh)
+# carry its image; a release whose node predates it has none and needs none.
+if [[ -n "${IMG[AUTONOMY_HOST_TERMINAL_IMAGE]:-}" ]]; then
+    docker tag "${IMG[AUTONOMY_HOST_TERMINAL_IMAGE]}" autonomy-host-terminal
 fi
 
 # ── 6. Compose file from the verified node image ─────────────────────────────

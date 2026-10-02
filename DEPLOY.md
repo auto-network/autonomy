@@ -318,17 +318,20 @@ bash install-published.sh --lock <newer image-lock.env> --dir ~/autonomy --yes
 The node keeps its data, identity and settings. What the rerun does:
 
 1. Verifies and pulls the release exactly as a first install does.
-2. Moves the code. The node runs its code from the `autonomy-code` volume, not
+2. Checks and moves the code. The node runs its code from the `autonomy-code` volume, not
    from the image: Docker seeds that volume from the image only while it is
    empty, so a new image alone would run the old code. Before any container
    is recreated, a one-shot container of the new node image (as uid 1000,
    the volume's owner) fetches the commit named in the image's `/app/VERSION`
    into the volume's repository and moves it there with `git reset --keep`.
-   The installer refuses, with one line, and changes nothing when the volume
-   has uncommitted changes, or when its HEAD is not an ancestor of the release
-   commit: a downgrade, or local commits a developer node carries.
+   The installer checks first, and refuses with one line, changing nothing
+   (not the containers, not the session image tags, not `--dir`), when the
+   volume has uncommitted changes, or when its HEAD is not an ancestor of the
+   release commit: a downgrade, or local commits a developer node carries.
    `--allow-downgrade` overrides the ancestry check only; uncommitted changes
-   are always refused.
+   are always refused. Only then does it stop every container of the Compose
+   project `autonomy` and move the volume, because the dashboard hot-reloads
+   from it and would otherwise run the new code on the old image.
 3. Replaces `docker-compose.yml` with the one in the new node image and
    leaves `docker-compose.override.yml` alone.
 4. Merges `.env`: `AUTONOMY_IMAGE` and `AUTONOMY_SERVICE_GATEWAY_IMAGE` are

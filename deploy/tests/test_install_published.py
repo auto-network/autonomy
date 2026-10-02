@@ -83,6 +83,8 @@ if args[:1] == ["version"]:
     print("1.47")
 if args[:2] == ["volume", "inspect"]:
     sys.exit(0 if os.environ.get("T_CODE_VOLUME") else 1)
+if args[:1] == ["ps"] and os.environ.get("T_CODE_VOLUME"):
+    print("c0ffee")  # the running node's container
 if args[:1] == ["run"] and "--entrypoint" in args and "sh" in args:
     env = dict(os.environ)
     for i, a in enumerate(args):
@@ -305,17 +307,31 @@ def test_an_upgrade_moves_the_code_volume_to_the_release_commit_before_compose_u
     assert (n["code"] / "app.py").read_text(encoding="utf-8") == "new\n"
     assert (n["code"] / "VERSION").read_text(encoding="utf-8") == (n["release"] / "VERSION").read_text(encoding="utf-8")
     lines = calls.splitlines()
-    code_step = next(i for i, line in enumerate(lines) if "autonomy-code:/volume" in line)
-    compose_up = next(i for i, line in enumerate(lines) if line.startswith("docker compose up"))
-    assert code_step < compose_up
+
+    def at(pred) -> int:
+        return next(i for i, line in enumerate(lines) if pred(line))
+    check = at(lambda line: "AUTONOMY_CODE_STEP=check" in line)
+    stop = at(lambda line: line == "docker stop c0ffee")
+    move = at(lambda line: "AUTONOMY_CODE_STEP=move" in line)
+    tag = at(lambda line: line.startswith("docker tag "))
+    compose_up = at(lambda line: line.startswith("docker compose up"))
+    # Checked before anything the node uses changes; moved only once the node
+    # is stopped, so its code never changes under a running container.
+    assert check < stop < move < tag < compose_up
+    assert "label=com.docker.compose.project=autonomy" in lines[stop - 1]
     # As the volume's owner, never root, and from the image just verified.
-    assert "--user 1000:1000" in lines[code_step]
-    assert f"autonomy-node@sha256:{GOOD}" in lines[code_step]
+    for i in (check, move):
+        assert "--user 1000:1000" in lines[i]
+        assert f"autonomy-node@sha256:{GOOD}" in lines[i]
     assert f"code volume: {n['old']} -> {n['new']}" in result.stdout
 
 
 def _refused(tmp_path: Path, n: dict, result, calls: str) -> None:
     assert result.returncode == 10, result.stderr
+    # Nothing the running node uses has changed: not its containers, not the
+    # session image tags it launches from, not $DIR.
+    assert "docker stop" not in calls
+    assert "docker tag" not in calls
     assert "compose up" not in calls
     assert "docker cp" not in calls
     assert _env_file(tmp_path)["AUTONOMY_IMAGE"].endswith("c" * 64)  # .env untouched
