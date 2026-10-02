@@ -133,6 +133,52 @@ def target_of(request: Request) -> tuple[str, object] | None:
     return "unknown", named
 
 
+def authorize_forward(request: Request, target: tuple[str, object]) -> Response | None:
+    """Whether THIS caller may send the request to *target*, decided before
+    anything is forwarded (auto-3s3gi). The receiver runs the route as this
+    machine -- a fleet target with the operator's global authority, an org
+    runner as this machine's member persona in that runner's organization --
+    so the caller here must already hold that authority:
+
+    * a fleet machine, or an unknown name: global operator authority;
+    * an org runner: global authority, or an organization-bound principal of
+      that runner's organization.
+
+    ``None`` means authorized; otherwise the same refusal the handler would
+    give (401 for compatibility traffic, 403 for an org-bound caller)."""
+    from tools.dashboard import api_auth
+
+    kind, where = target
+    if kind == ORG:
+        principal = api_auth.principal_from_request(request)
+        if principal.org_bound and principal.org and principal.org == where.get("org"):
+            return None
+    return api_auth.require_global_api_authority(request)
+
+
+#: Reply content types a forwarded response may keep; any other becomes
+#: application/octet-stream, so a remote machine cannot serve HTML or script
+#: on this dashboard's origin.
+SAFE_CONTENT_TYPES = ("application/json", "text/plain", "text/event-stream",
+                      "application/octet-stream")
+
+
+def _reply_headers(headers) -> dict:
+    """The remote reply's headers that may reach this origin: only
+    RESPONSE_HEADERS, with an unsafe content type replaced, plus nosniff."""
+    out = {}
+    for key, value in (headers or {}).items() if isinstance(headers, dict) else ():
+        name = str(key).lower()
+        if name not in RESPONSE_HEADERS:
+            continue
+        value = str(value)
+        if name == "content-type" and value.split(";")[0].strip().lower() not in SAFE_CONTENT_TYPES:
+            value = "application/octet-stream"
+        out[name] = value
+    out["x-content-type-options"] = "nosniff"
+    return out
+
+
 async def forward(request: Request, target: tuple[str, object]) -> Response:
     from tools.dashboard import member_message_client, session_control_client
 
@@ -165,7 +211,7 @@ async def forward(request: Request, target: tuple[str, object]) -> Response:
     result = reply.get("result") or {}
     return Response(content=base64.b64decode(result.get("body") or ""),
                     status_code=int(result.get("status") or 502),
-                    headers=result.get("headers") or {})
+                    headers=_reply_headers(result.get("headers")))
 
 
 class RemoteTargetGuard:
@@ -232,7 +278,8 @@ def remote(*kinds: str, session_field: str | None = None,
                     return await fn(request)    # a direct call, not an HTTP request
                 target = await asyncio.to_thread(target_of, request)
                 if target is not None:
-                    return await forward(request, target)
+                    refused = authorize_forward(request, target)
+                    return refused if refused is not None else await forward(request, target)
                 return await fn(request)
             refused = await enforce(rule, request, caller)
             return refused if refused is not None else await fn(request)
