@@ -716,8 +716,9 @@ def fold_vault_part_rows() -> dict[str, int]:
     per account, verify the new record carries every part, then remove the
     part rows. No fallback read of the old layout remains.
 
-    Needs the warm audited delegate: run where the vault is open (dashboard
-    startup when warm, and after unlock). An account any of whose rows will
+    Needs the warm audited delegate: run where the vault is open -- after an
+    unlock or a hot-reload restore (both reach unlock_routes.
+    _schedule_vault_releases, which calls :func:`fold_where_due`). An account any of whose rows will
     not open is left exactly as it was and retried next run; a second run
     finds nothing to fold."""
     from tools.graph import ops as graph_ops

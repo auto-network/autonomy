@@ -23633,15 +23633,6 @@ async def _on_startup():
         except Exception:
             logger.exception("harness accounts: pre-vault migration failed; continuing startup")
         _mark("harness_credentials.migrate_plaintext_accounts")
-        # The per-part vault rows fold into one record per account
-        # (auto-raepo) where the vault is already open (a hot reload);
-        # after a cold start the unlock runs it (_schedule_vault_releases).
-        try:
-            from tools.graph import harness_credentials as _hv
-            await asyncio.to_thread(_hv.fold_where_due)
-        except Exception:
-            logger.exception("harness accounts: fold failed; continuing startup")
-        _mark("harness_credentials.fold_where_due")
         await web_push.start_worker()
         _mark("web_push.start_worker")
         await image_build_worker.start_worker()
