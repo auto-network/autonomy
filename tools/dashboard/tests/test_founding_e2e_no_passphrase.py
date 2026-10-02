@@ -209,6 +209,22 @@ def test_a_browser_founds_an_organization_without_ever_sending_a_passphrase(
     extra = [event for event in events if event.event_id not in result["event_ids"]]
     assert len(extra) == 1 and "delegat" in json.dumps(extra[0].payload), extra[0].payload
 
+    # ── No unsigned directory row ─────────────────────────────────────────
+    # Founding writes none: the founder's own row is written at the vault
+    # handoff, once the delegate it appends is held, and is signed by it. An
+    # unsigned row here is refused by every other member's store
+    # (settings_unsigned; the simulation's Bob never saw Alice's photo, 2026-10-02).
+    import sqlite3
+    from tools.graph.schemas.org_member_profile import MEMBER_PROFILE_SET_ID
+    conn = sqlite3.connect(org_ledger_db_path(ORG))
+    try:
+        unsigned = conn.execute(
+            "SELECT key FROM settings WHERE set_id=? AND signature IS NULL",
+            (MEMBER_PROFILE_SET_ID,)).fetchall()
+    finally:
+        conn.close()
+    assert unsigned == [], f"unsigned member-profile rows after founding: {unsigned}"
+
     # ── The organization root really is recoverable by its owner ──────────
     stored = list(settings_ops.read_owned_set(NETWORK_ORG_KEY_SET_ID, org=ORG))
     assert len(stored) == 1

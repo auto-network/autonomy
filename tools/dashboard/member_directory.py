@@ -2,19 +2,18 @@
 one row per member, keyed by persona public key, carrying the presentation
 that member chose for this organization.
 
-Three writers, each at the one moment the value exists (design
+Two writers, each at the one moment the value exists (design
 graph://4f9e881c-a9 §7 and §10, punch list item 31):
 
-* :func:`write_founder` — founding: the founder's Personal profile becomes
-  their organization presentation.
+* :func:`write_own` — this machine's operator, founder or joiner, once their
+  storage delegate for the organization is held: their Personal profile,
+  photo included, becomes their row (signed by that delegate).
 * :func:`project_claim` — admission on the organization's side: the profile
   the joiner signed into their claim (name, biography, initials; never a
   photo, the ledger is not a blob store) becomes their row.
-* :func:`write_self` — the joiner's own machine at install: their Personal
-  profile, photo included, becomes their row. The rows the sponsor served
-  for OTHER members are not written here: they are the machine-local
-  install seed (tools/dashboard/org_install_seed), never this member's
-  authored write.
+The rows the sponsor served for OTHER members at a join install are not
+written by this module: they are the machine-local install seed
+(tools/dashboard/org_install_seed), never this member's authored write.
 
 Rows are org-homed and replicate with the organization. The photo is the
 ``avatar`` field: the id of the canonical 512x512 WebP as an attachment IN
@@ -146,16 +145,25 @@ def write_row(slug: str, persona_pub: str, presentation: dict) -> None:
     )
 
 
-def write_founder(slug: str, persona_pub: str) -> bool:
+def write_own(slug: str, persona_pub: str) -> bool:
+    """This machine's operator's own row in org *slug*, from their Personal
+    profile, written once their storage delegate for the organization is
+    held (org_storage_delegate.accept): a row written earlier, at founding
+    or at the join install, carried no signature and was refused by every
+    other member's store (settings_unsigned). Every sign-on accepts a new
+    grant, so an existing row is left alone: a presentation chosen for this
+    organization is never overwritten by the Personal one."""
+    try:
+        existing = settings_ops.read_set_key(MEMBER_PROFILE_SET_ID, persona_pub, org=slug)
+    except Exception:
+        existing = None
+    if existing is not None:
+        return False
     presentation = presentation_from_personal_profile(slug)
     if presentation is None:
         return False
     write_row(slug, persona_pub, presentation)
     return True
-
-
-def write_self(slug: str, persona_pub: str) -> bool:
-    return write_founder(slug, persona_pub)
 
 
 def project_claim(slug: str, persona_pub: str, profile: Any) -> bool:

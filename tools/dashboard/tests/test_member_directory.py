@@ -1,5 +1,5 @@
-"""member_directory: the org member directory's three writers and the
-joiner-side import (punch list item 31)."""
+"""member_directory: the org member directory's writers and the joiner-side
+import (punch list item 31)."""
 from types import SimpleNamespace
 
 from tools.dashboard import member_directory as md
@@ -18,15 +18,16 @@ def _capture(monkeypatch):
     return writes
 
 
-def test_founder_row_is_the_personal_profile_snapshot(monkeypatch):
+def test_own_row_is_the_personal_profile_snapshot(monkeypatch):
     writes = _capture(monkeypatch)
+    monkeypatch.setattr(md.settings_ops, "read_set_key", lambda *a, **k: None)
     monkeypatch.setattr("tools.dashboard.personal_profile.get_effective_profile",
                         lambda: {"display_name": " Alice ", "biography": "Founder",
                                  "avatar_attachment_id": PERSONAL_ATT})
     copies = []
     monkeypatch.setattr(md, "org_avatar_attachment",
                         lambda slug, att: copies.append((slug, att)) or ORG_ATT)
-    assert md.write_founder("org", "a" * 64) is True
+    assert md.write_own("org", "a" * 64) is True
     # The photo is copied into the ORG's attachment store; the row names
     # that copy, never the personal attachment and never an inline icon.
     assert copies == [("org", PERSONAL_ATT)]
@@ -43,8 +44,9 @@ def test_avatar_ref_accepts_only_a_canonical_attachment_id():
 
 def test_no_personal_identity_writes_nothing(monkeypatch):
     writes = _capture(monkeypatch)
+    monkeypatch.setattr(md.settings_ops, "read_set_key", lambda *a, **k: None)
     monkeypatch.setattr("tools.dashboard.personal_profile.get_effective_profile", lambda: None)
-    assert md.write_founder("org", "a" * 64) is False
+    assert md.write_own("org", "a" * 64) is False
     assert writes == []
 
 

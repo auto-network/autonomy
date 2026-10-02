@@ -92,7 +92,7 @@ def test_replicated_directory_row_shadows_the_seed(stores, monkeypatch):
         member_directory, "presentation_from_personal_profile",
         lambda slug: {"display_name": "Bob", "byline": "", "avatar": ICON, "color": ""},
     )
-    assert member_directory.write_self(SLUG, bob) is True
+    assert member_directory.write_own(SLUG, bob) is True
     profiles = org_membership_routes._member_profiles(SLUG)
     assert profiles[alice]["display_name"] == "Alice (seed)"
     assert profiles[bob] == {"display_name": "Bob", "avatar": ICON, "color": None, "byline": None}

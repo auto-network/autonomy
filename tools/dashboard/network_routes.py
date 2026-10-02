@@ -575,14 +575,10 @@ async def post_ledger_found(request: Request) -> JSONResponse:
             events[3].payload["persona_pub"],
             source="found",
         )
-        # The founder's presentation in the organization they just founded:
-        # their Personal profile, snapshotted into the member directory so the
-        # invitation's "Invited by" tile and the member list name them.
-        try:
-            from tools.dashboard import member_directory
-            member_directory.write_founder(requested_org, events[3].payload["persona_pub"])
-        except Exception:
-            logger.exception("founder member-profile row not written; continuing")
+        # The founder's own member-profile row is written when their storage
+        # delegate is accepted (org_storage_delegate.accept), not here: this
+        # process holds no signer for the organization yet, and an unsigned
+        # row is refused by every other member's store.
     except Exception as exc:
         # The ledger is already durable and correct; failing the whole
         # founding here would leave a founded org the client believes failed.
@@ -1069,11 +1065,11 @@ async def post_join_outcome(request: Request) -> JSONResponse:
         org_ops._record_persona_setting(
             slug, genesis_id, persona_pub, source="join", invite_ref=invite_ref,
         )
-        # This person's own directory row, from their Personal profile: the
-        # one row of the install that is THEIRS to author into the org set.
-        from tools.dashboard import member_directory, org_install_seed
-        member_directory.write_self(slug, persona_pub)
-        # Everything else the sponsor served (directory rows, reachability
+        # This person's own directory row is written when their storage
+        # delegate is accepted at sign-on (org_storage_delegate.accept): the
+        # install holds no signer for the organization yet.
+        from tools.dashboard import org_install_seed
+        # Everything the sponsor served (directory rows, reachability
         # rows) is other members' facts. It is kept in the MACHINE store as
         # an install seed, read only where no replicated row exists yet:
         # written into the org sets it would replicate back to every member

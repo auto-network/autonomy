@@ -5,6 +5,7 @@ no private-key cache, and uses the existing organization ledger for authority.
 """
 from __future__ import annotations
 
+import logging
 import time
 
 from tools.graph import settings_ops
@@ -14,6 +15,8 @@ from tools.network.idkit import KeyPair
 from tools.network.ledger import Event, LedgerStore, org_ledger_db_path
 from tools.network.ledger.projections import organization_content_domain_id
 from tools.network.storagekit.delegate import storage_delegate_scopes
+
+logger = logging.getLogger(__name__)
 
 TTL_MS = 90 * 24 * 60 * 60 * 1000
 REMINT_BELOW_MS = 30 * 24 * 60 * 60 * 1000
@@ -280,3 +283,15 @@ def accept(item: dict) -> None:
         "public_key": key.public_hex, "key_reference": reference,
         "expires_at": event.hlc.ts + TTL_MS, "grant_event_id": event_id,
     }, org=None)
+    # This process now holds the organization's signer (signing_context
+    # resolves it from the index just written; a miss is never cached), so
+    # the member's own directory row is written here, signed, rather than at
+    # founding or at the join install where it was refused as unsigned.
+    from tools.dashboard import member_directory
+
+    try:
+        member_directory.write_own(org, event.author_key)
+    except Exception:
+        # The delegate is accepted either way; the row is retried at the
+        # next sign-on, which accepts a new grant.
+        logger.exception("member-profile row not written after delegate acceptance for %r", org)
