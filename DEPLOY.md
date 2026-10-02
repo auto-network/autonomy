@@ -307,6 +307,99 @@ bash install-published.sh --lock <image-lock.env URL or path> --install-docker -
 The signed digest is also what the product workflow simulation builds from;
 see `deploy/harness/README.md`.
 
+#### Upgrading a node to a new release
+
+Rerun the installer with the newer release's lock and the same `--dir`:
+
+```bash
+bash install-published.sh --lock <newer image-lock.env> --dir ~/autonomy --yes
+```
+
+The node keeps its data, identity and settings. What the rerun does:
+
+1. Verifies and pulls the release exactly as a first install does.
+2. Moves the code. The node runs its code from the `autonomy-code` volume, not
+   from the image: Docker seeds that volume from the image only while it is
+   empty, so a new image alone would run the old code. Before any container
+   is recreated, a one-shot container of the new node image (as uid 1000,
+   the volume's owner) fetches the commit named in the image's `/app/VERSION`
+   into the volume's repository and moves it there with `git reset --keep`.
+   The installer refuses, with one line, and changes nothing when the volume
+   has uncommitted changes, or when its HEAD is not an ancestor of the release
+   commit: a downgrade, or local commits a developer node carries.
+   `--allow-downgrade` overrides the ancestry check only; uncommitted changes
+   are always refused.
+3. Replaces `docker-compose.yml` with the one in the new node image and
+   leaves `docker-compose.override.yml` alone.
+4. Merges `.env`: `AUTONOMY_IMAGE` and `AUTONOMY_SERVICE_GATEWAY_IMAGE` are
+   set from the lock; every other value is kept. `DASHBOARD_PORT` and
+   `AUTONOMY_HOST_HOME` change only when `--port` or `--host-home` is passed
+   again, `DASHBOARD_HTTP_PORT` only with `--http-port`, and `AUTONOMY_SUBNET`
+   is chosen only when the key is missing.
+5. Runs `docker compose up -d --no-build` and waits for `/api/ping`.
+6. Records the release in the data volume once the dashboard answers:
+   `release/installed.env` is the installed lock plus `AUTONOMY_INSTALLED_AT`,
+   and the record it replaces moves to `release/history/`. A first install
+   writes the same record.
+
+Afterwards the code volume's HEAD is the commit in the release image:
+
+```bash
+docker run --rm --entrypoint cat <node image@sha256:...> /app/VERSION
+docker compose exec -u autonomy dashboard git -C /app rev-parse HEAD
+docker compose exec -u autonomy dashboard cat /app/data/release/installed.env
+```
+
+A node that follows `origin/master` through the dashboard's software update
+will usually be ahead of the newest release, so the ancestry check refuses it
+as a downgrade. Stay on the update channel the node already uses, or pass
+`--allow-downgrade` once on purpose.
+
+##### Converting a node built from a checkout
+
+A node started with `docker compose up` from a checkout (SJC-2's
+`~/autonomy-shipped`, for example) has its Compose project directory in that
+checkout. Its containers and volumes still belong to the Compose project
+`autonomy` (`name: autonomy` in `docker-compose.yml`) and its volumes have
+pinned names (`autonomy-code`, `autonomy-data`, ...), so an installer
+directory takes over the same containers and volumes. The data is not copied
+and nothing is rebuilt.
+
+1. Create the new directory and carry over the node's own values from the old
+   `.env`. Copy at least `DASHBOARD_PORT`, `DASHBOARD_HTTP_PORT`,
+   `AUTONOMY_SUBNET` and `AUTONOMY_HOST_HOME` (otherwise the installer chooses
+   new ones: a new subnet recreates the project network), plus anything else
+   the node sets: `TZ`, data-root and bind-path settings, credentials. Do not
+   carry `AUTONOMY_IMAGE`; the installer sets it.
+
+   ```bash
+   mkdir -p ~/autonomy
+   grep -v '^AUTONOMY_IMAGE=' ~/autonomy-shipped/.env >~/autonomy/.env
+   ```
+
+2. Copy `docker-compose.override.yml` if the checkout has one. The installer
+   runs a plain `docker compose up`, so a node started with extra `-f` files,
+   such as `deploy/docker-compose.host-data.yml` for host-directory volumes,
+   needs those files copied into the new directory and named in `.env`, for
+   example `COMPOSE_FILE=docker-compose.yml:docker-compose.host-data.yml`
+   (with `COMPOSE_FILE` set, Compose no longer loads
+   `docker-compose.override.yml` by itself: list it there too), together
+   with the variables they read, such as `AUTONOMY_HOST_DATA_ROOT`.
+   Check the result with `docker compose config` in the new directory
+   before running the installer.
+3. Commit or discard any uncommitted change in the code volume
+   (`docker compose exec -u autonomy dashboard git -C /app status`). A node
+   whose code predates the 2026-10-01 history rewrite
+   (`deploy/PUBLIC-REPO-CLEANSE.md`) has a HEAD from the old history, which
+   is never an ancestor of a release commit: reset it to the rewritten
+   history first, as that runbook says, or pass `--allow-downgrade` for this
+   one run after checking that the volume holds nothing you need.
+4. Run the installer with `--dir ~/autonomy`. From then on, upgrade from that
+   directory only. Running `docker compose` from the old checkout would
+   recreate the same containers from its own compose file and image
+   reference; retire it (rename the directory, or delete it once the new
+   one has run).
+
 This presentation path refuses source builds and verifies the exact digest
 before starting any container. It opens the HTTPS dashboards, real relay note,
 graph, and Design Studio surfaces between narratable pauses, and produces a
