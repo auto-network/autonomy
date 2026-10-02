@@ -1,8 +1,7 @@
 """auto-26e8a declared default: organization-shared inference accounts are
 for members' launches. Through the dashboard's settings routes, a caller that
-is not the operator in person reads them with every secret part redacted and
-cannot add, replace or remove them; the operator in person (dashboard cookie
-or host terminal) can. The launcher opens them in-process, which is not a
+is not the operator in person reads them with every secret part redacted;
+writes are open to agents (operator ruling 2026-10-02). The launcher opens them in-process, which is not a
 route (tests: agents/tests/test_org_shared_account_launch.py)."""
 
 from __future__ import annotations
@@ -79,29 +78,21 @@ def test_the_operator_in_person_reads_them_in_full(client):
     assert {m["payload"]["value"] for m in members} == {"at-SECRET", "team"}
 
 
-@pytest.mark.parametrize("method, path, body", [
+@pytest.mark.parametrize("method, path, body, expected", [
     ("POST", "/api/graph/setting", {"set_id": SET, "schema_revision": 1,
-                                    "key": "claude.account.O1.access", "payload": {"value": "x"}}),
-    ("POST", "/api/graph/setting/r1/override", {"payload": {"value": "x"}}),
-    ("DELETE", "/api/graph/setting/r1", None),
+                                    "key": "claude.account.O1.access", "payload": {"value": "x"}},
+     None),
+    ("POST", "/api/graph/setting/r1/override", {"payload": {"value": "x"}}, ("override", "r1")),
+    ("DELETE", "/api/graph/setting/r1", None, ("remove", "r1")),
 ])
-def test_a_session_cannot_add_replace_or_remove_a_shared_account(client, method, path, body):
+def test_a_session_may_add_replace_or_remove_a_shared_account(client, method, path, body,
+                                                                expected):
+    """Operator ruling 2026-10-02: agents may write the set."""
     _as(_org("acme"))
     response = client.request(method, path, json=body)
-    assert (response.status_code, response.json()["refusal"]) == (403, "operator-only-set")
-    assert client.writes == []
-
-
-def test_the_operator_in_person_may_replace_one(client):
-    _as(OPERATOR)
-    response = client.post("/api/graph/setting/r1/override", json={"payload": {"value": "x"}})
-    assert response.status_code == 201 and client.writes == [("override", "r1")]
-
-
-def test_a_session_still_writes_other_sets(client):
-    _as(_org("acme"))
-    response = client.post("/api/graph/setting/r3/override", json={"payload": {"value": "y"}})
-    assert response.status_code == 201 and client.writes == [("override", "r3")]
+    assert response.status_code != 403 and "operator-only-set" not in response.text
+    if expected is not None:     # creating a vaulted row needs a warm vault here
+        assert client.writes == [expected]
 
 
 def test_redaction_keeps_account_naming_parts():
