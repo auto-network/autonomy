@@ -211,6 +211,19 @@ def _render_schema_block(name: str, payload: dict[str, Any]) -> str:
         )
     header = "/**\n" + "\n".join(header_lines) + "\n */"
 
+    union = payload.get("union") or {}
+    if union.get("shapes"):
+        # A payload union (registry.payload_union): one interface per shape,
+        # each carrying its own discriminator literal, and the union type.
+        pieces = [header]
+        members: list[str] = []
+        for value, shape_payload in union["shapes"].items():
+            shape_name = f"{name}{_pascal(str(value).replace('-', '_'))}"
+            pieces.append(_render_interface(shape_name, shape_payload))
+            members.append(shape_name)
+        pieces.append(f"export type {name} =\n  | " + "\n  | ".join(members) + ";")
+        return "\n\n".join(pieces)
+
     variants = payload.get("variants") or {}
     if not variants:
         return f"{header}\n{_render_interface(name, payload)}"

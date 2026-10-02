@@ -70,7 +70,7 @@ import re
 import sys
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, get_origin
+from typing import Any, Callable, Literal, get_args, get_origin
 from uuid import uuid4
 
 
@@ -1041,6 +1041,93 @@ def declared_vault_tier(set_id: str) -> str | None:
     return seen.pop()
 
 
+def payload_union(*, discriminator: str, shapes: tuple[type, ...]) -> Any:
+    """Schema decorator: a set whose payload is ONE of several typed shapes,
+    told apart by the value of *discriminator*.
+
+    Each shape is a field-declaring ``SettingSchema`` subclass with no
+    ``set_id`` of its own (so it never registers as a set) that declares
+    *discriminator* as ``Literal["<value>"]``. A payload is enforced against
+    the shape its discriminator names; an unknown or missing value is
+    refused. The set class itself declares no fields: every field lives on
+    a shape.
+
+    This is not ``variants``, which are revisions and subclass trees of one
+    schema: a union is several payload shapes inside one revision, and it
+    exports under its own ``union`` key. A malformed declaration fails at
+    import.
+    """
+    if not isinstance(discriminator, str) or not discriminator:
+        raise TypeError("payload_union: discriminator must be a non-empty field name")
+    if not shapes:
+        raise TypeError("payload_union: declare at least one shape")
+
+    def _wrap(target: type) -> type:
+        own = target.__dict__.get("_field_metadata") or {}
+        if own:
+            raise TypeError(
+                f"{target.__name__}: a payload_union set declares no fields of "
+                f"its own; put {sorted(own)} on its shapes"
+            )
+        by_value: dict[str, type] = {}
+        for shape in shapes:
+            if not (isinstance(shape, type) and issubclass(shape, SettingSchema)):
+                raise TypeError(f"{target.__name__}: shape {shape!r} is not a SettingSchema")
+            if shape.__dict__.get("set_id") or getattr(shape, "set_id", None):
+                raise TypeError(
+                    f"{target.__name__}: shape {shape.__name__} declares a set_id; "
+                    f"a shape is a payload, never a set"
+                )
+            meta = getattr(shape, "_field_metadata", None) or {}
+            if discriminator not in meta:
+                raise TypeError(
+                    f"{target.__name__}: shape {shape.__name__} does not declare "
+                    f"the discriminator {discriminator!r} with field()"
+                )
+            try:
+                from typing import get_type_hints
+                ann = get_type_hints(shape).get(discriminator)
+            except Exception:
+                ann = None
+            args = get_args(ann) if get_origin(ann) is Literal else ()
+            if len(args) != 1 or not isinstance(args[0], str) or not args[0]:
+                raise TypeError(
+                    f"{target.__name__}: shape {shape.__name__} must declare "
+                    f"{discriminator!r} as Literal[\"<value>\"], got {ann!r}"
+                )
+            value = args[0]
+            if value in by_value:
+                raise TypeError(
+                    f"{target.__name__}: shapes {by_value[value].__name__} and "
+                    f"{shape.__name__} both claim {discriminator}={value!r}"
+                )
+            by_value[value] = shape
+            spec = dict(meta[discriminator])
+            spec["enum"] = [value]
+            spec["required"] = True
+            shape._field_metadata = {**meta, discriminator: spec}
+        target._union_discriminator = discriminator
+        target._union_shapes = by_value
+        return target
+
+    return _wrap
+
+
+def declared_union(set_id: str) -> tuple[str, dict[str, type]] | None:
+    """``(discriminator, {value: shape})`` of ``set_id``'s newest registered
+    revision, or None when it is not a payload union."""
+    prefix = f"{set_id}#"
+    newest = max(
+        (cls for key, cls in SCHEMAS.items() if key.startswith(prefix)),
+        key=lambda cls: int(getattr(cls, "schema_revision", 0) or 0),
+        default=None,
+    )
+    shapes = getattr(newest, "_union_shapes", None) if newest is not None else None
+    if not shapes:
+        return None
+    return newest._union_discriminator, dict(shapes)
+
+
 VALID_SIGNER_TIERS = ("persona", "delegate")
 
 
@@ -1717,6 +1804,13 @@ class SettingSchema:
         indexed = getattr(cls, "_indexed_payload_fields", ()) or ()
         if indexed:
             payload["indexed_payload"] = list(indexed)
+        union = getattr(cls, "_union_shapes", None)
+        if union:
+            payload["union"] = {
+                "discriminator": cls._union_discriminator,
+                "shapes": {value: shape._export_payload()
+                           for value, shape in union.items()},
+            }
         return payload
 
     @classmethod
@@ -2015,6 +2109,26 @@ def enforce_declared_fields(schema: type, payload: Any) -> None:
     contract stays as permissive as it is today rather than rejecting
     everything.
     """
+    union = getattr(schema, "_union_shapes", None)
+    if union:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{schema.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        discriminator = schema._union_discriminator
+        tag = payload.get(discriminator)
+        shape = union.get(tag) if isinstance(tag, str) else None
+        if shape is None:
+            raise SchemaValidationError(
+                f"{schema.__name__}: {discriminator!r} must be one of "
+                f"{sorted(union)}, got {tag!r}"
+            )
+        try:
+            enforce_declared_fields(shape, payload)
+        except SchemaValidationError as exc:
+            raise SchemaValidationError(f"{schema.__name__}: {exc}") from None
+        return
     meta = getattr(schema, "_field_metadata", None) or {}
     if not meta:
         return
