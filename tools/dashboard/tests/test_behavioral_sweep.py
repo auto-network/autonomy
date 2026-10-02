@@ -10703,6 +10703,8 @@ SEARCH_DROPDOWN_POSITIONING_CHECKS = """(async () => {
   var orgDD = await dropdownRect('sp-org-dropdown');
   r.org_chip_left = orgChip ? orgChip.left : null;
   r.org_dd_left = orgDD ? orgDD.left : null;
+  r.org_chip_bottom = orgChip ? orgChip.bottom : null;
+  r.org_dd_top = orgDD ? orgDD.top : null;
   if (orgChip && orgDD) {
     // The shared picker uses a viewport-clamped body popup: it must overlap
     // its own trigger horizontally and sit directly below it, not another chip.
@@ -10782,7 +10784,9 @@ class TestSearchDropdownPositioning:
         assert c.get("org_dd_anchored"), (
             f"Org dropdown not anchored under its chip: "
             f"chip.left={c.get('org_chip_left')!r} "
-            f"dd.left={c.get('org_dd_left')!r}"
+            f"dd.left={c.get('org_dd_left')!r} "
+            f"chip.bottom={c.get('org_chip_bottom')!r} "
+            f"dd.top={c.get('org_dd_top')!r}"
         )
 
 

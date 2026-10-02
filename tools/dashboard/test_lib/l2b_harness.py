@@ -72,6 +72,13 @@ def start_mock_server(
     nonce = uuid.uuid4().hex
     fixture_data = {**fixture_data, "__harness_nonce__": nonce}
 
+    # static/tailwind.css is built and gitignored; without it every browser
+    # test sees an unstyled page in a fresh checkout. dashboard-mock start
+    # builds it; this launches uvicorn directly, so build it here too.
+    from tools.dashboard.mock_server import _ensure_tailwind_css
+
+    _ensure_tailwind_css()
+
     fixture_path = tmp_path / "fixtures.json"
     fixture_path.write_text(json.dumps(fixture_data, indent=2))
 
