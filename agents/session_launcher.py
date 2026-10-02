@@ -765,6 +765,7 @@ def _resolve_credentials_via_substrate(
     rng: random.Random | None = None,
     empty_vault_expected: bool = False,
     account_id: str | None = None,
+    account_org: str | None = None,
 ) -> dict | None:
     """The account picker over the operator's vault (record v16 §10.9).
 
@@ -782,7 +783,19 @@ def _resolve_credentials_via_substrate(
     is a refusal with the remedy logged; nothing interactive runs here.
     """
     rng = rng or random
-    accounts = _claude_accounts()
+    if account_org is not None:
+        # An organization-shared account (auto-26e8a): chosen explicitly only,
+        # from that organization's set; the auto-pick stays personal.
+        from tools.graph import harness_credentials as hv
+        accounts = [a for a in hv.list_accounts("claude", org=account_org) if a.launchable]
+        if not account_id:
+            return None
+    else:
+        accounts = _claude_accounts()
+    if not accounts and account_org is not None:
+        logger.error("session_launcher: organization %s has no launchable Claude "
+                     "account %s", account_org, account_id)
+        return None
     if not accounts:
         from tools.graph import harness_credentials as hv
         if any(not a.openable for a in hv.list_accounts("claude")):
@@ -813,7 +826,10 @@ def _resolve_credentials_via_substrate(
     if chosen is None:
         return None
     out: dict = {"harness_token": chosen.id}
+    selection["source"] = account_org or "personal"
     out["selection"] = selection
+    if account_org is not None:
+        out["account_org"] = account_org
     alias = chosen.get("alias")
     if alias:
         out["alias"] = alias
@@ -1147,7 +1163,7 @@ def _own_selection(selection: dict) -> dict:
     account, how it was chosen, its reading, and only the COUNTS of the other
     accounts considered and excluded."""
     own = {k: v for k, v in selection.items()
-           if k in ("harness", "account_id", "alias", "method", "reading", "at")}
+           if k in ("harness", "account_id", "alias", "method", "reading", "at", "source")}
     own["candidates_count"] = selection.get("candidates_count",
                                             len(selection.get("candidates") or ()))
     own["excluded_count"] = len(selection.get("excluded") or ())
@@ -1162,11 +1178,11 @@ def _pick_selection(harness: str, acct: Any, candidates: int) -> dict:
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
 
 
-def _claude_bundle_doc(account_id: str) -> bytes | None:
+def _claude_bundle_doc(account_id: str, org: str | None = None) -> bytes | None:
     """``~/.claude/.credentials.json`` for the chosen account from its vault
-    rows, opened at launch while the operator is unlocked."""
+    rows (an organization's shared set with *org*), opened at launch."""
     from tools.graph import harness_credentials as hv
-    acct = hv.read_account("claude", account_id)
+    acct = hv.read_account("claude", account_id, org=org)
     if acct is None or not acct.has(*hv.CLAUDE_BUNDLE):
         logger.warning(
             "session_launcher: the Claude account %s has no openable OAuth "
@@ -1209,7 +1225,8 @@ def _codex_auth_doc(acct) -> bytes:
 def _signin_payloads(claude_account: str | None,
                      accounts_out: dict | None = None,
                      *, harness: str | None = None,
-                     picked: dict | None = None) -> dict[str, bytes] | None:
+                     picked: dict | None = None,
+                     claude_org: str | None = None) -> dict[str, bytes] | None:
     """Every sign-in this launch delivers, ``{filename: content}``.
 
     Only the sign-in of the session's own *harness* (auto-9hu6y, default
@@ -1247,11 +1264,13 @@ def _signin_payloads(claude_account: str | None,
             if accounts_out is not None:
                 accounts_out[CODEX_AUTH_FILENAME] = codex.id
     if claude_account:
-        bundle = _claude_bundle_doc(claude_account)
+        bundle = _claude_bundle_doc(claude_account, claude_org)
         if bundle is None:
             return None
         payloads[CLAUDE_BUNDLE_FILENAME] = bundle
-        if accounts_out is not None:
+        # A re-delivery reopens by account id from the PERSONAL vault, so an
+        # organization account is not recorded for it.
+        if accounts_out is not None and claude_org is None:
             accounts_out[CLAUDE_BUNDLE_FILENAME] = claude_account
     grok = ((picked["grok"] if picked and "grok" in picked else _pick_account("grok"))
             if wants("grok") else None)
@@ -2128,6 +2147,7 @@ def launch_session(
     vault_links: tuple = (),
     selection_out: dict | None = None,
     account_id: str | None = None,
+    account_org: str | None = None,
 ) -> str | None:
     """Launch an agent container session.
 
@@ -2202,6 +2222,10 @@ def launch_session(
                     missing.
         claude_alias: Prefer this Claude account (by alias) when resolving
                     credentials; the usual pick otherwise.
+        account_org: With *account_id*, the account is that organization's
+                    shared account, opened from this machine's replica of the
+                    organization vault -- also on a carried launch, where it
+                    is the one secret the runner provides (D10).
         account_id: Launch on exactly this account of the session's harness
                     (the launch chooser's choice). Strict: an account that is
                     not a launchable one in this vault refuses the launch.
@@ -2311,10 +2335,13 @@ def launch_session(
     # must hard-fail on missing Claude credentials.
     auth_args: list[str] = []
     creds: dict | None = None
-    if harness == "claude" and carried is None:
+    # An organization-shared account is opened here even on a carried launch:
+    # it is the organization's, not this machine owner's (D10).
+    org_account = bool(account_id and account_org)
+    if harness == "claude" and (carried is None or org_account):
         if account_id:
-            creds = _resolve_credentials_via_substrate(prefer_alias=None,
-                                                       account_id=account_id)
+            creds = _resolve_credentials_via_substrate(
+                prefer_alias=None, account_id=account_id, account_org=account_org)
         else:
             creds = (_resolve_credentials(prefer_alias=claude_alias) if claude_alias
                      else _resolve_credentials())
@@ -2331,12 +2358,17 @@ def launch_session(
     # sign-in, so the record names the account the session actually holds.
     picked: dict[str, Any] = {}
     selection: dict | None = None
-    if carried is not None:
+    if carried is not None and not org_account:
         selection = {"method": "carried"}
     elif harness == "claude" and creds is not None:
         selection = creds.get("selection") or {"method": "environment"}
     elif harness in ("codex", "grok"):
-        _launchable = [a for a in _accounts(harness) if a.launchable]
+        if account_org:
+            from tools.graph import harness_credentials as _hv
+            _launchable = [a for a in _hv.list_accounts(harness, org=account_org)
+                           if a.launchable]
+        else:
+            _launchable = [a for a in _accounts(harness) if a.launchable]
         if account_id:
             _acct = next((a for a in _launchable if a.id == account_id), None)
             if _acct is None:
@@ -2349,6 +2381,7 @@ def launch_session(
         if _acct is not None:
             picked[harness] = _acct
             selection = _pick_selection(harness, _acct, len(_launchable))
+            selection["source"] = account_org or "personal"
             if account_id:
                 selection["method"] = "explicit"
     if selection is not None and selection_out is not None:
@@ -2428,7 +2461,7 @@ def launch_session(
         _generate_grok_config(run_dir, grok_profile)
 
     # ── Auth args (may copy creds file into run_dir) ───────────
-    if creds is not None:
+    if creds is not None and carried is None:
         auth_args = _setup_auth_docker_args(creds, run_dir)
         if auth_args is None:
             print(
@@ -2512,11 +2545,25 @@ def launch_session(
         # No account ids: a re-delivery would reopen THIS machine's vault.
         signins = dict(carried.signins)
         carried_env = dict(carried.env)
+        if org_account:
+            # The organization's shared account, from this machine's replica
+            # of the organization vault; delivered like every carried value.
+            org_signins = _signin_payloads(
+                creds.get("harness_token")
+                if creds is not None and creds.get("type") == "vault" else None,
+                harness=harness, picked=picked, claude_org=account_org)
+            if org_signins is None:
+                signins = None
+            else:
+                signins.update(org_signins)
+                if creds is not None and creds.get("type") == "token":
+                    carried_env["CLAUDE_CODE_OAUTH_TOKEN"] = creds["token"]
     else:
         signins = _signin_payloads(
             creds.get("harness_token")
             if creds is not None and creds.get("type") == "vault" else None,
-            accounts_out=signin_accounts, harness=harness, picked=picked)
+            accounts_out=signin_accounts, harness=harness, picked=picked,
+            claude_org=account_org)
     if signins is None:
         print(
             f"  ERROR: refusing to launch session '{name}': a sign-in "

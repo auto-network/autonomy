@@ -46,6 +46,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
 from tools.graph.schemas.vault_credential import (
+    ORG_HARNESS_ACCOUNTS_SET_ID,
     VAULT_AUDITED_SET_ID,
     VAULT_CREDENTIAL_REVISION,
 )
@@ -70,6 +71,8 @@ def dispatch_token_path() -> str:
     return os.path.join(root, *DISPATCH_TOKEN_RELEASE)
 
 HARNESSES = ("claude", "codex", "grok")
+#: The source of an account in the operator's own vault.
+PERSONAL = "personal"
 
 CLAUDE_PARTS = (
     "setup", "setup_minted_at", "access", "refresh", "expires", "scopes",
@@ -114,6 +117,9 @@ class Account:
     #: (the vault is cold); ``parts`` then holds only what did open.
     openable: bool = True
     row_ids: dict[str, str] = field(default_factory=dict)
+    #: "personal" (the operator's audited vault) or the slug of the
+    #: organization whose shared set holds it (auto-26e8a).
+    source: str = PERSONAL
 
     def get(self, part: str) -> str | None:
         v = self.parts.get(part)
@@ -171,13 +177,26 @@ def _bearer() -> str | None:
     return os.environ.get("CROSSTALK_TOKEN") or None
 
 
-def _read_via_dashboard(prefix: str) -> list[Any]:
+def _set_for(org: str | None) -> str:
+    """The personal audited set, or an organization's shared-account set."""
+    return VAULT_AUDITED_SET_ID if org is None else ORG_HARNESS_ACCOUNTS_SET_ID
+
+
+def _org_vault_open_here() -> bool:
+    """True when this process can open organization vault rows."""
+    from tools.graph import settings_ops
+    return getattr(settings_ops, "_vault_key_holder", None) is not None
+
+
+def _read_via_dashboard(prefix: str, org: str | None = None) -> list[Any]:
     """GET the audited set's rows under *prefix* from the dashboard, which
     opens only those rows."""
     from tools.graph.client import _dict_to_resolved_setting
 
     api = os.environ.get("GRAPH_API") or "https://localhost:8080"
     headers = {"Accept": "application/json"}
+    if org is not None:
+        headers["X-Graph-Org"] = org
     token = _bearer()
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -185,7 +204,7 @@ def _read_via_dashboard(prefix: str) -> list[Any]:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     req = urllib.request.Request(
-        f"{api}/api/graph/settings/{VAULT_AUDITED_SET_ID}?peers=&"
+        f"{api}/api/graph/settings/{_set_for(org)}?peers=&"
         + urllib.parse.urlencode({"key_prefix": prefix}), headers=headers,
     )
     with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
@@ -193,21 +212,23 @@ def _read_via_dashboard(prefix: str) -> list[Any]:
     return [_dict_to_resolved_setting(m) for m in body.get("members", [])]
 
 
-def _read_all(read_set: Callable[..., Any] | None = None, *, prefix: str) -> list[Any]:
+def _read_all(read_set: Callable[..., Any] | None = None, *, prefix: str,
+              org: str | None = None) -> list[Any]:
     """The audited set's rows under *prefix* (one harness's accounts). The
     prefix filters in the query, before the vault opens anything, so no other
     secret in the tier -- backup keys, relay tokens, another harness's
     accounts -- is decrypted to list these."""
     from tools.graph import ops as graph_ops
 
+    set_id = _set_for(org)
     if read_set is not None:
-        members = read_set(VAULT_AUDITED_SET_ID, org=None, peers=[], key_prefix=prefix)
+        members = read_set(set_id, org=org, peers=[], key_prefix=prefix)
         return list(getattr(members, "members", []) or [])
-    if _vault_open_here():
-        members = graph_ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[], key_prefix=prefix)
+    if (_org_vault_open_here() or not _in_container()) if org is not None else _vault_open_here():
+        members = graph_ops.read_set(set_id, org=org, peers=[], key_prefix=prefix)
         return list(getattr(members, "members", []) or [])
     try:
-        return _read_via_dashboard(prefix)
+        return _read_via_dashboard(prefix, org)
     except Exception as exc:
         if _in_container():
             logger.error(
@@ -220,37 +241,36 @@ def _read_all(read_set: Callable[..., Any] | None = None, *, prefix: str) -> lis
             "harness accounts: dashboard unreachable (%s); reading the local "
             "store cold — rows will report as not openable", exc,
         )
-        members = graph_ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[], key_prefix=prefix)
+        members = graph_ops.read_set(set_id, org=org, peers=[], key_prefix=prefix)
         return list(getattr(members, "members", []) or [])
 
 
-def _write(key: str, value: str, existing_id: str | None) -> str:
+def _write(key: str, value: str, existing_id: str | None, org: str | None = None) -> str:
     payload = {"value": value}
+    set_id = _set_for(org)
     if _in_container():
         from tools.graph.client import get_client
         client = get_client()
         if existing_id:
-            return client.override_setting(existing_id, payload, org=None, state="raw")
+            return client.override_setting(existing_id, payload, org=org, state="raw")
         return client.add_setting(
-            VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION, key, payload,
-            org=None, state="raw",
+            set_id, VAULT_CREDENTIAL_REVISION, key, payload, org=org, state="raw",
         )
     from tools.graph import ops as graph_ops
     if existing_id:
-        return graph_ops.override_setting(existing_id, payload, org=None, state="raw")
+        return graph_ops.override_setting(existing_id, payload, org=org, state="raw")
     return graph_ops.add_setting(
-        VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION, key, payload,
-        org=None, state="raw",
+        set_id, VAULT_CREDENTIAL_REVISION, key, payload, org=org, state="raw",
     )
 
 
-def _remove(row_id: str) -> None:
+def _remove(row_id: str, org: str | None = None) -> None:
     if _in_container():
         from tools.graph.client import get_client
-        get_client().remove_setting(row_id, org=None)
+        get_client().remove_setting(row_id, org=org)
         return
     from tools.graph import ops as graph_ops
-    graph_ops.remove_setting(row_id, org=None)
+    graph_ops.remove_setting(row_id, org=org)
 
 
 # ── reading ──────────────────────────────────────────────────
@@ -266,12 +286,14 @@ def _value(row: Any) -> str | None:
 
 def list_accounts(
     harness: str, *, read_set: Callable[..., Any] | None = None,
+    org: str | None = None,
 ) -> list[Account]:
-    """Every account of *harness* in the vault, sorted by id."""
+    """Every account of *harness* in the operator's vault, or with *org* in
+    that organization's shared set (auto-26e8a), sorted by id."""
     prefix = _prefix(harness)
     by_id: dict[str, Account] = {}
     try:
-        rows = _read_all(read_set, prefix=prefix)
+        rows = _read_all(read_set, prefix=prefix, org=org)
     except Exception:
         return []
     for row in rows:
@@ -282,7 +304,8 @@ def list_accounts(
         account_id, sep, part = rest.rpartition(".")
         if not sep or part not in PARTS[harness]:
             continue
-        acct = by_id.setdefault(account_id, Account(harness, account_id))
+        acct = by_id.setdefault(account_id, Account(harness, account_id,
+                                                    source=org or PERSONAL))
         row_id = getattr(row, "id", None)
         if isinstance(row_id, str):
             acct.row_ids[part] = row_id
@@ -297,11 +320,33 @@ def list_accounts(
 
 def read_account(
     harness: str, account_id: str, *, read_set: Callable[..., Any] | None = None,
+    org: str | None = None,
 ) -> Account | None:
-    for acct in list_accounts(harness, read_set=read_set):
+    for acct in list_accounts(harness, read_set=read_set, org=org):
         if acct.id == account_id:
             return acct
     return None
+
+
+def organization_slugs() -> list[str]:
+    """The organizations whose shared accounts this machine can list: every
+    organization store it holds."""
+    from tools.graph import org_ops
+    try:
+        return [ref.slug for ref in org_ops.list_orgs()
+                if ref.slug not in (PERSONAL, "machine")]
+    except Exception:
+        return []
+
+
+def all_accounts(harness: str, *, orgs: Iterable[str] | None = None) -> list[Account]:
+    """Personal accounts, then each organization's shared accounts (every
+    organization store this machine holds unless *orgs* names them), each
+    marked by ``source``."""
+    out = list_accounts(harness)
+    for slug in (organization_slugs() if orgs is None else orgs):
+        out.extend(list_accounts(harness, org=slug))
+    return out
 
 
 def find_account(harness: str, *, alias: str) -> Account | None:
@@ -314,34 +359,36 @@ def find_account(harness: str, *, alias: str) -> Account | None:
 # ── writing ──────────────────────────────────────────────────
 
 
-def write_account(harness: str, account_id: str, parts: dict[str, str | None]) -> Account:
+def write_account(harness: str, account_id: str, parts: dict[str, str | None],
+                  *, org: str | None = None) -> Account:
     """Seal *parts* into the account's rows; a ``None`` clears the part.
 
     A vault row is an encrypted object revision and is never rewritten: the
     first value of a part is added, a change appends a revision over the
     existing row, and resolution takes the newest.
     """
-    existing = read_account(harness, account_id) or Account(harness, account_id)
+    existing = (read_account(harness, account_id, org=org)
+                or Account(harness, account_id, source=org or PERSONAL))
     for part, value in parts.items():
         key = account_key(harness, account_id, part)
         text = NONE if value is None else str(value)
         if not text:
             text = NONE
         row_id = existing.row_ids.get(part)
-        new_id = _write(key, text, row_id)
+        new_id = _write(key, text, row_id, org)
         existing.row_ids[part] = row_id or new_id
         existing.parts[part] = text
     return existing
 
 
-def remove_account(harness: str, account_id: str) -> int:
+def remove_account(harness: str, account_id: str, *, org: str | None = None) -> int:
     """Remove every row of the account; returns how many rows went."""
-    acct = read_account(harness, account_id)
+    acct = read_account(harness, account_id, org=org)
     if acct is None:
         return 0
     count = 0
     for row_id in acct.row_ids.values():
-        _remove(row_id)
+        _remove(row_id, org)
         count += 1
     return count
 

@@ -8,8 +8,10 @@ whether the launcher's own picker would choose it. No secret part is ever
 read into a row. ``check_account`` is the strict check a launch naming an
 account runs before anything starts.
 
-Personal accounts only for now: organization-shared accounts are auto-26e8a
-and their usage auto-elxua.
+Organization-shared accounts (auto-26e8a) are listed beside the personal
+ones with their organization as ``source``; their usage readings are
+auto-elxua. Only a personal account is ever ``recommended``: the auto-pick
+never spends an organization's shared account.
 """
 
 from __future__ import annotations
@@ -76,24 +78,24 @@ def account_rows(harness: str) -> list[dict]:
     from agents import session_launcher as sl
     from tools.graph import harness_credentials as hv
 
-    accounts = hv.list_accounts(harness)
+    accounts = hv.all_accounts(harness)
     readings = _readings(harness)
     now = datetime.now(timezone.utc)
-    launchable = [a for a in accounts if a.launchable]
+    launchable = [a for a in accounts if a.launchable and a.source == hv.PERSONAL]
     recommended = _recommended(harness, launchable)
     rows = []
     for acct in accounts:
-        reading = readings.get(acct.id)
+        reading = readings.get(acct.id) if acct.source == hv.PERSONAL else None
         rows.append({
             "account_id": acct.id,
             "harness": harness,
             **{part: acct.get(part) for part in PUBLIC_PARTS},
             "plan_type": (reading or {}).get("plan_type"),
-            "source": "personal",
+            "source": acct.source,
             "launchable": acct.launchable,
             "openable": acct.openable,
             "exhausted": bool(reading) and sl._usage_exhausted(reading, now=now),
-            "recommended": acct.id == recommended,
+            "recommended": acct.source == hv.PERSONAL and acct.id == recommended,
             "usage": _usage_view(reading),
         })
     rows.sort(key=lambda r: (not r["recommended"], r["exhausted"], not r["launchable"],
@@ -101,14 +103,17 @@ def account_rows(harness: str) -> list[dict]:
     return rows
 
 
-def check_account(harness: str, account_id: str) -> tuple[str, str] | None:
-    """``None`` when *account_id* is a launchable *harness* account here;
-    else ``(refusal code, detail)``."""
+def check_account(harness: str, account_id: str,
+                  org: str | None = None) -> tuple[str, str] | None:
+    """``None`` when *account_id* is a launchable *harness* account here (in
+    organization *org*'s shared set when given); else ``(refusal code,
+    detail)``."""
     from tools.graph import harness_credentials as hv
 
-    acct = next((a for a in hv.list_accounts(harness) if a.id == account_id), None)
+    acct = next((a for a in hv.list_accounts(harness, org=org) if a.id == account_id), None)
     if acct is None:
-        return ACCOUNT_NOT_FOUND, f"no {harness} account {account_id} in this vault"
+        where = f"organization {org}'s shared accounts" if org else "this vault"
+        return ACCOUNT_NOT_FOUND, f"no {harness} account {account_id} in {where}"
     if not acct.launchable:
         return ACCOUNT_NOT_LAUNCHABLE, (
             f"the {harness} account {account_id} cannot launch "

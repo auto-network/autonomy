@@ -10009,6 +10009,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             harness=resolved_harness,
             model=job.config.get("model") or proj.model or None,
             account_id=job.config.get("account"),
+            account_org=job.config.get("account_org"),
             extra_env=extra_env,
             output_dir=str(run_dir),
             global_claude_md=primer_path,
@@ -10980,6 +10981,7 @@ async def _create_remote_session(request, body: dict):
         "model": body.get("model"),
         "harness": body.get("harness"),
         "account": body.get("account"),
+        "account_org": body.get("account_org"),
         "operation_id": operation_id or _secrets.token_hex(16),
     }
     reply = await session_control_client.request(
@@ -11013,7 +11015,8 @@ async def _create_remote_session(request, body: dict):
 
 
 def _member_launch_credentials(proj, harness: str, model: str | None,
-                               account: str | None = None) -> dict | str:
+                               account: str | None = None,
+                               account_org: str | None = None) -> dict | str:
     """Everything a launch of *proj* on another member's runner must carry,
     opened from THIS machine's vault and environment (auto-1qj12), as the
     request's ``credentials`` object; or a refusal detail naming what is
@@ -11057,27 +11060,32 @@ def _member_launch_credentials(proj, harness: str, model: str | None,
         else:
             logger.warning("org runner launch: env_from_host %r is not set here; "
                            "the session starts without it", name)
-    if account:
-        from tools.dashboard import harness_accounts
-
-        problem = harness_accounts.check_account(harness, account)
-        if problem is not None:
-            return problem[1]
-    if harness == "claude":
-        creds = sl._resolve_credentials_via_substrate(prefer_alias=None, account_id=account)
-        if creds is None:
-            return "no launchable Claude account in this machine's vault"
-        if creds.get("type") == "token":
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = creds["token"]
-        else:
-            payloads = sl._signin_payloads(creds["harness_token"], harness="claude")
-            if payloads is None:
-                return "the chosen Claude account could not be opened"
-            signins.update(payloads)
+    if account and account_org:
+        # An organization-shared account: the runner opens it from its own
+        # replica of the organization vault, so no sign-in travels (D10).
+        pass
     else:
-        picked = ({harness: next(a for a in sl._accounts(harness) if a.id == account)}
-                  if account else None)
-        signins.update(sl._signin_payloads(None, harness=harness, picked=picked) or {})
+        if account:
+            from tools.dashboard import harness_accounts
+
+            problem = harness_accounts.check_account(harness, account)
+            if problem is not None:
+                return problem[1]
+        if harness == "claude":
+            creds = sl._resolve_credentials_via_substrate(prefer_alias=None, account_id=account)
+            if creds is None:
+                return "no launchable Claude account in this machine's vault"
+            if creds.get("type") == "token":
+                env["CLAUDE_CODE_OAUTH_TOKEN"] = creds["token"]
+            else:
+                payloads = sl._signin_payloads(creds["harness_token"], harness="claude")
+                if payloads is None:
+                    return "the chosen Claude account could not be opened"
+                signins.update(payloads)
+        else:
+            picked = ({harness: next(a for a in sl._accounts(harness) if a.id == account)}
+                      if account else None)
+            signins.update(sl._signin_payloads(None, harness=harness, picked=picked) or {})
     return {"credentials": credentials, "env": env,
             "signins": {name: base64.b64encode(value).decode("ascii")
                         for name, value in signins.items()}}
@@ -11108,6 +11116,11 @@ async def _launch_on_org_runner(body: dict, runner: dict) -> JSONResponse:
         if len(primer_text.encode()) > MAX_CARRIED_PRIMER_BYTES:
             return JSONResponse({"error": "the primer is too large to carry",
                                  "refusal": "primer-too-large", "at": "local"}, status_code=413)
+    if body.get("account_org") and body["account_org"] != runner["org"]:
+        return JSONResponse({"error": "an organization's shared account runs only on that "
+                                      "organization's runners",
+                             "refusal": "account-not-launchable", "at": "local"},
+                            status_code=409)
     operation_id = body.get("operation_id")
     if operation_id is not None and not (
             isinstance(operation_id, str) and re.fullmatch(r"[0-9a-f]{32}", operation_id)):
@@ -11122,7 +11135,7 @@ async def _launch_on_org_runner(body: dict, runner: dict) -> JSONResponse:
     harness = body.get("harness") or proj.harness or "claude"
     carried = await asyncio.to_thread(
         _member_launch_credentials, proj, harness, body.get("model") or proj.model,
-        body.get("account"))
+        body.get("account"), body.get("account_org"))
     if isinstance(carried, str):
         return JSONResponse({"error": carried, "refusal": "credential-refused",
                              "at": "local"}, status_code=409)
@@ -11131,6 +11144,8 @@ async def _launch_on_org_runner(body: dict, runner: dict) -> JSONResponse:
               "operation_id": operation_id, "credentials": carried}
     if isinstance(body.get("model"), str) and body["model"]:
         launch["model"] = body["model"]
+    if body.get("account") and body.get("account_org"):
+        launch["account"], launch["account_org"] = body["account"], body["account_org"]
     if primer_text:
         launch["primer_text"] = primer_text
     payload = {"method": "POST", "path": "/api/session/create", "query": "",
@@ -11275,13 +11290,28 @@ async def _create_org_member_session(body: dict, caller) -> JSONResponse:
                     for link in getattr(proj, "vault_links", ()) or ()
                     if link.required and link.key not in carried.credentials]
         harness = body.get("harness") or proj.harness or "claude"
-        if harness == "claude" and CLAUDE_BUNDLE_FILENAME not in carried.signins \
+        account, account_org = body.get("account"), body.get("account_org")
+        if account or account_org:
+            # Only the caller's organization's shared account, opened from this
+            # runner's replica of that organization's vault (D10); never one
+            # of this machine owner's own accounts.
+            from tools.dashboard import harness_accounts
+
+            if not account or account_org != caller.org:
+                return refuse("account-not-launchable",
+                              "a member may name only a shared account of their own "
+                              "organization", 403)
+            problem = await asyncio.to_thread(
+                harness_accounts.check_account, harness, str(account), caller.org)
+            if problem is not None:
+                return refuse(problem[0], problem[1], 409)
+        elif harness == "claude" and CLAUDE_BUNDLE_FILENAME not in carried.signins \
                 and "CLAUDE_CODE_OAUTH_TOKEN" not in carried.env:
             missing.append("no Claude sign-in was carried")
         if missing or refusals:
             return refuse("credential-refused", "; ".join(missing + refusals), 403)
         request_body = {"type": "container", "project": project}
-        for name in ("model", "harness"):
+        for name in ("model", "harness", "account", "account_org"):
             if isinstance(body.get(name), str) and body[name]:
                 request_body[name] = body[name]
         logger.info("org member launch: org=%s persona=%s project=%s carried=%r",
@@ -11375,7 +11405,8 @@ async def _create_session_from_body(body: dict, request=None, provenance=None,
 
             problem = await asyncio.to_thread(
                 harness_accounts.check_account,
-                body.get("harness") or proj.harness or "claude", str(body["account"]))
+                body.get("harness") or proj.harness or "claude", str(body["account"]),
+                body.get("account_org") or None)
             if problem is not None:
                 return JSONResponse({"error": problem[1], "refusal": problem[0],
                                      "code": problem[0]}, status_code=409)
@@ -11408,6 +11439,7 @@ async def _create_session_from_body(body: dict, request=None, provenance=None,
                 "model": body.get("model"),
                 "harness": body.get("harness"),
                 **({"account": body["account"]} if body.get("account") else {}),
+                **({"account_org": body["account_org"]} if body.get("account_org") else {}),
                 **({"workspace_org": workspace_org} if workspace_org else {}),
                 **({"carried": carried} if carried is not None else {}),
                 **({"primer_text": primer_text} if primer_text else {}),

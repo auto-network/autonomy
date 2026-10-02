@@ -288,7 +288,7 @@ def launch_op(create: Callable[[dict], Awaitable[object]]) -> OpHandler:
                 return ok({"tmux_name": existing["tmux_name"], **here,
                            "repeated": True})
             request = {"type": "container", "project": project}
-            for name in ("primer", "model", "harness", "account"):
+            for name in ("primer", "model", "harness", "account", "account_org"):
                 if isinstance(body.get(name), str) and body[name]:
                     request[name] = body[name]
             response = await create(request, provenance={
