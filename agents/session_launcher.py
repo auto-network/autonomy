@@ -437,7 +437,7 @@ def _resolve_credential(key: str) -> str | None:
     # The audited set is @home("personal"); org=None routes to personal.db
     # regardless of the acting org (required, not a default — auto-0815).
     try:
-        members = _ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
+        members = _ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[], key_equals=key)
     except Exception:
         logger.exception("credential %r: vault set read failed", key)
         return None
@@ -1720,7 +1720,9 @@ def _grok_vault_key_available() -> bool:
     try:
         from tools.graph import ops as _ops
         from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
-        members = _ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
+        members = _ops.read_set(
+            VAULT_AUDITED_SET_ID, org=None, peers=[], key_equals=GROK_VAULT_KEY,
+        )
     except Exception:
         return False
     return any(getattr(row, "key", None) == GROK_VAULT_KEY
