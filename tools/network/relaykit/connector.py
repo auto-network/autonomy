@@ -123,6 +123,48 @@ class TunnelProtocolVersionError(ConnectionError):
         )
 
 
+# ── Concurrent requests on one channel (graph://9642ab99-bae T1) ─────────────
+# A request message may carry a request id: REQUEST_ID_PREFIX, then
+# REQUEST_ID_LEN bytes of id, then the request. It runs as its own task and
+# every message of its reply carries the same prefix and id, so many requests
+# share one channel without waiting for each other. A message without an id is
+# served exactly as before, in order. No untagged request starts with 0x00:
+# they are JSON or an ASCII tag (the fleet sync FS* magics). The prefix lives
+# inside the sealed message, so the relay never sees it.
+REQUEST_ID_PREFIX = b"\x00RQ1"
+REQUEST_ID_LEN = 8
+#: id-tagged requests in flight on one channel. Viewer channels are opened by
+#: public link holders; before ids, the in-order loop was an implicit cap of 1.
+MAX_REQUESTS_IN_FLIGHT = 32
+REFUSAL_REQUESTS_AT_CAP = "channel-requests-at-cap"
+REFUSAL_REQUEST_ID_IN_USE = "channel-request-id-in-use"
+REFUSAL_REQUEST_FAILED = "channel-request-failed"
+REFUSAL_REQUEST_UNANSWERED = "channel-request-unanswered"
+REFUSAL_IDS_UNSUPPORTED = "channel-request-ids-unsupported"
+
+
+def split_request_id(message: bytes) -> tuple[bytes | None, bytes]:
+    """``(request id, body)`` of a channel message; ``(None, message)`` when
+    it carries no id."""
+    head = len(REQUEST_ID_PREFIX) + REQUEST_ID_LEN
+    if len(message) >= head and message[:len(REQUEST_ID_PREFIX)] == REQUEST_ID_PREFIX:
+        return bytes(message[len(REQUEST_ID_PREFIX):head]), bytes(message[head:])
+    return None, message
+
+
+def tag_message(request_id: bytes, body: bytes) -> bytes:
+    if len(request_id) != REQUEST_ID_LEN:
+        raise ValueError("request id must be %d bytes" % REQUEST_ID_LEN)
+    return REQUEST_ID_PREFIX + request_id + bytes(body)
+
+
+def _channel_refusal(code: str, detail: str = "") -> bytes:
+    """A typed refusal the loop itself answers a tagged request with (the
+    session-control refusal shape)."""
+    return json.dumps({"v": 1, "ok": False, "refusal": code, "detail": detail,
+                       "at": "peer"}).encode("utf-8")
+
+
 async def echo_handler(token: str, message: bytes) -> bytes:
     """Reference handler: byte-exact echo (what the soak test asserts)."""
     return message
@@ -237,9 +279,54 @@ async def _serve_channel_records(
         if inspect.isawaitable(channel_handler):
             channel_handler = await channel_handler
 
+    # Every sealed record takes the channel's next sequence number, and a
+    # message's records must arrive together for the receiver to reassemble
+    # it, so each MESSAGE is sent under this lock; replies to concurrent
+    # requests interleave between messages, never inside one.
+    send_lock = asyncio.Lock()
+    in_flight: dict[bytes, asyncio.Task] = {}
+    stateful = factory is not None
+
+    async def send_response(response, request_id: bytes | None = None) -> None:
+        response_messages = _response_messages(response)
+        try:
+            async for response_message, stream_final in response_messages:
+                if request_id is not None:
+                    response_message = tag_message(request_id, response_message)
+                async with send_lock:
+                    for out in crypto.iter_seal_message(
+                        response_message, stream_final=stream_final
+                    ):
+                        await send(out)
+        finally:
+            await response_messages.aclose()
+
+    async def serve_tagged(request_id: bytes, body: bytes) -> None:
+        try:
+            try:
+                response = handler(token, body)
+                if inspect.isawaitable(response):
+                    response = await response
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("channel request failed: %s", type(exc).__name__,
+                               exc_info=True)
+                response = _channel_refusal(REFUSAL_REQUEST_FAILED, type(exc).__name__)
+            if response is None:
+                response = _channel_refusal(REFUSAL_REQUEST_UNANSWERED)
+            await send_response(response, request_id)
+        finally:
+            in_flight.pop(request_id, None)
+
     try:
         while True:
-            receive_timeout = getattr(channel_handler, "receive_timeout", None)
+            # The stateful hooks (for_channel state, receive_timeout,
+            # on_response_sent) belong to the untagged, in-order exchange
+            # only: while tagged requests are in flight the channel is not
+            # idle, so receive_timeout does not apply.
+            receive_timeout = (None if in_flight else
+                               getattr(channel_handler, "receive_timeout", None))
             if receive_timeout is None:
                 record = await recv()
             else:
@@ -256,20 +343,29 @@ async def _serve_channel_records(
             message = crypto.open_record(record)
             if message is None:
                 continue
+            request_id, body = split_request_id(message)
+            if request_id is not None:
+                # A tagged request goes to the stateless handler as its own
+                # task. A channel with per-channel state (ICE signalling)
+                # keeps that state single-threaded: it refuses ids.
+                if stateful:
+                    await send_response(_channel_refusal(REFUSAL_IDS_UNSUPPORTED), request_id)
+                elif len(in_flight) >= MAX_REQUESTS_IN_FLIGHT:
+                    await send_response(_channel_refusal(
+                        REFUSAL_REQUESTS_AT_CAP,
+                        f"{MAX_REQUESTS_IN_FLIGHT} requests already in flight"), request_id)
+                elif request_id in in_flight:
+                    await send_response(_channel_refusal(REFUSAL_REQUEST_ID_IN_USE), request_id)
+                else:
+                    in_flight[request_id] = asyncio.get_running_loop().create_task(
+                        serve_tagged(request_id, body))
+                continue
             response = channel_handler(token, message)
             if inspect.isawaitable(response):
                 response = await response
             if response is None:
                 continue
-            response_messages = _response_messages(response)
-            try:
-                async for response_message, stream_final in response_messages:
-                    for out in crypto.iter_seal_message(
-                        response_message, stream_final=stream_final
-                    ):
-                        await send(out)
-            finally:
-                await response_messages.aclose()
+            await send_response(response)
             # A stateful capability can transfer ownership only after every
             # encrypted record in its response has actually reached the
             # transport.  Keep this hook synchronous: after the final send
@@ -284,6 +380,11 @@ async def _serve_channel_records(
                 if close_after_response:
                     return
     finally:
+        tasks = list(in_flight.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         close = getattr(channel_handler, "aclose", None)
         if close is not None:
             result = close()

@@ -151,7 +151,7 @@ def test_a_request_the_host_received_is_never_sent_twice(monkeypatch):
 
 
 async def _lost_reply_scenario(root, port, monkeypatch):
-    monkeypatch.setattr(session_control, "_request_channels", {})
+    monkeypatch.setattr(session_control, "_pool", {})
     _register(port, root)
     machine_a, machine_b = KeyPair.generate(), KeyPair.generate()
     id_a, id_b = "a1" * 32, "b1" * 32
@@ -172,7 +172,7 @@ async def _lost_reply_scenario(root, port, monkeypatch):
         item = await broker_b.next(10)
         assert item["op"] == "send"
         # The host has the request; its channel goes before it answers.
-        entry = session_control._request_channels[machine_b.public_hex]
+        entry = session_control._pool[(machine_b.public_hex, session_control.SCOPE_PERSONAL)]
         await entry.endpoint.close()
         reply = await asyncio.wait_for(asking, 10)
         assert (reply["refusal"], reply["at"]) == (session_control.REPLY_LOST, "local")

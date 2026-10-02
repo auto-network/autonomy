@@ -449,6 +449,45 @@ async def _refuse_pair(endpoint: FleetStreamEndpoint, code: str, detail: str) ->
             await endpoint.close()
 
 
+#: Served connections: endpoint -> the peer machine its requests proved.
+_served: dict[FleetStreamEndpoint, str] = {}
+_revocation_task: Optional[asyncio.Task] = None
+#: How often the serving side re-checks that each connected peer is still
+#: admitted (lifecycle rule 8). The runtime's roster has no change event; a
+#: re-check this often closes a removed peer's connection within it.
+REVOCATION_CHECK_S = 5.0
+
+
+async def _close_revoked(runtime) -> int:
+    """Close every served connection whose peer is no longer admitted."""
+    closed = 0
+    for endpoint, client_pub in list(_served.items()):
+        try:
+            session_authenticator(runtime).authorize(client_pub)
+        except (SessionControlError, FleetHandshakeRefused) as exc:
+            logger.info("session-control connection from %s closed: no longer admitted (%s)",
+                        client_pub[:12], getattr(exc, "refusal", exc))
+            _served.pop(endpoint, None)
+            with contextlib.suppress(Exception):
+                await endpoint.close()
+            closed += 1
+    return closed
+
+
+def _watch_revocations(runtime) -> None:
+    global _revocation_task
+    if runtime is None or (_revocation_task is not None and not _revocation_task.done()):
+        return
+
+    async def loop():
+        while _served:
+            await asyncio.sleep(REVOCATION_CHECK_S)
+            with contextlib.suppress(Exception):
+                await _close_revoked(runtime)
+
+    _revocation_task = asyncio.get_running_loop().create_task(loop())
+
+
 async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticator,
                  broker: InboundBroker, runtime=None) -> None:
     await endpoint.ready.wait()
@@ -477,6 +516,9 @@ async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticato
              else authenticator).authorize(client_pub)
         except (SessionControlError, FleetHandshakeRefused) as exc:
             return encode(refusal(exc.refusal, exc.detail))
+        if endpoint not in _served:
+            _served[endpoint] = client_pub
+            _watch_revocations(runtime)
         if request["op"] == "subscribe":
             return await _accept_subscription(request, client_pub, broker, endpoint)
         submitted = time.monotonic()
@@ -529,6 +571,7 @@ async def _serve(endpoint: FleetStreamEndpoint, authenticator: FleetAuthenticato
         logger.warning("session-control pair %s ended with an error",
                        endpoint.pair_id[:8], exc_info=True)
     finally:
+        _served.pop(endpoint, None)
         with contextlib.suppress(Exception):
             await endpoint.close()
 
@@ -744,40 +787,242 @@ async def _open_channel_steps(connector, runtime, machine_pub: str, timeout: flo
             await endpoint.close()
 
 
-class _RequestChannel:
-    """The one open request channel to a peer. Requests take turns on it;
-    the handshake is paid once, not per request."""
+# ── The peer connection pool (graph://9642ab99-bae, connection lifecycle) ────
+#
+# One peer connection per (peer machine, scope), opened by the first call to
+# that peer. Requests on it are id-tagged (relaykit connector
+# REQUEST_ID_PREFIX), so they run concurrently: one reader task routes each
+# reply to the pending request with its id. A connection records
+# last_activity; at the cap the least recently active IDLE connection is
+# closed first, and if every connection is busy the call is refused
+# pool-full. The caller closes a connection idle longer than the configured
+# period. A connection ends Done (closed by this side) or Lost (the channel
+# ended under it): in-flight requests then fail with reply-lost.
 
-    def __init__(self):
-        self.lock = asyncio.Lock()
+#: Peer connections in the pool, all scopes together (lifecycle rule 1).
+POOL_CAP = 255
+#: The scope this module's connections belong to: the operator's own fleet.
+SCOPE_PERSONAL = "personal"
+POOL_FULL = "pool-full"                            # every connection is busy at the cap
+RELAY_PAIR_CAP = "relay-pair-cap"                  # the relay would refuse another pair in this scope
+#: Default for the caller-side idle close (Settings: autonomy.network.peer-connections).
+IDLE_CLOSE_S_DEFAULT = 900.0
+
+
+class _PeerConnection:
+    """One authenticated connection to one peer in one scope."""
+
+    def __init__(self, key: tuple[str, str]):
+        self.key = key
         self.channel = None
         self.endpoint = None
         self._stack: Optional[contextlib.AsyncExitStack] = None
+        self._reader: Optional[asyncio.Task] = None
+        self._open_lock = asyncio.Lock()
+        #: request id -> the future its reply resolves.
+        self.pending: dict[bytes, asyncio.Future] = {}
+        #: Ids in send order: an untagged reply (a peer from before ids)
+        #: answers the oldest.
+        self._order: list[bytes] = []
+        self.last_activity = time.monotonic()
+        self.ending: Optional[str] = None          # "done" | "lost"
 
     def usable(self) -> bool:
-        return self.channel is not None and not self.endpoint.closed.is_set()
+        return (self.channel is not None and not self.endpoint.closed.is_set()
+                and self.ending is None)
 
-    async def open(self, connector, runtime, machine_pub, timeout, resolve_slot,
-                   timing: Optional[dict] = None):
-        stack = contextlib.AsyncExitStack()
+    def busy(self) -> bool:
+        return bool(self.pending)
+
+    async def ensure_open(self, connector, runtime, machine_pub, timeout, resolve_slot,
+                          timing: dict) -> bool:
+        """Open the connection if it is not; True when it was already open."""
+        async with self._open_lock:
+            if self.usable():
+                return True
+            await self._teardown()
+            stack = contextlib.AsyncExitStack()
+            try:
+                self.channel, self.endpoint = await stack.enter_async_context(
+                    _open_channel(connector, runtime, machine_pub, timeout, resolve_slot,
+                                  timing))
+            except BaseException:
+                await stack.aclose()
+                raise
+            self._stack, self.ending = stack, None
+            self.last_activity = time.monotonic()
+            self._reader = asyncio.get_running_loop().create_task(self._read())
+            return False
+
+    async def _read(self) -> None:
+        from tools.network.relaykit.connector import split_request_id
+
         try:
-            self.channel, self.endpoint = await stack.enter_async_context(
-                _open_channel(connector, runtime, machine_pub, timeout, resolve_slot,
-                              timing))
-        except BaseException:
-            await stack.aclose()
+            while True:
+                message, _final = await self.channel.recv_message_with_final()
+                self.last_activity = time.monotonic()
+                request_id, body = split_request_id(message)
+                if request_id is None:
+                    if not self._order:
+                        continue
+                    request_id = self._order[0]
+                if request_id in self._order:
+                    self._order.remove(request_id)
+                future = self.pending.pop(request_id, None)
+                if future is not None and not future.done():
+                    future.set_result(body)
+        except asyncio.CancelledError:
             raise
-        self._stack = stack
+        except Exception as exc:
+            if self.ending is None:
+                self.ending = "lost"
+                logger.info("session-control connection to %s lost: %s",
+                            self.key[0][:12], type(exc).__name__)
+            self._fail_pending(REPLY_LOST, f"the connection was lost: {exc}")
 
-    async def close(self) -> None:
+    def _fail_pending(self, code: str, detail: str) -> None:
+        pending, self.pending, self._order = self.pending, {}, []
+        for future in pending.values():
+            if not future.done():
+                future.set_exception(SessionControlError(code, detail))
+
+    async def exchange(self, record: bytes, timeout: float) -> dict:
+        from tools.network.relaykit.connector import tag_message
+
+        request_id = secrets.token_bytes(8)
+        future = asyncio.get_running_loop().create_future()
+        self.pending[request_id] = future
+        self._order.append(request_id)
+        self.last_activity = time.monotonic()
+        try:
+            await self.channel.send_message(tag_message(request_id, record))
+        except (FleetStreamClosed, ConnectionError) as exc:
+            self.pending.pop(request_id, None)
+            if request_id in self._order:
+                self._order.remove(request_id)
+            raise SessionControlError(CLOSED_AT_SEND, f"the connection closed: {exc}") from exc
+        try:
+            raw = await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError:
+            self.pending.pop(request_id, None)
+            if request_id in self._order:
+                self._order.remove(request_id)
+            raise SessionControlError(REPLY_TIMEOUT, f"no reply within {timeout}s") from None
+        return _decode_reply(raw)
+
+    async def close(self, ending: str = "done") -> None:
+        if self.ending is None:
+            self.ending = ending
+        self._fail_pending(REPLY_LOST, f"the connection was closed ({self.ending})")
+        await self._teardown()
+
+    async def _teardown(self) -> None:
+        reader, self._reader = self._reader, None
+        if reader is not None and reader is not asyncio.current_task():
+            reader.cancel()
+            with contextlib.suppress(BaseException):
+                await reader
         stack, self._stack, self.channel, self.endpoint = self._stack, None, None, None
         if stack is not None:
             with contextlib.suppress(Exception):
                 await stack.aclose()
 
 
-#: machine_pub -> the open request channel to it.
-_request_channels: dict[str, _RequestChannel] = {}
+#: (machine_pub, scope) -> its peer connection.
+_pool: dict[tuple[str, str], _PeerConnection] = {}
+
+
+def _scope_cap(scope: str) -> tuple[int, str]:
+    """How many connections this scope may hold, and the refusal at it: the
+    pool cap, or the relay's pair cap per tunnel when lower (lifecycle rule
+    10: until that is decided, refuse where the relay would)."""
+    from tools.network.relaykit.fleet_stream_wire import SESSION_PAIRS_PER_TUNNEL
+
+    if SESSION_PAIRS_PER_TUNNEL < POOL_CAP:
+        return SESSION_PAIRS_PER_TUNNEL, RELAY_PAIR_CAP
+    return POOL_CAP, POOL_FULL
+
+
+async def _connection_for(machine_pub: str, scope: str = SCOPE_PERSONAL) -> _PeerConnection:
+    """The pool entry for (*machine_pub*, *scope*), making room at the cap by
+    closing the least recently active idle connection; refuses when every
+    connection is busy."""
+    key = (machine_pub, scope)
+    existing = _pool.get(key)
+    if existing is not None:
+        return existing
+    in_scope = [c for k, c in _pool.items() if k[1] == scope]
+    cap, code = _scope_cap(scope)
+    if len(_pool) >= POOL_CAP:
+        candidates, code = list(_pool.values()), POOL_FULL
+    elif len(in_scope) >= cap:
+        candidates = in_scope
+    else:
+        candidates = None
+    if candidates is not None:
+        idle = [c for c in candidates if not c.busy()]
+        if not idle:
+            raise SessionControlError(code, f"{len(candidates)} connections, all busy")
+        victim = min(idle, key=lambda c: c.last_activity)
+        _pool.pop(victim.key, None)
+        logger.info("session-control connection to %s evicted (idle %.0fs)",
+                    victim.key[0][:12], time.monotonic() - victim.last_activity)
+        await victim.close("done")
+    entry = _PeerConnection(key)
+    _pool[key] = entry
+    _sweep_idle()
+    return entry
+
+
+_idle_task: Optional[asyncio.Task] = None
+IDLE_SWEEP_S = 30.0
+
+
+def _sweep_idle() -> None:
+    """Run the caller-side idle close while the pool holds connections."""
+    global _idle_task
+    if _idle_task is not None and not _idle_task.done():
+        return
+
+    async def loop():
+        while _pool:
+            await asyncio.sleep(IDLE_SWEEP_S)
+            with contextlib.suppress(Exception):
+                await close_idle()
+
+    _idle_task = asyncio.get_running_loop().create_task(loop())
+
+
+def idle_close_s() -> float:
+    """The caller-side idle close period (lifecycle rule 5), from the
+    machine's autonomy.network.peer-connections Setting."""
+    try:
+        from tools.graph import settings_ops
+        from tools.graph.schemas.peer_connections import PEER_CONNECTIONS_SET_ID
+
+        row = settings_ops.read_set_key(PEER_CONNECTIONS_SET_ID, "default",
+                                        org="machine", peers=[])
+        value = ((row or {}).get("payload") or {}).get("idle_close_s")
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+    except Exception:
+        logger.debug("peer-connections Setting unreadable; default idle close",
+                     exc_info=True)
+    return IDLE_CLOSE_S_DEFAULT
+
+
+async def close_idle(now: Optional[float] = None, period: Optional[float] = None) -> int:
+    """Close every connection idle longer than the period (Done); returns
+    how many closed."""
+    now = time.monotonic() if now is None else now
+    period = idle_close_s() if period is None else period
+    closed = 0
+    for key, entry in list(_pool.items()):
+        if not entry.busy() and now - entry.last_activity > period:
+            _pool.pop(key, None)
+            await entry.close("done")
+            closed += 1
+    return closed
 
 
 def _steps(timing: dict) -> str:
@@ -816,8 +1061,9 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
     as any other refusal. A refusal carries ``at``: ``local`` when this
     machine decided it, ``peer`` when the target did.
 
-    Requests reuse one open channel per peer, so the relay open and the
-    fleet handshake are paid once rather than per request."""
+    Requests share one peer connection per (peer, scope) and run
+    concurrently on it (id-tagged), so the relay open and the fleet handshake
+    are paid once and no request waits for another."""
     try:
         record = encode({"v": SESSION_CONTROL_VERSION, "op": op, "body": body},
                         too_large=REQUEST_TOO_LARGE)
@@ -836,54 +1082,23 @@ async def request(connector, runtime, *, machine_pub: str, op: str,
                         (opened - started) * 1000, _steps(steps),
                         (time.monotonic() - opened) * 1000)
         else:
-            entry = _request_channels.setdefault(machine_pub, _RequestChannel())
+            entry = await _connection_for(machine_pub)
             started = time.monotonic()
             steps = {}
-            async with entry.lock:
-                waited = time.monotonic() - started
-                reused = entry.usable()
-                if reused:
-                    # Our own grant is checked on every request; opening a
-                    # channel checks it anyway.
-                    session_authenticator(runtime)
-                else:
-                    await entry.close()
-                    await entry.open(connector, runtime, machine_pub, timeout, resolve_slot,
-                                     steps)
-                opened = time.monotonic()
-                try:
-                    reply = await _exchange(entry.channel, record, timeout)
-                    logger.info(
-                        "session-control request op=%s to=%s channel=%s lock_ms=%.0f "
-                        "open_ms=%.0f %s exchange_ms=%.0f", op, machine_pub[:12],
-                        "reused" if reused else "new", waited * 1000,
-                        (opened - started - waited) * 1000, _steps(steps),
-                        (time.monotonic() - opened) * 1000)
-                except _NotSent:
-                    await entry.close()
-                    if not reused:
-                        raise SessionControlError(
-                            CLOSED_AT_SEND, "the new channel closed") from None
-                    # The reused channel had closed (the host's idle close)
-                    # and the request never left: once more on a new channel.
-                    await entry.open(connector, runtime, machine_pub, timeout, resolve_slot)
-                    try:
-                        reply = await _exchange(entry.channel, record, timeout)
-                        logger.info("session-control request op=%s to=%s channel=retried "
-                                    "total_ms=%.0f", op, machine_pub[:12],
-                                    (time.monotonic() - started) * 1000)
-                    except _NotSent:
-                        await entry.close()
-                        raise SessionControlError(
-                            CLOSED_AT_SEND, "the new channel closed") from None
-                    except BaseException:
-                        await entry.close()
-                        raise
-                except BaseException:
-                    # A channel whose exchange failed or timed out may still
-                    # carry that reply later; it is never reused.
-                    await entry.close()
-                    raise
+            reused = await entry.ensure_open(connector, runtime, machine_pub, timeout,
+                                             resolve_slot, steps)
+            if reused:
+                # Our own grant is checked on every request; opening a
+                # connection checks it anyway.
+                session_authenticator(runtime)
+            opened = time.monotonic()
+            reply = await entry.exchange(record, timeout)
+            logger.info(
+                "session-control request op=%s to=%s channel=%s in_flight=%d "
+                "open_ms=%.0f %s exchange_ms=%.0f", op, machine_pub[:12],
+                "reused" if reused else "new", len(entry.pending),
+                (opened - started) * 1000, _steps(steps),
+                (time.monotonic() - opened) * 1000)
         if reply.get("ok") is False and "at" not in reply:
             reply = {**reply, "at": "peer"}
         return reply

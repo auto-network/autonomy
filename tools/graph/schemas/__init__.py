@@ -93,6 +93,7 @@ from . import fleet_diagnostic_target  # noqa: F401 — autonomy.fleet.diagnosti
 from . import workspace  # noqa: F401
 from . import workspace_artifact  # noqa: F401 — autonomy.workspace.artifact#1
 from . import dispatch_limits  # noqa: F401 — autonomy.dispatch.limits#1
+from . import peer_connections  # noqa: F401 — autonomy.network.peer-connections#1
 from . import browser_defaults  # noqa: F401 — autonomy.browser.defaults#1
 from . import note_similarity  # noqa: F401 — autonomy.graph.note-similarity#1
 from . import vault_audit  # noqa: F401 — autonomy.vault.audit#1

@@ -755,14 +755,6 @@ async def wait_alive(awaitable, *, ping, interval_s: float | None = None,
                 await task
 
 
-#: After a reply has been fully written, the listener waits for the puller
-#: to close (a direct pull is one request per connection) or, rarely, to ask
-#: again. That wait is NOT ping-guarded: the puller is applying the tail of
-#: the reply from its socket buffers and may be stalled or paused for longer
-#: than the ping timeout, and a 1011 close here would abort the TCP
-#: connection and discard the unread tail (reviewer auto-0925-123637,
-#: 2026-09-29). It is bounded on wake, generously.
-SERVE_IDLE_AFTER_REPLY_S = 900.0
 
 
 async def wait_bounded_on_wake(awaitable, bound_s: float):
@@ -835,13 +827,12 @@ async def serve_fleet_transport(
         # Until the first reply is written the peer owes us a request, and
         # a ping-guarded wait catches a dead one. Once a reply has been
         # written the peer is applying it from its buffers; pinging it then
-        # could cut off the tail (SERVE_IDLE_AFTER_REPLY_S).
+        # could cut off the tail. The serving side never closes for
+        # idleness: only the caller decides to close (graph://9642ab99-bae,
+        # connection lifecycle rule 5).
         if not replied:
             return await wait_alive(recv(), ping=ping)
-        try:
-            return await wait_bounded_on_wake(recv(), SERVE_IDLE_AFTER_REPLY_S)
-        except asyncio.TimeoutError:
-            return None   # the peer never closed after its reply: end the channel quietly
+        return await recv()
 
     async def bounded_send(payload: bytes) -> None:
         nonlocal replied

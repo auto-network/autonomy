@@ -64,6 +64,9 @@ class ViewerChannel:
     def __init__(self, ws, crypto: ChannelCrypto):
         self._ws = ws
         self._crypto = crypto
+        #: A message's records go out together (each takes the next sequence
+        #: number), so concurrent senders take turns per message.
+        self._send_lock = asyncio.Lock()
         #: One socket, two kinds of message, one reader. Whichever call
         #: reads next routes what it finds into BOTH queues, so a feed
         #: frame arriving mid-request and a record arriving while waiting
@@ -194,8 +197,19 @@ class ViewerChannel:
         )
 
     async def send_message(self, data: bytes) -> None:
-        for record in self._crypto.seal_message(data):
-            await self._ws.send(record)
+        async with self._send_lock:
+            for record in self._crypto.seal_message(data):
+                await self._ws.send(record)
+
+    async def recv_message_with_final(self) -> tuple[bytes, bool]:
+        """One whole message and whether it ends its reply (``STREAM_FINAL``):
+        what a reader that routes replies by request id needs."""
+        parts: list[bytes] = []
+        while True:
+            opened = self._crypto.open_stream_record(await self._next(self._records))
+            parts.append(opened.chunk)
+            if opened.message_end:
+                return b"".join(parts), opened.stream_final
 
     async def recv_message(self) -> bytes:
         while True:
