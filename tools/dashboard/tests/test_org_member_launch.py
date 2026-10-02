@@ -163,7 +163,7 @@ def test_home_sends_the_launch_to_the_runner_over_member_message(server, monkeyp
     monkeypatch.setattr(server.workspace_settings, "_workspaces_in_org",
                         lambda org: {"dev": _proj()})
     monkeypatch.setattr(server, "_member_launch_credentials",
-                        lambda proj, harness, model: {"credentials": {"github.token": "v"},
+                        lambda *_a: {"credentials": {"github.token": "v"},
                                                       "env": {}, "signins": {}})
 
     async def fake_request(target, op, payload, *, timeout=15.0):

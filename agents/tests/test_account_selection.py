@@ -111,3 +111,21 @@ def test_a_codex_session_records_the_account_it_was_given(tmp_path, monkeypatch,
                                          "account_id": meta["harness_token"],
                                          "method": "random", "candidates_count": 2,
                                          "excluded_count": 0}
+
+
+def test_an_explicit_codex_account_is_the_one_delivered_and_an_unknown_refuses(
+        tmp_path, monkeypatch, fake_crosstalk, captured_run):
+    parts = {"id": "i", "access": "a", "refresh": "r", "expires": "4102444800000"}
+    _stub_vault(monkeypatch, {"codex": [hv.Account("codex", "C1", parts),
+                                        hv.Account("codex", "C2", parts)]})
+    monkeypatch.setattr(session_launcher, "_codex_auth_doc", lambda acct: acct.id.encode())
+    delivered = {}
+    monkeypatch.setattr(session_launcher, "deliver_signins",
+                        lambda name, payloads, **_k: delivered.update(payloads) or [])
+    run = tmp_path / "run"
+    _run(name="auto-cx2", output_dir=str(run), harness="codex", account_id="C2")
+    meta = json.loads((run / "sessions" / ".session_meta.json").read_text())
+    assert delivered[session_launcher.CODEX_AUTH_FILENAME] == b"C2"
+    assert (meta["harness_token"], meta["account_selection"]["method"]) == ("C2", "explicit")
+    assert _run(name="auto-cx3", output_dir=str(tmp_path / "r3"), harness="codex",
+                account_id="nope") is None

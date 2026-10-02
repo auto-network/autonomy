@@ -3983,6 +3983,23 @@ def _existing_usage_payload(row_key: str) -> dict | None:
     return (row or {}).get("payload") if isinstance(row, dict) else None
 
 
+async def api_harness_accounts(request):
+    """GET /api/harness/accounts?harness=claude|codex|grok — the launch
+    chooser's account list (auto-k784w): no secret part, operator only."""
+    refused = api_auth.require_global_api_authority(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import harness_accounts
+    from tools.graph.harness_credentials import HARNESSES
+
+    harness = request.query_params.get("harness") or "claude"
+    if harness not in HARNESSES:
+        return JSONResponse({"error": f"harness must be one of {', '.join(HARNESSES)}"},
+                            status_code=400)
+    rows = await asyncio.to_thread(harness_accounts.account_rows, harness)
+    return JSONResponse({"harness": harness, "accounts": rows})
+
+
 async def api_harness_usage(request):
     _ = request
     data = await asyncio.to_thread(_collect_harness_usage)
@@ -9991,6 +10008,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             metadata=meta,
             harness=resolved_harness,
             model=job.config.get("model") or proj.model or None,
+            account_id=job.config.get("account"),
             extra_env=extra_env,
             output_dir=str(run_dir),
             global_claude_md=primer_path,
@@ -10961,6 +10979,7 @@ async def _create_remote_session(request, body: dict):
         "primer": body.get("primer"),
         "model": body.get("model"),
         "harness": body.get("harness"),
+        "account": body.get("account"),
         "operation_id": operation_id or _secrets.token_hex(16),
     }
     reply = await session_control_client.request(
@@ -10993,7 +11012,8 @@ async def _create_remote_session(request, body: dict):
     }, status_code=202)
 
 
-def _member_launch_credentials(proj, harness: str, model: str | None) -> dict | str:
+def _member_launch_credentials(proj, harness: str, model: str | None,
+                               account: str | None = None) -> dict | str:
     """Everything a launch of *proj* on another member's runner must carry,
     opened from THIS machine's vault and environment (auto-1qj12), as the
     request's ``credentials`` object; or a refusal detail naming what is
@@ -11037,8 +11057,14 @@ def _member_launch_credentials(proj, harness: str, model: str | None) -> dict | 
         else:
             logger.warning("org runner launch: env_from_host %r is not set here; "
                            "the session starts without it", name)
+    if account:
+        from tools.dashboard import harness_accounts
+
+        problem = harness_accounts.check_account(harness, account)
+        if problem is not None:
+            return problem[1]
     if harness == "claude":
-        creds = sl._resolve_credentials_via_substrate(prefer_alias=None)
+        creds = sl._resolve_credentials_via_substrate(prefer_alias=None, account_id=account)
         if creds is None:
             return "no launchable Claude account in this machine's vault"
         if creds.get("type") == "token":
@@ -11049,7 +11075,9 @@ def _member_launch_credentials(proj, harness: str, model: str | None) -> dict | 
                 return "the chosen Claude account could not be opened"
             signins.update(payloads)
     else:
-        signins.update(sl._signin_payloads(None, harness=harness) or {})
+        picked = ({harness: next(a for a in sl._accounts(harness) if a.id == account)}
+                  if account else None)
+        signins.update(sl._signin_payloads(None, harness=harness, picked=picked) or {})
     return {"credentials": credentials, "env": env,
             "signins": {name: base64.b64encode(value).decode("ascii")
                         for name, value in signins.items()}}
@@ -11093,7 +11121,8 @@ async def _launch_on_org_runner(body: dict, runner: dict) -> JSONResponse:
              "refusal": "workspace-unavailable"}, status_code=404)
     harness = body.get("harness") or proj.harness or "claude"
     carried = await asyncio.to_thread(
-        _member_launch_credentials, proj, harness, body.get("model") or proj.model)
+        _member_launch_credentials, proj, harness, body.get("model") or proj.model,
+        body.get("account"))
     if isinstance(carried, str):
         return JSONResponse({"error": carried, "refusal": "credential-refused",
                              "at": "local"}, status_code=409)
@@ -11339,6 +11368,17 @@ async def _create_session_from_body(body: dict, request=None, provenance=None,
                 {"error": f"Project config error: {e}",
                  "code": "workspace-config-error"}, status_code=500,
             )
+        if body.get("account") and carried is None:
+            # The chooser's account is strict (auto-k784w): refused here,
+            # before anything is registered, never substituted at launch.
+            from tools.dashboard import harness_accounts
+
+            problem = await asyncio.to_thread(
+                harness_accounts.check_account,
+                body.get("harness") or proj.harness or "claude", str(body["account"]))
+            if problem is not None:
+                return JSONResponse({"error": problem[1], "refusal": problem[0],
+                                     "code": problem[0]}, status_code=409)
         # auto-ja51w C3: register the session row IMMEDIATELY (before the
         # ~7-9s prepare_session_mounts + launch_session block) so the dashboard
         # can broadcast per-step progress via SSE during the otherwise dead-air
@@ -11367,6 +11407,7 @@ async def _create_session_from_body(body: dict, request=None, provenance=None,
                 # back to the workspace config in the worker when absent.
                 "model": body.get("model"),
                 "harness": body.get("harness"),
+                **({"account": body["account"]} if body.get("account") else {}),
                 **({"workspace_org": workspace_org} if workspace_org else {}),
                 **({"carried": carried} if carried is not None else {}),
                 **({"primer_text": primer_text} if primer_text else {}),
@@ -22919,6 +22960,7 @@ routes = [
     Route("/api/orgs/{slug}", api_orgs_delete, methods=["DELETE"]),
     Route("/api/stats", api_stats),
     Route("/api/harness_usage", api_harness_usage),
+    Route("/api/harness/accounts", api_harness_accounts),
     Route("/api/attention", api_attention),
     Route("/api/dao/active_sessions", api_dao_active_sessions),
     Route("/api/_mock/harness-nonce", api_mock_harness_nonce),

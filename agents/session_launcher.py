@@ -691,6 +691,7 @@ def _resolve_credentials_via_substrate(
     *, prefer_alias: str | None,
     rng: random.Random | None = None,
     empty_vault_expected: bool = False,
+    account_id: str | None = None,
 ) -> dict | None:
     """The account picker over the operator's vault (record v16 §10.9).
 
@@ -740,22 +741,32 @@ def _resolve_credentials_via_substrate(
     now = datetime.now(timezone.utc)
     usage_by_org: dict[str, dict] = {}
     for payload in _claude_usage_rows():
-        account_id = payload.get("account_id")
-        if not isinstance(account_id, str) or not account_id:
+        read_id = payload.get("account_id")
+        if not isinstance(read_id, str) or not read_id:
             continue
         if _reading_window_open(payload, now=now):
-            usage_by_org[account_id] = payload
+            usage_by_org[read_id] = payload
             continue
         if _is_usage_stale(payload, now=now):
             continue
         if not _is_usage_usable(payload):
             continue
-        usage_by_org[account_id] = payload
+        usage_by_org[read_id] = payload
     candidates = [a.id for a in accounts]
     excluded: list[dict] = []
     chosen = None
     method = None
-    if prefer_alias:
+    if account_id:
+        # An explicit choice is strict (graph://7eb29bc8-31a §11 Delta 3):
+        # an account that is not launchable here is a refusal, never a
+        # substitute.
+        chosen = next((a for a in accounts if a.id == account_id), None)
+        if chosen is None:
+            logger.error("session_launcher: the chosen Claude account %s is not a "
+                         "launchable account in this vault", account_id)
+            return None
+        method = "explicit"
+    if chosen is None and prefer_alias:
         for acct in accounts:
             if acct.get("alias") == prefer_alias:
                 chosen, method = acct, "alias"
@@ -2102,6 +2113,7 @@ def launch_session(
     carried: CarriedCredentials | None = None,
     vault_links: tuple = (),
     selection_out: dict | None = None,
+    account_id: str | None = None,
 ) -> str | None:
     """Launch an agent container session.
 
@@ -2176,6 +2188,9 @@ def launch_session(
                     missing.
         claude_alias: Prefer this Claude account (by alias) when resolving
                     credentials; the usual pick otherwise.
+        account_id: Launch on exactly this account of the session's harness
+                    (the launch chooser's choice). Strict: an account that is
+                    not a launchable one in this vault refuses the launch.
         selection_out: When given, receives the full account-selection record
                     (candidates, excluded accounts and their readings) for the
                     caller to store where the session cannot read it; the
@@ -2283,8 +2298,12 @@ def launch_session(
     auth_args: list[str] = []
     creds: dict | None = None
     if harness == "claude" and carried is None:
-        creds = (_resolve_credentials(prefer_alias=claude_alias) if claude_alias
-                 else _resolve_credentials())
+        if account_id:
+            creds = _resolve_credentials_via_substrate(prefer_alias=None,
+                                                       account_id=account_id)
+        else:
+            creds = (_resolve_credentials(prefer_alias=claude_alias) if claude_alias
+                     else _resolve_credentials())
         _lap("resolve_credentials")
         if creds is None:
             print(
@@ -2303,11 +2322,21 @@ def launch_session(
     elif harness == "claude" and creds is not None:
         selection = creds.get("selection") or {"method": "environment"}
     elif harness in ("codex", "grok"):
-        _acct = _pick_account(harness)
+        _launchable = [a for a in _accounts(harness) if a.launchable]
+        if account_id:
+            _acct = next((a for a in _launchable if a.id == account_id), None)
+            if _acct is None:
+                print(f"  ERROR: account-not-launchable: {harness} account {account_id} "
+                      f"is not a launchable account here (session '{name}')",
+                      file=sys.stderr)
+                return None
+        else:
+            _acct = _pick_account(harness)
         if _acct is not None:
             picked[harness] = _acct
-            selection = _pick_selection(
-                harness, _acct, sum(1 for a in _accounts(harness) if a.launchable))
+            selection = _pick_selection(harness, _acct, len(_launchable))
+            if account_id:
+                selection["method"] = "explicit"
     if selection is not None and selection_out is not None:
         selection_out.update(selection)
     if selection is not None:
