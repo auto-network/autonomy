@@ -13,7 +13,7 @@ from pathlib import Path
 import time
 from typing import Mapping
 
-from tools.dashboard.dao import approval_requests
+from tools.dashboard import link_operations
 from tools.dashboard.fleet_enrollment_service import (
     FleetEnrollmentStore,
     PendingEnrollment,
@@ -156,6 +156,46 @@ def _peer_rows(epoch: str | None) -> dict[str, dict]:
             conn.close()
 
 
+def _publication_from_journal(key: str, entry: Mapping) -> dict | None:
+    """One recorded fleet:join publish from the link-operation journal
+    (link_operations.Journal), in the shape the invitation view reads:
+    ``request``, ``created_at`` in seconds, and ``result`` null while the
+    operation is still running, else ``{approved, execution}``."""
+    request = entry.get("request")
+    if entry.get("op") != "publish" or not isinstance(request, Mapping):
+        return None
+    if request.get("target_type") != "fleet:join":
+        return None
+    state = entry.get("state")
+    if state in ("prepared", "claimed"):
+        result = None
+    else:
+        execution = entry.get("execution")
+        if not isinstance(execution, Mapping):
+            execution = {"ok": False, "error": "Invitation publication did not complete."}
+        result = {"approved": True, "execution": dict(execution)}
+    return {
+        "id": key,
+        "created_at": float(entry.get("prepared_at") or 0),
+        "request": dict(request),
+        "result": result,
+    }
+
+
+def _invitation_publication(journal_entries) -> dict | None:
+    """The newest fleet:join publication this machine recorded. Every
+    publish, the operator's own from the Fleet page and an approved Central
+    request alike, runs through the link operation and is recorded in the
+    journal (auto-fkhq0.10a); nothing else produces one."""
+    candidates = [
+        adapted for key, entry in journal_entries
+        if (adapted := _publication_from_journal(key, entry)) is not None
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: float(row.get("created_at") or 0))
+
+
 def _load_inputs(*, now_ms: int) -> ProjectionInputs:
     root_pub = fleet_tunnel_server._personal_root_pub()
     entries = tuple(fleet_roster.load_entries(org=None))
@@ -176,14 +216,7 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         row.source_approval_id: fleet_enrollment_approvals.decision_status(row.source_approval_id)
         for row in admissions if row.source_approval_id
     }
-    invitation_publication = next(
-        (
-            row
-            for row in approval_requests.recent_for_kind("link_publish")
-            if (row.get("request") or {}).get("target_type") == "fleet:join"
-        ),
-        None,
-    )
+    invitation_publication = _invitation_publication(link_operations.Journal.entries())
     # The local machine's operational facts (connector armed, code staleness,
     # serving certificate). Probes are best-effort: an unreadable probe leaves
     # the field null and the browser shows nothing rather than a guess.

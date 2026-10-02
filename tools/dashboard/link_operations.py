@@ -275,6 +275,16 @@ class Journal:
                                   org="machine")
 
     @staticmethod
+    def entries() -> list[tuple[str, dict]]:
+        """Every journal entry on this machine, ``(key, payload)``, as stored:
+        a claim left by a stopped process is not settled here (that is
+        :func:`read`, on the operation's own path)."""
+        rows = settings_ops.read_owned_set(LINK_OPERATION_SET_ID, org="machine",
+                                           target_revision=LINK_OPERATION_REVISION)
+        return [(str(m.key), dict(m.payload)) for m in rows.members
+                if isinstance(m.payload, dict)]
+
+    @staticmethod
     def stale_prepared(older_than: float) -> list[str]:
         """Operator operations prepared before *older_than* and never signed."""
         rows = settings_ops.read_owned_set(LINK_OPERATION_SET_ID, org="machine",

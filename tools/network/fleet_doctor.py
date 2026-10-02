@@ -1801,9 +1801,11 @@ def _find_stale_fleet_join_state() -> dict:
     invite": the enrollment-invite record (machine.db,
     fleet_enrollment_invites), the link-grant that makes the connector
     eligible to serve it (settings, autonomy.network.link-grant, in
-    whichever local org last published it), and the approval-request
-    audit row the UI's "awaiting_signature" state resurfaces the newest
-    of (approval_requests.db, kind=link_publish). None of these expire
+    whichever local org last published it), and the link-operation
+    journal entry the UI's "awaiting_signature" state resurfaces the
+    newest of (settings, autonomy.machine.link-operation, op=publish;
+    since auto-fkhq0.10a every publish is recorded there, the operator's
+    own and an approved Central request alike). None of these expire
     or get cleared on their own -- discovered live 2026-08-23 doing this
     exact cleanup by hand three times in one session, because a stuck
     target_uuid/token in any ONE of them silently reproduces the same
@@ -1818,9 +1820,9 @@ def _find_stale_fleet_join_state() -> dict:
     import sqlite3
     from tools.graph.db import _org_db_path
     from tools.graph import org_ops
-    from tools.dashboard.dao import approval_requests as ar
+    from tools.dashboard import link_operations
 
-    found = {"enrollment_invites": [], "link_grants": [], "approval_requests": []}
+    found = {"enrollment_invites": [], "link_grants": [], "link_operations": []}
 
     machine_path = _org_db_path("machine")
     if machine_path.exists():
@@ -1867,11 +1869,12 @@ def _find_stale_fleet_join_state() -> dict:
                 })
 
     try:
-        for row in ar.recent_for_kind("link_publish", limit=50):
-            req = row.get("request") or {}
-            if req.get("target_type") == "fleet:join":
-                found["approval_requests"].append({
-                    "id": row["id"], "created_at": row["created_at"],
+        for key, entry in link_operations.Journal.entries():
+            req = entry.get("request") or {}
+            if entry.get("op") == "publish" and req.get("target_type") == "fleet:join":
+                found["link_operations"].append({
+                    "id": key, "created_at": entry.get("prepared_at"),
+                    "state": entry.get("state"),
                     "org": req.get("org"), "target_uuid": req.get("target_uuid"),
                 })
     except Exception:
@@ -1890,14 +1893,13 @@ def clear_stale_fleet_join(*, dry_run: bool = True) -> dict:
     same stale link on the next publish attempt, which is exactly what
     happened twice live before this existed.
     """
-    import sqlite3
     from tools.graph.db import _org_db_path
 
     found = _find_stale_fleet_join_state()
     total = sum(len(v) for v in found.values())
     _section("Clear stale fleet:join invite state")
     if total == 0:
-        _line("nothing found", "no enrollment-invite, link-grant, or approval-request "
+        _line("nothing found", "no enrollment-invite, link-grant, or link-operation "
               "rows are tied to a fleet:join target -- nothing to clear")
         return found
 
@@ -1912,10 +1914,11 @@ def clear_stale_fleet_join(*, dry_run: bool = True) -> dict:
             "link-grant" + ("" if dry_run else " -- REMOVING"),
             f"org={item['org']} key={item['key']} target_uuid={item['target_uuid']}",
         )
-    for item in found["approval_requests"]:
+    for item in found["link_operations"]:
         _line(
-            "approval_requests row" + ("" if dry_run else " -- REMOVING"),
-            f"id={item['id']} org={item['org']} target_uuid={item['target_uuid']}",
+            "link-operation journal entry" + ("" if dry_run else " -- REMOVING"),
+            f"id={item['id']} state={item['state']} org={item['org']} "
+            f"target_uuid={item['target_uuid']}",
         )
 
     if dry_run:
@@ -1934,13 +1937,10 @@ def clear_stale_fleet_join(*, dry_run: bool = True) -> dict:
             check=False, capture_output=True, text=True,
         )
 
-    if found["approval_requests"]:
-        from tools.dashboard.dao import approval_requests as ar
-        conn = sqlite3.connect(ar.DB_PATH)
-        for item in found["approval_requests"]:
-            conn.execute("DELETE FROM approval_requests WHERE id=?", (item["id"],))
-        conn.commit()
-        conn.close()
+    if found["link_operations"]:
+        from tools.dashboard import link_operations
+        for item in found["link_operations"]:
+            link_operations.Journal.delete(item["id"])
 
     _line("cleared", f"{total} row(s) removed -- next publish will mint a genuinely fresh invite")
     return found

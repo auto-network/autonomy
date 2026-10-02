@@ -567,3 +567,78 @@ def test_local_machine_block_carries_per_scope_states_and_dashboard_cache():
                    "cachePresent": False}
     absent = project(_inputs(entries=(LOCAL_ENTRY,)))["localMachine"]
     assert absent["scopeStates"] == [] and absent["dashboardCredentialPresent"] is None
+
+
+# The invitation's publish is an operator link operation (d68a06cb6,
+# auto-fkhq0.10a), recorded in the machine-homed link-operation journal;
+# the view reads it from there, or the page reports "Inactive" after a
+# publication the receipt called successful.
+
+def _journal_entry(state, **extra):
+    return {
+        "state": state,
+        "op": "publish",
+        "initiator": "operator",
+        "prepared_at": (NOW - 5_000) / 1000,
+        "request": {
+            "org": "personal",
+            "target_uuid": "11111111-1111-4111-8111-111111111111",
+            "target_type": "fleet:join",
+            "meta": {"ttl": 604800, "label": "Fleet machine invitation"},
+        },
+        "staged": {},
+        **extra,
+    }
+
+
+def test_a_published_route_in_the_journal_waits_for_the_signature():
+    from tools.dashboard.plugins.fleet.entrypoints.projection import _invitation_publication
+
+    done = _journal_entry("done", finished_at=NOW / 1000, execution={
+        "ok": True, "url": "https://relay.auto.network/l/" + "46" * 16, "token": "46" * 16,
+    })
+    publication = _invitation_publication([("op-one", done)])
+    value = project(_inputs(
+        entries=(LOCAL_ENTRY,), invitation_publication=publication,
+    ))["invitation"]
+
+    assert value["status"] == "awaiting_signature"
+    assert value["publishedAt"] == NOW - 5_000
+    assert value["expiresAt"] == NOW - 5_000 + 604_800_000
+    assert value["targetUuid"] == "11111111-1111-4111-8111-111111111111"
+    assert value["rendezvous"] == "https://relay.auto.network/l/" + "46" * 16
+    assert value["grantToken"] == "46" * 16
+
+
+def test_a_running_operation_is_publishing_and_a_failed_one_says_why():
+    from tools.dashboard.plugins.fleet.entrypoints.projection import _invitation_publication
+
+    running = _invitation_publication([("op-one", _journal_entry("claimed"))])
+    assert project(_inputs(
+        entries=(LOCAL_ENTRY,), invitation_publication=running,
+    ))["invitation"]["status"] == "publishing"
+
+    failed = _invitation_publication([("op-two", _journal_entry(
+        "failed", execution={"ok": False, "error": "the registry refused the link"},
+    ))])
+    value = project(_inputs(entries=(LOCAL_ENTRY,), invitation_publication=failed))["invitation"]
+    assert value["status"] == "failed"
+    assert value["error"] == "the registry refused the link"
+
+
+def test_only_the_newest_fleet_join_publish_counts():
+    from tools.dashboard.plugins.fleet.entrypoints.projection import _invitation_publication
+
+    note_link = _journal_entry("done", execution={"ok": True, "url": "https://x/n", "token": "33" * 16})
+    note_link["request"] = {**note_link["request"], "target_type": "note"}
+    older = _journal_entry("done", prepared_at=(NOW - 60_000) / 1000,
+                           execution={"ok": True, "url": "https://x/old", "token": "22" * 16})
+    newest = _journal_entry("done", execution={"ok": True, "url": "https://x/new", "token": "44" * 16})
+    revoke = {**_journal_entry("done"), "op": "revoke"}
+
+    chosen = _invitation_publication([
+        ("op-note", note_link), ("op-old", older), ("op-new", newest), ("op-revoke", revoke),
+    ])
+    assert chosen["id"] == "op-new"
+    assert _invitation_publication([("op-note", note_link), ("op-revoke", revoke)]) is None
+    assert _invitation_publication([]) is None
