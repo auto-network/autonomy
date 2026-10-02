@@ -111,3 +111,27 @@ def test_a_redacted_credential_is_not_taken_for_a_token(monkeypatch):
     monkeypatch.setattr(hv, "_read_one", lambda set_id, key, org: rows[set_id])
     acct = hv.read_credential("claude", "O1", org="acme")
     assert acct.openable is False and acct.secret == {}
+
+
+def _public(harness, account_id, **public):
+    acct = hv.Account(harness, account_id, public={"harness": harness, "account_id": account_id,
+                                                   **public})
+    acct.opened = False
+    return acct
+
+
+def test_a_valid_setup_token_is_selectable_whatever_the_bundle_state():
+    """Home 2026-10-02: both Claude accounts recorded refresh_failed
+    (invalid_grant) beside setup tokens valid to 2027, and launched."""
+    acct = _public("claude", "a", credential_state="refresh_failed",
+                   setup_expires_at=9_999_999_999_999)
+    assert sl._selectable("claude", acct)
+    lapsed = _public("claude", "b", credential_state="refresh_failed", setup_expires_at=1)
+    assert not sl._selectable("claude", lapsed)
+
+
+def test_an_expired_codex_access_token_is_selectable():
+    assert sl._selectable("codex", _public("codex", "c", credential_state="expired",
+                                           credential_expires_at=1))
+    assert not sl._selectable("codex", _public("codex", "d", credential_state="missing"))
+    assert not sl._selectable("codex", _public("codex", "e", credential_state="refresh_failed"))

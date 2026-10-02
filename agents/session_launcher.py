@@ -704,13 +704,26 @@ def choose(harness: str, *, account_id: str | None = None, alias: str | None = N
 
 
 def _selectable(harness: str, acct: Any) -> bool:
-    """Whether an account listed from its public row can be chosen: its
-    recorded state is ok and not expired. A Claude account recorded ok
-    holds a fresh setup token or a refresh token (the state a write
-    records), and the session refreshes a lapsed access token itself, so it
-    is selectable whatever that token's expiry (coordinator decision
-    19:22Z). The chooser and the strict pre-launch check use this too."""
-    if harness == "claude" and acct.public.get("credential_state") == "ok":
+    """Whether an account listed from its public row can be chosen -- the
+    one place this is decided; the chooser and the strict pre-launch check
+    use it too. In general: its recorded state is ok and not expired.
+
+    * Claude: an unexpired setup token launches on its own, whatever the
+      OAuth bundle's state (a refresh_failed bundle beside a valid setup
+      token, Home 2026-10-02). A Claude account recorded ok holds a fresh
+      setup token or a refresh token, and the session refreshes a lapsed
+      access token itself, so it is selectable whatever that token's expiry
+      (coordinator decision 19:22Z).
+    * Codex: every credential holds a refresh token (the shape requires
+      one) and the CLI refreshes an expired access token itself (an
+      'expired' account signed in on Home 2026-10-02), so 'expired' is
+      selectable.
+    """
+    state = acct.public.get("credential_state")
+    if harness == "claude":
+        if acct.setup_token_fresh() or state == "ok":
+            return True
+    elif harness == "codex" and state == "expired":
         return True
     return acct.usable()
 
