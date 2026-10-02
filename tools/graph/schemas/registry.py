@@ -902,6 +902,25 @@ def readiness_gate(set_id: str, revision: int) -> str | None:
     return getattr(schema, "_readiness_gate", None) if schema else None
 
 
+# Answers of the per-set ``declared_*`` lookups below. SCHEMAS is keyed by
+# ``set_id#revision``, so an answer takes a scan of every entry, and it cannot
+# change until a schema is registered or unregistered; it is computed once per
+# set and dropped by either. A disagreement raises and is not kept.
+_DECLARED: dict[tuple[str, str], str | None] = {}
+
+
+def _per_set(lookup: Callable[[str], str | None]) -> Callable[[str], str | None]:
+    def cached(set_id: str) -> str | None:
+        key = (lookup.__name__, set_id)
+        if key not in _DECLARED:
+            _DECLARED[key] = lookup(set_id)
+        return _DECLARED[key]
+    cached.__name__ = lookup.__name__
+    cached.__doc__ = lookup.__doc__
+    return cached
+
+
+@_per_set
 def declared_home(set_id: str) -> str | None:
     """The home every registered revision of ``set_id`` agrees on.
 
@@ -925,6 +944,7 @@ def declared_home(set_id: str) -> str | None:
     return seen.pop()
 
 
+@_per_set
 def declared_org_writeback_key_strategy(set_id: str) -> str | None:
     """The cross-org personal-write namespace every revision agrees on.
 
@@ -1018,6 +1038,7 @@ def vaulted(tier: str) -> Any:
     return _wrap
 
 
+@_per_set
 def declared_vault_tier(set_id: str) -> str | None:
     """The vault tier every registered revision of ``set_id`` agrees on.
 
@@ -1908,6 +1929,7 @@ def register_schema(
             f"{model_cls.__qualname__}"
         )
     SCHEMAS[key] = model_cls
+    _DECLARED.clear()
     if upconvert_from_prev is not None:
         register_upconverter(set_id, revision - 1, revision, upconvert_from_prev)
 
@@ -1929,6 +1951,7 @@ def register_upconverter(
 def unregister_schema(set_id: str, revision: int) -> None:
     """Test helper: drop a registration without affecting the rest."""
     SCHEMAS.pop(schema_key(set_id, revision), None)
+    _DECLARED.clear()
     # Drop adjacent upconverters too — registrations are normally a unit.
     UPCONVERTERS.pop(_hop_key(set_id, revision - 1, revision), None)
     UPCONVERTERS.pop(_hop_key(set_id, revision, revision + 1), None)
