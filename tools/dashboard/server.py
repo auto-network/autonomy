@@ -186,6 +186,7 @@ from tools.dashboard import network_routes
 from tools.dashboard import org_membership_routes
 from tools.dashboard import org_runners
 from tools.dashboard import remote_api
+from tools.dashboard import restricted_sets
 from tools.dashboard import web_push, web_push_routes
 from tools.dashboard import image_build_worker
 from tools.dashboard import web_gateway_supervisor
@@ -22963,24 +22964,24 @@ routes = [
     Route("/api/graph/tree", api_graph_tree, methods=["GET"]),
     # Settings primitive (graph://0d3f750f-f9c). Routes ordered specific → generic.
     Route("/api/graph/sets", api_graph_set_ids, methods=["GET"]),
-    Route("/api/graph/setting-resolve/{value}", api_graph_setting_resolve, methods=["GET"]),
-    Route("/api/graph/settings/{set_id}/{key}/chain", api_graph_settings_chain, methods=["GET"]),
-    Route("/api/graph/settings/{set_id}/{key}/check", api_graph_settings_check, methods=["GET"]),
+    Route("/api/graph/setting-resolve/{value}", restricted_sets.guard_read(api_graph_setting_resolve), methods=["GET"]),
+    Route("/api/graph/settings/{set_id}/{key}/chain", restricted_sets.guard_read(api_graph_settings_chain), methods=["GET"]),
+    Route("/api/graph/settings/{set_id}/{key}/check", restricted_sets.guard_read(api_graph_settings_check), methods=["GET"]),
     # Before {set_id}/{key}, or "contested" would be captured as a key.
-    Route("/api/graph/settings/{set_id}/contested", api_graph_settings_contested, methods=["GET"]),
-    Route("/api/graph/settings/{set_id}/{key}", api_graph_settings_get_by_key, methods=["GET"]),
-    Route("/api/graph/settings/{set_id}/migrate", api_graph_settings_migrate, methods=["POST"]),
-    Route("/api/graph/settings/{set_id}", api_graph_settings_list, methods=["GET"]),
-    Route("/api/graph/setting", api_graph_setting_create, methods=["POST"]),
-    Route("/api/graph/setting/{id}/override", api_graph_setting_override, methods=["POST"]),
-    Route("/api/graph/setting/{id}/exclude", api_graph_setting_exclude, methods=["POST"]),
-    Route("/api/graph/setting/{id}/promote", api_graph_setting_promote, methods=["POST"]),
+    Route("/api/graph/settings/{set_id}/contested", restricted_sets.guard_read(api_graph_settings_contested), methods=["GET"]),
+    Route("/api/graph/settings/{set_id}/{key}", restricted_sets.guard_read(api_graph_settings_get_by_key), methods=["GET"]),
+    Route("/api/graph/settings/{set_id}/migrate", restricted_sets.guard_write(api_graph_settings_migrate, target="path"), methods=["POST"]),
+    Route("/api/graph/settings/{set_id}", restricted_sets.guard_read(api_graph_settings_list), methods=["GET"]),
+    Route("/api/graph/setting", restricted_sets.guard_write(api_graph_setting_create, target="body"), methods=["POST"]),
+    Route("/api/graph/setting/{id}/override", restricted_sets.guard_write(api_graph_setting_override, target="row"), methods=["POST"]),
+    Route("/api/graph/setting/{id}/exclude", restricted_sets.guard_write(api_graph_setting_exclude, target="row"), methods=["POST"]),
+    Route("/api/graph/setting/{id}/promote", restricted_sets.guard_write(api_graph_setting_promote, target="row"), methods=["POST"]),
     Route("/api/graph/source/{id}/move", api_graph_source_move, methods=["POST"]),
     Route("/api/graph/source/{id}/promote", api_graph_source_promote, methods=["POST"]),
-    Route("/api/graph/setting/{id}/deprecate", api_graph_setting_deprecate, methods=["POST"]),
-    Route("/api/graph/setting/{id}/undeprecate", api_graph_setting_undeprecate, methods=["POST"]),
-    Route("/api/graph/setting/{id}", api_graph_setting_get, methods=["GET"]),
-    Route("/api/graph/setting/{id}", api_graph_setting_delete, methods=["DELETE"]),
+    Route("/api/graph/setting/{id}/deprecate", restricted_sets.guard_write(api_graph_setting_deprecate, target="row"), methods=["POST"]),
+    Route("/api/graph/setting/{id}/undeprecate", restricted_sets.guard_write(api_graph_setting_undeprecate, target="row"), methods=["POST"]),
+    Route("/api/graph/setting/{id}", restricted_sets.guard_read(api_graph_setting_get), methods=["GET"]),
+    Route("/api/graph/setting/{id}", restricted_sets.guard_write(api_graph_setting_delete, target="row"), methods=["DELETE"]),
     Route("/api/agent-actions/dispatch", api_agent_action_dispatch, methods=["POST"]),
     Route("/api/graph/{id}", api_graph_resolve),
     Route("/api/source/{id}", api_source_read),
