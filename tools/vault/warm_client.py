@@ -1,7 +1,7 @@
 """Headless personal vault unlock using the existing decryption-key handoff.
 
-No personal ledger events or signing delegates are created. Old storage-format
-values recover through their persisted descriptors and grants when present.
+No personal ledger events or signing delegates are created. Personal values
+open through the audited recipient alone; no grant is recovered.
 The personal root stays in this client process, never in the HTTP handoff.
 """
 
@@ -16,8 +16,6 @@ import urllib.request
 from tools.network.idkit import KeyPair
 from tools.network.idkit.root_factor_policy import open_armor_with_password
 from tools.network.idkit.canonical import canonical_json
-from tools.network.storagekit import credentials as kem_credentials
-from tools.network.idkit.sealing import derive_encapsulation_keypair
 from tools.vault.personal_object import derive_delegate_audited_recipient
 
 API = os.environ.get("DASHBOARD_API", "https://localhost:8080")
@@ -65,9 +63,6 @@ def unlock(pw: str) -> KeyPair:
 def warm(pw: str) -> dict:
     """The whole warm-up. Returns the vault-keys response."""
     root = unlock(pw)
-    recovery = call("/api/identity/unlock/vault-keys")
-    if recovery.get("_status"):
-        return recovery
     root_seed = bytes.fromhex(root.private_hex)
     private_hex, public_hex = derive_delegate_audited_recipient(root_seed)
     payload = {
@@ -75,13 +70,6 @@ def warm(pw: str) -> dict:
         "delegate_audited_private_key": private_hex,
         "delegate_audited_public_key": public_hex,
     }
-    genesis_id = recovery.get("recovery_genesis_id")
-    if genesis_id:
-        kem_private, _ = derive_encapsulation_keypair(
-            kem_credentials.derive_kem_seed(root_seed),
-            kem_credentials.kem_purpose(genesis_id),
-        )
-        payload["persona_kem_private_key"] = kem_private
     return call("/api/identity/unlock/vault-keys", payload)
 
 

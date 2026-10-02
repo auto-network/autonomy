@@ -1,7 +1,7 @@
 """Personal decryption keys survive graceful reload through the RAM carrier.
 
-Old-format storage grants recover with the optional KEM key; new personal
-values need only the audited recipient. Neither requires a signing delegate.
+Personal values need only the audited recipient; organization KEM keys ride
+their own carrier. Neither requires a signing delegate.
 """
 
 from __future__ import annotations
@@ -19,9 +19,8 @@ def _ramfs(tmp_path, monkeypatch):
     # A temp dir stands in for the ramfs key cache; neuter the ramfs guard so
     # the test runs headless (the guard itself is covered by memory_cache).
     monkeypatch.setenv("AUTONOMY_KEYCACHE_MOUNT", str(tmp_path))
-    # restore opens KeyControlStore(vault_db_path_for(None)); give it a temp
-    # personal store so resolution doesn't refuse (open_generation_keys itself
-    # is stubbed, so the store's contents don't matter).
+    # Organization restore resolves stores under the data root; point it at
+    # a temp tree.
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     (tmp_path / "orgs").mkdir(parents=True, exist_ok=True)
@@ -34,63 +33,6 @@ def _ramfs(tmp_path, monkeypatch):
     yield
     u._VAULT_CACHE.clear()
     settings_ops.set_personal_delegate_audited_key(None)
-
-
-def _warm(monkeypatch):
-    """Install personal decryption material and capture old-data recovery."""
-    kem_private = "e" * 64
-    audited_delegate = "d" * 64
-    u._VAULT_CACHE["kem_private"] = kem_private
-    u._VAULT_CACHE["audited_delegate"] = audited_delegate
-
-    captured: dict = {}
-
-    # Restore re-derives the generation keys through open_generation_keys +
-    # _bring_vault_up; stub both, capturing what the KEM key drives.
-    def fake_open(kem_hex, grants, states):
-        captured["kem_hex"] = kem_hex
-        return {"a" * 64: b"\x01" * 32}
-
-    def fake_bring_up(generation_keys, delegate_hex=None):
-        captured["generation_keys"] = generation_keys
-        captured["delegate_hex"] = delegate_hex
-        return len(generation_keys)
-
-    monkeypatch.setattr("tools.vault.unlock.open_generation_keys", fake_open)
-    monkeypatch.setattr(u, "_bring_vault_up", fake_bring_up)
-    return kem_private, audited_delegate, captured
-
-
-def test_graceful_reload_recovers_old_content_without_a_signing_key(tmp_path, monkeypatch, caplog):
-    import logging
-
-    kem_private, audited_delegate, captured = _warm(monkeypatch)
-
-    assert u.save_vault_across_hot_reload() is True
-    u._VAULT_CACHE.clear()  # the reload: the in-memory cache dies
-    with caplog.at_level(logging.INFO, logger=u.logger.name):
-        assert u.restore_vault_across_hot_reload() is True
-
-    # A successful re-warm announces itself, so a "cold key" diagnosis can be
-    # checked against whether a hot-reload actually succeeded (no false positive).
-    assert any(
-        "keys successfully hot-reloaded" in r.getMessage()
-        for r in caplog.records
-    )
-
-    # No signing key crossed; the KEM key drove old-generation recovery.
-    assert captured["delegate_hex"] is None
-    assert captured["kem_hex"] == kem_private
-    assert captured["generation_keys"] == {"a" * 64: b"\x01" * 32}
-    # And the KEM key is retained for the NEXT reload.
-    assert u._VAULT_CACHE.get("kem_private") == kem_private
-    assert u._VAULT_CACHE.get("audited_delegate") == audited_delegate
-    assert settings_ops._personal_delegate_audited_key == audited_delegate
-
-    # The snapshot files are consumed on load — nothing lingers on ramfs.
-    assert u._keycache_read("vault.hotreload.delegate") is None
-    assert u._keycache_read(u._HOTRELOAD_KEM) is None
-    assert u._keycache_read(u._HOTRELOAD_AUDITED_DELEGATE) is None
 
 
 def test_a_crash_leaves_nothing_and_boots_locked(monkeypatch):
@@ -108,16 +50,30 @@ def test_a_signing_key_without_a_personal_recipient_is_not_a_warm_vault(tmp_path
     assert u._keycache_read(u._HOTRELOAD_KEM) is None
 
 
-def test_personal_recipient_alone_survives_reload(tmp_path, monkeypatch):
-    """New personal vaults have no ledger, signing delegate, or generation KEM."""
+def test_personal_recipient_alone_survives_reload(tmp_path, monkeypatch, caplog):
+    """Personal vaults have no ledger, signing delegate, or generation KEM."""
+    import logging
+
     u._VAULT_CACHE["audited_delegate"] = "d" * 64
-    monkeypatch.setattr(u, "_personal_store_has_generations", lambda: False)
     assert u.save_vault_across_hot_reload() is True
-    u._VAULT_CACHE.clear()
-    assert u.restore_vault_across_hot_reload() is True
+    u._VAULT_CACHE.clear()  # the reload: the in-memory cache dies
+    with caplog.at_level(logging.INFO, logger=u.logger.name):
+        assert u.restore_vault_across_hot_reload() is True
+
+    # A successful re-warm announces itself, so a "cold key" diagnosis can be
+    # checked against whether a hot-reload actually succeeded (no false positive).
+    assert any(
+        "keys successfully hot-reloaded" in r.getMessage()
+        for r in caplog.records
+    )
     assert settings_ops._personal_delegate_audited_key == "d" * 64
+    assert u._VAULT_CACHE.get("audited_delegate") == "d" * 64
     assert "delegate" not in u._VAULT_CACHE
-    assert "kem_private" not in u._VAULT_CACHE
+
+    # The snapshot files are consumed on load — nothing lingers on ramfs.
+    assert u._keycache_read("vault.hotreload.delegate") is None
+    assert u._keycache_read(u._HOTRELOAD_KEM) is None
+    assert u._keycache_read(u._HOTRELOAD_AUDITED_DELEGATE) is None
 
 
 def test_org_map_survives_when_one_org_cannot_be_resolved(tmp_path, monkeypatch):
@@ -128,7 +84,6 @@ def test_org_map_survives_when_one_org_cannot_be_resolved(tmp_path, monkeypatch)
     keys = {'a' * 64: {'b' * 64: 'c' * 64}, 'e' * 64: {'f' * 64: '1' * 64}}
     u._VAULT_CACHE['organization_kem_keys'] = keys
     monkeypatch.setattr(org_ops, 'list_orgs', lambda: [SimpleNamespace(slug='unavailable')])
-    monkeypatch.setattr(u, '_personal_store_has_generations', lambda: False)
     assert u.save_vault_across_hot_reload()
     assert json.loads(u._keycache_read(u._HOTRELOAD_ORGANIZATION_KEM)) == keys
     u._VAULT_CACHE.clear()
@@ -174,7 +129,6 @@ def test_one_org_store_failure_does_not_block_another_org_restore(tmp_path, monk
         descriptor.genesis_id: {grant.recipient_kem_key_id: private}}
     assert u.save_vault_across_hot_reload()
     u._VAULT_CACHE.clear()
-    monkeypatch.setattr(u, '_personal_store_has_generations', lambda: False)
     monkeypatch.setattr(u, '_ensure_sealed_settings_pepper', lambda: None)
     monkeypatch.setattr(org_ops, 'list_orgs', lambda: [
         SimpleNamespace(slug='broken'), SimpleNamespace(slug='healthy')])

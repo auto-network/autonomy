@@ -82,14 +82,13 @@ def collect(only_org: str | None = None):
     fleet runtime, personal serve certificate) are unchanged, and no other
     organization's checkpoint, delegate or binding is touched or reported."""
     from tools.dashboard import (fleet_enrollment_routes as fleet, identity_routes,
-                                 membership_checkpoint, network_routes, unlock_routes,
+                                 membership_checkpoint, network_routes,
                                  vault_routes, org_storage_delegate)
 
     personal = identity_routes._personal_member()
     try:
-        vault = _body(unlock_routes.personal_vault_recovery())
-        vault.update(root_pub=personal.payload["root_pub"],
-                     inventory=vault_routes.root_anchor_inventory())
+        vault = {"root_pub": personal.payload["root_pub"],
+                 "inventory": vault_routes.root_anchor_inventory()}
     except Exception:
         logger.exception("sign-in vault preparation unavailable")
         vault = {"error": "recovery-unavailable"}

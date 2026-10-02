@@ -4,7 +4,7 @@ lockout of every sign-in method.
 ``signon_preparation.collect()`` is awaited by the browser BEFORE the
 credential POST on the password, passkey AND recovery paths. If any single
 input raises — one organization's ledger, the fleet runtime read, the
-personal recovery store — ``get_preparation`` answers 503 and the operator
+personal vault inventory — ``get_preparation`` answers 503 and the operator
 cannot sign in at all, including with the recovery code. Before fa760a61 the
 unlock plan isolated failures per organization and a failed fleet read was
 reported as unreadable and skipped.
@@ -29,7 +29,6 @@ from tools.dashboard import (
     network_routes,
     org_storage_delegate,
     signon_preparation,
-    unlock_routes,
     vault_routes,
 )
 
@@ -49,8 +48,6 @@ def healthy(monkeypatch):
     """Every preparation input answers; tests then break exactly one."""
     monkeypatch.setattr(identity_routes, "_personal_member",
                         lambda: SimpleNamespace(payload={"root_pub": "cd" * 32}))
-    monkeypatch.setattr(unlock_routes, "personal_vault_recovery",
-                        lambda: JSONResponse({"recovery": "ok"}))
     monkeypatch.setattr(vault_routes, "root_anchor_inventory", lambda: {"anchors": []})
     monkeypatch.setattr(fleet, "runtime_preparation",
                         lambda: JSONResponse({"enabled": False}))
@@ -63,6 +60,9 @@ def healthy(monkeypatch):
                         lambda: iter([(_entry("good"), "ef" * 32), (_entry("bad"), "ef" * 32)]))
     monkeypatch.setattr(signon_preparation, "organization_encryption_recovery",
                         lambda org: {"genesis_id": "ab" * 32, "counter": 0, "credentials": []})
+
+
+_VAULT = {"root_pub": "cd" * 32, "inventory": {"anchors": []}}
 
 
 def _prepared_slugs(result: dict) -> list[str]:
@@ -81,7 +81,7 @@ def test_one_organizations_failure_does_not_block_sign_in(healthy, monkeypatch):
 
     result = signon_preparation.collect()
 
-    assert result["vault"]["recovery"] == "ok"
+    assert result["vault"] == _VAULT
     assert _prepared_slugs(result) == ["good"]
     bad = [o for o in result["organizations"] if o["slug"] == "bad"]
     # Reported as unavailable, or omitted — never raised.
@@ -109,22 +109,9 @@ def test_fleet_runtime_failure_does_not_block_sign_in(healthy, monkeypatch):
 
     result = signon_preparation.collect()
 
-    assert result["vault"]["recovery"] == "ok"
+    assert result["vault"] == _VAULT
     assert _prepared_slugs(result) == ["good", "bad"]
     assert not result["runtime"] or result["runtime"].get("error")
-
-
-def test_personal_recovery_store_failure_does_not_block_access_sign_in(healthy, monkeypatch):
-    """The personal recovery inventory feeds the vault phase, not the access
-    unlock. When it cannot be read (two genesis rows, a locked store), the
-    access sign-in must still be prepared."""
-    monkeypatch.setattr(unlock_routes, "personal_vault_recovery",
-                        lambda: JSONResponse({"error": "multiple genesis rows"}, status_code=503))
-
-    result = signon_preparation.collect()
-
-    assert _prepared_slugs(result) == ["good", "bad"]
-    assert not result["vault"] or result["vault"].get("error")
 
 
 def test_route_answers_sealed_preparation_when_one_org_fails(healthy, monkeypatch):
@@ -218,6 +205,6 @@ def test_the_join_window_prepares_only_the_joined_organization(healthy):
     organization's maintenance is neither run nor reported there."""
     result = signon_preparation.collect(only_org="good")
     assert [o["slug"] for o in result["organizations"]] == ["good"]
-    assert result["vault"]["recovery"] == "ok"          # personal inputs unchanged
+    assert result["vault"] == _VAULT          # personal inputs unchanged
     everything = signon_preparation.collect()
     assert sorted(o["slug"] for o in everything["organizations"]) == ["bad", "good"]

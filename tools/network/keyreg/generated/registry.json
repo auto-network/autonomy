@@ -1304,7 +1304,7 @@
         "tools/vault/unlock.py:open_generation_keys",
         "tools/dashboard/static/js/ceremony/vault-unlock.js:prepareVault",
         "tools/dashboard/unlock_routes.py:_accept_organization_kem_key",
-        "tools/dashboard/unlock_routes.py:restore_vault_across_hot_reload",
+        "tools/dashboard/unlock_routes.py:_restore_organization_kem_keys",
         "tools/vault/key_holder.py:build_key_holder"
       ],
       "crib": [
@@ -1332,7 +1332,7 @@
       },
       "group": "domain-storage",
       "kind": "kem",
-      "notes": "Initial founding and admission derive counter zero, then bind the pair with kem_purpose(genesis_id). PersonaKemCredential has no counter field. Personal and organization sign-in handoffs open existing grants and keep KEM keys in process memory. Organization reads open late grants, and graceful reload uses the existing RAM-backed carrier to retain KEM keys, not generation secrets (graph://35308bf7-584, auto-a1pub). This key is not stored in audited Settings; cold restart needs sign-in.",
+      "notes": "Initial founding and admission derive counter zero, then bind the pair with kem_purpose(genesis_id). PersonaKemCredential has no counter field. Organization sign-in handoffs open existing grants and keep KEM keys in process memory. Organization reads open late grants, and graceful reload uses the existing RAM-backed carrier to retain organization KEM keys, not generation secrets (graph://35308bf7-584, auto-a1pub). Personal values do not use grants (personal_object); the personal self-grant recovery at sign-in and its reload KEM carrier were removed 2026-10-02, so no personal KEM key is derived or handed off. This key is not stored in audited Settings; cold restart needs sign-in. * The four proofs below model persona-addressed grants without distinguishing the personal domain from an organization's, so they also covered the personal grant recovery removed 2026-10-02; they have not been re-checked against today's organization-only use.",
       "proofs": [
         {
           "framework": "tamarin",
@@ -2370,7 +2370,7 @@
           "memory-held generation secrets recovered from CapabilityGrants"
         ]
       },
-      "notes": "Grant opening primitive, not a human-factor authorization or an audited-object release. Org integration remains pending.",
+      "notes": "Grant opening primitive, not a human-factor authorization or an audited-object release. Its consumer is organization grant recovery (ceremony.organization_grant_recovery); personal values no longer use grants (personal sign-in recovery removed 2026-10-02).",
       "source": {
         "file": "tools/vault/unlock.py",
         "kind": "ceremony",

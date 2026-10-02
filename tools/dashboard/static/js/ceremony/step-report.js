@@ -72,7 +72,6 @@ const REASON_PHRASES = [
   ['anchor-race', 'the vault anchor inventory changed mid-ceremony'],
   ['anchor-enroll', 'the root anchor could not be enrolled'],
   ['root-class', 'the root policy class could not be created'],
-  ['recovery', 'the personal vault recovery metadata could not be read'],
   ['heads', 'the ledger heads could not be read'],
   ['vault-keys', 'the dashboard refused the vault key material'],
 ];

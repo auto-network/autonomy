@@ -21,14 +21,6 @@ export async function prepareVault(rootSeed, prepared, audited, organizations = 
   const result = { keys: { generation_keys: {},
     delegate_audited_private_key: audited.privateKeyHex,
     delegate_audited_public_key: audited.publicKeyHex } };
-  if (prepared.recovery_genesis_id) {
-    const kemSeed = await deriveKemSeed(rootSeed);
-    try {
-      result.keys.persona_kem_private_key = (await deriveEncapsulationKeypair(
-        kemSeed, 'autonomy/persona-kem/v1/' + prepared.recovery_genesis_id,
-      )).privateKeyHex;
-    } finally { kemSeed.fill(0); }
-  }
   result.keys.organization_kem_keys = [];
   result.failures = [];
   if (organizations.length) {
@@ -235,23 +227,6 @@ async function _wakeVaultInner({
   });
   if (!personalVault.ready) return personalVault;
 
-  // Old storage-format records carry their domain id in their descriptors.
-  // Recover their decrypt-only key without a ledger, persona, or new credential.
-  const recovery = await fetchImpl('/api/identity/unlock/vault-keys', {
-    credentials: 'same-origin',
-  });
-  if (!recovery.ok) return { ready: false, reason: `recovery-${recovery.status}` };
-  const { recovery_genesis_id: genesisId } = await body(recovery);
-  let kemPrivateKey;
-  if (genesisId) {
-    const kemSeed = await deriveKemSeed(personalRootSeed);
-    const pair = await deriveEncapsulationKeypair(
-      kemSeed, 'autonomy/persona-kem/v1/' + genesisId,
-    );
-    kemPrivateKey = pair.privateKeyHex;
-    kemSeed.fill(0);
-  }
-
   // A purpose-separated X25519 recipient lets audited personal Settings be
   // written while cold and read unattended while this process remains warm.
   // The browser is the only place holding the personal root: derive here,
@@ -267,7 +242,6 @@ async function _wakeVaultInner({
     credentials: 'same-origin',
     body: JSON.stringify({
       generation_keys: generationKeys,
-      persona_kem_private_key: kemPrivateKey,
       delegate_audited_private_key: auditedDelegate.privateKeyHex,
       delegate_audited_public_key: auditedDelegate.publicKeyHex,
     }),

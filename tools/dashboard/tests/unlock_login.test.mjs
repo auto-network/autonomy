@@ -123,7 +123,7 @@ async function router(url, opts) {
     if (SERVER.preparationFailure === 'ciphertext') return ok({ sealed: '00' });
     const pair = await deriveEncapsulationKeypair(SERVER.rootSeed,
       'autonomy/vault/delegate-audited-recipient/v1');
-    const payload = { vault: { root_pub: SERVER.rootPub, recovery_genesis_id: null,
+    const payload = { vault: { root_pub: SERVER.rootPub,
       inventory: { anchors: [], classes: [{ governance: { form: 'root-reachable' } }] } },
       organizations: [], runtime: { enabled: false }, completion: null, personal_serve: {} };
     if (SERVER.preparationFailure === 'vault') payload.vault = { error: 'recovery-unavailable' };

@@ -2,7 +2,8 @@
 
 
 Personal-homed Settings use personal_object directly, with no authority ledger.
-Old personal storage-format values remain readable through the key holder.
+Old personal storage-format values were re-sealed or deleted and their sign-in
+recovery removed (2026-10-02); no personal generation keys reach this cache.
 """
 
 from __future__ import annotations

@@ -1145,39 +1145,11 @@ def sanitize_next(raw: str | None) -> str:
 # ── the vault's one warm moment ───────────────────────────────────────
 
 
-async def get_personal_vault_recovery(request: Request) -> JSONResponse:
-    """Old personal storage derivation context, from descriptors, not a ledger."""
-    if session_from_request(request) is None:
-        return JSONResponse({"ok": False, "error": "unlock required"}, status_code=401)
-    return personal_vault_recovery()
-
-
-def personal_vault_recovery() -> JSONResponse:
-    """Read-only descriptor context, shared with encrypted preparation."""
-    try:
-        from tools.network.storagekit.keycontrol import KeyControlStore
-        from tools.vault.db_content_store import vault_db_path_for
-
-        path = vault_db_path_for(None)
-        genesis_ids = set()
-        if Path(path).exists():
-            with KeyControlStore(path) as kc:
-                genesis_ids = {state.genesis_id for state in kc.states.values()}
-        if len(genesis_ids) > 1:
-            raise ValueError("personal storage has more than one recovery domain")
-        return JSONResponse({"recovery_genesis_id": next(iter(genesis_ids), None)})
-    except Exception:
-        logger.exception("personal storage recovery metadata unavailable")
-        return JSONResponse({"ok": False, "error": "recovery metadata unavailable"},
-                            status_code=503)
-
-
 async def post_unlock_vault_keys(request: Request) -> JSONResponse:
     """Receive scoped decryption keys after the authenticated root unlock.
 
     The personal root stays in the client. Its audited X25519 recipient opens
-    modern personal values. An optional KEM key recovers old storage-format
-    values from persisted grants; it does not create membership or credentials.
+    personal values.
     The existing organization signing-author handoff is separate from this
     personal recipient and is not provisioned by personal warm-up.
     Organization KEM keys are matched to current credentials, held in memory,
@@ -1228,61 +1200,6 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
                 f"generation key for {state_id} is {len(raw)} bytes, not 32"
             )}, status_code=400)
         decoded[state_id] = raw
-
-    # Server-side recovery (crib §1c/§12): the caller re-derived the persona's
-    # decrypt-only KEM private key from the root and hands it here; this
-    # process opens the PERSISTED grants against the held descriptors and
-    # rebuilds every generation key the in-memory cache lost. The KEM key can
-    # sign nothing and authors nothing — §12 places it exactly here after
-    # sign-in. Keys the caller sent explicitly win over recovered ones.
-    kem_private_hex = body.get("persona_kem_private_key")
-    if kem_private_hex is not None:
-        if not isinstance(kem_private_hex, str):
-            logger.warning("vault bring-up refused (persona-kem-key-shape)")
-            return JSONResponse({"ok": False, "error": (
-                "persona_kem_private_key must be the persona's KEM private "
-                "key as hex, or absent"
-            )}, status_code=400)
-        try:
-            from tools.network.storagekit.keycontrol import KeyControlStore
-            from tools.vault.db_content_store import vault_db_path_for
-            from tools.vault.unlock import open_generation_keys
-
-            with KeyControlStore(vault_db_path_for(None)) as kc:
-                recovered = open_generation_keys(
-                    kem_private_hex, kc.accepted_grants(), kc.states,
-                )
-        except Exception as exc:  # noqa: BLE001 — one refusal shape
-            logger.warning("grant recovery failed", exc_info=True)
-            return JSONResponse({"ok": False, "error": (
-                f"generation-key recovery from persisted grants failed: {exc}"
-            )}, status_code=500)
-        for state_id, secret in recovered.items():
-            decoded.setdefault(state_id, secret)
-        # Retain the persona KEM private key (§12 permits the dashboard to hold
-        # it after sign-in) so a graceful hot reload can hand it to the next
-        # process, which then opens grants — including ones minted on another
-        # machine and synced in — with nobody present.
-        _VAULT_CACHE["kem_private"] = kem_private_hex
-
-    if not decoded and _personal_store_has_generations():
-        logger.warning(
-            "vault bring-up refused (no-generation-keys): caller sent none "
-            "and grant recovery produced none, but the store holds sealed "
-            "content")
-        # Refusing empty is right for a store that HAS sealed content: neither
-        # the caller nor grant recovery produced a single generation key, so
-        # bringing the vault up would answer every read with a missing-key
-        # error while looking healthy. It is wrong on a first unlock, where
-        # there are legitimately none — nothing has ever been sealed, and the
-        # sealer mints the first generation on the first write. Treating that
-        # as an error is why the vault could never be woken on a fresh store.
-        return JSONResponse({"ok": False, "error": (
-            "no generation keys: the caller sent none and none could be "
-            "recovered from persisted grants, but this store holds sealed "
-            "content. Send persona_kem_private_key for recovery, or report "
-            "the failure — do not bring the vault up half-way"
-        )}, status_code=400)
 
     if "delegate_signing_key" in body:
         logger.warning(
@@ -1600,25 +1517,6 @@ def _assert_audited_recipient_compatible(public_hex: str) -> None:
         )
 
 
-def _personal_store_has_generations() -> bool:
-    """Whether old storage-format personal values have generation records.
-
-    Modern personal values do not use generations. Distinguishes missing
-    recovery keys for old content from a store with no old grants. Fails to
-    False on any error: an
-    unreadable key-control store must not be the thing that blocks a fresh
-    identity from ever bringing its vault up.
-    """
-    try:
-        from tools.network.storagekit.keycontrol import KeyControlStore
-        from tools.vault.db_content_store import vault_db_path_for
-
-        with KeyControlStore(vault_db_path_for(None)) as kc:
-            return bool(kc.states)
-    except Exception:
-        return False
-
-
 def _bring_vault_up(generation_keys: dict) -> int:
     """Install the vault seams for this process. Returns how many keys landed.
 
@@ -1661,8 +1559,9 @@ def _agent_delegate(org):
 # can hand the warm keys to the next process through the ramfs key cache and
 # come back warm with nobody present.
 #
-# What crosses: the personal audited decryption key, optional old-personal KEM,
-# and organization KEM keys. None grants membership or signs anything.
+# What crosses: the personal audited decryption key and organization KEM keys.
+# (`_HOTRELOAD_KEM` is only cleared: a pre-2026-10-02 process may have left
+# the retired personal KEM carrier behind.) None grants membership or signs anything.
 # The snapshot uses the existing ramfs carrier: no disk fallback, no reboot
 # persistence. Successful restoration consumes it; failed application retains
 # it for a retry. It is written at unlock and at graceful shutdown.
@@ -1736,8 +1635,8 @@ _SNAPSHOT_LOCK = threading.Lock()
 def save_vault_across_hot_reload(*, blocking: bool = True) -> bool:
     """Retain personal and organization decryption keys in the existing RAM carrier.
 
-    The audited recipient suffices for new personal values. Carry a KEM key
-    only when old storage-format values required it. No signing key is saved.
+    The audited recipient suffices for personal values; organization KEM keys
+    ride their own carrier. No signing key is saved.
 
     ``blocking=False`` is the SIGTERM path (:func:`save_vault_on_sigterm`):
     it runs between bytecodes of whatever the main thread was doing, so it
@@ -1783,11 +1682,7 @@ def _save_vault_snapshot() -> bool:
         logger.warning("vault snapshot NOT written: missing audited recipient")
         return False
     try:
-        kem_private = _VAULT_CACHE.get("kem_private")
-        if kem_private:
-            _keycache_write(_HOTRELOAD_KEM, kem_private.encode("ascii"))
-        else:
-            _keycache_clear(_HOTRELOAD_KEM)
+        _keycache_clear(_HOTRELOAD_KEM)
         _keycache_write(_HOTRELOAD_AUDITED_DELEGATE, audited_delegate.encode("ascii"))
         organization_keys = _VAULT_CACHE.get("organization_kem_keys", {})
         if organization_keys:
@@ -1811,27 +1706,12 @@ def restore_vault_across_hot_reload() -> bool:
     Consume after successful apply only; retain the snapshot on transient error.
     """
     audited_raw = _keycache_read(_HOTRELOAD_AUDITED_DELEGATE)
-    kem_raw = _keycache_read(_HOTRELOAD_KEM)
     if not audited_raw:
         logger.warning("vault snapshot NOT restored: missing audited recipient")
         _clear_vault_snapshot()
         return False
     try:
         generation_keys = {}
-        if kem_raw:
-            from tools.network.storagekit.keycontrol import KeyControlStore
-            from tools.vault.db_content_store import vault_db_path_for
-            from tools.vault.unlock import open_generation_keys
-
-            kem_private_hex = kem_raw.decode("ascii").strip()
-            with KeyControlStore(vault_db_path_for(None)) as kc:
-                generation_keys = open_generation_keys(
-                    kem_private_hex, kc.accepted_grants(), kc.states
-                )
-            if not generation_keys and _personal_store_has_generations():
-                raise ValueError("no generation keys recovered for old personal content")
-        elif _personal_store_has_generations():
-            raise ValueError("old personal content needs its KEM recovery key")
         from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
         audited_private_hex = audited_raw.decode("ascii").strip()
@@ -1843,16 +1723,12 @@ def restore_vault_across_hot_reload() -> bool:
             audited_private_hex, audited_public_hex
         )
         _bring_vault_up(generation_keys)
-        if kem_raw:
-            _VAULT_CACHE["kem_private"] = kem_private_hex
         _install_personal_audited_delegate(private_hex, public_hex)
         _ensure_sealed_settings_pepper()
         _schedule_settings_signing_pass()
         _schedule_vault_releases()
         logger.info(
-            "vault keys successfully hot-reloaded: personal recipient and %d "
-            "recovered generation key(s)", len(generation_keys),
-        )
+            "vault keys successfully hot-reloaded: personal recipient")
     except Exception:
         logger.exception("vault hot-reload restore failed; retaining snapshot")
         return False
@@ -1973,8 +1849,6 @@ ROUTES = [
           methods=["POST"]),
     Route("/api/identity/unlock/approval", post_unlock_approval,
           methods=["POST"]),
-    Route("/api/identity/unlock/vault-keys", get_personal_vault_recovery,
-          methods=["GET"]),
     Route("/api/identity/unlock/vault-keys", post_unlock_vault_keys,
           methods=["POST"]),
     Route("/api/identity/session", get_session, methods=["GET"]),

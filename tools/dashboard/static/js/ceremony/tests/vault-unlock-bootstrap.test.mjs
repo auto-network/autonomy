@@ -114,33 +114,29 @@ test('a partial bootstrap finishes the class without reopening or replacing the 
   ]);
 });
 
-for (const genesis of [null, 'ab'.repeat(32)]) {
-  test('warm-up uses decryption keys only; recovery domain ' + genesis, async () => {
-    const handoffs = [];
-    const fetchImpl = async (url, options = {}) => {
-      if (url === '/api/identity/vault-anchors') return reply(200, {
-        anchors: [], classes: [{ governance: { form: 'root-reachable' } }],
-      });
-      if (url === '/api/identity/unlock/vault-keys') {
-        if (options.method === 'POST') {
-          handoffs.push(JSON.parse(options.body));
-          return reply(200, { ok: true });
-        }
-        return reply(200, { recovery_genesis_id: genesis });
-      }
-      if (url === '/api/network/unlock-maintenance-report') return reply(200, {});
-      throw new Error('Unexpected request, including any ledger call: ' + url);
-    };
-    for (let i = 0; i < 2; i++) {
-      const result = await wakeVault({ personalRootSeed: ROOT_SEED, fetchImpl });
-      assert.equal(result.ready, true);
+test('warm-up uses decryption keys only', async () => {
+  const handoffs = [];
+  const fetchImpl = async (url, options = {}) => {
+    if (url === '/api/identity/vault-anchors') return reply(200, {
+      anchors: [], classes: [{ governance: { form: 'root-reachable' } }],
+    });
+    if (url === '/api/identity/unlock/vault-keys' && options.method === 'POST') {
+      handoffs.push(JSON.parse(options.body));
+      return reply(200, { ok: true });
     }
-    assert.deepEqual(handoffs[0], handoffs[1]);
-    const handoff = handoffs[0];
-    assert.equal(handoff.delegate_audited_private_key.length, 64);
-    assert.equal(handoff.delegate_audited_public_key.length, 64);
-    assert.equal(Boolean(handoff.persona_kem_private_key), Boolean(genesis));
-    assert.equal('delegate_signing_key' in handoff, false);
-    assert.equal('kem_credential' in handoff, false);
-  });
-}
+    if (url === '/api/network/unlock-maintenance-report') return reply(200, {});
+    throw new Error('Unexpected request, including any ledger call: '
+      + (options.method || 'GET') + ' ' + url);
+  };
+  for (let i = 0; i < 2; i++) {
+    const result = await wakeVault({ personalRootSeed: ROOT_SEED, fetchImpl });
+    assert.equal(result.ready, true);
+  }
+  assert.deepEqual(handoffs[0], handoffs[1]);
+  const handoff = handoffs[0];
+  assert.equal(handoff.delegate_audited_private_key.length, 64);
+  assert.equal(handoff.delegate_audited_public_key.length, 64);
+  assert.equal('persona_kem_private_key' in handoff, false);
+  assert.equal('delegate_signing_key' in handoff, false);
+  assert.equal('kem_credential' in handoff, false);
+});

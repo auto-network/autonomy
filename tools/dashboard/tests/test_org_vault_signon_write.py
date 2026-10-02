@@ -214,7 +214,6 @@ def test_root_unlock_enables_organization_channel_key_write(tmp_path, monkeypatc
             Route("/api/network/ledger/delegate", network_routes.post_ledger_delegate, methods=["POST"]),
             Route("/api/network/unlock-report", network_routes.post_unlock_maintenance_report, methods=["POST"]),
             Route("/api/network/membership-checkpoint", registry_acceptance, methods=["POST"]),
-            Route("/api/identity/unlock/vault-keys", unlock_routes.get_personal_vault_recovery, methods=["GET"]),
             Route("/api/identity/unlock/vault-keys", unlock_routes.post_unlock_vault_keys, methods=["POST"]),
         ])
         from tools.graph.schemas.network_identity import (

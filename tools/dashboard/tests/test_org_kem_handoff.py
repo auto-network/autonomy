@@ -180,7 +180,6 @@ def test_route_isolates_refusal_and_retains_before_snapshot(org, monkeypatch):
     item = item_for(org)
     snapshots = []
     monkeypatch.setattr(unlock_routes, "session_from_request", lambda r: {"sid": "test"})
-    monkeypatch.setattr(unlock_routes, "_personal_store_has_generations", lambda: False)
     monkeypatch.setattr(unlock_routes, "_bring_vault_up", lambda keys: 0)
     def snapshot():
         snapshots.append(copy.deepcopy(unlock_routes._VAULT_CACHE["organization_kem_keys"]))

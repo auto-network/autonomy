@@ -26,7 +26,6 @@ def warm(monkeypatch):
     """A vault that brings up cleanly; records the post-success steps."""
     calls: dict[str, int] = {"snapshot": 0, "pepper": 0, "reconcile": 0, "bring_up": 0}
     monkeypatch.setattr(unlock_routes, "session_from_request", lambda request: {"sid": "t"})
-    monkeypatch.setattr(unlock_routes, "_personal_store_has_generations", lambda: False)
 
     def bring_up(decoded):
         calls["bring_up"] += 1

@@ -5,8 +5,8 @@ reaches this process — so bringing the vault up means receiving content keys
 over a route and installing the read and write seams with them. That route is
 the difference between a vault that is built and a vault that works.
 
-Every refusal here is about not half-installing: a wrong-length secret, an
-empty set, or an unauthenticated caller each leave the process with no vault
+Every refusal here is about not half-installing: a wrong-length secret, a
+malformed body, or an unauthenticated caller each leave the process with no vault
 rather than a vault that fails later at a read, where it would look like a
 key-agreement problem instead of a wiring one.
 """
@@ -31,8 +31,6 @@ def client(monkeypatch, tmp_path):
     settings_ops.set_vault_key_holder(None)
     settings_ops.set_personal_delegate_audited_key(None)
     app = Starlette(routes=[
-        Route("/api/identity/unlock/vault-keys",
-              unlock_routes.get_personal_vault_recovery, methods=["GET"]),
         Route("/api/identity/unlock/vault-keys",
               unlock_routes.post_unlock_vault_keys, methods=["POST"]),
     ])
@@ -73,49 +71,19 @@ def test_without_a_session_the_vault_does_not_come_up(client, monkeypatch):
 # ── what it refuses rather than half-installing ──────────────
 
 
-def test_an_empty_set_is_refused_when_the_store_HAS_sealed_content(
-        client, unlocked, monkeypatch):
-    """The browser opening no grants is a failure to report, not a vault to
-    bring up half-way — but only where there were grants to open."""
-    monkeypatch.setattr(unlock_routes, "_personal_store_has_generations",
-                        lambda: True)
-    response = client.post("/api/identity/unlock/vault-keys",
-                           json={"generation_keys": {}})
-
-    assert response.status_code == 400
-    assert settings_ops._vault_key_holder is None
-
-
-def test_an_empty_set_is_ACCEPTED_on_a_first_unlock(client, unlocked, monkeypatch):
+def test_an_empty_set_is_ACCEPTED_on_a_first_unlock(client, unlocked):
     """THE ONE THAT MATTERS, and the reason a fresh identity could never have a
     vault at all.
 
-    On a store where nothing has ever been sealed there are legitimately no
-    grants: the sealer mints the first generation on the first write. The old
-    rule could not tell that apart from a browser that failed to open grants it
-    should have, so it refused the only state a new store can be in — and the
-    single path to bringing the vault up rejected every new identity.
+    Personal values open through the audited recipient, not generation keys,
+    so an empty set is the normal personal hand-off; refusing it once rejected
+    every new identity.
     """
-    monkeypatch.setattr(unlock_routes, "_personal_store_has_generations",
-                        lambda: False)
     response = client.post("/api/identity/unlock/vault-keys",
                            json={"generation_keys": {}})
 
     assert response.status_code == 200, response.text
     assert settings_ops._vault_key_holder is not None
-
-
-def test_an_unreadable_key_control_store_does_not_block_a_first_unlock():
-    """Fails to False deliberately: an unreadable store must not be the thing
-    that stops a fresh identity from ever having a vault."""
-    import tools.vault.db_content_store as dcs
-
-    original = dcs.vault_db_path_for
-    try:
-        dcs.vault_db_path_for = lambda *a, **k: (_ for _ in ()).throw(OSError("nope"))
-        assert unlock_routes._personal_store_has_generations() is False
-    finally:
-        dcs.vault_db_path_for = original
 
 
 def test_a_wrong_length_secret_is_refused(client, unlocked):
@@ -150,9 +118,8 @@ def test_a_good_hand_off_installs_both_seams(client, unlocked):
 
     assert response.status_code == 200, response.text
     # `snapshot_persisted` is FALSE here, and truthfully so: this unlock sends
-    # only generation_keys, so `_VAULT_CACHE["kem_private"]` is never set
-    # (unlock_routes.py:1255 is inside `if kem_private_hex is not None`) and
-    # `save_vault_across_hot_reload` requires the personal audited recipient. The process is
+    # only generation_keys, and `save_vault_across_hot_reload` requires the
+    # personal audited recipient. The process is
     # warm and the hand-off is NOT durable — previously indistinguishable from
     # outside, which is how the operator was told "unlocked" while the next
     # process booted locked.
@@ -289,14 +256,10 @@ def test_body_shape_refusals_are_logged(client, unlocked, caplog):
                     json={"generation_keys": {"state-1": 7}})
         client.post("/api/identity/unlock/vault-keys",
                     json={"generation_keys": {},
-                          "persona_kem_private_key": 12})
-        client.post("/api/identity/unlock/vault-keys",
-                    json={"generation_keys": {},
                           "delegate_signing_key": 12})
     messages = _refusal_log(caplog)
     assert any("generation-keys-shape" in m for m in messages)
     assert any("generation-keys-entry-shape" in m for m in messages)
-    assert any("persona-kem-key-shape" in m for m in messages)
     assert any("delegate-signing-key-shape" in m for m in messages)
 
 
@@ -308,18 +271,6 @@ def test_audited_recipient_refusal_is_logged(client, unlocked, caplog):
                   "delegate_audited_private_key": "ab" * 32})
     assert response.status_code == 400
     assert any("audited-recipient" in m for m in _refusal_log(caplog))
-
-
-def test_empty_set_with_sealed_content_refusal_is_logged(
-    client, unlocked, monkeypatch, caplog,
-):
-    monkeypatch.setattr(unlock_routes, "_personal_store_has_generations",
-                        lambda: True)
-    with caplog.at_level("WARNING", logger="tools.dashboard.unlock_routes"):
-        response = client.post("/api/identity/unlock/vault-keys",
-                               json={"generation_keys": {}})
-    assert response.status_code == 400
-    assert any("no-generation-keys" in m for m in _refusal_log(caplog))
 
 
 # ── Snapshot lifecycle (auto-0908 review requirements) ──────────────────
@@ -349,21 +300,6 @@ def test_a_successful_restore_consumes_the_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ur, "_validate_audited_delegate_pair", lambda a, b: (a, b))
 
-    class _KC:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        accepted_grants = staticmethod(lambda: {})
-        states = {}
-
-    import sys, types
-    fake = types.ModuleType("m")
-    monkeypatch.setitem(sys.modules, "tools.network.storagekit.keycontrol",
-                        types.SimpleNamespace(KeyControlStore=lambda p: _KC()))
-    monkeypatch.setitem(sys.modules, "tools.vault.db_content_store",
-                        types.SimpleNamespace(vault_db_path_for=lambda o: ":memory:"))
-    monkeypatch.setitem(sys.modules, "tools.vault.unlock",
-                        types.SimpleNamespace(open_generation_keys=lambda *a: {}))
-
     assert ur.restore_vault_across_hot_reload() is True
     assert len(cleared) == 4, "a consumed snapshot must be cleared, including org keys"
 
@@ -376,16 +312,12 @@ def test_a_failed_apply_retains_a_complete_snapshot(monkeypatch, tmp_path):
     cleared = []
     monkeypatch.setattr(ur, "_keycache_read", lambda name: b"aa" * 32)
     monkeypatch.setattr(ur, "_keycache_clear", lambda name: cleared.append(name))
+    monkeypatch.setattr(
+        ur, "_validate_audited_delegate_pair", lambda a, b: (a, b))
 
-    import sys, types
-    def _boom(_p):
-        raise RuntimeError("grants store briefly unavailable")
-    monkeypatch.setitem(sys.modules, "tools.network.storagekit.keycontrol",
-                        types.SimpleNamespace(KeyControlStore=_boom))
-    monkeypatch.setitem(sys.modules, "tools.vault.db_content_store",
-                        types.SimpleNamespace(vault_db_path_for=lambda o: ":memory:"))
-    monkeypatch.setitem(sys.modules, "tools.vault.unlock",
-                        types.SimpleNamespace(open_generation_keys=lambda *a: {}))
+    def _boom(*_a, **_k):
+        raise RuntimeError("vault store briefly unavailable")
+    monkeypatch.setattr(ur, "_bring_vault_up", _boom)
 
     assert ur.restore_vault_across_hot_reload() is False
     assert cleared == [], "a complete snapshot must survive a failed apply"

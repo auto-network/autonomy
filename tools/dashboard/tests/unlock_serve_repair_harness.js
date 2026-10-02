@@ -107,7 +107,7 @@ require("../static/js/unlock.js");
     const orgs = process.env.AUTONOMY_ALL_ORG_REPAIR === '1'
       ? ['autonomy', 'dynbench', 'anchore'] : ['autonomy'];
     const inputs = {
-      vault: { root_pub: 'aa'.repeat(32), recovery_genesis_id: null,
+      vault: { root_pub: 'aa'.repeat(32),
         inventory: { anchors: [], classes: [{ governance: { form: 'root-reachable' } }] } },
       runtime: { enabled: false }, completion: null, personal_serve: {},
       organizations: orgs.map((slug, i) => ({ slug,

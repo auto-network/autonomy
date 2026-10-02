@@ -541,7 +541,7 @@ Organization branch; no content viewer certificate.
 
 **Crib:** §8, §18
 
-Grant opening primitive, not a human-factor authorization or an audited-object release. Org integration remains pending.
+Grant opening primitive, not a human-factor authorization or an audited-object release. Its consumer is organization grant recovery (ceremony.organization_grant_recovery); personal values no longer use grants (personal sign-in recovery removed 2026-10-02).
 
 <a id="workflow-delegate-checkpoint_publish"></a>
 ## delegate.checkpoint_publish

@@ -24296,9 +24296,10 @@ async def _on_shutdown():
         except Exception:
             logger.exception("event_bus.snapshot() raised unexpectedly; continuing")
     # Hand a WARM vault to the next process across a graceful reload
-    # (auto-a1pub): the delegate signing key and the persona KEM private key go
-    # to the ramfs key cache, and the next boot re-derives the generation keys
-    # from the on-disk grants with that KEM key. A CRASH skips this hook, so a
+    # (auto-a1pub): the personal audited recipient and the organization KEM
+    # keys go to the ramfs key cache, and the next boot reinstalls the
+    # recipient and re-opens organization grants with those KEM keys. A CRASH
+    # skips this hook, so a
     # non-graceful restart writes nothing and boots locked — fail-closed.
     try:
         from tools.dashboard.unlock_routes import save_vault_across_hot_reload

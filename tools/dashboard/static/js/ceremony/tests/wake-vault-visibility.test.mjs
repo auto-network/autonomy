@@ -2,8 +2,8 @@
 // wakeVault's failure reasons were returned and dropped by every caller, so a
 // completed sign-in with a dead vault left no trace anywhere. wakeVault now
 // reports its own outcome centrally: console.error, a ceremony-error POST,
-// and a sessionStorage message the shell renders. Recovery metadata failures
-// remain visible; personal warm-up no longer consults an authority ledger.
+// and a sessionStorage message the shell renders. A refused key hand-off is
+// visible; personal warm-up no longer consults an authority ledger.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -43,7 +43,7 @@ function fakeSessionStorage() {
 }
 
 // Anchor inventory answering "ready, nothing to create" so wakeVault reaches
-// the recovery metadata read with minimal stubbing.
+// the key hand-off with minimal stubbing.
 const READY_INVENTORY = {
   anchors: [{ anchor_id: 'personal-root-default' }],
   classes: [{
@@ -52,18 +52,20 @@ const READY_INVENTORY = {
   }],
 };
 
-function recoveryFetch(recoveryStatus, captured) {
+function handoffFetch(handoffStatus, captured) {
   return async (url, options = {}) => {
     const method = options.method || 'GET';
     captured.push([method, url, options.body || null]);
     if (url === '/api/identity/vault-anchors') return reply(200, READY_INVENTORY);
-    if (url === '/api/identity/unlock/vault-keys') return reply(recoveryStatus, {});
+    if (method === 'POST' && url === '/api/identity/unlock/vault-keys') {
+      return reply(handoffStatus, {});
+    }
     if (url === '/api/identity/ceremony-error') return reply(200, { ok: true });
     throw new Error(`unexpected request ${method} ${url}`);
   };
 }
 
-test('a recovery failure surfaces in all three channels', async () => {
+test('a refused key hand-off surfaces in all three channels', async () => {
   const storage = fakeSessionStorage();
   globalThis.sessionStorage = storage;
   const errors = [];
@@ -73,41 +75,22 @@ test('a recovery failure surfaces in all three channels', async () => {
     const captured = [];
     const result = await wakeVault({
       personalRootSeed: ROOT_SEED,
-      fetchImpl: recoveryFetch(409, captured),
+      fetchImpl: handoffFetch(409, captured),
     });
     assert.equal(result.ready, false);
-    assert.equal(result.reason, 'recovery-409');
+    assert.equal(result.reason, 'vault-keys-409');
 
-    // 1. The shell notice names the failed recovery-metadata read.
+    // 1. The shell notice names the refused key hand-off.
     const stored = storedMessages(storage)['vault-wake'];
-    assert.ok(stored && stored.includes('recovery metadata'), stored);
+    assert.ok(stored && stored.includes('refused the vault key material'), stored);
     // 2. The console.
-    assert.ok(errors.some((line) => line.includes('recovery-409')));
+    assert.ok(errors.some((line) => line.includes('vault-keys-409')));
     // 3. The capped client-error log.
     const report = captured.find(([, url]) => url === '/api/identity/ceremony-error');
     assert.ok(report, 'ceremony-error POST must fire');
     const body = JSON.parse(report[2]);
     assert.equal(body.ceremony, 'vault-wake');
-    assert.equal(body.action, 'recovery-409');
-  } finally {
-    console.error = origError;
-    delete globalThis.sessionStorage;
-  }
-});
-
-test('a missing recovery endpoint is an explicit failure', async () => {
-  const storage = fakeSessionStorage();
-  globalThis.sessionStorage = storage;
-  const origError = console.error;
-  console.error = () => {};
-  try {
-    const result = await wakeVault({
-      personalRootSeed: ROOT_SEED,
-      fetchImpl: recoveryFetch(404, []),
-    });
-    assert.equal(result.reason, 'recovery-404');
-    const stored = storedMessages(storage)['vault-wake'];
-    assert.ok(stored && stored.includes('recovery metadata'), stored);
+    assert.equal(body.action, 'vault-keys-409');
   } finally {
     console.error = origError;
     delete globalThis.sessionStorage;
@@ -119,7 +102,9 @@ test('reporting failures never break the wake result', async () => {
   // the caller still gets the honest result.
   const fetchImpl = async (url, options = {}) => {
     if (url === '/api/identity/vault-anchors') return reply(200, READY_INVENTORY);
-    if (url === '/api/identity/unlock/vault-keys') return reply(500, {});
+    if (options.method === 'POST' && url === '/api/identity/unlock/vault-keys') {
+      return reply(500, {});
+    }
     if (url === '/api/identity/ceremony-error') throw new Error('offline');
     throw new Error(`unexpected request ${url}`);
   };
@@ -131,7 +116,7 @@ test('reporting failures never break the wake result', async () => {
     });
     assert.deepEqual(
       { ready: result.ready, reason: result.reason },
-      { ready: false, reason: 'recovery-500' },
+      { ready: false, reason: 'vault-keys-500' },
     );
   } finally {
     console.error = origError;
@@ -142,7 +127,6 @@ test('describeStepFailure yields an operator sentence for every known gate', () 
   for (const reason of [
     'anchor-inventory-503', 'personal-root-500', 'personal-root-public-key',
     'anchor-race-409', 'anchor-enroll-400', 'root-class-500',
-    'recovery-409', 'recovery-404', 'recovery-503',
     'vault-keys-400', 'something-unmapped',
   ]) {
     const message = describeStepFailure('vault-wake', reason);
