@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
 from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from tools.dashboard.plugins.voice_notes.entrypoints import api
@@ -87,3 +89,33 @@ def test_put_note_rejects_unbounded_or_malformed_input(monkeypatch):
         json={"title": "x" * 241, "body": "y"},
     )
     assert too_large.status_code == 400
+
+
+def _scope_client(monkeypatch, selected_org):
+    """A route that answers with what ``_scope`` resolved for an
+    authenticated caller whose request selected *selected_org*."""
+    monkeypatch.setattr(api, "require_authenticated_api_caller", lambda request: None)
+    monkeypatch.setattr(api, "organization_scope_from_request", lambda request: selected_org)
+
+    async def probe(request):
+        organization, refusal = api._scope(request)
+        return refusal or JSONResponse({"organization": organization})
+
+    return TestClient(Starlette(routes=[Route("/probe", probe)]))
+
+
+def test_scope_without_a_selected_organization_is_the_personal_store(monkeypatch):
+    # The personal Voice Notes page sends no X-Graph-Org (the shell stamps
+    # none when no organization is selected, 7123935ea): that is the
+    # operator's own notes, never "organization scope required".
+    response = _scope_client(monkeypatch, None).get("/probe")
+
+    assert response.status_code == 200
+    assert response.json() == {"organization": "personal"}
+
+
+def test_scope_keeps_the_selected_organization(monkeypatch):
+    response = _scope_client(monkeypatch, "widgets").get("/probe")
+
+    assert response.status_code == 200
+    assert response.json() == {"organization": "widgets"}

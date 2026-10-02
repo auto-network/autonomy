@@ -25,15 +25,15 @@ _NOTE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
 
 def _scope(request: Request):
+    """The authenticated caller's store: the organization this request
+    selected, else personal (auto-2v6ay.2, D5). The Voice Notes page is a
+    personal page: the shell stamps no ``X-Graph-Org`` on it unless an
+    organization is selected, so an unscoped request is the operator's own
+    notes, not a refusal."""
     refusal = require_authenticated_api_caller(request)
     if refusal is not None:
         return None, refusal
-    organization = organization_scope_from_request(request)
-    if not organization:
-        return None, JSONResponse(
-            {"error": "organization scope required"}, status_code=400,
-        )
-    return organization, None
+    return organization_scope_from_request(request) or "personal", None
 
 
 def _utc_now() -> str:
