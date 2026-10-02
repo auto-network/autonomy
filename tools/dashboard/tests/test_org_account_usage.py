@@ -24,7 +24,7 @@ def _iso(dt):
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def _reading(at, used=10, identity="org:O1", harness="claude"):
+def _reading(at, used=10, identity="O1", harness="claude"):
     return {"harness": harness, "identity_id": identity, "identity_label": "x", "status": "ok",
             "source": "probe_headers", "updated_at": _iso(at),
             "windows": {"short": {"used_percent": used, "resets_at": 1}}}
@@ -46,12 +46,12 @@ def _store(stored):
 
 def test_a_shared_reading_is_written_only_when_newer_than_the_stored_one():
     read_key, upsert, writes = _store({})
-    assert hus.publish_org_reading("acme", "claude:org:O1", _reading(NOW), read_key=read_key,
+    assert hus.publish_org_reading("acme", "claude:O1", _reading(NOW), read_key=read_key,
                                    upsert_by_key=upsert)
     # Another member's machine holds an older reading: it does not roll back.
-    assert not hus.publish_org_reading("acme", "claude:org:O1", _reading(NOW - timedelta(minutes=5)),
+    assert not hus.publish_org_reading("acme", "claude:O1", _reading(NOW - timedelta(minutes=5)),
                                        read_key=read_key, upsert_by_key=upsert)
-    assert hus.publish_org_reading("acme", "claude:org:O1", _reading(NOW + timedelta(minutes=1)),
+    assert hus.publish_org_reading("acme", "claude:O1", _reading(NOW + timedelta(minutes=1)),
                                    read_key=read_key, upsert_by_key=upsert)
     assert [w[0] for w in writes] == [hus.ORG_HARNESS_USAGE_SET_ID] * 2
     assert {w[1] for w in writes} == {"acme"}
@@ -95,15 +95,15 @@ def _rows(monkeypatch, shared_readings):
 
 
 def test_a_shared_account_shows_its_organizations_reading(monkeypatch):
-    rows = _rows(monkeypatch, {"org:O1": _reading(NOW, used=42)})
+    rows = _rows(monkeypatch, {"O1": _reading(NOW, used=42)})
     assert rows["O1"]["usage"]["short"]["used_percent"] == 42
     assert rows["O1"]["usage"]["as_of"] == _iso(NOW)
 
 
 def test_stale_or_missing_shared_readings_are_the_ones_refreshed(monkeypatch):
-    fresh = _rows(monkeypatch, {"org:O1": _reading(NOW - timedelta(minutes=5))})
+    fresh = _rows(monkeypatch, {"O1": _reading(NOW - timedelta(minutes=5))})
     assert harness_accounts.stale_shared_accounts(list(fresh.values()), now=NOW) == []
-    old = _rows(monkeypatch, {"org:O1": _reading(NOW - timedelta(minutes=16))})
+    old = _rows(monkeypatch, {"O1": _reading(NOW - timedelta(minutes=16))})
     assert [r["account_id"] for r in harness_accounts.stale_shared_accounts(
         list(old.values()), now=NOW)] == ["O1"]
     missing = _rows(monkeypatch, {})
@@ -142,7 +142,7 @@ def test_a_probe_reads_the_shared_account_and_writes_the_organizations_set(monke
     monkeypatch.setattr(hus, "publish_org_reading",
                         lambda org, key, payload, **_k: written.append((org, key)) or True)
     assert server._probe_org_claude_account("acme", "O1")
-    assert written == [("acme", "claude:org:O1")]
+    assert written == [("acme", "claude:O1")]
 
 
 def test_an_unchanged_shared_reading_is_refreshed_at_most_once_a_minute():

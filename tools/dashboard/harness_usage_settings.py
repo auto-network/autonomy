@@ -613,7 +613,7 @@ def _resolve_claude_identity(org_id: str | None) -> dict[str, str | None]:
             "header carries one on every successful poll."
         )
     return {
-        "identity_id": f"org:{org_id}",
+        "identity_id": org_id,
         "identity_label": short_identity_label("org", org_id),
         "account_id": org_id,
     }

@@ -131,6 +131,7 @@ from . import bootstrap_allowlist  # noqa: F401 — autonomy.org.bootstrap-allow
 from . import harness_bootstrap  # noqa: F401 — autonomy.harness.bootstrap#1
 from . import vault_policy_class  # noqa: F401 — autonomy.vault.policy-class#1
 from . import vault_credential  # noqa: F401 — autonomy.vault.audited#1 + .secured#1
+from . import harness_account  # noqa: F401 — autonomy.harness.account#1, autonomy.vault.harness-credential#1 + org
 from . import machine_vault  # noqa: F401 — autonomy.machine.vault.audited#1
 from . import machine_serve_cert  # noqa: F401 — autonomy.machine.serve-cert#1
 from . import mailbox_send  # noqa: F401 — autonomy.machine.mailbox-send#1

@@ -4040,7 +4040,7 @@ def _probe_org_claude_account(org: str, account_id: str) -> bool:
     if acct is None or not acct.openable:
         return False
     alias = acct.get("alias")
-    identity_id = f"org:{account_id}"
+    identity_id = account_id   # usage keyed <harness>:<account_id> (auto-raepo)
     row_key = _harness_usage_settings.make_harness_usage_key("claude", identity_id)
     updated_at = _now_iso()
     if acct.setup_token_fresh():
@@ -17136,7 +17136,7 @@ def _collect_claude_usage_payloads(
     for org_uuid in sorted(set(credentials_by_org) | set(setup_tokens_by_org)):
         credentials = credentials_by_org.get(org_uuid, {})
         alias = credentials.get("alias") if isinstance(credentials.get("alias"), str) else None
-        identity_id = f"org:{org_uuid}"
+        identity_id = org_uuid   # usage keyed <harness>:<account_id> (auto-raepo)
         row_key = _harness_usage_settings.make_harness_usage_key(
             "claude", identity_id,
         )

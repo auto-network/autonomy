@@ -65,11 +65,19 @@ def registered_schemas():
     return out
 
 
+def _declares_fields(cls) -> bool:
+    """Its own fields, or -- for a payload_union -- every shape's."""
+    shapes = getattr(cls, "_union_shapes", None)
+    if shapes:
+        return all(getattr(shape, "_field_metadata", None) for shape in shapes.values())
+    return bool(getattr(cls, "_field_metadata", None))
+
+
 def test_every_schema_declares_at_least_one_field(registered_schemas):
     undeclared = [
         f"{set_id}#{revision} ({cls.__module__}.{cls.__name__})"
         for set_id, revision, cls in registered_schemas
-        if not (getattr(cls, "_field_metadata", None) or {})
+        if not _declares_fields(cls)
     ]
     assert not undeclared, (
         "these schemas declare no fields, so nothing can enforce, print or "

@@ -37,8 +37,9 @@ def warm_vault(tmp_path, monkeypatch):
     settings_ops.set_personal_delegate_audited_key(None)
 
 
-def test_keys_are_compound_and_refuse_bad_ids():
-    assert hv.account_key("claude", "org-A", "setup") == "claude.account.org-A.setup"
+def test_keys_are_harness_and_account_and_refuse_bad_ids():
+    assert hv.account_key("claude", "org-A") == "claude:org-A"
+    assert hv.account_key("claude", "org-A", "setup") == "claude:org-A"
     with pytest.raises(ValueError):
         hv.account_key("claude", "a:b", "setup")
     with pytest.raises(ValueError):
@@ -63,32 +64,45 @@ def test_write_read_and_change_an_account(warm_vault):
     acct = hv.read_account("claude", "org-A")
     assert acct.get("access") == "at-2"
     assert acct.get("refresh") == "rt-1"
-    assert acct.get("error") is None and acct.parts["error"] == hv.NONE
+    assert acct.get("error") is None and "error" not in acct.public
     assert [a.id for a in hv.list_accounts("claude")] == ["org-A"]
     assert hv.list_accounts("codex") == []
 
 
-def test_rewriting_a_part_keeps_exactly_one_row_per_part(warm_vault):
-    """auto-z4582: the 4-hourly refresh rewrote access/refresh/expires and
-    stacked 47 rows per part. A rewrite now replaces the row: one row per
-    part, no override rows, whatever the number of rotations."""
-    for n in range(5):
-        hv.write_account("claude", "org-B", {
-            "access": f"at-{n}", "refresh": f"rt-{n}", "expires": str(1000 + n),
-        })
-    conn = sqlite3.connect(str(warm_vault))
+def _rows(db, key):
+    conn = sqlite3.connect(str(db))
     try:
-        rows = conn.execute(
-            "SELECT key, supersedes FROM settings WHERE key LIKE 'claude.account.org-B.%'"
+        return conn.execute(
+            "SELECT set_id, supersedes FROM settings WHERE key = ? ORDER BY set_id", (key,),
         ).fetchall()
     finally:
         conn.close()
-    assert sorted(k for k, _ in rows) == [
-        "claude.account.org-B.access", "claude.account.org-B.expires",
-        "claude.account.org-B.refresh"]
-    assert all(sup is None for _, sup in rows)
+
+
+def test_an_account_is_one_public_row_and_one_sealed_credential(warm_vault):
+    """auto-raepo: one row per account in each set, keyed <harness>:<id>,
+    however many rotations; the secrets only in the vaulted one."""
+    for n in range(5):
+        hv.write_account("claude", "org-B", {
+            "access": f"at-{n}", "refresh": f"rt-{n}", "expires": str(1000 + n),
+            "alias": "work",
+        })
+    assert _rows(warm_vault, "claude:org-B") == [
+        ("autonomy.harness.account", None), ("autonomy.vault.harness-credential", None)]
     acct = hv.read_account("claude", "org-B")
     assert (acct.get("access"), acct.get("refresh"), acct.expires_ms()) == ("at-4", "rt-4", 1004)
+    assert acct.public["credential_state"] == "ok" and acct.public["alias"] == "work"
+    assert not ({"access", "refresh", "setup"} & set(acct.public))
+
+
+def test_a_rotation_is_one_write_of_the_credential(warm_vault, monkeypatch):
+    hv.write_account("claude", "org-R", {"access": "at-0", "refresh": "rt-0", "expires": "1"})
+    writes = []
+    real = hv._write
+    monkeypatch.setattr(hv, "_write", lambda set_id, key, payload, org=None: (
+        writes.append(set_id), real(set_id, key, payload, org))[1])
+    hv.write_account("claude", "org-R", {"access": "at-1", "refresh": "rt-1", "expires": "2"})
+    assert writes.count("autonomy.vault.harness-credential") == 1
 
 
 def test_a_container_writes_through_the_dashboard_write_route(monkeypatch):
@@ -106,8 +120,8 @@ def test_a_container_writes_through_the_dashboard_write_route(monkeypatch):
 
     monkeypatch.setenv("GRAPH_API", "https://dashboard.example")
     monkeypatch.setattr("tools.graph.client.get_client", lambda: Client())
-    assert hv._write("claude.account.x.access", "v") == "sid"
-    assert calls[0][1][2] == "claude.account.x.access" and calls[0][1][3] == {"value": "v"}
+    assert hv._write("autonomy.vault.harness-credential", "claude:x", {"harness": "claude"}) == "sid"
+    assert calls[0][1][0] == "autonomy.vault.harness-credential" and calls[0][1][2] == "claude:x"
 
 
 def test_rows_hold_no_plaintext(warm_vault):
@@ -128,11 +142,12 @@ def test_cold_vault_reports_present_but_not_openable(warm_vault):
     assert [a.id for a in accts] == ["default"]
     assert accts[0].openable is False
     assert accts[0].get("auth") is None
-    # sealing still works cold
+    # a public write still works cold, and keeps the credential's state
     hv.write_account("grok", "default", {"alias": "work"})
+    assert hv.list_accounts("grok")[0].public["credential_state"] == "ok"
 
 
-def test_setup_token_freshness_is_by_minted_at():
+def test_setup_token_freshness_is_by_its_expiry():
     now = datetime(2026, 9, 22, tzinfo=timezone.utc)
     fresh = hv.Account("claude", "a", {"setup": "k", "setup_minted_at": (now - timedelta(days=10)).isoformat()})
     stale = hv.Account("claude", "b", {"setup": "k", "setup_minted_at": (now - timedelta(days=400)).isoformat()})
@@ -291,13 +306,14 @@ def test_rows_migrated_before_the_erasure_are_scrubbed_once_confirmed(warm_vault
     assert snapshot == {s: _stored(warm_vault, s) for s in snapshot}
 
 
-def test_listing_one_harness_opens_only_that_harness_s_rows(warm_vault, monkeypatch):
-    """auto-k784w review: the read filters by key prefix in the query, so the
-    vault opens no other secret of the tier -- not another harness's
-    accounts, not an unrelated credential -- to list one harness."""
+def test_listing_one_harness_opens_only_that_harness_s_credentials(warm_vault, monkeypatch):
+    """The read filters by key prefix in the query, so the vault opens no
+    other secret -- not another harness's accounts, not an unrelated
+    credential -- to list one harness."""
     hv.write_account("claude", "org-A", {"alias": "a", "access": "at-1", "refresh": "rt-1"})
     hv.write_account("codex", "acct-9", {"id": "i", "access": "at-c", "refresh": "rt-c"})
-    hv._write("relay.token", "unrelated-secret", None)
+    settings_ops.write_by_key(hv.VAULT_AUDITED_SET_ID, 1, "relay.token",
+                              {"value": "unrelated-secret"}, org=None)
     opened = []
     real = settings_ops._unwrap_vault_locator
 
@@ -307,12 +323,44 @@ def test_listing_one_harness_opens_only_that_harness_s_rows(warm_vault, monkeypa
 
     monkeypatch.setattr(settings_ops, "_unwrap_vault_locator", spy)
     assert [a.id for a in hv.list_accounts("claude")] == ["org-A"]
-    assert opened and all(k.startswith("claude.account.") for k in opened)
+    assert opened == ["claude:org-A"]
 
 
-def test_key_prefix_is_literal_and_escaped(warm_vault):
-    hv.write_account("claude", "org_A", {"alias": "underscore"})
-    hv.write_account("claude", "orgxA", {"alias": "x"})
-    rows = settings_ops.read_set(hv.VAULT_AUDITED_SET_ID, org=None, peers=[],
-                                 key_prefix="claude.account.org_A.")
-    assert {r.key for r in rows.members} == {"claude.account.org_A.alias"}
+# ── the fold of the per-part vault rows ──────────────────────
+
+
+def _seal_part(key, value):
+    settings_ops.write_by_key(hv.VAULT_AUDITED_SET_ID, 1, key, {"value": value}, org=None)
+
+
+def test_the_fold_makes_one_record_per_account_and_removes_the_part_rows(warm_vault):
+    parts = {"setup": "sk-1", "setup_minted_at": "2026-09-01T00:00:00Z", "access": "at",
+             "refresh": "rt", "expires": "9000", "scopes": "a,b", "alias": "max",
+             "email": "m@x", "org_name": "Org", "refreshed_at": "-", "error": "-"}
+    for part, value in parts.items():
+        _seal_part(f"claude.account.org-1.{part}", value)
+    for part, value in {"id": "idt", "access": "cat", "refresh": "crt", "expires": "5",
+                        "email": "c@x", "refreshed_at": "-", "error": "-"}.items():
+        _seal_part(f"codex.account.acct-1.{part}", value)
+    _seal_part("relay.token", "unrelated")
+
+    counts = hv.fold_vault_part_rows()
+    assert counts == {"accounts": 2, "rows_removed": 18, "cold": 0, "failed": 0}
+    left = {m.key for m in settings_ops.read_set(hv.VAULT_AUDITED_SET_ID, org=None, peers=[]).members}
+    assert left == {"relay.token"}
+    claude = hv.read_account("claude", "org-1")
+    assert (claude.get("setup"), claude.get("access"), claude.get("refresh")) == ("sk-1", "at", "rt")
+    assert claude.expires_ms() == 9000 and hv.scopes_list(claude.get("scopes")) == ["a", "b"]
+    assert claude.public["setup_expires_at"] > claude.public["access_expires_at"]
+    assert claude.get("error") is None and claude.public["credential_state"] == "ok"
+    codex = hv.read_account("codex", "acct-1")
+    assert (codex.get("id"), codex.get("access"), codex.expires_ms()) == ("idt", "cat", 5)
+    assert hv.fold_vault_part_rows() == {"accounts": 0, "rows_removed": 0, "cold": 0, "failed": 0}
+
+
+def test_the_fold_leaves_an_account_it_cannot_open(warm_vault):
+    _seal_part("grok.account.default.auth", '{"t": 1}')
+    settings_ops.set_personal_delegate_audited_key(None)
+    assert hv.fold_vault_part_rows()["cold"] == 1
+    assert {m.key for m in settings_ops.read_set(
+        hv.VAULT_AUDITED_SET_ID, org=None, peers=[]).members} == {"grok.account.default.auth"}

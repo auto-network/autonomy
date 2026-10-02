@@ -19,26 +19,34 @@ from agents.tests.test_session_launcher import (  # noqa: F401 -- fixtures
 )
 from tools.dashboard import harness_accounts
 from tools.graph import harness_credentials as hv
-from tools.graph.schemas.vault_credential import (
-    ORG_HARNESS_ACCOUNTS_SET_ID, VAULT_AUDITED_SET_ID,
+from tools.graph.schemas.harness_account import (
+    HARNESS_ACCOUNT_SET_ID, HARNESS_CREDENTIAL_SET_ID,
+    ORG_HARNESS_ACCOUNT_SET_ID, ORG_HARNESS_CREDENTIAL_SET_ID,
 )
 
 BUNDLE = {"access": "at-ORG", "refresh": "rt-ORG", "expires": "9000",
           "scopes": "user:inference", "alias": "team"}
 
 
-def _row(key, value):
-    return SimpleNamespace(key=key, id="r-" + key, payload={"value": value}, vault_error=None)
+def _rows(account_id, parts):
+    """The account's two rows (public, credential), built by the module's own mapping."""
+    acct = hv.Account("claude", account_id, parts)
+    acct.public.update({"harness": "claude", "account_id": account_id, "credential_state": "ok"})
+    key = f"claude:{account_id}"
+    return (SimpleNamespace(key=key, id="p-" + key, payload=acct.public, vault_error=None),
+            SimpleNamespace(key=key, id="c-" + key, payload={"harness": "claude", **acct.secret},
+                            vault_error=None))
 
 
 def _store(monkeypatch):
-    """Personal rows in the audited set, acme's shared rows in its set."""
+    """Personal accounts in the personal sets, acme's shared ones in its sets."""
+    p_public, p_cred = _rows("P1", {"alias": "mine", "access": "at-P", "refresh": "rt-P"})
+    o_public, o_cred = _rows("O1", BUNDLE)
     rows = {
-        (VAULT_AUDITED_SET_ID, None): [_row("claude.account.P1.alias", "mine"),
-                                       _row("claude.account.P1.access", "at-P"),
-                                       _row("claude.account.P1.refresh", "rt-P")],
-        (ORG_HARNESS_ACCOUNTS_SET_ID, "acme"): [
-            _row(f"claude.account.O1.{k}", v) for k, v in BUNDLE.items()],
+        (HARNESS_ACCOUNT_SET_ID, None): [p_public],
+        (HARNESS_CREDENTIAL_SET_ID, None): [p_cred],
+        (ORG_HARNESS_ACCOUNT_SET_ID, "acme"): [o_public],
+        (ORG_HARNESS_CREDENTIAL_SET_ID, "acme"): [o_cred],
     }
     reads = []
 
@@ -62,7 +70,8 @@ def test_shared_accounts_are_listed_beside_personal_ones_with_their_source(monke
     assert hv.list_accounts("claude", org="acme")[0].launchable
     # A personal account is never read from, or listed under, an organization.
     assert [a.id for a in hv.list_accounts("claude", org="acme")] == ["O1"]
-    assert (ORG_HARNESS_ACCOUNTS_SET_ID, "acme") in reads
+    assert (ORG_HARNESS_ACCOUNT_SET_ID, "acme") in reads
+    assert (ORG_HARNESS_CREDENTIAL_SET_ID, "acme") in reads
 
 
 def test_writing_a_shared_account_goes_to_the_organization_set(monkeypatch):
@@ -71,11 +80,12 @@ def test_writing_a_shared_account_goes_to_the_organization_set(monkeypatch):
     monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.setattr(hv, "read_account", lambda *a, **k: None)
     added = []
-    monkeypatch.setattr(graph_ops, "add_setting",
+    monkeypatch.setattr(graph_ops, "write_by_key",
                         lambda set_id, rev, key, payload, *, org, state: added.append(
                             (set_id, key, org)) or "id")
-    hv.write_account("claude", "O2", {"alias": "shared"}, org="acme")
-    assert added == [(ORG_HARNESS_ACCOUNTS_SET_ID, "claude.account.O2.alias", "acme")]
+    hv.write_account("claude", "O2", {"alias": "shared", "setup": "sk-ORG"}, org="acme")
+    assert added == [(ORG_HARNESS_CREDENTIAL_SET_ID, "claude:O2", "acme"),
+                     (ORG_HARNESS_ACCOUNT_SET_ID, "claude:O2", "acme")]
 
 
 def test_the_chooser_lists_shared_accounts_and_never_recommends_one(monkeypatch):

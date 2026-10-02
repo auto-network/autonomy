@@ -43,9 +43,9 @@ def _readings(harness: str) -> dict[str, dict]:
 
 
 def usage_identity(harness: str, account_id: str) -> str:
-    """The usage row's identity for an account: Claude rows are keyed by the
-    organization UUID as ``org:<id>``, Codex rows by the account id."""
-    return f"org:{account_id}" if harness == "claude" else account_id
+    """The usage row's identity for an account: its account id, so the usage
+    key is ``<harness>:<account_id>`` like the account sets (auto-raepo)."""
+    return account_id
 
 
 def _org_readings(harness: str, slugs) -> dict[str, dict[str, dict]]:

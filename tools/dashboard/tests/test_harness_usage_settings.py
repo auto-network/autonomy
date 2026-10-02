@@ -75,7 +75,7 @@ def test_normalize_claude_usage_payload_uses_org_identity():
         alias="primary",
     )
 
-    assert payload["identity_id"] == "org:478d4828-69e3-4aec-837d-ab25b5c799c4"
+    assert payload["identity_id"] == "478d4828-69e3-4aec-837d-ab25b5c799c4"
     assert payload["identity_label"] == "org 478d4828"
     assert payload["account_id"] == "478d4828-69e3-4aec-837d-ab25b5c799c4"
     assert payload["alias"] == "primary"
@@ -390,10 +390,10 @@ def test_publish_harness_usage_snapshot_collects_claude_but_writes_only_changes(
         server,
         "_collect_claude_usage_payloads",
         lambda updated_at: [(
-            "claude:org:org-X",
+            "claude:org-X",
             hus.make_unavailable_usage_payload(
                 harness="claude",
-                identity_id="org:org-X",
+                identity_id="org-X",
                 identity_label="org X",
                 source="oauth_usage",
                 note="test",
@@ -415,7 +415,7 @@ def test_publish_harness_usage_snapshot_collects_claude_but_writes_only_changes(
 
     # Substrate enumeration still runs every tick, but timestamp-only refreshes
     # do not rewrite the Personal/raw Setting.
-    assert writes == ["claude:org:org-X"]
+    assert writes == ["claude:org-X"]
 
 
 # ── auto-pojkz: one Codex writer, reading-time clock, cold-row expiry ──
@@ -693,7 +693,7 @@ def _install_credentials(graph_db_env, *, alias: str, org_uuid: str,
     """One Claude account with an OAuth bundle and its labels — what the
     install command and the Getting Started scan seal (record v16 §10.9)."""
     acct = _account(org_uuid)
-    acct.parts.update({
+    acct.apply({
         "alias": alias, "org_name": f"{alias}-org", "email": f"{alias}@example.com",
         "access": access_token, "refresh": f"refresh-{alias}",
         "expires": "9999999999999", "scopes": "user:profile",
@@ -703,7 +703,7 @@ def _install_credentials(graph_db_env, *, alias: str, org_uuid: str,
 def test_collect_claude_usage_writes_one_row_per_credential(graph_db_env, monkeypatch):
     """auto-08n3f: substrate-backed enumeration. Each
     ``dashboard.claude.credentials`` row produces one harness-usage row,
-    keyed by the bare ``claude:org:<uuid>`` (no alias suffix)."""
+    keyed by the bare ``claude:<uuid>`` (no alias suffix)."""
     _install_credentials(graph_db_env, alias="default",
                          org_uuid="org-DEFAULT", access_token="tok-default")
     _install_credentials(graph_db_env, alias="primary",
@@ -722,8 +722,8 @@ def test_collect_claude_usage_writes_one_row_per_credential(graph_db_env, monkey
     assert sorted(fetch_calls) == ["tok-default", "tok-primary"]
     keys = [k for k, _ in payloads]
     assert keys == sorted([
-        "claude:org:org-DEFAULT",
-        "claude:org:org-PRIMARY",
+        "claude:org-DEFAULT",
+        "claude:org-PRIMARY",
     ])
     by_alias = {p["alias"]: p for _, p in payloads}
     assert by_alias["default"]["account_id"] == "org-DEFAULT"
@@ -766,11 +766,11 @@ def test_collect_claude_usage_writes_unavailable_on_failure(
         server._collect_claude_usage_payloads("2026-05-04T13:00:00Z"),
     )
 
-    assert set(payloads) == {"claude:org:org-DEFAULT", "claude:org:org-PRIMARY"}
-    assert payloads["claude:org:org-DEFAULT"]["status"] == "unavailable"
-    assert "HTTP 401" in (payloads["claude:org:org-DEFAULT"].get("note") or "")
-    assert payloads["claude:org:org-DEFAULT"]["account_id"] == "org-DEFAULT"
-    assert payloads["claude:org:org-PRIMARY"]["status"] == "ok"
+    assert set(payloads) == {"claude:org-DEFAULT", "claude:org-PRIMARY"}
+    assert payloads["claude:org-DEFAULT"]["status"] == "unavailable"
+    assert "HTTP 401" in (payloads["claude:org-DEFAULT"].get("note") or "")
+    assert payloads["claude:org-DEFAULT"]["account_id"] == "org-DEFAULT"
+    assert payloads["claude:org-PRIMARY"]["status"] == "ok"
 
 
 def test_collect_claude_usage_no_session_dependency(graph_db_env, monkeypatch):
@@ -790,15 +790,15 @@ def test_collect_claude_usage_no_session_dependency(graph_db_env, monkeypatch):
     payloads = server._collect_claude_usage_payloads("2026-05-04T13:00:00Z")
 
     keys = [k for k, _ in payloads]
-    assert keys == ["claude:org:org-X"]
+    assert keys == ["claude:org-X"]
 
 
 def _install_setup_token(graph_db_env, *, org_uuid: str, raw_key: str) -> None:
     """A freshly minted setup token on the account, so the probe path reads it."""
     from datetime import datetime, timezone
     acct = _account(org_uuid)
-    acct.parts["setup"] = raw_key
-    acct.parts["setup_minted_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    acct.apply({"setup": raw_key,
+                "setup_minted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
 
 
 _PROBE_HEADERS_200 = {
@@ -823,7 +823,7 @@ def test_probe_headers_parse_200():
     )
     assert payload["status"] == "ok"
     assert payload["source"] == "probe_headers"
-    assert payload["identity_id"] == "org:org-X"
+    assert payload["identity_id"] == "org-X"
     assert payload["alias"] == "gmail"
     assert payload["rate_limit_reached_type"] is None
     assert payload["windows"]["short"] == {
@@ -870,9 +870,9 @@ def test_collect_claude_usage_probes_each_setup_token_row(graph_db_env, monkeypa
     payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
 
     assert sorted(probed) == ["sk-ant-oat01-A", "sk-ant-oat01-B"]
-    assert set(payloads) == {"claude:org:org-A", "claude:org:org-B"}
+    assert set(payloads) == {"claude:org-A", "claude:org-B"}
     assert all(p["source"] == "probe_headers" for p in payloads.values())
-    assert payloads["claude:org:org-A"]["account_id"] == "org-A"
+    assert payloads["claude:org-A"]["account_id"] == "org-A"
 
 
 def test_collect_claude_usage_joins_alias_from_credentials(graph_db_env, monkeypatch):
@@ -891,8 +891,8 @@ def test_collect_claude_usage_joins_alias_from_credentials(graph_db_env, monkeyp
 
     payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
 
-    assert payloads["claude:org:org-X"]["alias"] == "gmail"
-    assert payloads["claude:org:org-X"]["status"] == "ok"
+    assert payloads["claude:org-X"]["alias"] == "gmail"
+    assert payloads["claude:org-X"]["status"] == "ok"
 
 
 def test_collect_claude_usage_probe_failure_keeps_valid_reading(graph_db_env, monkeypatch):
@@ -924,7 +924,7 @@ def test_collect_claude_usage_probe_failure_writes_unavailable_when_no_valid_rea
 
     payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
 
-    row = payloads["claude:org:org-X"]
+    row = payloads["claude:org-X"]
     assert row["status"] == "unavailable"
     assert row["source"] == "probe_headers"
     assert "HTTP 401" in row["note"]
@@ -948,7 +948,7 @@ def test_collect_claude_usage_falls_back_to_bundle_without_setup_token(
     payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
 
     assert fetched == ["tok-N"]
-    assert payloads["claude:org:org-N"]["source"] == "oauth_usage"
+    assert payloads["claude:org-N"]["source"] == "oauth_usage"
 
 
 def _snapshot_with_fleet_gate(monkeypatch, *, allowed: bool) -> list[str]:
@@ -994,7 +994,7 @@ def test_fetch_claude_usage_probe_returns_headers_on_429(monkeypatch):
 def _stored_reading(updated_at: str, *, long_resets_at: int) -> dict:
     """A persisted ok reading whose 7d window is still open."""
     return {
-        "harness": "claude", "identity_id": "org:org-X", "status": "ok",
+        "harness": "claude", "identity_id": "org-X", "status": "ok",
         "source": "oauth_usage", "updated_at": updated_at,
         "windows": {
             "short": {"used_percent": 74.0, "window_minutes": 300,
@@ -1035,7 +1035,7 @@ def test_collect_claude_usage_refetches_when_stored_reading_is_older_than_interv
     payloads = server._collect_claude_usage_payloads("2026-09-07T19:00:00Z")
 
     assert fetch_calls == ["tok-default"]
-    assert [k for k, _ in payloads] == ["claude:org:org-X"]
+    assert [k for k, _ in payloads] == ["claude:org-X"]
 
 
 def test_collect_claude_usage_skips_fetch_when_stored_reading_is_fresh(
