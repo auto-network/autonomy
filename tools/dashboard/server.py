@@ -244,7 +244,6 @@ from tools.dashboard import software_update_settings as _software_update_setting
 from tools.dashboard import session_board_settings  # noqa: E402
 from tools.dashboard import voice_transcription_settings as _voice_transcription_settings  # noqa: E402
 from tools.dashboard import worktree_directives as _worktree_directives  # noqa: E402, F401
-from tools.dashboard import claude_credentials_refresh as _claude_credentials_refresh  # noqa: E402
 from tools.dashboard import codex_credentials_refresh as _codex_credentials_refresh  # noqa: E402
 from tools.graph import settings_ops  # noqa: E402
 
@@ -4043,14 +4042,11 @@ def _probe_org_claude_account(org: str, account_id: str) -> bool:
     identity_id = account_id   # usage keyed <harness>:<account_id> (auto-raepo)
     row_key = _harness_usage_settings.make_harness_usage_key("claude", identity_id)
     updated_at = _now_iso()
-    if acct.setup_token_fresh():
-        payload = _claude_usage_via_probe(
-            acct.get("setup") or "", org_uuid=account_id, alias=alias, row_key=row_key,
-            identity_id=identity_id, updated_at=updated_at)
-    else:
-        payload = _claude_usage_via_bundle(
-            {"alias": alias, "access_token": acct.get("access")}, org_uuid=account_id,
-            alias=alias, row_key=row_key, identity_id=identity_id, updated_at=updated_at)
+    # The probe runs on whichever token the account holds (auto-n9tdh).
+    token = acct.get("setup") if acct.setup_token_fresh() else acct.get("access")
+    payload = _claude_usage_via_probe(
+        token or "", org_uuid=account_id, alias=alias, row_key=row_key,
+        identity_id=identity_id, updated_at=updated_at)
     if payload is None:
         return False
     return _harness_usage_settings.publish_org_reading(
@@ -16940,8 +16936,8 @@ def _publish_harness_usage_snapshot() -> None:
     # Everything this tick does is GLOBAL row maintenance: probing the vendor
     # for a Claude reading (auto-r5wlw) and expiring a Codex row nobody is
     # refreshing (auto-pojkz). Both write personal-homed, fleet-synced rows, so
-    # exactly one machine may do them -- reuse the singular-ownership gate
-    # claude_credentials_refresh already uses for the same reason.
+    # exactly one machine may do them -- reuse the fleet's singular-ownership
+    # gate (fleet_tunnel_server), as the Codex refresh does.
     #
     # Codex READINGS are deliberately NOT here. They are written by
     # session_monitor._publish_codex_harness_usage_setting straight off each
@@ -17103,11 +17099,10 @@ def _collect_claude_usage_payloads(
     (``invalid_grant``). Alias is joined from the
     ``dashboard.claude.credentials`` row with the same key, informationally.
 
-    An org that has a credentials row but no fresh setup-token row (an
-    install in progress) falls back to the legacy ``GET /api/oauth/usage``
-    bundle path so it still reports.
+    An account with no fresh setup token is probed with its OAuth access
+    token (auto-n9tdh): the probe runs on whichever token the account holds.
 
-    The row key is the bare ``claude:org:<uuid>``.
+    The row key is ``claude:<account id>``.
 
     On failure a row is written with ``status='unavailable'`` unless the
     stored reading is still valid (its window has not reset), in which case
@@ -17158,17 +17153,13 @@ def _collect_claude_usage_payloads(
                 org_uuid, alias,
             )
             continue
-        setup_token = setup_tokens_by_org.get(org_uuid)
-        if setup_token:
-            payload = _claude_usage_via_probe(
-                setup_token, org_uuid=org_uuid, alias=alias, row_key=row_key,
-                identity_id=identity_id, updated_at=updated_at,
-            )
-        else:
-            payload = _claude_usage_via_bundle(
-                credentials, org_uuid=org_uuid, alias=alias, row_key=row_key,
-                identity_id=identity_id, updated_at=updated_at,
-            )
+        # The probe runs on whichever token the account holds: its setup
+        # token when fresh, else the OAuth access token (auto-n9tdh).
+        token = setup_tokens_by_org.get(org_uuid) or credentials.get("access_token") or ""
+        payload = _claude_usage_via_probe(
+            token, org_uuid=org_uuid, alias=alias, row_key=row_key,
+            identity_id=identity_id, updated_at=updated_at,
+        )
         if payload is not None:
             payloads[row_key] = payload
 
@@ -17243,54 +17234,6 @@ def _claude_usage_via_probe(
     return payload
 
 
-def _claude_usage_via_bundle(
-    credentials: dict[str, Any], *, org_uuid: str, alias: str | None,
-    row_key: str, identity_id: str, updated_at: str,
-) -> dict[str, Any] | None:
-    """Legacy path: ``GET /api/oauth/usage`` with the consumer bundle's
-    ``access_token``. Used only for an org with no fresh setup-token row."""
-    access_token = credentials.get("access_token")
-    if not isinstance(access_token, str) or not access_token:
-        return _harness_usage_settings.make_unavailable_usage_payload(
-            harness="claude",
-            identity_id=identity_id,
-            identity_label=_harness_usage_settings.short_identity_label(
-                "org", org_uuid,
-            ),
-            source="oauth_usage",
-            note="no setup token and credentials row missing access_token",
-            updated_at=updated_at,
-            account_id=org_uuid,
-            alias=alias,
-        )
-    logger.info(
-        "claude harness usage: no setup token for org=%s alias=%r; "
-        "fetching /usage with the bundle", org_uuid, alias,
-    )
-    try:
-        usage_body, _headers = _fetch_claude_oauth_usage(access_token)
-    except Exception as exc:
-        logger.exception(
-            "claude harness usage: /usage call failed for org=%s alias=%r",
-            org_uuid, alias,
-        )
-        return _claude_usage_failure_payload(
-            exc, source="oauth_usage", org_uuid=org_uuid, alias=alias,
-            row_key=row_key, identity_id=identity_id, updated_at=updated_at,
-            what="/usage call",
-        )
-    logger.info(
-        "claude harness usage: /usage OK for org=%s alias=%r", org_uuid, alias,
-    )
-    return _harness_usage_settings.normalize_claude_usage_payload(
-        bundle={"subscription_type": None, "rate_limit_tier": None},
-        usage_body=usage_body,
-        org_id=org_uuid,
-        updated_at=updated_at,
-        alias=alias,
-    )
-
-
 def _fetch_claude_usage_probe(setup_token: str) -> tuple[int, dict[str, str]]:
     """One-token ``POST /v1/messages`` whose only purpose is the response headers.
 
@@ -17300,7 +17243,7 @@ def _fetch_claude_usage_probe(setup_token: str) -> tuple[int, dict[str, str]]:
     status or a network error raises ``RuntimeError``. The token is never
     logged.
     """
-    from tools.graph.claude_oauth import CLAUDE_USER_AGENT
+    from tools.graph.credential_import import CLAUDE_USER_AGENT
 
     body = json.dumps({
         "model": _CLAUDE_USAGE_PROBE_MODEL,
@@ -17358,75 +17301,6 @@ def _fetch_claude_usage_probe(setup_token: str) -> tuple[int, dict[str, str]]:
         status_code, elapsed_ms, headers.get("anthropic-organization-id", "<unset>"),
     )
     return status_code, headers
-
-
-def _fetch_claude_oauth_usage(
-    access_token: str,
-) -> tuple[dict[str, Any], dict[str, str]]:
-    """GET /api/oauth/usage. Logs intent / success / failure with HTTP code +
-    duration so production traces attribute every call to its outcome.
-    Bearer token is never logged."""
-    url = "https://api.anthropic.com/api/oauth/usage"
-    from tools.graph.claude_oauth import CLAUDE_USER_AGENT
-    req = urllib_request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "anthropic-beta": "oauth-2025-04-20",
-            "Content-Type": "application/json",
-            "User-Agent": CLAUDE_USER_AGENT,
-        },
-        method="GET",
-    )
-    logger.info("claude /usage: GET %s (Bearer auth)", url)
-    started = time.monotonic()
-    try:
-        with urllib_request.urlopen(req, timeout=10) as resp:
-            body_bytes = resp.read()
-            headers = {k.lower(): v for k, v in resp.headers.items()}
-            status_code = resp.status
-    except urllib_error.HTTPError as exc:
-        elapsed_ms = (time.monotonic() - started) * 1000
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", errors="replace").strip()
-        except Exception:
-            detail = ""
-        logger.error(
-            "claude /usage: GET FAILED HTTP %d in %.1fms: %s",
-            exc.code, elapsed_ms, detail[:160] or "<empty body>",
-        )
-        suffix = f": {detail[:160]}" if detail else ""
-        raise RuntimeError(f"Claude usage API returned HTTP {exc.code}{suffix}") from exc
-    except Exception as exc:
-        elapsed_ms = (time.monotonic() - started) * 1000
-        logger.error(
-            "claude /usage: GET ERROR in %.1fms: %s",
-            elapsed_ms, type(exc).__name__,
-        )
-        raise RuntimeError(f"Claude usage API failed: {type(exc).__name__}") from exc
-
-    elapsed_ms = (time.monotonic() - started) * 1000
-    try:
-        body = json.loads(body_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        logger.error(
-            "claude /usage: GET HTTP %d in %.1fms returned invalid JSON",
-            status_code, elapsed_ms,
-        )
-        raise RuntimeError("Claude usage API returned invalid JSON") from exc
-    if not isinstance(body, dict):
-        logger.error(
-            "claude /usage: GET HTTP %d in %.1fms returned non-object payload",
-            status_code, elapsed_ms,
-        )
-        raise RuntimeError("Claude usage API returned a non-object payload")
-    org_id = headers.get("anthropic-organization-id", "<unset>")
-    logger.info(
-        "claude /usage: GET OK HTTP %d in %.1fms org=%s",
-        status_code, elapsed_ms, org_id,
-    )
-    return body, headers
 
 
 #: How often the settler looks for a closed day. It writes at most one row
@@ -23306,7 +23180,6 @@ async def _software_update_poller() -> None:
 _tokens_rollup_poller_task: asyncio.Task | None = None
 _serving_bootstrap_task: asyncio.Task | None = None
 _event_proxy_task: asyncio.Task | None = None
-_claude_credentials_refresh_task: asyncio.Task | None = None
 _codex_credentials_refresh_task: asyncio.Task | None = None
 _event_loop_watchdog_task: asyncio.Task | None = None
 _vault_release_sweeper_task: asyncio.Task | None = None
@@ -23540,7 +23413,7 @@ _design_lifecycle_task: asyncio.Task | None = None
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
     global _tokens_rollup_poller_task
-    global _claude_credentials_refresh_task, _codex_credentials_refresh_task
+    global _codex_credentials_refresh_task
     global _event_loop_watchdog_task
     global _serving_bootstrap_task
     global _event_proxy_task
@@ -24233,7 +24106,7 @@ async def _on_startup():
 
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
-    global _harness_usage_poller_task, _claude_credentials_refresh_task
+    global _harness_usage_poller_task
     global _tokens_rollup_poller_task
     global _codex_credentials_refresh_task
     global _settings_mediator_started, _serving_bootstrap_task
@@ -24367,7 +24240,6 @@ async def _on_shutdown():
             _harness_usage_poller_task,
             _software_update_poller_task,
             _tokens_rollup_poller_task,
-            _claude_credentials_refresh_task,
             _codex_credentials_refresh_task,
             _event_loop_watchdog_task,
             _vault_release_sweeper_task,
@@ -24385,7 +24257,6 @@ async def _on_shutdown():
     _mock_event_watcher_task = None
     _harness_usage_poller_task = None
     _tokens_rollup_poller_task = None
-    _claude_credentials_refresh_task = None
     _codex_credentials_refresh_task = None
     _vault_release_sweeper_task = None
     global _plugin_background_supervisor
@@ -24445,7 +24316,7 @@ async def _activate_worker(reason: str) -> None:
     best-effort and logged on failure, matching how they behaved when they
     lived inline in ``_on_startup``.
     """
-    global _worker_activated, _claude_credentials_refresh_task
+    global _worker_activated
     global _codex_credentials_refresh_task, _software_update_poller_task
     if _worker_activated:
         return
@@ -24552,13 +24423,9 @@ async def _activate_worker(reason: str) -> None:
 
     if _should_run_harness_usage_poller():
         # Fetches origin and may fast-forward the checkout: one worker only,
-        # so it starts at activation, like the credentials refresh pollers.
+        # so it starts at activation, like the Codex credentials refresh poller.
         _software_update_poller_task = asyncio.create_task(
             _software_update_poller(), name="software-update-poller")
-    if _claude_credentials_refresh.should_run_credentials_refresh_poller():
-        _claude_credentials_refresh_task = asyncio.create_task(
-            _claude_credentials_refresh.credentials_refresh_poller()
-        )
     if _codex_credentials_refresh.should_run_codex_credentials_refresh_poller():
         _codex_credentials_refresh_task = asyncio.create_task(
             _codex_credentials_refresh.codex_credentials_refresh_poller()

@@ -4,7 +4,6 @@ auto-vqa8n).
 Mocks ``urllib.request.urlopen`` at the helper boundary so the assertions
 exercise classification, payload construction, upsert wiring, and
 revoked-row skip behaviour without real auth.openai.com round-trips.
-Parity reference: ``test_claude_credentials_refresh.py``.
 
 The auto-vqa8n additions pin the *freshness honesty* contract: refresh
 decisions derive from measured state (last successful refresh + failure

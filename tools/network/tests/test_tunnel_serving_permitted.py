@@ -1,11 +1,10 @@
 """Tunnel eligibility narrows to designation ONLY (auto-clune.7 patch A).
 
 `fleet_tunnel_server.state()` is the fleet's singular-ownership election, and
-`allowed` is consumed by things that have nothing to do with tunnels: claude and
-codex credential refresh, usage-row maintenance, enrollment targeting. Its own
-comment in `claude_credentials_refresh.py` says so — "so ONLY ONE Fleet machine
-ever refreshes this credential". Widening `allowed` to enable tunnels on every
-machine would let every machine refresh a single-use credential concurrently.
+`allowed` is consumed by things that have nothing to do with tunnels: Codex
+credential refresh, usage-row maintenance, enrollment targeting -- ONLY ONE
+Fleet machine may refresh a single-use credential. Widening `allowed` to enable
+tunnels on every machine would let every machine refresh it concurrently.
 
 So this patch adds a narrower predicate and leaves `state()` alone. The tests
 that matter are the two that would catch the change being wrong in each

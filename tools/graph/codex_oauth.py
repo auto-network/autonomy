@@ -22,8 +22,8 @@ returns a rotated access/id/refresh triple with a clean HTTP 200. The
 a new access_token but does **not** return a fresh refresh_token, so the
 chain would decay to expiry.
 
-Spec: bead auto-l1h3f (Codex credential end-state, STEP 2). Parity
-reference: ``tools/graph/claude_oauth.py`` (``graph://73c4e9ef-bbc``).
+Spec: bead auto-l1h3f (Codex credential end-state, STEP 2); see
+``graph://73c4e9ef-bbc``.
 """
 
 from __future__ import annotations

@@ -713,9 +713,9 @@ def test_collect_claude_usage_writes_one_row_per_credential(graph_db_env, monkey
 
     def _fake_fetch(token):
         fetch_calls.append(token)
-        return _CLAUDE_USAGE_BODY, {}
+        return 200, dict(_PROBE_HEADERS_200)
 
-    monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
+    monkeypatch.setattr(server, "_fetch_claude_usage_probe", _fake_fetch)
 
     payloads = server._collect_claude_usage_payloads("2026-05-04T13:00:00Z")
 
@@ -735,7 +735,7 @@ def test_collect_claude_usage_returns_nothing_when_no_credentials(
 ):
     monkeypatch.setattr(
         server,
-        "_fetch_claude_oauth_usage",
+        "_fetch_claude_usage_probe",
         lambda token: (_ for _ in ()).throw(AssertionError("must not call OAuth")),
     )
 
@@ -758,9 +758,9 @@ def test_collect_claude_usage_writes_unavailable_on_failure(
     def _fake_fetch(token):
         if token == "tok-default":
             raise RuntimeError("Claude usage API returned HTTP 401")
-        return _CLAUDE_USAGE_BODY, {}
+        return 200, dict(_PROBE_HEADERS_200)
 
-    monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
+    monkeypatch.setattr(server, "_fetch_claude_usage_probe", _fake_fetch)
 
     payloads = dict(
         server._collect_claude_usage_payloads("2026-05-04T13:00:00Z"),
@@ -783,8 +783,8 @@ def test_collect_claude_usage_no_session_dependency(graph_db_env, monkeypatch):
                          org_uuid="org-X", access_token="tok-default")
     monkeypatch.setattr(
         server,
-        "_fetch_claude_oauth_usage",
-        lambda token: (_CLAUDE_USAGE_BODY, {}),
+        "_fetch_claude_usage_probe",
+        lambda token: (200, dict(_PROBE_HEADERS_200)),
     )
 
     payloads = server._collect_claude_usage_payloads("2026-05-04T13:00:00Z")
@@ -862,10 +862,6 @@ def test_collect_claude_usage_probes_each_setup_token_row(graph_db_env, monkeypa
         server, "_fetch_claude_usage_probe",
         lambda token: probed.append(token) or (200, _PROBE_HEADERS_200),
     )
-    monkeypatch.setattr(
-        server, "_fetch_claude_oauth_usage",
-        lambda token: (_ for _ in ()).throw(AssertionError("bundle path must not run")),
-    )
 
     payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
 
@@ -882,11 +878,9 @@ def test_collect_claude_usage_joins_alias_from_credentials(graph_db_env, monkeyp
     _install_credentials(graph_db_env, alias="gmail", org_uuid="org-X",
                          access_token="tok-expired-bundle")
     monkeypatch.setattr(
-        server, "_fetch_claude_usage_probe", lambda token: (200, _PROBE_HEADERS_200),
-    )
-    monkeypatch.setattr(
-        server, "_fetch_claude_oauth_usage",
-        lambda token: (_ for _ in ()).throw(AssertionError("bundle must not be used")),
+        server, "_fetch_claude_usage_probe",
+        lambda token: (200, _PROBE_HEADERS_200) if token == "sk-ant-oat01-X"
+        else (_ for _ in ()).throw(AssertionError("a fresh setup token is probed first")),
     )
 
     payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
@@ -930,25 +924,23 @@ def test_collect_claude_usage_probe_failure_writes_unavailable_when_no_valid_rea
     assert "HTTP 401" in row["note"]
 
 
-def test_collect_claude_usage_falls_back_to_bundle_without_setup_token(
+def test_collect_claude_usage_probes_the_access_token_without_a_setup_token(
     graph_db_env, monkeypatch,
 ):
+    """auto-n9tdh: the probe runs on whichever token the account holds; the
+    legacy /api/oauth/usage path is gone."""
     _install_credentials(graph_db_env, alias="fresh", org_uuid="org-N",
                          access_token="tok-N")
+    probed: list[str] = []
     monkeypatch.setattr(
         server, "_fetch_claude_usage_probe",
-        lambda token: (_ for _ in ()).throw(AssertionError("no setup token, no probe")),
-    )
-    fetched: list[str] = []
-    monkeypatch.setattr(
-        server, "_fetch_claude_oauth_usage",
-        lambda token: fetched.append(token) or (_CLAUDE_USAGE_BODY, {}),
+        lambda token: probed.append(token) or (200, dict(_PROBE_HEADERS_200)),
     )
 
     payloads = dict(server._collect_claude_usage_payloads("2026-09-07T20:00:00Z"))
 
-    assert fetched == ["tok-N"]
-    assert payloads["claude:org-N"]["source"] == "oauth_usage"
+    assert probed == ["tok-N"]
+    assert payloads["claude:org-N"]["source"] == "probe_headers"
 
 
 def _snapshot_with_fleet_gate(monkeypatch, *, allowed: bool) -> list[str]:
@@ -1028,9 +1020,9 @@ def test_collect_claude_usage_refetches_when_stored_reading_is_older_than_interv
 
     def _fake_fetch(token):
         fetch_calls.append(token)
-        return _CLAUDE_USAGE_BODY, {}
+        return 200, dict(_PROBE_HEADERS_200)
 
-    monkeypatch.setattr(server, "_fetch_claude_oauth_usage", _fake_fetch)
+    monkeypatch.setattr(server, "_fetch_claude_usage_probe", _fake_fetch)
 
     payloads = server._collect_claude_usage_payloads("2026-09-07T19:00:00Z")
 
@@ -1054,7 +1046,7 @@ def test_collect_claude_usage_skips_fetch_when_stored_reading_is_fresh(
                              long_resets_at=now + 20 * 3600)
     monkeypatch.setattr(server, "_existing_usage_payload", lambda key: stored)
     monkeypatch.setattr(
-        server, "_fetch_claude_oauth_usage",
+        server, "_fetch_claude_usage_probe",
         lambda token: (_ for _ in ()).throw(AssertionError("must not call /usage")),
     )
 

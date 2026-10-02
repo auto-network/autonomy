@@ -1,58 +1,35 @@
 """``graph claude`` subcommand group — operator surface for substrate-stored
 Claude account credentials.
 
-Sub-commands implemented (graph://73c4e9ef-bbc):
+Sub-commands:
 
-* ``graph claude install --alias <name>`` — interactive: drives consumer
-  OAuth + console OAuth + setup-token mint; writes both substrate rows.
-* ``graph claude install --alias <name> --refresh-setup-token`` — re-mint
-  only path; replaces the setup-token row in place.
+* ``graph claude install`` — prints the two ways an account gets in: ``graph
+  credentials import`` for a sign-in already on this machine, and ``claude
+  setup-token`` for a one-year token (graph://5ab13dd5-570). The dashboard
+  runs no OAuth flow of its own and never refreshes a Claude sign-in
+  (auto-n9tdh, operator ruling 2026-10-02).
 * ``graph claude list`` — table of installed accounts.
 * ``graph claude usage`` — table of per-account 5h/7d window usage.
-* ``graph claude remove --alias <name>`` — confirms + deletes both rows.
-
-The OAuth + PKCE machinery itself lives in :mod:`tools.graph.claude_oauth`
-so tests can mock at the helper boundary; this module owns the CLI shape
-and the substrate writes.
-
-A core invariant of install: the consumer flow's organization UUID must
-match the console flow's. We abort with a clear "you logged in as
-different accounts the second time" error before writing anything when
-they don't.
+* ``graph claude remove --alias <name>`` — confirms + deletes the account.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
-import time
 from datetime import datetime, timezone
 from typing import Any
 
 from . import harness_credentials as hv
 from . import ops
-from .claude_oauth import (
-    CONSOLE_SCOPES,
-    CONSUMER_SCOPES,
-    FlowResult,
-    OAuthError,
-    TokenResponse,
-    mint_setup_token,
-    run_oauth_flow,
-)
 
 
 logger = logging.getLogger(__name__)
 
 
 # ── helpers ──────────────────────────────────────────────────
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
 
 
 def _print_table(rows: list[dict], cols: list[tuple[str, str, int]]) -> None:
@@ -167,249 +144,16 @@ def _account_by_org_uuid(org_uuid: str, org: str | None = None) -> hv.Account | 
 # ── install ──────────────────────────────────────────────────
 
 
-def _bundle_parts(
-    *, alias: str, token: TokenResponse,
-) -> dict[str, str | None]:
-    """The account parts a fresh consumer bundle sets (record v16 §10.9)."""
-    return {
-        "alias": alias,
-        "org_name": token.organization_name,
-        "email": token.account_email,
-        "access": token.access_token,
-        "refresh": token.refresh_token,
-        "expires": str(_now_ms() + (token.expires_in * 1000)),
-        "scopes": hv.scopes_text(
-            s for s in (token.scope or "").split(" ") if s
-        ),
-        "refreshed_at": None,
-        "error": None,
-    }
-
-
-def _write_bundle(*, org_uuid: str, parts: dict[str, str | None],
-                  org: str | None = None) -> None:
-    """Seal the bundle parts into the account keyed by *org_uuid*.
-
-    Re-running install for the same account rotates the bundle in place: a
-    vault row is never rewritten, a change appends a revision.
-    """
-    hv.write_account("claude", org_uuid, parts, org=org)
-
-
-def _write_setup_token(*, org_uuid: str, raw_key: str, org: str | None = None) -> None:
-    """Seal a freshly minted setup token; minted-at is its year clock."""
-    hv.write_account("claude", org_uuid, {
-        "setup": raw_key,
-        "setup_minted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }, org=org)
-
-
-def _alias_collision_check(alias: str, org_uuid: str, org: str | None = None) -> None:
-    """Refuse to repurpose an alias that is already pointing at a different
-    Anthropic org. Re-running with the same (alias, org_uuid) is fine.
-    """
-    existing = _account_by_alias(alias, org)
-    if existing is None:
-        return
-    if existing.id == org_uuid:
-        return
+def cmd_claude_install(args: argparse.Namespace) -> None:  # noqa: ARG001
+    """The two routes by which a Claude account gets into the vault."""
     print(
-        f"Error: alias {alias!r} is already installed and points at a "
-        f"different Anthropic org ({existing.id}). To re-target the alias "
-        f"to a new account, remove it first: "
-        f"`graph claude remove --alias {alias}`.",
-        file=sys.stderr,
+        "graph claude install does not sign in. A Claude account gets in one of\n"
+        "two ways:\n"
+        "  1. An existing sign-in on this machine (claude logged in):\n"
+        "       graph credentials import\n"
+        "  2. A one-year setup token, minted with `claude setup-token`; see\n"
+        "       graph://5ab13dd5-570\n"
     )
-    sys.exit(1)
-
-
-def _run_consumer_flow() -> FlowResult:
-    print("Step 1/2: Claude consumer login (browser will open)…")
-    return run_oauth_flow(scope=CONSUMER_SCOPES)
-
-
-def _run_console_flow() -> FlowResult:
-    print(
-        "Step 2/2: Claude console login (browser will open) — same account "
-        "as step 1…"
-    )
-    return run_oauth_flow(scope=CONSOLE_SCOPES)
-
-
-def _do_install_full(args: argparse.Namespace) -> int:
-    """Drive the full install: consumer flow + console flow + mint + writes."""
-    logger.info("claude install: starting full install alias=%r", args.alias)
-    try:
-        consumer = _run_consumer_flow()
-    except OAuthError as e:
-        logger.error("claude install: consumer flow failed alias=%r: %s", args.alias, e)
-        print(f"Error during consumer login: {e}", file=sys.stderr)
-        print(
-            "This hand-rolled OAuth path is known broken for Max/consumer "
-            "accounts. Use the container-driven recovery instead: "
-            "graph read 5ab13dd5-570", file=sys.stderr,
-        )
-        return 1
-
-    org_uuid = consumer.token.organization_uuid
-    logger.info(
-        "claude install: consumer flow OK alias=%r org=%s account=%s",
-        args.alias, org_uuid, consumer.token.account_email,
-    )
-    _alias_collision_check(args.alias, org_uuid, getattr(args, "org", None))
-
-    try:
-        console = _run_console_flow()
-    except OAuthError as e:
-        logger.error("claude install: console flow failed alias=%r: %s", args.alias, e)
-        print(f"Error during console login: {e}", file=sys.stderr)
-        print(
-            "This hand-rolled OAuth path is known broken for Max/consumer "
-            "accounts. Use the container-driven recovery instead: "
-            "graph read 5ab13dd5-570", file=sys.stderr,
-        )
-        return 1
-
-    if console.token.organization_uuid != org_uuid:
-        logger.error(
-            "claude install: same-org check failed — consumer org=%s console org=%s",
-            org_uuid, console.token.organization_uuid,
-        )
-        print(
-            "Error: you logged in as different accounts the second time "
-            f"({consumer.token.account_email} vs "
-            f"{console.token.account_email}). Aborting before any writes.",
-            file=sys.stderr,
-        )
-        return 1
-    logger.info("claude install: console flow OK alias=%r org=%s (same-org confirmed)",
-                args.alias, org_uuid)
-
-    try:
-        raw_key = mint_setup_token(
-            console_access_token=console.token.access_token,
-        )
-    except OAuthError as e:
-        logger.error("claude install: mint failed alias=%r org=%s: %s",
-                     args.alias, org_uuid, e)
-        print(f"Error minting setup token: {e}", file=sys.stderr)
-        print(
-            "This hand-rolled OAuth path is known broken for Max/consumer "
-            "accounts. Use the container-driven recovery instead: "
-            "graph read 5ab13dd5-570", file=sys.stderr,
-        )
-        return 1
-
-    _write_bundle(
-        org_uuid=org_uuid,
-        parts=_bundle_parts(alias=args.alias, token=consumer.token),
-        org=getattr(args, "org", None),
-    )
-    _write_setup_token(org_uuid=org_uuid, raw_key=raw_key, org=getattr(args, "org", None))
-    logger.info(
-        "claude install: vault writes OK alias=%r org=%s (bundle + setup token)",
-        args.alias, org_uuid,
-    )
-
-    print(
-        f"Installed Claude account: alias={args.alias!r} "
-        f"org={consumer.token.organization_name!r} "
-        f"account={consumer.token.account_email!r}"
-    )
-    return 0
-
-
-def _do_install_refresh_setup_token(args: argparse.Namespace) -> int:
-    """Skip the consumer flow; only run the console flow + mint, replace the
-    setup-token row in place. Used when the year-long token is about to
-    expire or has been revoked.
-    """
-    logger.info("claude install: --refresh-setup-token alias=%r", args.alias)
-    existing = _account_by_alias(args.alias, getattr(args, "org", None))
-    if existing is None:
-        logger.error(
-            "claude install: --refresh-setup-token alias=%r — no installed account",
-            args.alias,
-        )
-        print(
-            f"Error: --refresh-setup-token requires an existing install for "
-            f"alias {args.alias!r}; run `graph claude install --alias "
-            f"{args.alias}` first.",
-            file=sys.stderr,
-        )
-        return 1
-    expected_org_uuid = existing.id
-    try:
-        console = _run_console_flow()
-    except OAuthError as e:
-        logger.error(
-            "claude install: --refresh-setup-token alias=%r console flow failed: %s",
-            args.alias, e,
-        )
-        print(f"Error during console login: {e}", file=sys.stderr)
-        print(
-            "This hand-rolled OAuth path is known broken for Max/consumer "
-            "accounts. Use the container-driven recovery instead: "
-            "graph read 5ab13dd5-570", file=sys.stderr,
-        )
-        return 1
-    if console.token.organization_uuid != expected_org_uuid:
-        logger.error(
-            "claude install: --refresh-setup-token alias=%r same-org check failed "
-            "(expected=%s console=%s)",
-            args.alias, expected_org_uuid, console.token.organization_uuid,
-        )
-        print(
-            f"Error: console login resolved to org "
-            f"{console.token.organization_uuid!r}, but alias {args.alias!r} "
-            f"is bound to org {expected_org_uuid!r}. Log in as the same "
-            "account, or remove the alias and re-install.",
-            file=sys.stderr,
-        )
-        return 1
-    try:
-        raw_key = mint_setup_token(
-            console_access_token=console.token.access_token,
-        )
-    except OAuthError as e:
-        logger.error(
-            "claude install: --refresh-setup-token alias=%r org=%s mint failed: %s",
-            args.alias, expected_org_uuid, e,
-        )
-        print(f"Error minting setup token: {e}", file=sys.stderr)
-        print(
-            "This hand-rolled OAuth path is known broken for Max/consumer "
-            "accounts. Use the container-driven recovery instead: "
-            "graph read 5ab13dd5-570", file=sys.stderr,
-        )
-        return 1
-    _write_setup_token(org_uuid=expected_org_uuid, raw_key=raw_key,
-                       org=getattr(args, "org", None))
-    logger.info(
-        "claude install: --refresh-setup-token alias=%r org=%s OK (setup token replaced)",
-        args.alias, expected_org_uuid,
-    )
-    print(
-        f"Refreshed setup token for alias={args.alias!r} "
-        f"org={expected_org_uuid!r}"
-    )
-    return 0
-
-
-def cmd_claude_install(args: argparse.Namespace) -> None:
-    if not args.alias or not args.alias.strip():
-        print(
-            "Error: --alias is required and must be a non-empty string",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    args.alias = args.alias.strip()
-    if args.refresh_setup_token:
-        rc = _do_install_refresh_setup_token(args)
-    else:
-        rc = _do_install_full(args)
-    if rc != 0:
-        sys.exit(rc)
 
 
 # ── list ─────────────────────────────────────────────────────
@@ -565,33 +309,9 @@ def attach_claude_subparser(sub: Any) -> None:
 
     p_install = claude_sub.add_parser(
         "install",
-        help=(
-            "Run the consumer + console OAuth flows and write the credentials "
-            "and setup-token rows. With --refresh-setup-token, only re-mint. "
-            "KNOWN BROKEN for Max/consumer accounts (wrong authorize host/scope "
-            "vs what the real Claude binary uses) — see graph://5ab13dd5-570 "
-            "for the working container-driven recovery procedure."
-        ),
-    )
-    p_install.add_argument(
-        "--alias", required=True,
-        help=(
-            "Operator-friendly free-form name (e.g. 'gmail-max'). Stored on "
-            "the credentials row's payload."
-        ),
-    )
-    p_install.add_argument(
-        "--refresh-setup-token", action="store_true",
-        dest="refresh_setup_token",
-        help=(
-            "Skip the consumer flow; only run the console flow + mint, "
-            "replacing the setup-token row in place. Used when the year-long "
-            "token is about to expire or has been revoked."
-        ),
-    )
-    p_install.add_argument(
-        "--org", default=None,
-        help="Act on this organization's shared accounts instead of your own vault.",
+        help=("Print how a Claude account gets in: `graph credentials import` "
+              "for a sign-in on this machine, or `claude setup-token` for a "
+              "one-year token (graph://5ab13dd5-570)."),
     )
     p_install.set_defaults(func=cmd_claude_install)
 

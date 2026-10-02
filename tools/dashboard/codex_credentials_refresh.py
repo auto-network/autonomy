@@ -6,13 +6,14 @@ the in-container Codex CLI physically cannot write a refreshed token back.
 Left alone, the row's stored refresh_token is never exercised host-side and
 eventually ages past whatever opaque lifetime the endpoint enforces, at
 which point every running container fails to authenticate at once. The host
-runs this tick to keep every row's refresh_token rolling forward, in the
-spirit of ``claude_credentials_refresh`` — but on a MEASURED cadence rather
-than a token-exp threshold (see "what governs a refresh decision" below).
+runs this tick to keep every row's refresh_token rolling forward, on a
+MEASURED cadence rather than a token-exp threshold (see "what governs a
+refresh decision" below). The dashboard refreshes only Codex: a Claude
+sign-in is used as imported and never refreshed (auto-n9tdh).
 
 STEP 2 (the retire step) of the Codex credential end-state — bead
-auto-l1h3f. Spec / parity reference: ``graph://73c4e9ef-bbc``
-(``claude_credentials_refresh``). Proven refresh recipe: session
+auto-l1h3f. Spec / parity reference: ``graph://73c4e9ef-bbc``. Proven
+refresh recipe: session
 ``df69566d-979`` (2026-05-31, headless, zero-browser).
 
 Failure handling (mirrors the Claude poller):
@@ -759,11 +760,11 @@ async def codex_credentials_refresh_poller() -> None:
     while True:
         try:
             # dashboard.codex.credentials is a synced personal Setting, same as
-            # Claude's — every Fleet machine sees the same row. Refreshing it
-            # independently on each machine races Anthropic's/OpenAI's
-            # single-use refresh_token rotation, so only the Fleet's singular
+            # every Fleet machine sees the same row. Refreshing it
+            # independently on each machine races OpenAI's single-use
+            # refresh_token rotation, so only the Fleet's singular
             # tunnel-server machine may run this tick (same gate
-            # claude_credentials_refresh.py and link_serving.py use).
+            # link_serving.py uses).
             eligibility = fleet_tunnel_server.state()
             if not eligibility.allowed:
                 logger.info(
