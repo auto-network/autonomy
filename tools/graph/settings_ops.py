@@ -2969,12 +2969,15 @@ def add_setting(
     audited seal path) and a ``write_by_key`` land in the same place. A no-op
     for every other set and for a personal/scopeless caller.
 
-    ``replaces`` names the row this one REPLACES (a vaulted value's change,
-    via :func:`write_by_key`): in the same transaction the old row is deleted
-    first -- the one-live-base index is checked per statement -- and the new
-    one inserted, so the key never has two live rows or none. The old row
-    must exist in this store, be raw, and carry the same set and key, as
-    :func:`remove_setting` requires; a failed insert rolls back and leaves it.
+    ``replaces`` names the row the caller saw for this key, which this one
+    REPLACES (a vaulted value's change, via :func:`write_by_key`). Under the
+    write lock the key's current live row is found -- a concurrent writer may
+    already have replaced the one named, and the last writer wins -- and in
+    the same transaction it is deleted first (the one-live-base index is
+    checked per statement), then the new row inserted, so the key never has
+    two live rows or none. A named row of another set or key is refused, the
+    replaced row must be raw (as :func:`remove_setting` requires), and a
+    failed insert rolls back and leaves it.
     """
     org = _resolve_org_arg(org)
     key, org = _apply_org_writeback(set_id, key, org)
@@ -3009,17 +3012,26 @@ def add_setting(
         envelope = _envelope_columns(db, org, set_id, schema_revision, key, state, stored_payload)
         if replaces is not None:
             db.conn.execute("BEGIN IMMEDIATE")
-            old = db.conn.execute(
-                "SELECT set_id, schema_revision, key, publication_state, deprecated "
-                "FROM settings WHERE id = ?", (replaces,),
+            named = db.conn.execute(
+                "SELECT set_id, key FROM settings WHERE id = ?", (replaces,),
             ).fetchone()
-            if old is None:
-                raise LookupError(f"setting to replace not found: {replaces!r}")
-            if old["set_id"] != set_id or old["key"] != key:
+            if named is not None and (named["set_id"] != set_id or named["key"] != key):
                 raise ValueError(
-                    f"{replaces!r} is {old['set_id']}/{old['key']}, not "
+                    f"{replaces!r} is {named['set_id']}/{named['key']}, not "
                     f"{set_id}/{key}; a row replaces only its own key"
                 )
+            # The row replaced is the key's CURRENT live row, found under the
+            # lock: a concurrent writer may already have replaced the one the
+            # caller saw, and the last writer wins, as it always has.
+            old = db.conn.execute(
+                "SELECT id, set_id, schema_revision, key, publication_state, deprecated "
+                "FROM settings WHERE set_id = ? AND schema_revision = ? AND key = ? "
+                "  AND supersedes IS NULL AND excludes IS NULL "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (set_id, int(schema_revision), key),
+            ).fetchone()
+            if old is None:
+                raise LookupError(f"no live {set_id}/{key} row to replace")
             if old["publication_state"] != "raw":
                 raise ValueError(
                     f"can only replace raw Settings; {replaces!r} is "
@@ -3029,7 +3041,7 @@ def add_setting(
                 old["set_id"], old["schema_revision"], old["key"],
                 old["publication_state"], old["deprecated"],
             )
-            db.conn.execute("DELETE FROM settings WHERE id = ?", (replaces,))
+            db.conn.execute("DELETE FROM settings WHERE id = ?", (old["id"],))
         db.conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
             "publication_state, created_at, updated_at, expires_at, "

@@ -266,6 +266,31 @@ def test_a_failed_replacement_leaves_the_old_row(graph_db_env, vault_schema, vau
     ) == {"access_token": "one"}
 
 
+def test_two_writers_to_one_key_both_land_and_the_last_wins(
+    graph_db_env, vault_schema, vault, monkeypatch
+):
+    """Review of aa0aaeafd: two refreshes of one account race. The second
+    writer's pre-read row id is already gone; it still replaces the key's
+    current row under the lock, and one row remains with its value."""
+    ops.add_setting(
+        "autonomy.test.vaulted", 1, "default", {"access_token": "zero"},
+        org=ops.CALLER_ORG,
+    )
+    stale = settings_ops._existing_base_id("autonomy.test.vaulted", 1, "default", None)
+    settings_ops.write_by_key(
+        "autonomy.test.vaulted", 1, "default", {"access_token": "first"}, org=None,
+    )
+    monkeypatch.setattr(settings_ops, "_existing_base_id", lambda *a, **k: stale)
+    second_id = settings_ops.write_by_key(
+        "autonomy.test.vaulted", 1, "default", {"access_token": "second"}, org=None,
+    )
+    assert row_ids(graph_db_env, "autonomy.test.vaulted", "default") == [(second_id, None)]
+    assert open_revision(
+        json.loads(stored_row(graph_db_env, second_id)["payload"]),
+        holdings=vault.holdings(), content_store=vault.store,
+    ) == {"access_token": "second"}
+
+
 def test_replaces_refuses_another_key_or_a_missing_row(graph_db_env, vault_schema, vault):
     other_id = ops.add_setting(
         "autonomy.test.vaulted", 1, "other", {"access_token": "x"}, org=ops.CALLER_ORG,
@@ -275,7 +300,7 @@ def test_replaces_refuses_another_key_or_a_missing_row(graph_db_env, vault_schem
             "autonomy.test.vaulted", 1, "default", {"access_token": "y"},
             org=None, replaces=other_id,
         )
-    with pytest.raises(LookupError, match="not found"):
+    with pytest.raises(LookupError, match="no live"):
         settings_ops.add_setting(
             "autonomy.test.vaulted", 1, "default", {"access_token": "y"},
             org=None, replaces="no-such-row",
