@@ -761,6 +761,16 @@ class OrgHarnessUsageV1(DashboardHarnessUsageV1):
     schema_revision = HARNESS_USAGE_SCHEMA_REVISION
 
 
+#: An unchanged shared reading is rewritten at most this often (seconds).
+ORG_UNCHANGED_REFRESH_S = 60
+
+
+def _window_usage(payload: Any) -> dict:
+    windows = payload.get("windows") if isinstance(payload, dict) else None
+    return {name: (w or {}).get("used_percent") for name, w in (windows or {}).items()
+            if isinstance(w, dict)}
+
+
 def publish_org_reading(
     org: str,
     key: str,
@@ -781,6 +791,13 @@ def publish_org_reading(
             stored = None
         stored_at = reading_epoch(stored) if isinstance(stored, dict) else None
         if taken is not None and stored_at is not None and taken <= stored_at:
+            return False
+        # Each write is a signed organization row that syncs to every member,
+        # so an unchanged reading is refreshed at most once a minute (a busy
+        # Codex session reports on every turn).
+        if (taken is not None and stored_at is not None
+                and taken - stored_at < ORG_UNCHANGED_REFRESH_S
+                and _window_usage(stored) == _window_usage(payload)):
             return False
         upsert_by_key(ORG_HARNESS_USAGE_SET_ID, HARNESS_USAGE_SCHEMA_REVISION, key, payload,
                       org=org, state="raw")

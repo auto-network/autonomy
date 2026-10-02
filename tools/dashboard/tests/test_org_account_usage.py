@@ -143,3 +143,15 @@ def test_a_probe_reads_the_shared_account_and_writes_the_organizations_set(monke
                         lambda org, key, payload, **_k: written.append((org, key)) or True)
     assert server._probe_org_claude_account("acme", "O1")
     assert written == [("acme", "claude:org:O1")]
+
+
+def test_an_unchanged_shared_reading_is_refreshed_at_most_once_a_minute():
+    read_key, upsert, writes = _store({})
+    publish = lambda at, used: hus.publish_org_reading(  # noqa: E731
+        "acme", "codex:acct-9", _reading(at, used=used, identity="acct-9", harness="codex"),
+        read_key=read_key, upsert_by_key=upsert)
+    assert publish(NOW, 10)
+    assert not publish(NOW + timedelta(seconds=20), 10)      # same usage, 20 s later
+    assert publish(NOW + timedelta(seconds=30), 11)          # usage moved
+    assert publish(NOW + timedelta(seconds=95), 11)          # same usage, over a minute
+    assert len(writes) == 3
