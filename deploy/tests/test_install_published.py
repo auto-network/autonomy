@@ -324,6 +324,8 @@ def test_an_upgrade_moves_the_code_volume_to_the_release_commit_before_compose_u
         assert "--user 1000:1000" in lines[i]
         assert f"autonomy-node@sha256:{GOOD}" in lines[i]
     assert f"code volume: {n['old']} -> {n['new']}" in result.stdout
+    # The fakes never answer /api/ping: a failure after the move says how to finish.
+    assert "rerun this same command to finish the upgrade" in result.stderr
 
 
 def _refused(tmp_path: Path, n: dict, result, calls: str) -> None:
@@ -353,6 +355,7 @@ def test_a_code_volume_with_local_commits_is_refused_and_nothing_is_recreated(tm
     result, calls = _run(tmp_path, _lock(tmp_path), env_extra=n["env"])
     _refused(tmp_path, n, result, calls)
     assert "is not an ancestor of release commit" in result.stderr
+    assert "finish the upgrade" not in result.stderr
     assert "--allow-downgrade" in result.stderr
     assert _git(n["code"], "rev-parse", "HEAD") == local
 
@@ -372,6 +375,7 @@ def test_a_first_install_has_no_code_step(tmp_path):
     result, calls = _run(tmp_path, _lock(tmp_path))
     assert result.returncode == 5, result.stderr
     assert "autonomy-code:/volume" not in calls
+    assert "finish the upgrade" not in result.stderr
     assert _env_file(tmp_path)["DASHBOARD_PORT"] == "8080"
 
 

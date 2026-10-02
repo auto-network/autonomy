@@ -275,6 +275,12 @@ if docker volume inspect "$CODE_VOLUME" >/dev/null 2>&1; then
         exit 10
     }
     step "code volume: ${moved% *} -> ${moved#* }"
+    # From here a failure leaves the node stopped on the release's code: say
+    # how to finish, so the operator does not have to guess. A rerun passes
+    # the code checks (HEAD is the release commit) and picks up where this
+    # one stopped.
+    trap 'rc=$?; rm -rf "$TOOLS"
+          [[ $rc -eq 0 ]] || echo "the node may be stopped on the new release'"'"'s code: rerun this same command to finish the upgrade" >&2' EXIT
 fi
 
 # The session launcher starts sessions from these local names.
