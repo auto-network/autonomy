@@ -247,3 +247,30 @@ def test_rows_migrated_before_the_erasure_are_scrubbed_once_confirmed(warm_vault
     assert hv.migrate_plaintext_accounts() == {"claude": 0, "setup_tokens": 0, "codex": 0,
                                                "deprecated": 0, "scrubbed": 0, "failed": 0}
     assert snapshot == {s: _stored(warm_vault, s) for s in snapshot}
+
+
+def test_listing_one_harness_opens_only_that_harness_s_rows(warm_vault, monkeypatch):
+    """auto-k784w review: the read filters by key prefix in the query, so the
+    vault opens no other secret of the tier -- not another harness's
+    accounts, not an unrelated credential -- to list one harness."""
+    hv.write_account("claude", "org-A", {"alias": "a", "access": "at-1", "refresh": "rt-1"})
+    hv.write_account("codex", "acct-9", {"id": "i", "access": "at-c", "refresh": "rt-c"})
+    hv._write("relay.token", "unrelated-secret", None)
+    opened = []
+    real = settings_ops._unwrap_vault_locator
+
+    def spy(locator, **kw):
+        opened.append(kw["key"])
+        return real(locator, **kw)
+
+    monkeypatch.setattr(settings_ops, "_unwrap_vault_locator", spy)
+    assert [a.id for a in hv.list_accounts("claude")] == ["org-A"]
+    assert opened and all(k.startswith("claude.account.") for k in opened)
+
+
+def test_key_prefix_is_literal_and_escaped(warm_vault):
+    hv.write_account("claude", "org_A", {"alias": "underscore"})
+    hv.write_account("claude", "orgxA", {"alias": "x"})
+    rows = settings_ops.read_set(hv.VAULT_AUDITED_SET_ID, org=None, peers=[],
+                                 key_prefix="claude.account.org_A.")
+    assert {r.key for r in rows.members} == {"claude.account.org_A.alias"}

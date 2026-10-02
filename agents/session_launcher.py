@@ -687,6 +687,79 @@ def _reading_snapshot(payload: Any) -> dict | None:
     }
 
 
+def _choose_claude_account(accounts: list, *, prefer_alias: str | None,
+                           account_id: str | None, rng) -> tuple[Any, dict | None]:
+    """The Claude picker's decision over *accounts* (the launchable ones) and
+    its record, without opening any credential: shared by the launch and the
+    chooser's ``recommended`` (auto-k784w). ``(None, None)`` when an explicit
+    *account_id* is not among them."""
+    # The readings the decision is made on, kept for the record (auto-dgr2c)
+    # whichever branch decides: an alias pick ignores them, but what they
+    # said at that moment is still the evidence a later question needs.
+    now = datetime.now(timezone.utc)
+    usage_by_org: dict[str, dict] = {}
+    for payload in _claude_usage_rows():
+        read_id = payload.get("account_id")
+        if not isinstance(read_id, str) or not read_id:
+            continue
+        if _reading_window_open(payload, now=now):
+            usage_by_org[read_id] = payload
+            continue
+        if _is_usage_stale(payload, now=now):
+            continue
+        if not _is_usage_usable(payload):
+            continue
+        usage_by_org[read_id] = payload
+    candidates = [a.id for a in accounts]
+    excluded: list[dict] = []
+    chosen = None
+    method = None
+    if account_id:
+        # An explicit choice is strict (graph://7eb29bc8-31a §11 Delta 3):
+        # an account that is not launchable here is a refusal, never a
+        # substitute.
+        chosen = next((a for a in accounts if a.id == account_id), None)
+        if chosen is None:
+            logger.error("session_launcher: the chosen Claude account %s is not a "
+                         "launchable account in this vault", account_id)
+            return None, None
+        method = "explicit"
+    if chosen is None and prefer_alias:
+        for acct in accounts:
+            if acct.get("alias") == prefer_alias:
+                chosen, method = acct, "alias"
+                break
+    if chosen is None:
+        exhausted = {
+            a.id for a in accounts
+            if _usage_exhausted(usage_by_org.get(a.id), now=now)
+        }
+        if exhausted and len(exhausted) < len(accounts):
+            excluded = [{"account_id": a, "reason": "exhausted",
+                         "reading": _reading_snapshot(usage_by_org.get(a))}
+                        for a in sorted(exhausted)]
+            accounts = [a for a in accounts if a.id not in exhausted]
+        if len(accounts) == 1:
+            chosen, method = accounts[0], "only"
+        elif all(a.id in usage_by_org for a in accounts):
+            chosen, method = max(
+                accounts,
+                key=lambda a: (_token_headroom_score(usage_by_org.get(a.id, {})), a.id),
+            ), "headroom"
+        else:
+            chosen, method = rng.choice(accounts), "random"
+        if exhausted and len(exhausted) == len(candidates):
+            method += "-all-exhausted"
+
+    selection = {
+        "harness": "claude", "account_id": chosen.id, "alias": chosen.get("alias"),
+        "method": method, "candidates": candidates, "excluded": excluded,
+        "reading": _reading_snapshot(usage_by_org.get(chosen.id)),
+        "at": now.isoformat(timespec="seconds"),
+    }
+    return chosen, selection
+
+
 def _resolve_credentials_via_substrate(
     *, prefer_alias: str | None,
     rng: random.Random | None = None,
@@ -735,71 +808,12 @@ def _resolve_credentials_via_substrate(
         )
         return None
 
-    # The readings the decision is made on, kept for the record (auto-dgr2c)
-    # whichever branch decides: an alias pick ignores them, but what they
-    # said at that moment is still the evidence a later question needs.
-    now = datetime.now(timezone.utc)
-    usage_by_org: dict[str, dict] = {}
-    for payload in _claude_usage_rows():
-        read_id = payload.get("account_id")
-        if not isinstance(read_id, str) or not read_id:
-            continue
-        if _reading_window_open(payload, now=now):
-            usage_by_org[read_id] = payload
-            continue
-        if _is_usage_stale(payload, now=now):
-            continue
-        if not _is_usage_usable(payload):
-            continue
-        usage_by_org[read_id] = payload
-    candidates = [a.id for a in accounts]
-    excluded: list[dict] = []
-    chosen = None
-    method = None
-    if account_id:
-        # An explicit choice is strict (graph://7eb29bc8-31a §11 Delta 3):
-        # an account that is not launchable here is a refusal, never a
-        # substitute.
-        chosen = next((a for a in accounts if a.id == account_id), None)
-        if chosen is None:
-            logger.error("session_launcher: the chosen Claude account %s is not a "
-                         "launchable account in this vault", account_id)
-            return None
-        method = "explicit"
-    if chosen is None and prefer_alias:
-        for acct in accounts:
-            if acct.get("alias") == prefer_alias:
-                chosen, method = acct, "alias"
-                break
+    chosen, selection = _choose_claude_account(
+        accounts, prefer_alias=prefer_alias, account_id=account_id, rng=rng)
     if chosen is None:
-        exhausted = {
-            a.id for a in accounts
-            if _usage_exhausted(usage_by_org.get(a.id), now=now)
-        }
-        if exhausted and len(exhausted) < len(accounts):
-            excluded = [{"account_id": a, "reason": "exhausted",
-                         "reading": _reading_snapshot(usage_by_org.get(a))}
-                        for a in sorted(exhausted)]
-            accounts = [a for a in accounts if a.id not in exhausted]
-        if len(accounts) == 1:
-            chosen, method = accounts[0], "only"
-        elif all(a.id in usage_by_org for a in accounts):
-            chosen, method = max(
-                accounts,
-                key=lambda a: (_token_headroom_score(usage_by_org.get(a.id, {})), a.id),
-            ), "headroom"
-        else:
-            chosen, method = rng.choice(accounts), "random"
-        if exhausted and len(exhausted) == len(candidates):
-            method += "-all-exhausted"
-
+        return None
     out: dict = {"harness_token": chosen.id}
-    out["selection"] = {
-        "harness": "claude", "account_id": chosen.id, "alias": chosen.get("alias"),
-        "method": method, "candidates": candidates, "excluded": excluded,
-        "reading": _reading_snapshot(usage_by_org.get(chosen.id)),
-        "at": now.isoformat(timespec="seconds"),
-    }
+    out["selection"] = selection
     alias = chosen.get("alias")
     if alias:
         out["alias"] = alias

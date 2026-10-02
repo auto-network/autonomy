@@ -5886,6 +5886,7 @@ def read_set(
     now: int | None = None,
     key_equals: str | None = None,
     where_payload: "Mapping[str, str | Sequence[str]] | None" = None,
+    key_prefix: str | None = None,
 ) -> SetMembers[Any]:
     """Resolve members of *set_id* visible to org's session.
 
@@ -5991,6 +5992,12 @@ def read_set(
     if prefix is not None:
         prefix_clause = " AND key LIKE ? ESCAPE '\\'"
         prefix_params = (_prefix_like_pattern(prefix),)
+    if key_prefix is not None:
+        # A literal key prefix, no separator appended (``prefix`` is for
+        # composite ``parent:child`` keys). Filtered in the query, so on a
+        # vaulted set step six opens only these keys (auto-k784w review).
+        prefix_clause += " AND key LIKE ? ESCAPE '\\'"
+        prefix_params = (*prefix_params, _prefix_like_pattern(key_prefix)[:-2] + "%")
 
     # Exact-key narrowing (private substrate selector). Additive equality on
     # the indexed ``key`` column — resolution is per key, so restricting the

@@ -19464,9 +19464,13 @@ async def api_graph_settings_list(request):
             "members": dao_mock.get_settings_members(set_id, org=org),
             "dropped": {},
         })
+    # ``key_prefix`` narrows the read to keys starting with it, in the query
+    # itself, so a vaulted set opens only those rows (harness accounts,
+    # auto-k784w review).
     members = graph_ops.read_set(
         set_id, target_revision=target, min_revision=minrev,
         org=org or graph_ops.CALLER_ORG, peers=peers,
+        key_prefix=request.query_params.get("key_prefix") or None,
     )
     out = members.as_payload()
     if stored is not None:

@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import ssl
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -170,8 +171,9 @@ def _bearer() -> str | None:
     return os.environ.get("CROSSTALK_TOKEN") or None
 
 
-def _read_via_dashboard() -> list[Any]:
-    """GET the audited set from the dashboard, which opens the rows."""
+def _read_via_dashboard(prefix: str) -> list[Any]:
+    """GET the audited set's rows under *prefix* from the dashboard, which
+    opens only those rows."""
     from tools.graph.client import _dict_to_resolved_setting
 
     api = os.environ.get("GRAPH_API") or "https://localhost:8080"
@@ -183,24 +185,29 @@ def _read_via_dashboard() -> list[Any]:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     req = urllib.request.Request(
-        f"{api}/api/graph/settings/{VAULT_AUDITED_SET_ID}?peers=", headers=headers,
+        f"{api}/api/graph/settings/{VAULT_AUDITED_SET_ID}?peers=&"
+        + urllib.parse.urlencode({"key_prefix": prefix}), headers=headers,
     )
     with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
         body = json.load(resp)
     return [_dict_to_resolved_setting(m) for m in body.get("members", [])]
 
 
-def _read_all(read_set: Callable[..., Any] | None = None) -> list[Any]:
+def _read_all(read_set: Callable[..., Any] | None = None, *, prefix: str) -> list[Any]:
+    """The audited set's rows under *prefix* (one harness's accounts). The
+    prefix filters in the query, before the vault opens anything, so no other
+    secret in the tier -- backup keys, relay tokens, another harness's
+    accounts -- is decrypted to list these."""
     from tools.graph import ops as graph_ops
 
     if read_set is not None:
-        members = read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
+        members = read_set(VAULT_AUDITED_SET_ID, org=None, peers=[], key_prefix=prefix)
         return list(getattr(members, "members", []) or [])
     if _vault_open_here():
-        members = graph_ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
+        members = graph_ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[], key_prefix=prefix)
         return list(getattr(members, "members", []) or [])
     try:
-        return _read_via_dashboard()
+        return _read_via_dashboard(prefix)
     except Exception as exc:
         if _in_container():
             logger.error(
@@ -213,7 +220,7 @@ def _read_all(read_set: Callable[..., Any] | None = None) -> list[Any]:
             "harness accounts: dashboard unreachable (%s); reading the local "
             "store cold — rows will report as not openable", exc,
         )
-        members = graph_ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
+        members = graph_ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[], key_prefix=prefix)
         return list(getattr(members, "members", []) or [])
 
 
@@ -264,7 +271,7 @@ def list_accounts(
     prefix = _prefix(harness)
     by_id: dict[str, Account] = {}
     try:
-        rows = _read_all(read_set)
+        rows = _read_all(read_set, prefix=prefix)
     except Exception:
         return []
     for row in rows:

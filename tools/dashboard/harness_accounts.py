@@ -55,18 +55,21 @@ def _usage_view(reading: dict | None) -> dict | None:
 
 def _recommended(harness: str, launchable: list) -> str | None:
     """The account the launcher's own picker would choose, or None when it
-    would pick at random."""
+    would pick at random. The picker's decision alone: no credential is
+    opened."""
+    import random
+
     from agents import session_launcher as sl
 
     if len(launchable) == 1:
         return launchable[0].id
     if harness != "claude" or not launchable:
         return None
-    creds = sl._resolve_credentials_via_substrate(prefer_alias=None)
-    selection = (creds or {}).get("selection") or {}
-    if str(selection.get("method", "")).startswith("random"):
+    chosen, selection = sl._choose_claude_account(
+        launchable, prefer_alias=None, account_id=None, rng=random.Random(0))
+    if chosen is None or str(selection.get("method", "")).startswith("random"):
         return None
-    return selection.get("account_id")
+    return chosen.id
 
 
 def account_rows(harness: str) -> list[dict]:
