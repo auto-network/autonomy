@@ -147,20 +147,21 @@ def _read_rows(set_id: str) -> list[Any]:
     return list(members.members)
 
 
-def _accounts() -> list[hv.Account]:
-    """Every installed Claude account, from the vault (record v16 §10.9)."""
-    return hv.list_accounts("claude")
+def _accounts(org: str | None = None) -> list[hv.Account]:
+    """Every installed Claude account, from the vault (record v16 §10.9), or
+    with *org* that organization's shared accounts (auto-26e8a)."""
+    return hv.list_accounts("claude", org=org)
 
 
-def _account_by_alias(alias: str) -> hv.Account | None:
-    for acct in _accounts():
+def _account_by_alias(alias: str, org: str | None = None) -> hv.Account | None:
+    for acct in _accounts(org):
         if acct.get("alias") == alias:
             return acct
     return None
 
 
-def _account_by_org_uuid(org_uuid: str) -> hv.Account | None:
-    return hv.read_account("claude", org_uuid)
+def _account_by_org_uuid(org_uuid: str, org: str | None = None) -> hv.Account | None:
+    return hv.read_account("claude", org_uuid, org=org)
 
 
 # ── install ──────────────────────────────────────────────────
@@ -185,28 +186,29 @@ def _bundle_parts(
     }
 
 
-def _write_bundle(*, org_uuid: str, parts: dict[str, str | None]) -> None:
+def _write_bundle(*, org_uuid: str, parts: dict[str, str | None],
+                  org: str | None = None) -> None:
     """Seal the bundle parts into the account keyed by *org_uuid*.
 
     Re-running install for the same account rotates the bundle in place: a
     vault row is never rewritten, a change appends a revision.
     """
-    hv.write_account("claude", org_uuid, parts)
+    hv.write_account("claude", org_uuid, parts, org=org)
 
 
-def _write_setup_token(*, org_uuid: str, raw_key: str) -> None:
+def _write_setup_token(*, org_uuid: str, raw_key: str, org: str | None = None) -> None:
     """Seal a freshly minted setup token; minted-at is its year clock."""
     hv.write_account("claude", org_uuid, {
         "setup": raw_key,
         "setup_minted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    })
+    }, org=org)
 
 
-def _alias_collision_check(alias: str, org_uuid: str) -> None:
+def _alias_collision_check(alias: str, org_uuid: str, org: str | None = None) -> None:
     """Refuse to repurpose an alias that is already pointing at a different
     Anthropic org. Re-running with the same (alias, org_uuid) is fine.
     """
-    existing = _account_by_alias(alias)
+    existing = _account_by_alias(alias, org)
     if existing is None:
         return
     if existing.id == org_uuid:
@@ -254,7 +256,7 @@ def _do_install_full(args: argparse.Namespace) -> int:
         "claude install: consumer flow OK alias=%r org=%s account=%s",
         args.alias, org_uuid, consumer.token.account_email,
     )
-    _alias_collision_check(args.alias, org_uuid)
+    _alias_collision_check(args.alias, org_uuid, getattr(args, "org", None))
 
     try:
         console = _run_console_flow()
@@ -301,8 +303,9 @@ def _do_install_full(args: argparse.Namespace) -> int:
     _write_bundle(
         org_uuid=org_uuid,
         parts=_bundle_parts(alias=args.alias, token=consumer.token),
+        org=getattr(args, "org", None),
     )
-    _write_setup_token(org_uuid=org_uuid, raw_key=raw_key)
+    _write_setup_token(org_uuid=org_uuid, raw_key=raw_key, org=getattr(args, "org", None))
     logger.info(
         "claude install: vault writes OK alias=%r org=%s (bundle + setup token)",
         args.alias, org_uuid,
@@ -322,7 +325,7 @@ def _do_install_refresh_setup_token(args: argparse.Namespace) -> int:
     expire or has been revoked.
     """
     logger.info("claude install: --refresh-setup-token alias=%r", args.alias)
-    existing = _account_by_alias(args.alias)
+    existing = _account_by_alias(args.alias, getattr(args, "org", None))
     if existing is None:
         logger.error(
             "claude install: --refresh-setup-token alias=%r — no installed account",
@@ -380,7 +383,8 @@ def _do_install_refresh_setup_token(args: argparse.Namespace) -> int:
             "graph read 5ab13dd5-570", file=sys.stderr,
         )
         return 1
-    _write_setup_token(org_uuid=expected_org_uuid, raw_key=raw_key)
+    _write_setup_token(org_uuid=expected_org_uuid, raw_key=raw_key,
+                       org=getattr(args, "org", None))
     logger.info(
         "claude install: --refresh-setup-token alias=%r org=%s OK (setup token replaced)",
         args.alias, expected_org_uuid,
@@ -411,8 +415,8 @@ def cmd_claude_install(args: argparse.Namespace) -> None:
 # ── list ─────────────────────────────────────────────────────
 
 
-def cmd_claude_list(args: argparse.Namespace) -> None:  # noqa: ARG001
-    accounts = _accounts()
+def cmd_claude_list(args: argparse.Namespace) -> None:
+    accounts = _accounts(getattr(args, "org", None))
     if not accounts:
         print("(no Claude accounts installed — run `graph claude install`)")
         return
@@ -518,7 +522,8 @@ def cmd_claude_remove(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
     alias = args.alias.strip()
-    acct = _account_by_alias(alias)
+    org = getattr(args, "org", None)
+    acct = _account_by_alias(alias, org)
     if acct is None:
         print(f"No installed Claude account with alias {alias!r}.")
         return
@@ -538,7 +543,7 @@ def cmd_claude_remove(args: argparse.Namespace) -> None:
             return
     logger.info("claude remove: deleting alias=%r org=%s", alias, acct.id)
     try:
-        removed = hv.remove_account("claude", acct.id)
+        removed = hv.remove_account("claude", acct.id, org=org)
     except Exception as e:  # noqa: BLE001 — surface to operator
         logger.error("claude remove: delete failed alias=%r org=%s: %s", alias, acct.id, e)
         print(f"Error removing the account: {e}", file=sys.stderr)
@@ -584,11 +589,19 @@ def attach_claude_subparser(sub: Any) -> None:
             "token is about to expire or has been revoked."
         ),
     )
+    p_install.add_argument(
+        "--org", default=None,
+        help="Act on this organization's shared accounts instead of your own vault.",
+    )
     p_install.set_defaults(func=cmd_claude_install)
 
     p_list = claude_sub.add_parser(
         "list",
         help="Show installed Claude accounts (alias, org, email, freshness).",
+    )
+    p_list.add_argument(
+        "--org", default=None,
+        help="Act on this organization's shared accounts instead of your own vault.",
     )
     p_list.set_defaults(func=cmd_claude_list)
 
@@ -609,5 +622,9 @@ def attach_claude_subparser(sub: Any) -> None:
     p_remove.add_argument(
         "--yes", action="store_true",
         help="Skip the confirmation prompt.",
+    )
+    p_remove.add_argument(
+        "--org", default=None,
+        help="Act on this organization's shared accounts instead of your own vault.",
     )
     p_remove.set_defaults(func=cmd_claude_remove)

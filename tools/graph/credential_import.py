@@ -347,6 +347,7 @@ def _import_claude_setup_token(
     alias_override: str | None,
     dry_run: bool,
     fetch_identity: Callable[[str], ClaudeIdentity],
+    org: str | None = None,
 ) -> HarnessResult:
     """Seal a setup token found on disk into a Claude account record.
 
@@ -380,7 +381,7 @@ def _import_claude_setup_token(
     else:
         account_id = "setup-" + hashlib.sha256(token.encode()).hexdigest()[:16]
         label = "setup token"
-    existing = hv.read_account("claude", account_id)
+    existing = hv.read_account("claude", account_id, org=org)
     if existing is not None and existing.get("setup") == token:
         return HarnessResult(
             "claude", STATUS_UNCHANGED, f"setup token already sealed ({label})", label,
@@ -406,7 +407,7 @@ def _import_claude_setup_token(
         parts["alias"] = alias_override or (
             identity.account_email.split("@", 1)[0] if identity is not None else "setup-token"
         )
-    hv.write_account("claude", account_id, parts)
+    hv.write_account("claude", account_id, parts, org=org)
     logger.info("credential import: claude setup token sealed account=%s", account_id)
     return HarnessResult("claude", STATUS_IMPORTED, f"sealed the setup token ({label})", label)
 
@@ -417,6 +418,7 @@ def import_claude(
     alias_override: str | None = None,
     dry_run: bool = False,
     fetch_identity: Callable[[str], ClaudeIdentity] = _http_fetch_claude_identity,
+    org: str | None = None,
 ) -> HarnessResult:
     """Discover → validate → seal the local Claude sign-in into the account
     record keyed by the organization id the validation returns (record v16
@@ -437,7 +439,7 @@ def import_claude(
         if token is not None:
             return _import_claude_setup_token(
                 home, token, alias_override=alias_override,
-                dry_run=dry_run, fetch_identity=fetch_identity,
+                dry_run=dry_run, fetch_identity=fetch_identity, org=org,
             )
         return HarnessResult(
             "claude", STATUS_NEEDS_SIGN_IN,
@@ -449,7 +451,7 @@ def import_claude(
     except CredentialImportError as exc:
         logger.error("credential import: Claude sign-in validation failed: %s", exc)
         return HarnessResult("claude", STATUS_NEEDS_SIGN_IN, str(exc))
-    existing = hv.read_account("claude", identity.org_uuid)
+    existing = hv.read_account("claude", identity.org_uuid, org=org)
     sealed_exp = existing.expires_ms() if existing is not None else None
     if sealed_exp is not None and sealed_exp >= disc.expires_at_ms:
         return HarnessResult(
@@ -475,7 +477,7 @@ def import_claude(
     }
     if existing is None or existing.get("alias") is None:
         parts["alias"] = alias_override or identity.account_email.split("@", 1)[0]
-    hv.write_account("claude", identity.org_uuid, parts)
+    hv.write_account("claude", identity.org_uuid, parts, org=org)
     logger.info(
         "credential import: claude sealed org=%s account=%s",
         identity.org_uuid, identity.account_email,
@@ -634,6 +636,7 @@ def import_codex(
     *,
     now_ms: int | None = None,
     dry_run: bool = False,
+    org: str | None = None,
 ) -> HarnessResult:
     """Discover → validate → seal the local Codex sign-in into the account
     record keyed by the ChatGPT account id (record v16 §10.9). Same
@@ -660,7 +663,7 @@ def import_codex(
             f"{detail}; consumed in place from ~/.codex/auth.json",
             account,
         )
-    existing = hv.read_account("codex", disc.account_id)
+    existing = hv.read_account("codex", disc.account_id, org=org)
     sealed_exp = existing.expires_ms() if existing is not None else None
     if sealed_exp is not None and sealed_exp >= disc.id_token_exp_ms:
         return HarnessResult(
@@ -673,7 +676,7 @@ def import_codex(
             "codex", STATUS_WOULD_IMPORT,
             f"would seal {account} (account {disc.account_id})", account,
         )
-    hv.write_account("codex", disc.account_id, {
+    hv.write_account("codex", disc.account_id, org=org, parts={
         "id": disc.id_token,
         "access": disc.access_token,
         "refresh": disc.refresh_token,
@@ -707,7 +710,7 @@ def grok_account_id(raw: dict[str, Any]) -> str:
     return "default"
 
 
-def import_grok(home: str, *, dry_run: bool = False) -> HarnessResult:
+def import_grok(home: str, *, dry_run: bool = False, org: str | None = None) -> HarnessResult:
     path = os.path.join(home, GROK_AUTH_RELPATH)
     if not os.path.isfile(path):
         return HarnessResult(
@@ -728,12 +731,12 @@ def import_grok(home: str, *, dry_run: bool = False) -> HarnessResult:
             "grok", STATUS_NEEDS_SIGN_IN, "~/.grok/auth.json holds no sign-in",
         )
     account_id = grok_account_id(raw)
-    existing = hv.read_account("grok", account_id)
+    existing = hv.read_account("grok", account_id, org=org)
     if existing is not None and existing.get("auth") == text:
         return HarnessResult("grok", STATUS_UNCHANGED, f"already sealed and current ({account_id})", account_id)
     if dry_run:
         return HarnessResult("grok", STATUS_WOULD_IMPORT, f"would seal the stored sign-in ({account_id})", account_id)
-    hv.write_account("grok", account_id, {"auth": text})
+    hv.write_account("grok", account_id, {"auth": text}, org=org)
     logger.info("credential import: grok stored sign-in sealed account=%s", account_id)
     return HarnessResult("grok", STATUS_IMPORTED, f"sealed the stored sign-in ({account_id})", account_id)
 
@@ -746,15 +749,17 @@ def run_import(
     *,
     alias_override: str | None = None,
     dry_run: bool = False,
+    org: str | None = None,
 ) -> ImportReport:
     """Scan the three harnesses, seal what can be sealed, and report per
-    harness (record v16 §10.9)."""
+    harness (record v16 §10.9). With *org*, the accounts go to that
+    organization's shared set instead of the operator's vault (auto-26e8a)."""
     report = ImportReport()
     report.add(import_claude(
-        home, alias_override=alias_override, dry_run=dry_run,
+        home, alias_override=alias_override, dry_run=dry_run, org=org,
     ))
-    report.add(import_codex(home, dry_run=dry_run))
-    report.add(import_grok(home, dry_run=dry_run))
+    report.add(import_codex(home, dry_run=dry_run, org=org))
+    report.add(import_grok(home, dry_run=dry_run, org=org))
     return report
 
 
@@ -810,10 +815,12 @@ def _format_report(report: ImportReport) -> str:
 
 def cmd_credentials_import(args: argparse.Namespace) -> None:
     home = os.path.expanduser(args.home) if args.home else operator_home()
+    org = getattr(args, "org", None)
     report = run_import(
-        home, alias_override=args.alias, dry_run=args.dry_run,
+        home, alias_override=args.alias, dry_run=args.dry_run, org=org,
     )
-    print("Credential import" + (" (dry run)" if args.dry_run else "") + ":")
+    print("Credential import" + (f" into {org}'s shared accounts" if org else "")
+          + (" (dry run)" if args.dry_run else "") + ":")
     print(_format_report(report))
 
 
@@ -854,5 +861,11 @@ def attach_credentials_subparser(sub: Any) -> None:
         "--dry-run",
         action="store_true",
         help="Report what would be imported without writing anything.",
+    )
+    p_import.add_argument(
+        "--org",
+        default=None,
+        help=("Seal the accounts into this organization's shared account set "
+              "(any member may launch on them) instead of your own vault."),
     )
     p_import.set_defaults(func=cmd_credentials_import)

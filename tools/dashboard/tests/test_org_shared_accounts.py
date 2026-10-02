@@ -129,3 +129,43 @@ def test_home_carries_no_sign_in_for_a_shared_account_and_refuses_another_orgs(
         {"machine": "e1e1e1e1", "project": "dev", "account": "O1", "account_org": "beta"},
         RUNNER))
     assert json.loads(response.body)["refusal"] == "account-not-launchable"
+
+
+def test_credentials_import_with_org_seals_into_the_shared_set(monkeypatch, tmp_path):
+    from tools.graph import credential_import as ci
+
+    calls = []
+    monkeypatch.setattr(ci, "import_claude", lambda home, **kw: calls.append(("claude", kw["org"]))
+                        or ci.HarnessResult("claude", ci.STATUS_UNCHANGED, ""))
+    monkeypatch.setattr(ci, "import_codex", lambda home, **kw: calls.append(("codex", kw["org"]))
+                        or ci.HarnessResult("codex", ci.STATUS_UNCHANGED, ""))
+    monkeypatch.setattr(ci, "import_grok", lambda home, **kw: calls.append(("grok", kw["org"]))
+                        or ci.HarnessResult("grok", ci.STATUS_UNCHANGED, ""))
+    ci.run_import(str(tmp_path), org="acme")
+    assert calls == [("claude", "acme"), ("codex", "acme"), ("grok", "acme")]
+
+
+def test_grok_import_reads_and_writes_the_organizations_set(monkeypatch, tmp_path):
+    from tools.graph import credential_import as ci
+
+    (tmp_path / ".grok").mkdir()
+    (tmp_path / ".grok" / "auth.json").write_text('{"user_id": "u1", "token": "t"}')
+    seen = []
+    monkeypatch.setattr(hv, "read_account", lambda h, a, **kw: seen.append(("read", kw.get("org"))))
+    monkeypatch.setattr(hv, "write_account", lambda h, a, parts, **kw: seen.append(("write", kw.get("org"))))
+    ci.import_grok(str(tmp_path), org="acme")
+    assert seen == [("read", "acme"), ("write", "acme")]
+
+
+def test_claude_list_and_remove_take_org(monkeypatch, capsys):
+    from argparse import Namespace
+
+    from tools.graph import claude_cmd
+
+    _store(monkeypatch)
+    claude_cmd.cmd_claude_list(Namespace(org="acme"))
+    assert "team" in capsys.readouterr().out
+    removed = []
+    monkeypatch.setattr(hv, "remove_account", lambda h, a, org=None: removed.append((a, org)) or 1)
+    claude_cmd.cmd_claude_remove(Namespace(alias="team", yes=True, org="acme"))
+    assert removed == [("O1", "acme")]
