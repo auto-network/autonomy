@@ -9488,6 +9488,18 @@ def _append_workspace_startup_notice(message: str | None, proj) -> str | None:
     return f"{message.rstrip()}\n\n{notice}"
 
 
+def _first_message_at_launch(harness: str | None) -> bool:
+    """Whether the harness takes its first message as a launch argument.
+
+    Codex submits its positional prompt itself once its input is live. Pasting
+    instead depends on recognising the input box on screen, and Codex 0.157
+    draws a provisional "› Ask Codex to do anything" line before its daemon is
+    installed: the dashboard took that for the input box and pasted into a
+    screen that discarded the message (auto-1003-135004, auto-1003-141631).
+    """
+    return (harness or "").lower() == "codex"
+
+
 def _render_worker_first_message(
     *,
     tmux_name: str,
@@ -10054,12 +10066,23 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             proj, run_dir)
         working_dir = proj.working_dir or "/workspace/repo"
 
+        launch_message: str | None = None
+        launch_message_primer = False
+        if _first_message_at_launch(resolved_harness):
+            launch_message, launch_message_primer = _render_worker_first_message(
+                tmux_name=tmux_name,
+                proj=proj,
+                primer_url=primer_url if isinstance(primer_url, str) else None,
+                primer_text=job.config.get("primer_text"),
+            )
+
         cmd_str = launch_session(
             session_type="terminal",
             name=tmux_name,
             prompt=None,
             detach=False,
             image=proj.image,
+            initial_message=launch_message,
             mounts=project_mounts or None,
             metadata=meta,
             harness=resolved_harness,
@@ -10137,6 +10160,17 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             startup_script=startup_script,
             deadline=setup_deadline,
         )
+
+        if launch_message:
+            logger.info(
+                "session_lifecycle: first message passed at launch tmux=%s len=%d primer=%s harness=%s",
+                tmux_name,
+                len(launch_message),
+                launch_message_primer,
+                resolved_harness,
+            )
+            writer.set_state(tmux_name, "running")
+            return
 
         phase = "waiting_ready"
         writer.set_state(tmux_name, "waiting_ready")
@@ -10290,6 +10324,11 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
     try:
         run_dir = Path(cfg["output_dir"]) if cfg.get("output_dir") else None
         startup_script: Path | None = None
+        launch_message = (
+            _render_resume_message(tmux_name=tmux_name, cfg=cfg)
+            if kind != "host" and _first_message_at_launch(cfg.get("harness"))
+            else None
+        )
 
         if kind == "project":
             if (dashboard_db.get_session(tmux_name) or {}).get("owner_persona"):
@@ -10391,6 +10430,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 output_dir=str(run_dir),
                 model=cfg.get("model"),
                 resume_uuid=cfg["resume_uuid"],
+                initial_message=launch_message,
                 network_host=proj.network_host,
                 capabilities=proj.capabilities,
                 vault_links=getattr(proj, "vault_links", ()),
@@ -10407,6 +10447,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 output_dir=str(run_dir),
                 model=cfg.get("model"),
                 resume_uuid=cfg["resume_uuid"],
+                initial_message=launch_message,
                 global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
             )
         _remaining_step_timeout(launch_deadline, "launching")
@@ -10470,6 +10511,14 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 startup_script=startup_script,
                 deadline=time.monotonic() + _LIFECYCLE_SETUP_TIMEOUT_S,
             )
+
+        if launch_message:
+            logger.info(
+                "session_lifecycle: resume message passed at launch tmux=%s len=%d harness=%s",
+                tmux_name, len(launch_message), cfg.get("harness"),
+            )
+            writer.set_state(tmux_name, "running")
+            return
 
         phase = "waiting_ready"
         writer.set_state(tmux_name, "waiting_ready")

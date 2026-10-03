@@ -1029,9 +1029,30 @@ def _generate_codex_config(base_config: Path, trusted: list[str], run_dir: Path)
     prompt. The shared ``~/.codex/config.toml`` is mounted ``:ro``, so Codex
     could not persist trust itself either. Idempotent; returns None on any
     error (the caller then mounts the shared config unchanged, if any).
+
+    The approval and sandbox bypass is also written here, not only passed as
+    ``--dangerously-bypass-approvals-and-sandbox``: Codex 0.157 restarts its
+    app-server daemon to self-update about five minutes into a session, and
+    the restarted daemon kept only what the config says, so the session
+    began asking for approval. ``features.in_app_updates = false`` stops that
+    self-update; the image's pinned version is the session's version.
     """
     try:
         text = base_config.read_text() if base_config.exists() else ""
+        top = [
+            line for key, line in (
+                ("approval_policy", 'approval_policy = "never"'),
+                ("sandbox_mode", 'sandbox_mode = "danger-full-access"'),
+            )
+            if not re.search(rf"(?m)^\s*{key}\s*=", text)
+        ]
+        if top:
+            text = "\n".join(top) + "\n" + text
+        if not re.search(r"(?m)^\s*in_app_updates\s*=", text):
+            if re.search(r"(?m)^\[features\]\s*$", text):
+                text = re.sub(r"(?m)^\[features\]\s*$", "[features]\nin_app_updates = false", text, count=1)
+            else:
+                text = text.rstrip("\n") + "\n\n[features]\nin_app_updates = false\n"
         for path in trusted:
             marker = f'[projects."{path}"]'
             if marker not in text:
@@ -2196,6 +2217,7 @@ def launch_session(
     selection_out: dict | None = None,
     account_id: str | None = None,
     account_org: str | None = None,
+    initial_message: str | None = None,
 ) -> str | None:
     """Launch an agent container session.
 
@@ -2245,6 +2267,9 @@ def launch_session(
                     wrapper picks it up and runs it in the background before
                     exec'ing the main command. Exit status lands in
                     ``/workspace/output/.setup-exit``; log in ``.setup.log``.
+        initial_message: Interactive Codex only — the first message, passed
+                    as the TUI's positional prompt so Codex submits it itself
+                    once it is ready, instead of the dashboard pasting it.
         network_host: True (default) runs the container with ``--network=host``
                     so localhost:8080 reaches the host dashboard directly.
                     Set False to use the default bridge network; the launcher
@@ -2964,6 +2989,12 @@ def launch_session(
                     resume_uuid,
                 )
                 codex_args += ["resume", m.group(1) if m else resume_uuid]
+            if initial_message:
+                # The TUI submits its positional prompt as the first turn
+                # once it is ready, so the message cannot be typed into a
+                # screen that is still drawing (Codex 0.157 shows a
+                # provisional input line before its daemon is installed).
+                codex_args.append(initial_message)
             cmd += [*image_head, *codex_args]
 
     _lap("docker_cmd_assembled")

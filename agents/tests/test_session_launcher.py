@@ -3011,3 +3011,40 @@ def test_a_codex_session_trusts_its_working_dir_without_a_host_codex_config(tmp_
     assert mounts.get(str(generated)) == "/home/agent/.codex/config.toml:ro"
     text = generated.read_text()
     assert '[projects."/workspace/idea-board"]\ntrust_level = "trusted"' in text
+
+
+def test_a_codex_session_config_keeps_the_bypass_and_its_pinned_version(tmp_path, monkeypatch):
+    """Home 2026-10-03: Codex 0.157's app-server updated itself to 0.160.0
+    about five minutes into every session and restarted; the restarted daemon
+    kept only the config, not --dangerously-bypass-approvals-and-sandbox, and
+    the session began asking for approval (auto-1003-135004)."""
+    import tomllib
+    monkeypatch.setattr(session_launcher.Path, "home", lambda: tmp_path / "no-home")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    session_launcher._resolve_optional_tool_mounts(
+        run_dir=run_dir, working_dir="/workspace/repo")
+    config = tomllib.loads((run_dir / "codex-config.toml").read_text())
+    assert config["approval_policy"] == "never"
+    assert config["sandbox_mode"] == "danger-full-access"
+    assert config["features"]["in_app_updates"] is False
+    assert config["projects"]["/workspace/repo"]["trust_level"] == "trusted"
+
+
+def test_codex_interactive_takes_its_first_message_as_the_launch_prompt(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    """Codex 0.157 draws a provisional input line before its daemon is
+    installed; a pasted first message was discarded (auto-1003-141631). The
+    message is the TUI's positional prompt instead, after a resume id."""
+    message = "Session x started in workspace y.\nSecond line."
+    _run(output_dir=str(tmp_path / "a"), harness="codex", initial_message=message)
+    _run(
+        output_dir=str(tmp_path / "b"),
+        harness="codex",
+        resume_uuid="12345678-1234-1234-1234-123456789abc",
+        initial_message=message,
+    )
+    fresh, resumed = captured_run[0], captured_run[1]
+    assert fresh[-1] == message
+    assert resumed[-3:] == ["resume", "12345678-1234-1234-1234-123456789abc", message]

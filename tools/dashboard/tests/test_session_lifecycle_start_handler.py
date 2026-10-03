@@ -1017,3 +1017,58 @@ def test_terminals_poll_never_kills_a_launching_session(monkeypatch, tmp_path):
     assert json.loads(resp.body) == [] or isinstance(json.loads(resp.body), list)
     assert "host-launching" not in killed
     assert "auto-gone" in killed
+
+
+def test_codex_project_start_passes_the_first_message_at_launch_and_never_pastes(monkeypatch, tmp_path):
+    """Codex 0.157 draws a provisional input line before its daemon is
+    installed; the pasted startup message was discarded (auto-1003-141631).
+    A Codex launch carries the message as its launch prompt: no wait for the
+    input box, no paste."""
+    from tools.dashboard import server
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="auto-life", session_type="container",
+        project="blindhash-operations", harness="codex",
+    )
+    proj = SimpleNamespace(**{**vars(_project()), "harness": "codex"})
+    launched = {}
+
+    monkeypatch.setattr(server, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _project_id: proj)
+    monkeypatch.setattr(
+        server.workspace_settings, "materialize_startup_script",
+        lambda _proj, _run_dir: None,
+    )
+    monkeypatch.setattr(server, "render_workspace_primer", lambda _proj, **_kw: "primer")
+    monkeypatch.setattr(
+        server, "prepare_session_mounts",
+        lambda workspace, tmux_name, **kw: {str(tmp_path / "repo"): "/workspace/repo"},
+    )
+
+    def fake_launch_session(**kwargs):
+        launched.update(kwargs)
+        return "echo launched"
+
+    def must_not_run(**_kwargs):
+        raise AssertionError("a Codex launch must not wait for the screen or paste")
+
+    monkeypatch.setattr(server, "launch_session", fake_launch_session)
+    monkeypatch.setattr(
+        server.subprocess, "run",
+        lambda cmd, **kw: SimpleNamespace(returncode=0, stderr=b""),
+    )
+    monkeypatch.setattr(server, "_wait_for_setup_complete", lambda **_kwargs: None)
+    monkeypatch.setattr(server, "_render_worker_first_message", lambda **_kwargs: ("Hello", False))
+    monkeypatch.setattr(server, "_wait_for_prompt", must_not_run)
+    monkeypatch.setattr(server, "_inject_echo_verified", must_not_run)
+
+    server._run_project_session_start(
+        LifecycleJob("start", "auto-life", {"project_id": "blindhash-operations"}),
+        SessionLifecycleStateWriter(),
+    )
+
+    assert launched["initial_message"] == "Hello"
+    row = dashboard_db.get_session("auto-life")
+    assert row["state"] == "ACTIVE"
+    assert row["lifecycle_detail"] is None
