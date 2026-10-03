@@ -25,14 +25,18 @@ operations (force push, dropping databases, removing volumes, killing sessions).
 - Run tests in a throwaway container that mounts only your worktree, never in
   this terminal. Here `/workspace/repo/data` is the live data volume and
   `AUTONOMY_DATA_ROOT` points at it, so a test that falls through to the data
-  root writes to production. The developer image has pytest and the
-  dashboard's dependencies; `--network none` keeps the run away from the node's
-  services:
+  root writes to production. In the container only the worktree is mounted,
+  so the default data root is the worktree's own `data/`; do not override
+  `AUTONOMY_DATA_ROOT` (tests that derive paths from the repository root fail
+  when it points elsewhere). The developer image has pytest and the
+  dashboard's dependencies; `--network none` keeps the run away from the
+  node's services. Delete the worktree's `data/agent-runs` afterwards if a
+  test left one:
 
   ```bash
   docker run --rm --network none \
     --mount type=volume,src=autonomy-data,dst=/w,volume-subpath=worktrees/<session> \
-    -w /w -e AUTONOMY_DATA_ROOT=/tmp/test-data --entrypoint python3 \
+    -w /w --entrypoint python3 \
     autonomy/autonomy-developer -m pytest -q -p no:cacheprovider <test paths> \
     2>&1 | tee /tmp/test-results.txt
   ```
