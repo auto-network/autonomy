@@ -17,6 +17,12 @@
 .browser_profile
 data
 !data/uploads/.gitkeep
+# The org workspace volume (autonomy-orgs, ~150 GB on Home) and session
+# worktrees are mounted or created inside a live node's checkout; neither is
+# tracked, and sending them made `docker build` from /workspace/repo upload
+# the whole volume as context.
+/orgs
+/.worktrees
 node_modules
 **/__pycache__
 **/*.pyc
