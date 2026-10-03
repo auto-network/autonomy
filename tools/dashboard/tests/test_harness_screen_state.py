@@ -193,6 +193,19 @@ PANE_CODEX_COMPOSER_READY = """
 PANE_CODEX_COMPOSER_READY_V0_153 = _load("codex_composer_ready_v0_153.txt")
 
 
+# Real capture from Codex v0.157.1 (auto-1003-131848, Home 2026-10-03): the
+# trust prompt's wording changed, so neither pattern matched, the 12 s grace
+# declared the composer ready, and the startup paste was lost on this screen.
+PANE_CODEX_TRUST_DIALOG_V0_157 = _load("codex_trust_dialog_v0_157.txt")
+
+
+def test_codex_v0_157_trust_prompt_is_confirmed_and_not_composer_ready():
+    state, keys = CODEX_HARNESS.read_screen_state(PANE_CODEX_TRUST_DIALOG_V0_157, {})
+    assert state["confirming_trust_prompt"] is True
+    assert state["composer_ready"] is False
+    assert keys == [{"kind": "key", "value": "C-m"}]
+
+
 def test_codex_trust_dialog_is_confirmed_but_never_called_composer_ready():
     state, keys = CODEX_HARNESS.read_screen_state(PANE_CODEX_TRUST_DIALOG, {})
 

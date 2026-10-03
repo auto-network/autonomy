@@ -2996,3 +2996,18 @@ def test_the_image_entrypoint_is_read_not_assumed(monkeypatch):
         monkeypatch.setattr(session_launcher.subprocess, "run",
                             lambda *a, **k: R(out, rc))
         assert session_launcher._image_entrypoint("img") == want
+
+
+def test_a_codex_session_trusts_its_working_dir_without_a_host_codex_config(tmp_path, monkeypatch):
+    """Home 2026-10-03: the dashboard runs as a user with no ~/.codex, so no
+    pre-trusted config was mounted; every Codex session stopped at "Trust this
+    folder?" and its startup message was lost on that prompt."""
+    monkeypatch.setattr(session_launcher.Path, "home", lambda: tmp_path / "no-home")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    mounts = session_launcher._resolve_optional_tool_mounts(
+        run_dir=run_dir, working_dir="/workspace/idea-board")
+    generated = run_dir / "codex-config.toml"
+    assert mounts.get(str(generated)) == "/home/agent/.codex/config.toml:ro"
+    text = generated.read_text()
+    assert '[projects."/workspace/idea-board"]\ntrust_level = "trusted"' in text

@@ -7536,9 +7536,11 @@ async def api_session_tail(request):
         if candidate.exists():
             session_file = candidate
 
-    # Last-resort: scan data/agent-runs/ for a JSONL matching the id
+    # Last-resort: scan data/agent-runs/ for a JSONL matching the id. The
+    # scan walks the whole tree (~0.8 s on Home), so it runs off the event
+    # loop: a session with no transcript yet pays it on every poll.
     if session_file is None:
-        fallback = session_monitor.resolve_session_file(session_id)
+        fallback = await asyncio.to_thread(session_monitor.resolve_session_file, session_id)
         if fallback is not None:
             session_file = fallback
             # Persist the resolved path so subsequent SSE tails don't pay the

@@ -1018,20 +1018,24 @@ def _ensure_platform_snapshot() -> str | None:
         return None
 
 
-def _generate_codex_config(base_config: Path, git_root: str, run_dir: Path) -> Path | None:
-    """Write a per-session Codex ``config.toml`` that pre-trusts ``git_root``.
+def _generate_codex_config(base_config: Path, trusted: list[str], run_dir: Path) -> Path | None:
+    """Write a per-session Codex ``config.toml`` that pre-trusts every path in
+    *trusted*, starting from *base_config* when the host has one and from an
+    empty file when it does not.
 
-    The shared ``~/.codex/config.toml`` is mounted ``:ro``, so Codex cannot
-    persist trust itself ("config/batchWrite failed") and hangs on the trust
-    dialog. We instead generate a per-session copy with the trust entry already
-    present so Codex never needs to write. Idempotent; returns None on any error
-    (the caller then mounts the shared config unchanged).
+    Without a trust entry for its working directory Codex stops at its
+    "Trust this folder?" prompt before its input box exists (the bypass flag
+    does not skip it), and the launcher's startup message is lost on that
+    prompt. The shared ``~/.codex/config.toml`` is mounted ``:ro``, so Codex
+    could not persist trust itself either. Idempotent; returns None on any
+    error (the caller then mounts the shared config unchanged, if any).
     """
     try:
-        text = base_config.read_text()
-        marker = f'[projects."{git_root}"]'
-        if marker not in text:
-            text = text.rstrip("\n") + f'\n\n{marker}\ntrust_level = "trusted"\n'
+        text = base_config.read_text() if base_config.exists() else ""
+        for path in trusted:
+            marker = f'[projects."{path}"]'
+            if marker not in text:
+                text = text.rstrip("\n") + f'\n\n{marker}\ntrust_level = "trusted"\n'
         out = run_dir / "codex-config.toml"
         out.write_text(text)
         return out
@@ -1826,6 +1830,7 @@ def grok_launch_script(
 def _resolve_optional_tool_mounts(
     worktree_host: Path | None = None,
     run_dir: Path | None = None,
+    working_dir: str | None = None,
 ) -> dict[str, str]:
     """Return optional host mounts that make Codex usable inside containers.
 
@@ -1834,12 +1839,11 @@ def _resolve_optional_tool_mounts(
     config/skills/rules are ordinary host content (not credentials) and are
     still mounted from ``~/.codex`` read-only.
 
-    When ``worktree_host`` and ``run_dir`` are supplied, mount a generated
-    per-session ``config.toml`` that pre-trusts the worktree's git-root instead
-    of the shared (read-only) host config — otherwise Codex tries to write trust
-    into the ``:ro`` mount, fails ``config/batchWrite``, and hangs on the trust
-    dialog. Without those args (e.g. the CLI path) the shared config is mounted
-    unchanged.
+    With ``run_dir``, mount a generated per-session ``config.toml`` that
+    pre-trusts the session's container ``working_dir`` and, for a worktree,
+    its git-root, whether or not the host has a ``~/.codex/config.toml`` to
+    start from. Without a trusted path (e.g. the CLI path) the shared config,
+    if any, is mounted unchanged.
     """
 
     mounts: dict[str, str] = {}
@@ -1848,10 +1852,13 @@ def _resolve_optional_tool_mounts(
     base_config = host_codex_home / "config.toml"
 
     config_source = base_config
-    if worktree_host is not None and run_dir is not None and base_config.exists():
-        git_root = _codex_git_root(worktree_host)
-        if git_root:
-            generated = _generate_codex_config(base_config, git_root, run_dir)
+    if run_dir is not None:
+        trusted = [working_dir] if working_dir else []
+        git_root = _codex_git_root(worktree_host) if worktree_host is not None else None
+        if git_root and git_root not in trusted:
+            trusted.append(git_root)
+        if trusted:
+            generated = _generate_codex_config(base_config, trusted, run_dir)
             if generated is not None:
                 config_source = generated
 
@@ -2075,7 +2082,7 @@ def build_mount_plan(
     worktree_host = max(working_mounts, default=(0, None), key=lambda i: i[0])[1]
 
     for host_path, container_spec in _resolve_optional_tool_mounts(
-        worktree_host=worktree_host, run_dir=run_dir,
+        worktree_host=worktree_host, run_dir=run_dir, working_dir=working_dir,
     ).items():
         plan.set(mount_spec(host_path, container_spec))
 

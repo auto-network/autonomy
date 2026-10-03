@@ -3162,11 +3162,13 @@ def extract_codex_harness_state(
 # Enter accepted trust.
 _CODEX_TRUST_DIALOG_RE = re.compile(
     r"trust\s+the\s+contents\s+of\s+this\s+directory|"
-    r"trusting\s+the\s+directory\s+allows\s+project-local\s+config",
+    r"trusting\s+the\s+directory\s+allows\s+project-local\s+config|"
+    r"trust\s+this\s+folder\?",                       # Codex 0.157
     re.IGNORECASE,
 )
 _CODEX_TRUST_CONFIRM_RE = re.compile(
     r"(?:^|\n)\s*[›>]\s*1\.\s*yes,?\s+continue\b|"
+    r"(?:^|\n)\s*[›>]\s*1\.\s*trust\s+and\s+continue\b|"   # Codex 0.157
     r"press\s+enter\s+to\s+continue",
     re.IGNORECASE,
 )
