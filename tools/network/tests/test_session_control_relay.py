@@ -7,6 +7,7 @@ typed refusal -- including a relay that predates the capability."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 import time
@@ -14,7 +15,7 @@ import time
 import pytest
 
 from tools.network import fleet_roster, session_control
-from tools.network.fleet_sync_channel import FleetAuthenticator
+from tools.network.fleet_sync_channel import FleetAuthenticator, serve_fleet_transport
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.relaykit.connector import TunnelConnector
 from tools.network.relaykit.fleet_stream import FleetStreamAdapter
@@ -63,7 +64,9 @@ class Runtime:
         self.scheduler.authenticator.delegation_cert = self._cert(session_scope)
 
 
-async def _connector(port, root, machine, runtime, broker, *, caps):
+async def _connector(port, root, machine, runtime, broker, *, caps, offer=None):
+    """A connector; its session-control pairs are served by the dashboard
+    *broker* path, or by *offer* (a test's own handler, see _test_offer)."""
     serve_key = KeyPair.generate()
     now = int(time.time())
     cert = issue_cert(root, serve_key.public_hex, scope=("tunnel:serve",), org=ORG,
@@ -72,7 +75,7 @@ async def _connector(port, root, machine, runtime, broker, *, caps):
     connector = TunnelConnector(
         f"ws://127.0.0.1:{port}", ORG, serve_key, cert, machine_key=machine,
         caps=caps,
-        session_control_offer=session_control.session_control_offer_handler(
+        session_control_offer=offer or session_control.session_control_offer_handler(
             runtime, broker),
         min_backoff=0.05, max_backoff=0.2,
     )
@@ -514,24 +517,119 @@ def test_a_non_streamed_reply_may_not_name_a_local_file(tmp_path, monkeypatch):
 
 # ── T2: replies of any size or duration on the one connection ───────────────
 # (graph://9642ab99-bae v4). A reply is a sequence of bounded id-tagged
-# chunks, the last carrying the end flag; a live reply ends with an explicit
-# empty end chunk; ``cancel {id}`` stops one; the client reads a reply's
-# chunks by id from the pooled connection with _PeerConnection.stream().
+# chunks, the last carrying the end flag; a tagged live reply ends with an
+# explicit empty end chunk; ``cancel {id}`` stops one; the client reads a
+# reply's chunks by id from the pooled connection with
+# _PeerConnection.stream(). Proven with the TEST's handler behind the real
+# fleet handshake: nothing here goes through the paths stage 2 deletes.
 
 BIG_BYTES = 50 * 1024 * 1024
+CHUNK = 192 * 1024
 
 
-async def _dashboard(broker, stop, answer):
-    """B's dashboard: ``answer(item)`` gives the reply record for each
-    request, at once."""
-    while not stop.is_set():
-        item = await broker.next(0.5)
-        if item is not None:
-            broker.reply(item["id"], answer(item))
+class _LiveReply:
+    """A handler response with no last chunk of its own (relaykit ``live``)."""
+
+    live = True
+
+    def __init__(self, iterator):
+        self._iterator = iterator
+
+    def __aiter__(self):
+        return self._iterator
 
 
-def _ok(result):
-    return {"v": 1, "ok": True, "result": result}
+class _Handler:
+    """The serving side's replies, as the record loop sees them: one chunk,
+    a finite sequence, a live sequence, or one that runs until cancelled."""
+
+    def __init__(self, payload: bytes = b""):
+        self.payload = payload
+        self.events: asyncio.Queue = asyncio.Queue()      # live chunks; None ends it
+        self.endless_closed = asyncio.Event()             # the endless generator's finally ran
+
+    async def __call__(self, _token, message, client_pub, **_extra):
+        request = session_control.parse_request(message)
+        op = request["op"]
+        if op == "status":
+            return session_control.encode(
+                {"v": 1, "ok": True, "result": {"n": request["body"]["n"]}})
+        if op == "big":
+            return self._big()
+        if op == "live":
+            return _LiveReply(self._live())
+        if op == "endless":
+            return self._endless()
+        return session_control.encode(session_control.refusal("unknown-op", op))
+
+    async def _big(self):
+        for offset in range(0, len(self.payload), CHUNK):
+            yield self.payload[offset:offset + CHUNK]
+
+    async def _live(self):
+        while (event := await self.events.get()) is not None:
+            yield event
+
+    async def _endless(self):
+        try:
+            for _ in range(2000):            # bounded, so a missed cancel still ends
+                yield b"\x5a" * CHUNK
+                await asyncio.sleep(0)
+        finally:
+            self.endless_closed.set()
+
+
+def _test_offer(runtime, handler):
+    """The serving connector's ``session_control_offer`` with *handler* in
+    place of the dashboard broker: the relay pair and the session:control
+    handshake are real; the replies are the test's."""
+    tasks: set = set()
+
+    async def on_offer(endpoint) -> bool:
+        async def run():
+            await endpoint.ready.wait()
+            if endpoint.closed.is_set():
+                return
+
+            async def close(**_kwargs):
+                await endpoint.close()
+
+            try:
+                await serve_fleet_transport(
+                    token=endpoint.session, recv=endpoint.recv, send=endpoint.send,
+                    handler=handler, close=close,
+                    authenticator=session_control.session_authenticator(runtime))
+            except Exception:
+                pass
+            finally:
+                with contextlib.suppress(Exception):
+                    await endpoint.close()
+
+        task = asyncio.create_task(run())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return True
+
+    return on_offer
+
+
+async def _two(port, root, handler):
+    """A and B over the relay; B serves *handler*."""
+    _register(port, root)
+    machine_a, machine_b = KeyPair.generate(), KeyPair.generate()
+    id_a, id_b = "a1" * 32, "b1" * 32
+    roster = (
+        fleet_roster.enroll(root, machine_id=id_a, machine_pub=machine_a.public_hex, seq=0),
+        fleet_roster.enroll(root, machine_id=id_b, machine_pub=machine_b.public_hex, seq=0),
+    )
+    caps = (CAP_FLEET_DIRECTED_STREAM, CAP_SESSION_CONTROL)
+    runtime_a = Runtime(root, machine_a, id_a, roster)
+    runtime_b = Runtime(root, machine_b, id_b, roster)
+    a, task_a = await _connector(port, root, machine_a, runtime_a,
+                                 session_control.InboundBroker(), caps=caps)
+    b, task_b = await _connector(port, root, machine_b, runtime_b, None, caps=caps,
+                                 offer=_test_offer(runtime_b, handler))
+    return a, task_a, b, task_b, runtime_a, machine_b
 
 
 def _request_record(op, body=None):
@@ -546,41 +644,26 @@ async def _warm(a, runtime_a, machine_b):
     return session_control._pool[(machine_b.public_hex, session_control.SCOPE_PERSONAL)]
 
 
-def test_a_50_mb_reply_and_twenty_small_requests_share_one_pair(tmp_path, monkeypatch):
-    monkeypatch.setattr(session_control, "_data_root", lambda: tmp_path)
+def test_a_50_mb_reply_and_twenty_small_requests_share_one_pair(monkeypatch):
     monkeypatch.setattr(session_control, "_pool", {})
-    runs = tmp_path / "agent-runs" / "auto-1-x"
-    runs.mkdir(parents=True)
     import hashlib
     import os
 
     payload = os.urandom(1024 * 1024) * (BIG_BYTES // (1024 * 1024))
-    (runs / "big.bin").write_bytes(payload)
-    digest = hashlib.sha256(payload).hexdigest()
-    del payload
     root = KeyPair.generate()
     port = _free_port()
     with _live_registry(port) as app:
         asyncio.run(_big_scenario(root, port, app.state.directed_streams,
-                                  runs / "big.bin", digest))
+                                  _Handler(payload), hashlib.sha256(payload).hexdigest()))
 
 
-async def _big_scenario(root, port, custody, big, digest):
+async def _big_scenario(root, port, custody, handler, digest):
     import hashlib
 
-    a, task_a, b, task_b, runtime_a, machine_b, broker_b = await _two(port, root)
-    stop = asyncio.Event()
-    dashboard = asyncio.create_task(_dashboard(broker_b, stop, lambda item: (
-        _ok({"name": "big.bin", "stream_file": str(big)}) if item["op"] == "big"
-        else _ok({"n": item["body"]["n"]}))))
+    a, task_a, b, task_b, runtime_a, machine_b = await _two(port, root, handler)
     try:
         entry = await _warm(a, runtime_a, machine_b)
         reply = await entry.stream(_request_record("big"))
-        raw, final = await reply.next(10)
-        header = json.loads(raw)
-        assert header["ok"] is True and not final, header
-        assert header["result"]["stream"] == {"size": BIG_BYTES}
-
         started = time.monotonic()
         finished: dict[int, float] = {}
         received = hashlib.sha256()
@@ -610,150 +693,152 @@ async def _big_scenario(root, port, custody, big, digest):
         assert custody.snapshot()["pairs"] == 1
         assert entry.pending == {}
     finally:
-        stop.set()
-        await dashboard
         await _stop(a, task_a)
         await _stop(b, task_b)
 
 
-async def _two(port, root):
-    _register(port, root)
-    machine_a, machine_b = KeyPair.generate(), KeyPair.generate()
-    id_a, id_b = "a1" * 32, "b1" * 32
-    roster = (
-        fleet_roster.enroll(root, machine_id=id_a, machine_pub=machine_a.public_hex, seq=0),
-        fleet_roster.enroll(root, machine_id=id_b, machine_pub=machine_b.public_hex, seq=0),
-    )
-    caps = (CAP_FLEET_DIRECTED_STREAM, CAP_SESSION_CONTROL)
-    runtime_a = Runtime(root, machine_a, id_a, roster)
-    runtime_b = Runtime(root, machine_b, id_b, roster)
-    broker_b = session_control.InboundBroker()
-    a, task_a = await _connector(port, root, machine_a, runtime_a,
-                                 session_control.InboundBroker(), caps=caps)
-    b, task_b = await _connector(port, root, machine_b, runtime_b, broker_b, caps=caps)
-    return a, task_a, b, task_b, runtime_a, machine_b, broker_b
-
-
 def test_a_live_reply_and_requests_share_the_connection(monkeypatch):
     monkeypatch.setattr(session_control, "_pool", {})
-    monkeypatch.setattr(session_control, "_published", {})
-    monkeypatch.setattr(session_control, "_published_bytes", {})
-    monkeypatch.setattr(session_control, "_received", asyncio.Queue())
     root = KeyPair.generate()
     port = _free_port()
     with _live_registry(port) as app:
-        asyncio.run(_live_scenario(root, port, app.state.directed_streams))
+        asyncio.run(_live_scenario(root, port, app.state.directed_streams, _Handler()))
 
 
-async def _live_scenario(root, port, custody):
-    a, task_a, b, task_b, runtime_a, machine_b, broker_b = await _two(port, root)
-    stop = asyncio.Event()
-    sub_ids: list[str] = []
-
-    def answer(item):
-        if item["op"] == "subscribe":
-            sub_ids.append(item["body"]["sub_id"])
-            return _ok({"subscribed": True})
-        return _ok({"n": item["body"]["n"]})
-
-    dashboard = asyncio.create_task(_dashboard(broker_b, stop, answer))
+async def _live_scenario(root, port, custody, handler):
+    a, task_a, b, task_b, runtime_a, machine_b = await _two(port, root, handler)
     try:
         entry = await _warm(a, runtime_a, machine_b)
-        # The live reply: its header, then one chunk per event, on the
-        # pooled connection, with requests interleaving.
-        live = await entry.stream(_request_record("subscribe", {"persona": "p"}))
-        raw, final = await live.next(10)
-        assert json.loads(raw)["ok"] is True and not final
-        (sub_id,) = sub_ids
+        live = await entry.stream(_request_record("live"))
         seen = []
         for n in range(3):
-            assert session_control.publish(sub_id, {"topic": "t", "data": {"n": n}}) == {"ok": True}
+            # One chunk per event as the host produces it, with requests
+            # interleaving on the same pooled connection.
+            handler.events.put_nowait(json.dumps({"n": n}).encode())
             got = await session_control.request(
                 a, runtime_a, machine_pub=machine_b.public_hex, op="status",
                 body={"n": n}, timeout=10)
             assert got["result"] == {"n": n}
             chunk, final = await live.next(5)
             assert not final
-            seen.append(json.loads(chunk)["data"]["n"])
+            seen.append(json.loads(chunk)["n"])
         assert seen == [0, 1, 2]
         assert custody.snapshot()["pairs"] == 1
-        assert len(entry.pending) == 1          # the live reply keeps the connection busy
-        assert entry.busy()
-        # This side cancels it: its state is gone here at once, and the
-        # host's subscription is freed by the cancel. (The legacy
-        # subscription then closes its channel in its own finally, which
-        # stage 2 deletes; the explicit end chunk of a live reply is proven
-        # at the record loop, test_a_live_reply_ends_with_an_explicit_empty_end.)
-        await live.cancel()
-        assert entry.pending == {} and live.ended
-        for _ in range(100):
-            if sub_id not in session_control._published:
-                break
-            await asyncio.sleep(0.05)
-        assert sub_id not in session_control._published
+        assert len(entry.pending) == 1 and entry.busy()    # the live reply keeps it busy
+        # The host ends it: the explicit end is an empty chunk with the end
+        # flag; the reply's state is gone here and the connection lives on.
+        handler.events.put_nowait(None)
+        assert await live.next(5) == (b"", True)
+        assert entry.pending == {} and not entry.busy()
+        got = await session_control.request(
+            a, runtime_a, machine_pub=machine_b.public_hex, op="status",
+            body={"n": 9}, timeout=10)
+        assert got["result"] == {"n": 9} and custody.snapshot()["pairs"] == 1
     finally:
-        stop.set()
-        await dashboard
         await _stop(a, task_a)
         await _stop(b, task_b)
 
 
-def test_cancel_ends_a_reply_and_frees_its_state(tmp_path, monkeypatch):
-    monkeypatch.setattr(session_control, "_data_root", lambda: tmp_path)
+def test_cancel_ends_a_reply_and_frees_its_state(monkeypatch):
     monkeypatch.setattr(session_control, "_pool", {})
-    runs = tmp_path / "agent-runs" / "auto-1-x"
-    runs.mkdir(parents=True)
-    (runs / "big.bin").write_bytes(b"\x5a" * (8 * 1024 * 1024))
     root = KeyPair.generate()
     port = _free_port()
     with _live_registry(port) as app:
-        asyncio.run(_cancel_scenario(root, port, app.state.directed_streams,
-                                     runs / "big.bin", monkeypatch))
+        asyncio.run(_cancel_scenario(root, port, app.state.directed_streams, _Handler()))
 
 
-async def _cancel_scenario(root, port, custody, big, monkeypatch):
-    # The serving side's file reply, with its close observed: cancel must
-    # end the generator (closing the file) and the request's task.
-    original = session_control._stream_reply
-    closed = asyncio.Event()
-
-    async def observed(*args, **kwargs):
-        try:
-            async for chunk in original(*args, **kwargs):
-                yield chunk
-        finally:
-            closed.set()
-
-    monkeypatch.setattr(session_control, "_stream_reply", observed)
-    a, task_a, b, task_b, runtime_a, machine_b, broker_b = await _two(port, root)
-    stop = asyncio.Event()
-    dashboard = asyncio.create_task(_dashboard(broker_b, stop, lambda item: (
-        _ok({"stream_file": str(big)}) if item["op"] == "big"
-        else _ok({"n": item["body"]["n"]}))))
+async def _cancel_scenario(root, port, custody, handler):
+    a, task_a, b, task_b, runtime_a, machine_b = await _two(port, root, handler)
     try:
         entry = await _warm(a, runtime_a, machine_b)
-        reply = await entry.stream(_request_record("big"))
-        raw, final = await reply.next(10)
-        assert json.loads(raw)["result"]["stream"]["size"] == 8 * 1024 * 1024
-        chunk, final = await reply.next(10)
-        assert chunk and not final
+        reply = await entry.stream(_request_record("endless"))
+        for _ in range(2):
+            chunk, final = await reply.next(10)
+            assert len(chunk) == CHUNK and not final
         await reply.cancel()
-        # This side forgot it at once; the peer stopped producing it.
+        # This side forgot it at once; the host's generator was closed.
         assert entry.pending == {} and reply.ended
-        await asyncio.wait_for(closed.wait(), 10)
+        await asyncio.wait_for(handler.endless_closed.wait(), 10)
         # The connection is intact: the cancel landed between whole chunks,
         # so the next request on it is answered, still on the one pair.
         got = await session_control.request(
             a, runtime_a, machine_pub=machine_b.public_hex, op="status",
             body={"n": 7}, timeout=10)
         assert got["result"] == {"n": 7}, got
-        assert custody.snapshot()["pairs"] == 1
-        assert entry.usable()
+        assert custody.snapshot()["pairs"] == 1 and entry.usable()
     finally:
-        stop.set()
-        await dashboard
         await _stop(a, task_a)
         await _stop(b, task_b)
+
+
+# ── the record loop itself, with a fake crypto ──────────────────────────────
+
+
+class _PlainCrypto:
+    """Records are the messages; a flag suffix shows the end bit."""
+
+    def open_record(self, record):
+        return record
+
+    def iter_seal_message(self, message, *, stream_final=True):
+        yield message + (b"|end" if stream_final else b"|more")
+
+
+class _TwoChunks:
+    live = True
+
+    def __init__(self):
+        self._chunks = iter((b"one", b"two"))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._chunks)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+async def _serve_once(first: bytes, handler, sent: list):
+    from tools.network.relaykit import connector as relay_connector
+
+    inbox = asyncio.Queue()
+    inbox.put_nowait(first)
+
+    async def recv():
+        if inbox.empty():
+            await asyncio.sleep(0.05)
+            return None
+        return await inbox.get()
+
+    async def send(out):
+        sent.append(out)
+
+    await relay_connector._serve_channel_records(
+        _PlainCrypto(), token="t", recv=recv, send=send, handler=handler)
+
+
+def test_a_tagged_live_reply_ends_with_an_explicit_empty_end():
+    """A live reply has no last chunk of its own: when its iterator ends,
+    the loop sends an empty chunk carrying the end flag, so a reader that
+    routes by id knows the reply is over without the connection closing."""
+    from tools.network.relaykit import connector as relay_connector
+
+    sent: list[bytes] = []
+    asyncio.run(_serve_once(relay_connector.tag_message(b"1" * 8, b"live"),
+                            lambda _t, _m: _TwoChunks(), sent))
+    assert [relay_connector.split_request_id(out) for out in sent] == [
+        (b"1" * 8, b"one|more"), (b"1" * 8, b"two|more"), (b"1" * 8, b"|end")]
+
+
+def test_an_untagged_live_reply_sends_no_extra_message():
+    """T1's rule: a message without an id is served exactly as before ids.
+    The legacy subscription channel is untagged and ends with the channel;
+    it must not get the explicit end."""
+    sent: list[bytes] = []
+    asyncio.run(_serve_once(b"live", lambda _t, _m: _TwoChunks(), sent))
+    assert sent == [b"one|more", b"two|more"]
 
 
 def test_a_cancel_mid_chunk_never_tears_the_framing():
@@ -835,53 +920,3 @@ def test_a_cancel_mid_chunk_never_tears_the_framing():
     assert all(o.startswith(relay_connector.tag_message(b"1" * 8, b"chunk2")) for o in ones[-PARTS:])
     twos = [out for out in sent if relay_connector.split_request_id(out)[0] == b"2" * 8]
     assert [o.split(b"|")[1:] for o in twos] == [[b"1/3", b"1"], [b"2/3", b"1"], [b"3/3", b"1"]]
-
-
-def test_a_live_reply_ends_with_an_explicit_empty_end():
-    """A live reply has no last chunk of its own: when its iterator ends,
-    the loop sends an empty chunk carrying the end flag, so a reader that
-    routes by id knows the reply is over without the connection closing."""
-    from tools.network.relaykit import connector as relay_connector
-
-    class Crypto:
-        def open_record(self, record):
-            return record
-
-        def iter_seal_message(self, message, *, stream_final=True):
-            yield message + (b"|end" if stream_final else b"|more")
-
-    class Live:
-        live = True
-
-        def __init__(self):
-            self._chunks = iter((b"one", b"two"))
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            try:
-                return next(self._chunks)
-            except StopIteration:
-                raise StopAsyncIteration from None
-
-    sent = []
-
-    async def run():
-        inbox = asyncio.Queue()
-        inbox.put_nowait(relay_connector.tag_message(b"1" * 8, b"live"))
-
-        async def recv():
-            if inbox.empty():
-                await asyncio.sleep(0.05)
-                return None
-            return await inbox.get()
-
-        async def send(out):
-            sent.append(relay_connector.split_request_id(out))
-
-        await relay_connector._serve_channel_records(
-            Crypto(), token="t", recv=recv, send=send, handler=lambda _t, _m: Live())
-
-    asyncio.run(run())
-    assert sent == [(b"1" * 8, b"one|more"), (b"1" * 8, b"two|more"), (b"1" * 8, b"|end")]

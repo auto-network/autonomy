@@ -133,10 +133,10 @@ class TunnelProtocolVersionError(ConnectionError):
 # inside the sealed message, so the relay never sees it.
 REQUEST_ID_PREFIX = b"\x00RQ1"
 REQUEST_ID_LEN = 8
-#: A reply may be a sequence of bounded tagged messages; the last one is
-#: flagged STREAM_FINAL (the ``end``). A live reply (one with no last
-#: message of its own, a subscription) ends with an explicit empty final
-#: message. ``cancel {id}`` is CANCEL_PREFIX then the id, inside the sealed
+#: A tagged reply may be a sequence of bounded tagged messages; the last one
+#: is flagged STREAM_FINAL (the ``end``). A tagged live reply (one with no
+#: last message of its own) ends with an explicit empty final message.
+#: ``cancel {id}`` is CANCEL_PREFIX then the id, inside the sealed
 #: message like the request id: the loop cancels that reply's task, each
 #: message in progress finishing first so framing never tears, and sends
 #: nothing more for the id (graph://9642ab99-bae T2).
@@ -240,8 +240,9 @@ async def _response_messages(response):
     if getattr(response, "live", False):
         # A live response (a subscription) has no last message of its own:
         # each one is sent as it is produced (lookahead would hold every
-        # event until the next one arrived), and when the iterator ends an
-        # explicit empty final message is the reply's ``end``.
+        # event until the next one arrived). Untagged, the exchange ends
+        # with the channel, exactly as before ids; tagged, send_response
+        # follows the last one with the explicit empty ``end``.
         try:
             async for message in iterator:
                 yield _message_bytes(message), False
@@ -249,7 +250,6 @@ async def _response_messages(response):
             close = getattr(iterator, "aclose", None)
             if close is not None:
                 await close()
-        yield b"", True
         return
     try:
         try:
@@ -342,6 +342,7 @@ async def _serve_channel_records(
                 await send(out)
 
     async def send_response(response, request_id: bytes | None = None) -> None:
+        live = bool(getattr(response, "live", False))
         response_messages = _response_messages(response)
         try:
             async for response_message, stream_final in response_messages:
@@ -354,6 +355,11 @@ async def _serve_channel_records(
                         tag_message(request_id, response_message), stream_final))
         finally:
             await response_messages.aclose()
+        if request_id is not None and live:
+            # A tagged live reply has no last message of its own: its
+            # requester reads by id and needs the explicit empty ``end``.
+            # An untagged one is unchanged: it ends with the channel.
+            await _uninterrupted(send_message(tag_message(request_id, b""), True))
 
     async def serve_tagged(request_id: bytes, body: bytes) -> None:
         try:
