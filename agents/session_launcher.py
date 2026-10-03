@@ -716,14 +716,18 @@ def _selectable(harness: str, acct: Any) -> bool:
       (coordinator decision 19:22Z).
     * Codex: every credential holds a refresh token (the shape requires
       one) and the CLI refreshes an expired access token itself (an
-      'expired' account signed in on Home 2026-10-02), so 'expired' is
-      selectable.
+      'expired' account signed in on Home 2026-10-02), so a Codex row whose
+      state is ok or expired is selectable whatever its recorded
+      access-token expiry (an ok row past it launched unsigned on Home
+      2026-10-03).
     """
     state = acct.public.get("credential_state")
     if harness == "claude":
         if acct.setup_token_fresh() or state == "ok":
             return True
-    elif harness == "codex" and state == "expired":
+    elif harness == "codex" and state in ("ok", "expired"):
+        # The recorded expiry is the access token's; the stored refresh
+        # token outlives it, so an ok row past that expiry is selectable too.
         return True
     return acct.usable()
 

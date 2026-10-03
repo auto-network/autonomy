@@ -133,5 +133,9 @@ def test_a_valid_setup_token_is_selectable_whatever_the_bundle_state():
 def test_an_expired_codex_access_token_is_selectable():
     assert sl._selectable("codex", _public("codex", "c", credential_state="expired",
                                            credential_expires_at=1))
+    # The row's state still says ok after its access token's recorded expiry
+    # has passed (Home 2026-10-03: launched without a sign-in).
+    assert sl._selectable("codex", _public("codex", "f", credential_state="ok",
+                                            credential_expires_at=1))
     assert not sl._selectable("codex", _public("codex", "d", credential_state="missing"))
     assert not sl._selectable("codex", _public("codex", "e", credential_state="refresh_failed"))
