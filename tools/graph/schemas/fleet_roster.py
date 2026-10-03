@@ -163,3 +163,26 @@ class FleetRosterEntryV2(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: a kick tombstone does not cite a supersedes"
             )
+        cls._verify_against_personal_root(payload)
+
+    @classmethod
+    def _verify_against_personal_root(cls, payload: dict) -> None:
+        """Every local write of a roster entry is verified here, once: its
+        signature against THIS store's personal root when one is enrolled
+        (the same check sync ingest makes in materialize._verify_roster_row),
+        else against the root the entry names. Readers never
+        verify, so this is what keeps a session's write through the generic
+        Settings API from adding or revoking a machine without the root.
+        Writes are rare (one per enrolment or kick)."""
+        from tools.network import fleet_roster
+        from tools.network.fleet_tunnel_server import _personal_root_pub
+
+        # A joining machine stores its delivered roster before this store
+        # holds the personal identity; its signature is still checked, against
+        # the root the entry names (and resolve keeps only the anchor's).
+        root_pub = _personal_root_pub() or payload.get("personal_root_pub")
+        try:
+            fleet_roster.verify(
+                fleet_roster._entry_from_payload(payload), anchor_root_pub=root_pub)
+        except (fleet_roster.FleetRosterError, ValueError, TypeError, KeyError) as exc:
+            raise SchemaValidationError(f"{cls.__name__}: {exc}") from None

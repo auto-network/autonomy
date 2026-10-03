@@ -85,3 +85,46 @@ def test_a_reenrol_stored_beside_its_kick_resolves_alive(personal_store):
         fleet_roster.store_entry(e, org=None)
     roster = fleet_roster.current_roster(anchor, org=None)
     assert m in roster and roster[m].entry_id == back.entry_id
+
+
+def _anchor(monkeypatch, root_pub):
+    from tools.network import fleet_tunnel_server
+    monkeypatch.setattr(fleet_tunnel_server, "_personal_root_pub", lambda: root_pub)
+
+
+def test_a_forged_roster_row_is_refused_at_write(personal_store, monkeypatch):
+    """auto-s4uv8: readers do not verify roster signatures (b0c36e4b8), so a
+    session writing the set through the generic Settings API must be refused
+    at the write: a row naming the operator's root with a bad signature."""
+    from tools.graph.schemas.registry import SchemaValidationError
+    root = KeyPair.generate()
+    _anchor(monkeypatch, root.public_hex)
+    good = fleet_roster.enroll(root, machine_pub=KeyPair.generate().public_hex)
+    forged = fleet_roster._entry_payload(good)
+    forged["machine_pub"] = KeyPair.generate().public_hex
+    with pytest.raises(SchemaValidationError, match="does not verify"):
+        settings_ops.upsert_by_key(FLEET_ROSTER_SET_ID, FLEET_ROSTER_REVISION,
+                                   "f" * 64, forged, org=None, state="raw")
+    assert fleet_roster.load_entries(org=None) == []
+
+
+def test_an_override_that_swaps_the_machine_is_refused(personal_store, monkeypatch):
+    from tools.graph.schemas.registry import SchemaValidationError
+    root = KeyPair.generate()
+    _anchor(monkeypatch, root.public_hex)
+    sid = fleet_roster.store_entry(
+        fleet_roster.enroll(root, machine_pub=KeyPair.generate().public_hex), org=None)
+    with pytest.raises(SchemaValidationError, match="does not verify"):
+        settings_ops.override_setting(
+            sid, {"machine_pub": KeyPair.generate().public_hex}, org=None, state="raw")
+
+
+def test_an_entry_signed_by_another_root_is_refused_once_a_root_is_enrolled(
+    personal_store, monkeypatch,
+):
+    from tools.graph.schemas.registry import SchemaValidationError
+    _anchor(monkeypatch, KeyPair.generate().public_hex)
+    other = KeyPair.generate()
+    with pytest.raises(SchemaValidationError, match="not this fleet's personal root"):
+        fleet_roster.store_entry(
+            fleet_roster.enroll(other, machine_pub=KeyPair.generate().public_hex), org=None)
