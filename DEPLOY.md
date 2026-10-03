@@ -421,6 +421,39 @@ AUTONOMY_IMAGE='registry.example/autonomy/autonomy-node@sha256:<digest>' \
 This is an additional verified-published path. It does not replace the
 no-login checkout build and does not add a runtime CDN or phone-home.
 
+#### A free-threaded (Python 3.14t) release
+
+By default the node image is built `FROM python:3.12-slim` with `--pull`.
+Setting `AUTONOMY_PYTHON=3.14t` builds it on free-threaded CPython 3.14
+instead. Docker Hub publishes no free-threaded Python image, so the script
+first builds the base `autonomy-python:3.14t-slim` from
+`deploy/Dockerfile.python-freethreaded` (with `--pull`, so its Debian base is
+fresh), then builds the node with `BASE_IMAGE=autonomy-python:3.14t-slim` and
+**without** `--pull` — a pull of that local-only base would fail with
+"pull access denied for autonomy-python". Naming that base in
+`AUTONOMY_BASE_IMAGE` selects the same mode; any other base image with
+`AUTONOMY_PYTHON=3.14t` is refused. The session images and the Service
+gateway are unchanged. The base is only a build input: it is neither pushed
+nor listed in the lock.
+
+```bash
+AUTONOMY_PYTHON=3.14t \
+AUTONOMY_REGISTRY=ghcr.io AUTONOMY_IMAGE_NAMESPACE=auto-network \
+AUTONOMY_RELEASE_TAG=<tag> AUTONOMY_IMAGE_SOURCE=https://github.com/<org>/<repo> \
+  ./deploy/publish-images.sh
+```
+
+The lock then carries `AUTONOMY_PYTHON=3.14t` after the release tag (a default
+release has no such line). It is not an image entry: signing and verification
+cover the same digests, and `install-published.sh` reports the flavour in its
+`release` step. Before publishing the signed lock, confirm the node really runs
+without the GIL:
+
+```bash
+docker run --rm --entrypoint python3 <AUTONOMY_NODE_IMAGE from the lock> \
+  -c "import sys; print(sys._is_gil_enabled())"   # must print False
+```
+
 #### Base-image CVE republishing
 
 Release engineering reviews the node and session base images at least weekly

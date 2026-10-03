@@ -173,10 +173,11 @@ else
     cp "$LOCK" "$TOOLS/image-lock.env"
 fi
 declare -A IMG=()
-RELEASE_TAG=""
+RELEASE_TAG="" PYTHON_FLAVOUR=""
 while IFS='=' read -r name value; do
     case "$name" in
         AUTONOMY_RELEASE_TAG) RELEASE_TAG="$value" ;;
+        AUTONOMY_PYTHON) PYTHON_FLAVOUR="$value" ;;  # absent: the default python:3.12 node
         AUTONOMY_*_IMAGE)
             [[ "$value" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]] || {
                 echo "refusing non-digest lock entry: $name=$value" >&2; exit 2; }
@@ -186,7 +187,7 @@ done <"$TOOLS/image-lock.env"
 for need in AUTONOMY_NODE_IMAGE AUTONOMY_SESSION_IMAGE AUTONOMY_SESSION_PLATFORM_IMAGE AUTONOMY_SESSION_DIND_IMAGE; do
     [[ -n "${IMG[$need]:-}" ]] || { echo "lock is missing $need" >&2; exit 2; }
 done
-step "release ${RELEASE_TAG:-?}"
+step "release ${RELEASE_TAG:-?}${PYTHON_FLAVOUR:+ (Python $PYTHON_FLAVOUR)}"
 
 # ── 4. Verify every signature, then pull ─────────────────────────────────────
 for name in "${!IMG[@]}"; do

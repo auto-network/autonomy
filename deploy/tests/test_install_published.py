@@ -162,6 +162,19 @@ def test_a_release_lock_without_the_host_terminal_image_still_installs(tmp_path)
     assert "AUTONOMY_SERVICE_GATEWAY_IMAGE" not in _env_file(tmp_path)
 
 
+def test_a_free_threaded_release_lock_installs_and_names_its_python(tmp_path):
+    """publish-images.sh records AUTONOMY_PYTHON=3.14t in a free-threaded
+    release's lock (auto-d8jf5.2). It is not an image: the installer verifies
+    the same images and says which Python the node runs."""
+    lock = _lock(tmp_path)
+    lock.write_text(lock.read_text(encoding="utf-8").replace(
+        "AUTONOMY_RELEASE_TAG=test\n", "AUTONOMY_RELEASE_TAG=test\nAUTONOMY_PYTHON=3.14t\n"), encoding="utf-8")
+    result, calls = _run(tmp_path, lock)
+    assert result.returncode == 5, result.stderr  # fakes never answer /api/ping
+    assert "release test (Python 3.14t)" in result.stdout
+    assert sum(line.startswith("cosign verify") for line in calls.splitlines()) == 6
+
+
 def test_the_service_gateway_image_is_verified_pulled_and_recorded_for_the_dashboard(tmp_path):
     """The dashboard starts the gateway from its own Compose run, where .env
     is not read: the pinned reference is recorded in .env, which

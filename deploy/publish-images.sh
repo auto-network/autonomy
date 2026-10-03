@@ -28,6 +28,30 @@ esac
 
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 2; }
 
+# Python flavour of the node image. The default builds FROM python:3.12-slim
+# (or AUTONOMY_BASE_IMAGE) with --pull. AUTONOMY_PYTHON=3.14t builds on
+# free-threaded CPython 3.14 instead: Docker Hub publishes no such image, so
+# the base autonomy-python:3.14t-slim is built here first from
+# deploy/Dockerfile.python-freethreaded (with --pull, so its own upstream is
+# fresh), and the node build then runs WITHOUT --pull, which would otherwise
+# fail with "pull access denied for autonomy-python" (auto-d8jf5.2). Naming
+# that base in AUTONOMY_BASE_IMAGE selects the same mode.
+FREETHREADED_BASE="autonomy-python:3.14t-slim"
+PYTHON_FLAVOUR="${AUTONOMY_PYTHON:-}"
+if [[ -z "$PYTHON_FLAVOUR" && "${AUTONOMY_BASE_IMAGE:-}" == "$FREETHREADED_BASE" ]]; then
+    PYTHON_FLAVOUR=3.14t
+fi
+case "${PYTHON_FLAVOUR:-default}" in
+    default) ;;
+    3.14t)
+        if [[ -n "${AUTONOMY_BASE_IMAGE:-}" && "$AUTONOMY_BASE_IMAGE" != "$FREETHREADED_BASE" ]]; then
+            echo "AUTONOMY_PYTHON=3.14t builds on $FREETHREADED_BASE; unset AUTONOMY_BASE_IMAGE ($AUTONOMY_BASE_IMAGE)" >&2
+            exit 2
+        fi
+        ;;
+    *) echo "invalid AUTONOMY_PYTHON (unset for the default, or 3.14t for free-threaded)" >&2; exit 2 ;;
+esac
+
 # The repository the images come from, stamped as org.opencontainers.image.source
 # on every image built here and by agents/build.sh. GHCR attaches a package to
 # its repository by this label (and a first-time package then inherits the
@@ -62,9 +86,21 @@ echo "==> Building node image from deploy/Dockerfile"
 # by design — a release is the committed state. --depth 1 keeps it cheap.
 node_src="$(mktemp -d)"
 git clone --quiet --depth 1 "file://$REPO_ROOT/.git" "$node_src/repo"
+if [[ "$PYTHON_FLAVOUR" == 3.14t ]]; then
+    echo "==> Building free-threaded base $FREETHREADED_BASE from deploy/Dockerfile.python-freethreaded"
+    docker build --pull \
+        -f "$node_src/repo/deploy/Dockerfile.python-freethreaded" \
+        -t "$FREETHREADED_BASE" \
+        "$node_src/repo"
+    node_pull=()
+    node_base="$FREETHREADED_BASE"
+else
+    node_pull=(--pull)
+    node_base="${AUTONOMY_BASE_IMAGE:-python:3.12-slim}"
+fi
 node_build=(
-    docker build --pull "${source_label[@]}"
-    --build-arg "BASE_IMAGE=${AUTONOMY_BASE_IMAGE:-python:3.12-slim}"
+    docker build "${node_pull[@]}" "${source_label[@]}"
+    --build-arg "BASE_IMAGE=$node_base"
     -f "$node_src/repo/deploy/Dockerfile"
     -t "$node_ref"
 )
@@ -107,6 +143,9 @@ trap 'rm -f "$tmp_lock"' EXIT
 {
     printf 'AUTONOMY_IMAGE_LOCK_VERSION=1\n'
     printf 'AUTONOMY_RELEASE_TAG=%s\n' "$RELEASE_TAG"
+    # Absent means the default python:3.12-slim node; readers ignore keys
+    # that are not AUTONOMY_*_IMAGE.
+    [[ -z "$PYTHON_FLAVOUR" ]] || printf 'AUTONOMY_PYTHON=%s\n' "$PYTHON_FLAVOUR"
 } >"$tmp_lock"
 
 for i in "${!refs[@]}"; do

@@ -379,3 +379,93 @@ def test_publish_keeps_pushed_images_when_asked(release_env):
     calls = log.read_text(encoding="utf-8").splitlines()
     assert not any(line.startswith(("docker rmi", "docker image prune", "docker builder prune"))
                    for line in calls)
+
+
+def _builds(log: Path) -> list[str]:
+    return [line for line in log.read_text(encoding="utf-8").splitlines()
+            if line.startswith("docker build ")]
+
+
+def _node_build(builds: list[str]) -> str:
+    return next(line for line in builds if line.split("-f ", 1)[1].split()[0].endswith("/deploy/Dockerfile"))
+
+
+def test_default_release_builds_the_node_on_python_312_with_pull(release_env):
+    """auto-d8jf5.2: the free-threaded mode is opt-in; the default release is
+    unchanged: no base build, the node FROM python:3.12-slim with --pull, and
+    no Python flavour in the lock."""
+    env, log, lock_file, _ = release_env
+    subprocess.run(["bash", str(PUBLISH)], env=env, check=True)
+    builds = _builds(log)
+    assert len(builds) == 2
+    assert not any("Dockerfile.python-freethreaded" in line for line in builds)
+    node = _node_build(builds)
+    assert node.startswith("docker build --pull ")
+    assert "--build-arg BASE_IMAGE=python:3.12-slim" in node
+    assert not any(line.startswith("AUTONOMY_PYTHON=")
+                   for line in lock_file.read_text(encoding="utf-8").splitlines())
+
+
+@pytest.mark.parametrize("selector", [
+    {"AUTONOMY_PYTHON": "3.14t"},
+    {"AUTONOMY_BASE_IMAGE": "autonomy-python:3.14t-slim"},
+    {"AUTONOMY_PYTHON": "3.14t", "AUTONOMY_BASE_IMAGE": "autonomy-python:3.14t-slim"},
+])
+def test_free_threaded_release_builds_the_base_first_then_the_node_from_it_without_pull(release_env, selector):
+    """The free-threaded base exists only locally, so `docker build --pull`
+    of the node fails with "pull access denied for autonomy-python". The base
+    is built first (itself with --pull, so debian:trixie-slim is fresh) from
+    the same clean clone, and the node build names it and does not pull."""
+    env, log, lock_file, _ = release_env
+    subprocess.run(["bash", str(PUBLISH)], env={**env, **selector}, check=True)
+    builds = _builds(log)
+    assert len(builds) == 3
+    base = builds[0]
+    assert "Dockerfile.python-freethreaded" in base
+    assert base.startswith("docker build --pull ")
+    assert "-t autonomy-python:3.14t-slim" in base
+    node = _node_build(builds)
+    assert builds.index(node) > 0
+    assert "--pull" not in node.split()
+    assert "--build-arg BASE_IMAGE=autonomy-python:3.14t-slim" in node
+    assert base.split()[-1] == node.split()[-1]  # the same throwaway clone
+    # Only the node depends on the local base; the gateway still pulls.
+    gateway = next(line for line in builds if "Dockerfile.service-gateway" in line)
+    assert gateway.startswith("docker build --pull ")
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert sum(line.startswith("docker push ") for line in calls) == 6
+    assert not any("autonomy-python" in line for line in calls if line.startswith(("docker push", "docker rmi")))
+
+    lock = lock_file.read_text(encoding="utf-8").splitlines()
+    assert lock[:3] == [
+        "AUTONOMY_IMAGE_LOCK_VERSION=1",
+        "AUTONOMY_RELEASE_TAG=v1.2.3",
+        "AUTONOMY_PYTHON=3.14t",
+    ]
+    images = [line for line in lock if line.split("=", 1)[0].endswith("_IMAGE")]
+    assert len(images) == 6 and all(f"@sha256:{DIGEST}" in line for line in images)
+
+
+def test_free_threaded_release_refuses_a_conflicting_or_unknown_python(release_env):
+    env, log, _lock_file, _ = release_env
+    conflict = subprocess.run(
+        ["bash", str(PUBLISH)],
+        env={**env, "AUTONOMY_PYTHON": "3.14t", "AUTONOMY_BASE_IMAGE": "python:3.12-slim"},
+        capture_output=True, text=True,
+    )
+    assert conflict.returncode == 2 and "unset AUTONOMY_BASE_IMAGE" in conflict.stderr
+    unknown = subprocess.run(["bash", str(PUBLISH)], env={**env, "AUTONOMY_PYTHON": "3.13"},
+                             capture_output=True, text=True)
+    assert unknown.returncode == 2 and "invalid AUTONOMY_PYTHON" in unknown.stderr
+    assert not log.exists()
+
+
+def test_signing_accepts_a_free_threaded_lock(release_env):
+    """AUTONOMY_PYTHON is not an image entry: signing covers the same six."""
+    env, log, lock_file, _ = release_env
+    subprocess.run(["bash", str(PUBLISH)], env={**env, "AUTONOMY_PYTHON": "3.14t"}, check=True)
+    log.unlink()
+    subprocess.run(["bash", str(SIGN), str(lock_file)], env=env, input="SIGN v1.2.3\n",
+                   text=True, check=True, capture_output=True)
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert sum(line.startswith("cosign sign ") for line in calls) == 6
