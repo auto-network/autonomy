@@ -3,12 +3,20 @@
 Connector-side half (graph://7eb29bc8-31a §9.1, bead auto-99ioi). A
 session-control pair is a relay-brokered directed pair of its own capability;
 inside it the fleet handshake runs with a ``session:control`` delegation
-(FleetAuthenticator(scope="session:control")), and then each pair carries
-exactly one request and its reply as JSON records::
+(FleetAuthenticator(scope="session:control")), and then the pair is the ONE
+peer connection to that machine (graph://9642ab99-bae): every request on it
+is an id-tagged record, any number in flight, and its reply is one or more
+id-tagged chunks, the last carrying the ``end`` flag (relaykit connector
+REQUEST_ID_PREFIX and the STREAM_FINAL flag); ``cancel {id}`` stops one::
 
     request  {"v": 1, "op": "<op>", "body": {...}}
     reply    {"v": 1, "ok": true, "result": {...}}
            | {"v": 1, "ok": false, "refusal": "<typed reason>", "detail": "..."}
+
+Until stage 2 of the plan moves them, tail and output still use a transfer
+pair of their own (``request(stream=True)``) and live events a subscription
+channel of their own; the chunked replies on the peer connection are read by
+:meth:`_PeerConnection.stream`.
 
 The channel lives in this connector process, but the operations belong to the
 dashboard (its lifecycle worker, its session store). Rather than a new
@@ -809,6 +817,58 @@ RELAY_PAIR_CAP = "relay-pair-cap"                  # the relay would refuse anot
 IDLE_CLOSE_S_DEFAULT = 900.0
 
 
+class _Reply:
+    """One reply in progress on a peer connection: its chunks in order, as
+    the connection's reader routes them by id, until the one carrying the
+    ``end`` flag or a failure of the connection."""
+
+    def __init__(self, connection: "_PeerConnection", request_id: bytes):
+        self._connection = connection
+        self.request_id = request_id
+        self._items: asyncio.Queue = asyncio.Queue()
+        self.ended = False
+
+    def _put(self, body: bytes, final: bool) -> None:
+        self._items.put_nowait((body, final))
+
+    def _fail(self, exc: Exception) -> None:
+        self._items.put_nowait(exc)
+
+    async def next(self, timeout: Optional[float], *, code: str = REPLY_TIMEOUT,
+                   detail: str = "") -> tuple[bytes, bool]:
+        """The next ``(chunk, end)``; on *timeout* the reply is cancelled and
+        *code* raised."""
+        if self.ended:
+            raise SessionControlError(REPLY_MALFORMED, "the reply already ended")
+        try:
+            item = await asyncio.wait_for(self._items.get(), timeout)
+        except asyncio.TimeoutError:
+            await self.cancel()
+            raise SessionControlError(code, detail or f"no reply within {timeout}s") from None
+        if isinstance(item, Exception):
+            self.ended = True
+            raise item
+        body, final = item
+        self.ended = final
+        return body, final
+
+    async def cancel(self) -> None:
+        """Stop this reply: its state here is dropped at once, and the peer
+        is told ``cancel {id}`` so it stops producing it and frees its own."""
+        if self.ended:
+            return
+        self.ended = True
+        await self._connection._cancel(self.request_id)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> tuple[bytes, bool]:
+        if self.ended:
+            raise StopAsyncIteration
+        return await self.next(None)
+
+
 class _PeerConnection:
     """One authenticated connection to one peer in one scope."""
 
@@ -819,8 +879,10 @@ class _PeerConnection:
         self._stack: Optional[contextlib.AsyncExitStack] = None
         self._reader: Optional[asyncio.Task] = None
         self._open_lock = asyncio.Lock()
-        #: request id -> the future its reply resolves.
-        self.pending: dict[bytes, asyncio.Future] = {}
+        #: request id -> the reply its chunks are routed to. A reply in
+        #: progress, chunked or not, keeps the connection busy (lifecycle
+        #: rules 4 and 6).
+        self.pending: dict[bytes, _Reply] = {}
         #: Ids in send order: an untagged reply (a peer from before ids)
         #: answers the oldest.
         self._order: list[bytes] = []
@@ -859,18 +921,20 @@ class _PeerConnection:
 
         try:
             while True:
-                message, _final = await self.channel.recv_message_with_final()
+                message, final = await self.channel.recv_message_with_final()
                 self.last_activity = time.monotonic()
                 request_id, body = split_request_id(message)
                 if request_id is None:
                     if not self._order:
                         continue
                     request_id = self._order[0]
-                if request_id in self._order:
-                    self._order.remove(request_id)
-                future = self.pending.pop(request_id, None)
-                if future is not None and not future.done():
-                    future.set_result(body)
+                    final = True
+                reply = self.pending.get(request_id)
+                if reply is None:
+                    continue        # cancelled, or ended: nothing waits for it
+                if final:
+                    self._forget(request_id)
+                reply._put(body, final)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -880,34 +944,53 @@ class _PeerConnection:
                             self.key[0][:12], type(exc).__name__)
             self._fail_pending(REPLY_LOST, f"the connection was lost: {exc}")
 
+    def _forget(self, request_id: bytes) -> None:
+        self.pending.pop(request_id, None)
+        if request_id in self._order:
+            self._order.remove(request_id)
+
     def _fail_pending(self, code: str, detail: str) -> None:
         pending, self.pending, self._order = self.pending, {}, []
-        for future in pending.values():
-            if not future.done():
-                future.set_exception(SessionControlError(code, detail))
+        for reply in pending.values():
+            reply._fail(SessionControlError(code, detail))
 
-    async def exchange(self, record: bytes, timeout: float) -> dict:
+    async def stream(self, record: bytes) -> _Reply:
+        """Send one request; its reply, chunk by chunk, read by id from this
+        connection while every other reply interleaves with it."""
         from tools.network.relaykit.connector import tag_message
 
         request_id = secrets.token_bytes(8)
-        future = asyncio.get_running_loop().create_future()
-        self.pending[request_id] = future
+        reply = _Reply(self, request_id)
+        self.pending[request_id] = reply
         self._order.append(request_id)
         self.last_activity = time.monotonic()
         try:
             await self.channel.send_message(tag_message(request_id, record))
         except (FleetStreamClosed, ConnectionError) as exc:
-            self.pending.pop(request_id, None)
-            if request_id in self._order:
-                self._order.remove(request_id)
+            self._forget(request_id)
             raise SessionControlError(CLOSED_AT_SEND, f"the connection closed: {exc}") from exc
-        try:
-            raw = await asyncio.wait_for(future, timeout)
-        except asyncio.TimeoutError:
-            self.pending.pop(request_id, None)
-            if request_id in self._order:
-                self._order.remove(request_id)
-            raise SessionControlError(REPLY_TIMEOUT, f"no reply within {timeout}s") from None
+        return reply
+
+    async def _cancel(self, request_id: bytes) -> None:
+        from tools.network.relaykit.connector import tag_cancel
+
+        if request_id not in self.pending:
+            return
+        self._forget(request_id)
+        self.last_activity = time.monotonic()
+        if self.usable():
+            with contextlib.suppress(FleetStreamClosed, ConnectionError):
+                await self.channel.send_message(tag_cancel(request_id))
+
+    async def exchange(self, record: bytes, timeout: float) -> dict:
+        """Send one request whose reply is one chunk, and return it decoded.
+        A reply that keeps going is not what this caller asked for: it is
+        cancelled and reported."""
+        reply = await self.stream(record)
+        raw, final = await reply.next(timeout)
+        if not final:
+            await reply.cancel()
+            raise SessionControlError(REPLY_MALFORMED, "a chunked reply to a plain request")
         return _decode_reply(raw)
 
     async def close(self, ending: str = "done") -> None:

@@ -133,6 +133,14 @@ class TunnelProtocolVersionError(ConnectionError):
 # inside the sealed message, so the relay never sees it.
 REQUEST_ID_PREFIX = b"\x00RQ1"
 REQUEST_ID_LEN = 8
+#: A reply may be a sequence of bounded tagged messages; the last one is
+#: flagged STREAM_FINAL (the ``end``). A live reply (one with no last
+#: message of its own, a subscription) ends with an explicit empty final
+#: message. ``cancel {id}`` is CANCEL_PREFIX then the id, inside the sealed
+#: message like the request id: the loop cancels that reply's task, each
+#: message in progress finishing first so framing never tears, and sends
+#: nothing more for the id (graph://9642ab99-bae T2).
+CANCEL_PREFIX = b"\x00CX1"
 #: id-tagged requests in flight on one channel. Viewer channels are opened by
 #: public link holders; before ids, the in-order loop was an implicit cap of 1.
 MAX_REQUESTS_IN_FLIGHT = 32
@@ -159,6 +167,36 @@ def tag_message(request_id: bytes, body: bytes) -> bytes:
     if len(request_id) != REQUEST_ID_LEN:
         raise ValueError("request id must be %d bytes" % REQUEST_ID_LEN)
     return REQUEST_ID_PREFIX + request_id + bytes(body)
+
+
+def split_cancel_id(message: bytes) -> bytes | None:
+    """The request id a ``cancel`` message names, or None when the message
+    is not one."""
+    head = len(CANCEL_PREFIX) + REQUEST_ID_LEN
+    if len(message) == head and message[:len(CANCEL_PREFIX)] == CANCEL_PREFIX:
+        return bytes(message[len(CANCEL_PREFIX):head])
+    return None
+
+
+def tag_cancel(request_id: bytes) -> bytes:
+    if len(request_id) != REQUEST_ID_LEN:
+        raise ValueError("request id must be %d bytes" % REQUEST_ID_LEN)
+    return CANCEL_PREFIX + request_id
+
+
+async def _uninterrupted(coro):
+    """Run *coro* to completion even when the current task is cancelled
+    meanwhile, then let the cancellation through. A message's sealed records
+    take consecutive sequence numbers and must all be sent: a cancel that
+    landed between two of them would tear the receiver's framing."""
+    inner = asyncio.ensure_future(coro)
+    try:
+        return await asyncio.shield(inner)
+    except asyncio.CancelledError:
+        if not inner.done():
+            with contextlib.suppress(BaseException):
+                await inner
+        raise
 
 
 def _channel_refusal(code: str, detail: str = "") -> bytes:
@@ -200,9 +238,10 @@ async def _response_messages(response):
 
     iterator = aiter(response)
     if getattr(response, "live", False):
-        # A live response (a subscription) has no last message: each one is
-        # sent as it is produced, and the exchange ends with the channel.
-        # Lookahead here would hold every event until the next one arrived.
+        # A live response (a subscription) has no last message of its own:
+        # each one is sent as it is produced (lookahead would hold every
+        # event until the next one arrived), and when the iterator ends an
+        # explicit empty final message is the reply's ``end``.
         try:
             async for message in iterator:
                 yield _message_bytes(message), False
@@ -210,6 +249,7 @@ async def _response_messages(response):
             close = getattr(iterator, "aclose", None)
             if close is not None:
                 await close()
+        yield b"", True
         return
     try:
         try:
@@ -294,17 +334,24 @@ async def _serve_channel_records(
     # test can shrink it); a caller serving public viewers passes its own.
     cap = MAX_REQUESTS_IN_FLIGHT if max_in_flight is None else max_in_flight
 
+    async def send_message(response_message: bytes, stream_final: bool) -> None:
+        async with send_lock:
+            for out in crypto.iter_seal_message(
+                response_message, stream_final=stream_final
+            ):
+                await send(out)
+
     async def send_response(response, request_id: bytes | None = None) -> None:
         response_messages = _response_messages(response)
         try:
             async for response_message, stream_final in response_messages:
-                if request_id is not None:
-                    response_message = tag_message(request_id, response_message)
-                async with send_lock:
-                    for out in crypto.iter_seal_message(
-                        response_message, stream_final=stream_final
-                    ):
-                        await send(out)
+                if request_id is None:
+                    await send_message(response_message, stream_final)
+                else:
+                    # A tagged reply can be cancelled by its requester: the
+                    # message under way is still sent whole.
+                    await _uninterrupted(send_message(
+                        tag_message(request_id, response_message), stream_final))
         finally:
             await response_messages.aclose()
 
@@ -322,7 +369,19 @@ async def _serve_channel_records(
                 response = _channel_refusal(REFUSAL_REQUEST_FAILED, type(exc).__name__)
             if response is None:
                 response = _channel_refusal(REFUSAL_REQUEST_UNANSWERED)
-            await send_response(response, request_id)
+            try:
+                await send_response(response, request_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # The reply broke mid-stream (its source failed; the channel
+                # itself may be gone). Its requester needs an ``end`` to
+                # know it is over: an empty final message, which a reader
+                # that announced a size sees as a short stream.
+                logger.warning("channel reply %s ended with an error: %s",
+                               request_id.hex(), type(exc).__name__, exc_info=True)
+                with contextlib.suppress(Exception):
+                    await _uninterrupted(send_message(tag_message(request_id, b""), True))
         finally:
             in_flight.pop(request_id, None)
 
@@ -349,6 +408,14 @@ async def _serve_channel_records(
                 return
             message = crypto.open_record(record)
             if message is None:
+                continue
+            cancel_id = split_cancel_id(message)
+            if cancel_id is not None:
+                # ``cancel {id}``: stop that reply. Nothing more is sent for
+                # the id; the requester dropped its state when it asked.
+                task = in_flight.get(cancel_id)
+                if task is not None:
+                    task.cancel()
                 continue
             request_id, body = split_request_id(message)
             if request_id is not None:
