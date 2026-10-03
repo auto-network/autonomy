@@ -391,6 +391,7 @@ def test_codex_no_uuid_event_msg_resolves_via_shared_id_rule(
     from tools.dashboard.session_harness import codex_message_id
     live_id = codex_message_id(
         {"type": "user_message", "message": raw_text}, "user", raw_text,
+        "2026-05-03T08:57:01Z",
     )
     assert live_id is not None
     assert live_id.startswith("codex-user:")

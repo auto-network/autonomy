@@ -195,7 +195,7 @@ def test_reads_codex_user_turns_with_synthetic_message_id(tmp_path):
     # 0.146/0.148+ rollouts also carry never produces a (duplicate) turn.
     from tools.dashboard.session_harness import codex_message_id
     text = "codex user message here"
-    expected_id = codex_message_id({}, "user", text)
+    expected_id = codex_message_id({}, "user", text, "2026-08-10T12:00:00Z")
     assert expected_id and expected_id.startswith("codex-user:")
     # Filename ``rollout-*`` makes resolve_harness_for_path pick the Codex adapter.
     jsonl = _write_jsonl(tmp_path / "sessions" / "u" / "rollout-2026.jsonl", [
@@ -219,7 +219,7 @@ def test_reads_current_codex_response_item_user_turns_from_bounded_tail(tmp_path
     from tools.dashboard.session_harness import codex_message_id
 
     text = "Plese fix the correction overlay"
-    expected_id = codex_message_id({}, "user", text)
+    expected_id = codex_message_id({}, "user", text, "2026-08-16T12:01:00Z")
     lines = [{
         "type": "session_meta",
         "payload": {"cli_version": "0.148.0", "originator": "codex-tui"},

@@ -230,6 +230,7 @@ def test_ingest_all_claude_code_discovers_nested_codex_rollouts(
     monkeypatch.setattr("tools.graph.ingest.DATA_ROOT", tmp_path / "data")
     monkeypatch.setattr("tools.graph.ingest._REPO_ROOT", tmp_path)
     monkeypatch.setattr("tools.graph.ingest.Path.home", lambda: tmp_path / "home")
+    monkeypatch.setattr("tools.graph.ingest._host_home_mount", lambda: None)
 
     results = ingest_all_claude_code(graph_db)
 
@@ -348,3 +349,37 @@ class TestCodexRenumberingDedupRegression:
             "SELECT content FROM derivations WHERE source_id = ?", (source_id,),
         ).fetchall()
         assert [r["content"] for r in deriv_rows].count("Old turn two") == 1
+
+
+def test_a_repeated_user_message_is_its_own_turn_and_a_double_write_is_one(
+    graph_db, tmp_path
+):
+    """The same text sent again a minute later is a new turn; the CLI's
+    double-write of one event 5 ms apart is one. Before the codex id carried
+    the second, the repeat collided with the first under
+    UNIQUE(source_id, message_id), its thought was dropped, and the next
+    assistant turn failed its foreign key, stopping the whole ingest."""
+    jsonl = tmp_path / "sessions" / "2026" / "10" / "03" / "rollout-repeat.jsonl"
+    _write_jsonl(jsonl, [
+        _session_meta("2026-10-03T01:00:00Z"),
+        _user_message("continue please", "2026-10-03T01:00:01.000Z"),
+        _user_message("continue please", "2026-10-03T01:00:01.005Z"),
+        _agent_message("first answer", "2026-10-03T01:00:02Z"),
+        _user_message("continue please", "2026-10-03T01:01:01Z"),
+        _agent_message("second answer", "2026-10-03T01:01:02Z"),
+    ])
+
+    result = ingest_session_file(graph_db, jsonl)
+
+    assert result["status"] == "ingested"
+    users = graph_db.conn.execute(
+        "SELECT content FROM thoughts WHERE source_id = ? AND role = 'user'",
+        (result["source_id"],),
+    ).fetchall()
+    assert [r[0] for r in users] == ["continue please", "continue please"]
+    answers = graph_db.conn.execute(
+        "SELECT d.content FROM derivations d JOIN thoughts t ON t.id = d.thought_id"
+        " WHERE d.source_id = ? ORDER BY d.turn_number",
+        (result["source_id"],),
+    ).fetchall()
+    assert [r[0] for r in answers] == ["first answer", "second answer"]

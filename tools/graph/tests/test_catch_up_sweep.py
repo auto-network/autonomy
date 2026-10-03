@@ -53,6 +53,9 @@ def sweep_env(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.graph.ingest._REPO_ROOT", tmp_path)
     # No host ~/.claude/projects in the sweep for these tests.
     monkeypatch.setattr("tools.graph.ingest.Path.home", lambda: tmp_path / "no-home")
+    # Nor the operator's home mount: on a host terminal /host-home exists and
+    # the sweep would ingest the operator's real transcripts.
+    monkeypatch.setattr("tools.graph.ingest._host_home_mount", lambda: None)
 
     # Route dashboard.db (manifest) to a scratch file too.
     monkeypatch.setenv("DASHBOARD_DB", str(tmp_path / "dashboard.db"))

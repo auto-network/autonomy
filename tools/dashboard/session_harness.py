@@ -1882,7 +1882,9 @@ def _extract_codex_text_blocks(blocks: Any) -> str:
     return "".join(parts).strip()
 
 
-def codex_message_id(payload: dict, role: str, text: str) -> str | None:
+def codex_message_id(
+    payload: dict, role: str, text: str, timestamp: str | None = None,
+) -> str | None:
     """Return the deterministic ``message_id`` for a Codex event_msg chat turn.
 
     Live Codex ``event_msg`` user/agent rows do not always carry a raw UUID,
@@ -1892,6 +1894,14 @@ def codex_message_id(payload: dict, role: str, text: str) -> str | None:
     ``codex-<role>:<sha1[:16]>`` so live overlay state, ingest, and graph
     persistence all agree on the same key.
 
+    The hash covers the event's timestamp truncated to the second, as
+    :func:`claude_queue_message_id` covers its timestamp: the same message
+    sent again later is a new turn. The Codex CLI also writes some events
+    twice 2-17 ms apart; those land in the same second and keep one identity,
+    which is what lets ingest drop the copy. Measured on Home's 364 rollouts
+    (2026-10-03): 32 double-writes, all within one second; 147 repeats, all
+    at least a second apart. Without a timestamp the rule is text only.
+
     Returns ``None`` when neither a raw UUID nor any text is available — a
     Codex turn with no body cannot have a stable identity.
     """
@@ -1899,7 +1909,10 @@ def codex_message_id(payload: dict, role: str, text: str) -> str | None:
     if isinstance(raw_uuid, str) and raw_uuid:
         return raw_uuid
     if text:
-        digest = hashlib.sha1(f"{role}\n{text}".encode("utf-8")).hexdigest()[:16]
+        second = timestamp[:19] if isinstance(timestamp, str) else ""
+        digest = hashlib.sha1(
+            f"{role}\n{second}\n{text}".encode("utf-8")
+        ).hexdigest()[:16]
         return f"codex-{role}:{digest}"
     return None
 
@@ -1925,7 +1938,9 @@ def claude_queue_message_id(payload: dict, text: str, timestamp: str) -> str | N
     return f"claude-queued-user:{digest}"
 
 
-def _codex_event_message_identity(payload: dict, role: str, text: str) -> dict[str, str]:
+def _codex_event_message_identity(
+    payload: dict, role: str, text: str, timestamp: str | None = None,
+) -> dict[str, str]:
     """Return stable tile identity for Codex event_msg chat turns.
 
     Wraps :func:`codex_message_id` and adds ``parent_uuid`` when the payload
@@ -1933,7 +1948,7 @@ def _codex_event_message_identity(payload: dict, role: str, text: str) -> dict[s
     does not need it.
     """
     identity: dict[str, str] = {}
-    msg_id = codex_message_id(payload, role, text)
+    msg_id = codex_message_id(payload, role, text, timestamp)
     if msg_id:
         identity["message_id"] = msg_id
     parent = payload.get("parentUuid") or payload.get("parent_uuid")
@@ -2699,13 +2714,13 @@ def _codex_response_item_chat_entry(
             "role": "assistant",
             "content": text,
             "timestamp": timestamp,
-            **_codex_event_message_identity(payload, "assistant", text),
+            **_codex_event_message_identity(payload, "assistant", text, timestamp),
         }
 
     if _is_codex_preamble(text):
         return None
 
-    identity = _codex_event_message_identity(payload, "user", text)
+    identity = _codex_event_message_identity(payload, "user", text, timestamp)
     text = _unwrap_pasted_content(text)
     ct = _classify_crosstalk(text)
     if ct:

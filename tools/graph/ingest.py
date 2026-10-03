@@ -498,7 +498,7 @@ def _is_codex_noise_text(text: str) -> bool:
 
 
 def _codex_message_id(
-    payload: dict, entry: dict, role: str, text: str,
+    payload: dict, entry: dict, role: str, text: str, timestamp: str | None = None,
 ) -> str | None:
     """Return the deterministic message_id for a Codex event_msg chat turn.
 
@@ -514,7 +514,7 @@ def _codex_message_id(
     """
     from tools.dashboard.session_harness import codex_message_id
 
-    msg_id = codex_message_id(payload, role, text)
+    msg_id = codex_message_id(payload, role, text, timestamp)
     if msg_id:
         return msg_id
     outer = entry.get("uuid") if isinstance(entry, dict) else None
@@ -590,7 +590,7 @@ class CodexTurnExtractor:
         text = _clean_codex_text(text)
         if len(text) < 5:
             return None
-        message_id = _codex_message_id(payload, entry, role, text)
+        message_id = _codex_message_id(payload, entry, role, text, ts)
         stored_role = role
         if role == "user" and _is_codex_noise_text(text):
             stored_role = "injected"
@@ -1732,7 +1732,11 @@ def _ingest_text_session(
     derivations = []
     last_thought_id = None
 
-    for turn in turns:
+    # The same in-batch dedup the incremental path runs: a source's first
+    # batch can hold the CLI's double-write of one event, and inserting both
+    # would drop the copy under UNIQUE(source_id, message_id) and leave the
+    # next assistant turn pointing at a thought that was never stored.
+    for turn in _dedup_new_turns(db, source.id, turns, 0):
         if turn["role"] == "compact_summary":
             t_meta = {"timestamp": turn.get("timestamp", "")}
             if turn.get("compact_metadata"):

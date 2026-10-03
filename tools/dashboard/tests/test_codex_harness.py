@@ -936,7 +936,8 @@ def test_parse_codex_chat_renders_from_response_item_only():
     assert user["content"] == "Hello"
     assert user["timestamp"] == TS
     assert user["message_id"] == (
-        "codex-user:" + hashlib.sha1("user\nHello".encode("utf-8")).hexdigest()[:16]
+        "codex-user:"
+        + hashlib.sha1(f"user\n{TS[:19]}\nHello".encode("utf-8")).hexdigest()[:16]
     )
 
     assert assistant["type"] == "assistant_text"
@@ -945,7 +946,9 @@ def test_parse_codex_chat_renders_from_response_item_only():
     assert assistant["timestamp"] == TS
     assert assistant["message_id"] == (
         "codex-assistant:"
-        + hashlib.sha1("assistant\nHello. How can I help?".encode("utf-8")).hexdigest()[:16]
+        + hashlib.sha1(
+            f"assistant\n{TS[:19]}\nHello. How can I help?".encode("utf-8")
+        ).hexdigest()[:16]
     )
 
     # The 0.148+ duplicate shapes produce NO tile — one message, one tile.

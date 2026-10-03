@@ -315,7 +315,9 @@ class TestCodexExtractorGoldenCorpus:
         turns = _feed_all(CodexTurnExtractor(), CODEX_CORPUS)
         injected = next(t for t in turns if t["role"] == "injected")
         from tools.dashboard.session_harness import codex_message_id
-        expected = codex_message_id({}, "user", injected["content"])
+        expected = codex_message_id(
+            {}, "user", injected["content"], injected.get("timestamp"),
+        )
         assert injected["message_id"] == expected
 
     def test_token_count_is_absolute_not_additive(self):
