@@ -5826,6 +5826,58 @@ def cmd_session_auth(args):
         resp = urllib.request.urlopen(req, timeout=90, context=ctx)
         return json.loads(resp.read()), resp
 
+    jar_path = Path(args.jar)
+
+    def _inject(cookie_value: str) -> None:
+        if not args.browser:
+            return
+        set_cmd = ["agent-browser", "cookies", "set", _SESSION_AUTH_COOKIE,
+                   cookie_value, "--url", f"{api_base}/", "--httpOnly",
+                   "--secure", "--sameSite", "Lax"]
+        injected = subprocess.run(set_cmd, capture_output=True, text=True)
+        if injected.returncode != 0:
+            print("session-auth: cookie jar written, but agent-browser "
+                  f"injection failed: {injected.stderr.strip()}",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    def _receipt(expires_at: int, how: str) -> None:
+        remaining = max(0, expires_at - int(time.time()))
+        print(f"  ✓ dashboard session {how} {session_name} "
+              f"(scope dashboard:ui, expires in {remaining // 60}m)")
+        print(f"  cookie jar: {jar_path} (curl -b {jar_path})")
+        if args.browser:
+            print("  agent-browser: cookie injected into the active browser session")
+        else:
+            print("  for agent-browser: re-run with --browser, or set cookie "
+                  f"{_SESSION_AUTH_COOKIE} from the jar")
+
+    # The operator approves a session once: while the jar's cookie is still
+    # a live session on the dashboard, hand it out again instead of asking.
+    try:
+        jar_cookie = next(
+            line.rstrip("\n").split("\t")[6]
+            for line in jar_path.read_text().splitlines()
+            if line.split("\t")[5:6] == [_SESSION_AUTH_COOKIE]
+        )
+    except (OSError, StopIteration, IndexError):
+        jar_cookie = None
+    if jar_cookie:
+        req = urllib.request.Request(
+            f"{api_base}/api/identity/session",
+            headers={"Authorization": f"Bearer {token}",
+                     "Cookie": f"{_SESSION_AUTH_COOKIE}={jar_cookie}"},
+        )
+        try:
+            live = json.loads(
+                urllib.request.urlopen(req, timeout=30, context=ctx).read())
+        except (urllib.error.URLError, ValueError):
+            live = {}
+        if live.get("unlocked") and live.get("expires_at"):
+            _inject(jar_cookie)
+            _receipt(int(live["expires_at"]), "still granted to")
+            return
+
     keypair = KeyPair.generate()
     try:
         created, _ = _call("/api/approvals", {
@@ -5910,33 +5962,14 @@ def cmd_session_auth(args):
     expires_at = int(redeemed.get("expires_at") or 0)
     host = api_base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
 
-    jar_path = Path(args.jar)
     jar_line = (f"#HttpOnly_{host}\tFALSE\t/\tTRUE\t{expires_at}"
                 f"\t{_SESSION_AUTH_COOKIE}\t{cookie_value}\n")
     fd = os.open(jar_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write("# Netscape HTTP Cookie File\n" + jar_line)
 
-    if args.browser:
-        set_cmd = ["agent-browser", "cookies", "set", _SESSION_AUTH_COOKIE,
-                   cookie_value, "--url", f"{api_base}/", "--httpOnly",
-                   "--secure", "--sameSite", "Lax"]
-        injected = subprocess.run(set_cmd, capture_output=True, text=True)
-        if injected.returncode != 0:
-            print("session-auth: cookie jar written, but agent-browser "
-                  f"injection failed: {injected.stderr.strip()}",
-                  file=sys.stderr)
-            sys.exit(1)
-
-    remaining = max(0, expires_at - int(time.time()))
-    print(f"  ✓ dashboard session granted to {session_name} "
-          f"(scope dashboard:ui, expires in {remaining // 60}m)")
-    print(f"  cookie jar: {jar_path} (curl -b {jar_path})")
-    if args.browser:
-        print("  agent-browser: cookie injected into the active browser session")
-    else:
-        print("  for agent-browser: re-run with --browser, or set cookie "
-              f"{_SESSION_AUTH_COOKIE} from the jar")
+    _inject(cookie_value)
+    _receipt(expires_at, "granted to")
 
 
 _SHARE_OUTPUT_ROOT = Path("/workspace/output")
