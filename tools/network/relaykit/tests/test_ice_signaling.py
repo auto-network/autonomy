@@ -70,10 +70,21 @@ def test_duplicate_json_key_is_refused_before_interpretation():
                       ATTEMPT.encode() + b'"}')
 
 
-def test_pathologically_deep_json_is_a_typed_signaling_error():
-    raw = (b'{"v":' + b'[' * 10_000 + b'0' + b']' * 10_000 + b'}')
-    with pytest.raises(IceSignalingError, match="valid JSON"):
-        parse_message(raw)
+@pytest.mark.parametrize("depth", [10_000, 40_000, 63_000])
+def test_pathologically_deep_json_never_escapes_as_an_untyped_error(depth):
+    """How deep json.loads goes before refusing is the interpreter's call:
+    3.12 counts recursion (~1,000-10,000 levels), 3.14 measures the C stack
+    (tens of thousands within the byte limit). What this parser owns is that
+    the refusal, when it comes, is an IceSignalingError and never a bare
+    RecursionError; a message that parses is still checked downstream."""
+    raw = (b'{"v":' + b'[' * depth + b'0' + b']' * depth + b'}')
+    assert len(raw) <= MAX_ATTEMPT_SIGNAL_BYTES
+    try:
+        value, _size = parse_message(raw)
+    except IceSignalingError as exc:
+        assert "valid JSON" in str(exc)
+    else:
+        assert isinstance(value, dict)
 
 
 def test_public_direct_candidates_allow_mdns_reflexive_and_relay():
