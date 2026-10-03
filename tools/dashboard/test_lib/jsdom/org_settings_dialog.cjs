@@ -194,8 +194,10 @@ async function main() {
         looked_in: "the launcher environment", needed_by: ["Alpha", "Beta"],
       }],
       workspaces: [
-        { id: "alpha", name: "Alpha", ready: false, blocking: [], unanswerable: [{}] },
-        { id: "beta", name: "Beta", ready: false, blocking: [{}], unanswerable: [] },
+        // `unresolved` is the server's count of distinct things (e30e0b06f);
+        // the chip shows it rather than summing raw findings.
+        { id: "alpha", name: "Alpha", ready: false, blocking: [], unanswerable: [{}], unresolved: 1 },
+        { id: "beta", name: "Beta", ready: false, blocking: [{}], unanswerable: [], unresolved: 1 },
       ],
     }),
   });

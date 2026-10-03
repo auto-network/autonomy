@@ -318,6 +318,12 @@ def test_client(mock_fixture, resume_env, monkeypatch):
         original_init(self, db_path=resume_env["graph_db"], **kwargs)
 
     monkeypatch.setattr(graph_db_mod.GraphDB, "__init__", patched_init)
+    # Repointing GraphDB this way is invisible to workspace_settings' cache
+    # key (orgs root + GRAPH_DB), so a workspace snapshot cached by an earlier
+    # test on the worker (sessions listing, for one) would hide this
+    # fixture's "autonomy" workspace and resume as a plain container.
+    from agents import workspace_settings
+    workspace_settings.invalidate_caches()
 
     # That shim routes every org to one file, so a Setting read through it has
     # no originating org and its workspace resolves graph_project="" -- which
@@ -503,3 +509,5 @@ def test_client(mock_fixture, resume_env, monkeypatch):
         client._queued_jobs = _queued_jobs
         client.run_lifecycle_jobs = _run_lifecycle_jobs
         yield client
+    # Nor may this fixture's snapshot outlive it.
+    workspace_settings.invalidate_caches()
