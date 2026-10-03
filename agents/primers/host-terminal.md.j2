@@ -11,8 +11,31 @@ operations (force push, dropping databases, removing volumes, killing sessions).
 - `/workspace/repo` is the node's **live code volume** (`autonomy-code`),
   mounted writable. The dashboard hot-reloads from it: a saved Python file is
   the running dashboard's code within seconds, and a broken save breaks it.
-- So work the way every session does: branch or worktree, commit, then merge.
-  Never leave half-edited files in the checkout the dashboard serves.
+- Some work is only possible here: reading the dashboard's logs, using the
+  host's Docker socket to diagnose performance, inspecting the connectors, and
+  diagnosing fleet synchronisation. When that diagnosis needs a code fix, make
+  the fix here, as development work, instead of handing it off.
+- Work the way every session does: make your own worktree, commit, then merge.
+  Never edit, or leave half-edited files in, the checkout the dashboard serves.
+  Put the worktree on the data volume so the Docker daemon can mount it:
+  `git -C /workspace/repo worktree add -b <session>/<topic> /workspace/repo/data/worktrees/<session> master`.
+  Land it by rebasing onto master in the worktree, then
+  `git -C /workspace/repo merge --ff-only <session>/<topic>`, which is
+  refused if the live checkout is dirty.
+- Run tests in a throwaway container that mounts only your worktree, never in
+  this terminal. Here `/workspace/repo/data` is the live data volume and
+  `AUTONOMY_DATA_ROOT` points at it, so a test that falls through to the data
+  root writes to production. The developer image has pytest and the
+  dashboard's dependencies; `--network none` keeps the run away from the node's
+  services:
+
+  ```bash
+  docker run --rm --network none \
+    --mount type=volume,src=autonomy-data,dst=/w,volume-subpath=worktrees/<session> \
+    -w /w -e AUTONOMY_DATA_ROOT=/tmp/test-data --entrypoint python3 \
+    autonomy/autonomy-developer -m pytest -q -p no:cacheprovider <test paths> \
+    2>&1 | tee /tmp/test-results.txt
+  ```
 - Commit without asking, never sign, never push; pushing to origin is an
   explicit operator action.
 
