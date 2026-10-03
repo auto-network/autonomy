@@ -431,20 +431,27 @@ def test_a_one_row_per_key_vaulted_set_is_replaced_not_appended(
 def test_a_reader_with_no_vault_gets_a_refusal_and_never_the_value(
     graph_db_env, vault_schema, vault
 ):
-    """Resolution up to the merge step is unchanged and metadata-only: it
-    carries what the row holds as far as step six. There the read path
-    (auto-6364n) refuses, because this process registered a sealer and no key
-    holder — and a refusal is neither the plaintext nor the locator."""
+    """A whole-set read of a vaulted set is metadata only (655fcbe34): no
+    payload and no unwrap attempt. A read that names the key reaches step six
+    of the read path (auto-6364n), which refuses because this process
+    registered a sealer and no key holder. Neither is the plaintext nor the
+    locator."""
     ops.add_setting(
         "autonomy.test.vaulted", 1, "default", {"access_token": SECRET},
         org=ops.CALLER_ORG,
     )
-    resolved = settings_ops.read_set("autonomy.test.vaulted", org=None).to_dict()
-    member = resolved["default"]
-    assert member.payload is None
-    assert member.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
-    assert not is_vault_locator(member.payload)
-    assert SECRET not in json.dumps(member.to_dict())
+    listed = settings_ops.read_set("autonomy.test.vaulted", org=None).to_dict()["default"]
+    assert listed.payload is None
+    assert listed.vault_error is None
+    assert SECRET not in json.dumps(listed.to_dict())
+
+    named = settings_ops.read_set(
+        "autonomy.test.vaulted", org=None, key_equals="default",
+    ).to_dict()["default"]
+    assert named.payload is None
+    assert named.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
+    assert not is_vault_locator(named.payload)
+    assert SECRET not in json.dumps(named.to_dict())
 
 
 # ── ordinary settings are untouched ───────────────────────────────────────
