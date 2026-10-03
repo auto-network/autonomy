@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -469,3 +470,26 @@ def test_signing_accepts_a_free_threaded_lock(release_env):
                    text=True, check=True, capture_output=True)
     calls = log.read_text(encoding="utf-8").splitlines()
     assert sum(line.startswith("cosign sign ") for line in calls) == 6
+
+
+def test_free_threaded_base_pins_debian_uv_and_cpython():
+    """The free-threaded base is a release input (auto-d8jf5.2, pre-push review
+    finding 2): Debian by digest, uv as a release tarball checked with
+    sha256sum -c (a mismatch fails the build), never its install script, and
+    an exact CPython 3.14.x that the build asserts it got."""
+    dockerfile = (ROOT / "deploy" / "Dockerfile.python-freethreaded").read_text(encoding="utf-8")
+    instructions = "\n".join(line for line in dockerfile.splitlines() if not line.lstrip().startswith("#"))
+    assert re.search(r"^ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:[0-9a-f]{64}$", instructions, re.M)
+    assert re.search(r"^FROM \$\{DEBIAN_IMAGE\}$", instructions, re.M)
+    assert re.search(r"^ARG UV_VERSION=\d+\.\d+\.\d+$", instructions, re.M)
+    for arch in ("AMD64", "ARM64"):
+        assert re.search(rf"^ARG UV_SHA256_{arch}=[0-9a-f]{{64}}$", instructions, re.M), arch
+    assert 'echo "$sha  /tmp/uv.tgz" | sha256sum -c -' in instructions
+    # The checksum is verified before the tarball is unpacked.
+    assert instructions.index("sha256sum -c") < instructions.index("tar -xzf /tmp/uv.tgz")
+    assert "install.sh" not in instructions
+    assert not re.search(r"\|\s*(?:ba)?sh\b", instructions), "no script is piped into a shell"
+    assert re.search(r"^ARG PYTHON_VERSION=3\.14\.\d+t$", instructions, re.M)
+    assert 'uv python install "$PYTHON_VERSION"' in instructions
+    assert "assert not sys._is_gil_enabled()" in instructions
+    assert "sys.version_info[:3] ==" in instructions

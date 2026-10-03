@@ -85,6 +85,10 @@ def test_host_state_is_still_kept_out():
                  "agents/images/other/blob.tar", ".venv/bin/python",
                  "tools/dashboard/__pycache__/server.cpython-312.pyc", "agents/bin/claude"):
         assert _excluded(path, patterns), path
+    # Gitignored secrets a working checkout may hold (pre-push review finding 9).
+    for path in ("deploy/cosign.key", "agents/.restic.pw", "agents/backup.env"):
+        assert _excluded(path, patterns), path
+    assert not _excluded("deploy/cosign.pub", patterns)
     for path in ("data/uploads/.gitkeep", "agents/images/dashboard/Dockerfile",
                  ".gitignore", ".dockerignore", ".git/HEAD"):
         assert not _excluded(path, patterns), path

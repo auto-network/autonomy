@@ -35,6 +35,13 @@ agents/images
 !agents/images/dashboard/Dockerfile
 tools/dashboard/tailwindcss
 
+# Gitignored secrets that can sit in a working checkout. A release builds from
+# a clean clone and never sees them; a local `docker build .` from the checkout
+# would otherwise copy them into the image.
+deploy/cosign.key
+agents/.restic.pw
+agents/backup.env
+
 # Scratch
 *.log
 /tmp

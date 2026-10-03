@@ -434,7 +434,11 @@ fresh), then builds the node with `BASE_IMAGE=autonomy-python:3.14t-slim` and
 `AUTONOMY_BASE_IMAGE` selects the same mode; any other base image with
 `AUTONOMY_PYTHON=3.14t` is refused. The session images and the Service
 gateway are unchanged. The base is only a build input: it is neither pushed
-nor listed in the lock.
+nor listed in the lock. It pins everything it fetches: `debian:trixie-slim`
+by digest, uv as a release tarball checked with `sha256sum -c` (a mismatch
+fails the build), and the exact CPython 3.14.x, which uv in turn verifies
+against its embedded checksum. Bump those `ARG`s together, deliberately, as
+for any base-image republish.
 
 ```bash
 AUTONOMY_PYTHON=3.14t \

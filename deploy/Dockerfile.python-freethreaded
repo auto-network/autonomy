@@ -1,19 +1,43 @@
 # Free-threaded CPython 3.14 base image for deploy/Dockerfile:
 #   docker build -f deploy/Dockerfile.python-freethreaded -t autonomy-python:3.14t-slim .
 #   docker build --build-arg BASE_IMAGE=autonomy-python:3.14t-slim -f deploy/Dockerfile .
+# deploy/publish-images.sh builds it this way for AUTONOMY_PYTHON=3.14t.
 # Docker Hub publishes no free-threaded python image, so this installs uv's
 # CPython 3.14 free-threaded build and exposes it as python3/python/pip, the
 # names deploy/Dockerfile and its entrypoint use. uv marks its Pythons
 # EXTERNALLY-MANAGED; here it is the image's system Python, so the marker goes.
-FROM debian:trixie-slim
+#
+# Everything is pinned, because this is a release base: the Debian image by
+# digest (the multi-arch index of debian:trixie-slim), uv as a release tarball
+# checked with sha256sum -c (never its install script), and the exact CPython
+# version. uv verifies the CPython download against the sha256 it embeds, so
+# pinning uv pins that hash too. Bump all three deliberately, together with
+# the checksums; deploy/tests/test_image_release.py fails if a pin is dropped.
+ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+FROM ${DEBIAN_IMAGE}
+ARG UV_VERSION=0.12.23
+ARG UV_SHA256_AMD64=9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6
+ARG UV_SHA256_ARM64=6524bd338177ed50d035d39354e12545e993bbeba2ecbddf0480c5b3a81d313f
+ARG UV_URL_BASE=https://github.com/astral-sh/uv/releases/download
+ARG PYTHON_VERSION=3.14.8t
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 UV_PYTHON_INSTALL_DIR=/opt/python
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
-    && uv python install 3.14t \
-    && py="$(uv python find 3.14t)" \
-    && rm -f "$(dirname "$py")"/../lib/python3.14t/EXTERNALLY-MANAGED \
-    && "$py" -m ensurepip \
-    && ln -s "$py" /usr/local/bin/python3 && ln -s "$py" /usr/local/bin/python \
-    && printf '#!/bin/sh\nexec %s -m pip "$@"\n' "$py" > /usr/local/bin/pip && chmod +x /usr/local/bin/pip \
-    && python3 -c "import sys; assert not sys._is_gil_enabled(); print(sys.version)"
+RUN set -e; \
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) triple=x86_64-unknown-linux-gnu; sha="$UV_SHA256_AMD64" ;; \
+        arm64) triple=aarch64-unknown-linux-gnu; sha="$UV_SHA256_ARM64" ;; \
+        *) echo "no pinned uv for $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/uv.tgz "$UV_URL_BASE/$UV_VERSION/uv-$triple.tar.gz"; \
+    echo "$sha  /tmp/uv.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 "uv-$triple/uv"; \
+    rm /tmp/uv.tgz; \
+    uv python install "$PYTHON_VERSION"; \
+    py="$(uv python find "$PYTHON_VERSION")"; \
+    rm -f "$(dirname "$py")"/../lib/python3.14t/EXTERNALLY-MANAGED; \
+    "$py" -m ensurepip; \
+    ln -s "$py" /usr/local/bin/python3 && ln -s "$py" /usr/local/bin/python; \
+    printf '#!/bin/sh\nexec %s -m pip "$@"\n' "$py" > /usr/local/bin/pip && chmod +x /usr/local/bin/pip; \
+    python3 -c "import sys; assert not sys._is_gil_enabled(); assert sys.version_info[:3] == tuple(int(p) for p in '${PYTHON_VERSION%t}'.split('.')), sys.version; print(sys.version)"
