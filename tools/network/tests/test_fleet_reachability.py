@@ -282,6 +282,18 @@ def test_background_refresh_never_blocks_the_caller(env):
     assert client.count("/reachability/query") == 2
 
 
+def test_nothing_is_due_right_after_a_refresh_that_announced(env):
+    """The change key _due compares must be the one the refresh stores: a
+    two-element copy never equalled the three-element announce record
+    (dee1d2989), so every peers() call looked due and started a refresh,
+    and a refresh in flight then swallowed one that really was due."""
+    tc, _root = env
+    cache, t, _a, _b, _bc = _cache(env, _CountingClient(tc))
+    cache.peers()
+    assert cache._announced is not None
+    assert not cache._due(t[0])
+
+
 def test_announce_only_on_change_or_keepalive_and_lookup_only_when_needed(env):
     tc, _root = env
     client = _CountingClient(tc)

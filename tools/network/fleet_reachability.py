@@ -366,7 +366,7 @@ class ReachabilityCache:
         self._background = background
         self._min_lookup_spacing = min_lookup_spacing
         #: What was last announced successfully: (addrs, relay_url).
-        self._announced: Optional[tuple[tuple, Optional[str]]] = None
+        self._announced: Optional[tuple] = None
         #: The last descriptor published and the content it described, so a
         #: keepalive re-announces it instead of minting a new generation for
         #: reachability that has not moved.
@@ -539,6 +539,17 @@ class ReachabilityCache:
             return None
         return value if isinstance(value, str) and value else None
 
+    def _wanted_announce(self) -> tuple:
+        """``(wanted, advertise, relay_url, locator)``: what this machine would
+        announce now. ``wanted`` is the change-detection key stored as
+        ``_announced``; ``_due`` and ``_refresh_inner`` compare against the same
+        key (a two-element copy in ``_due`` never equalled the three-element
+        record, so every call looked due)."""
+        advertise = self.advertised_addrs()
+        relay_url = self.announced_relay_url()
+        locator = self.current_relay_locator()
+        return (tuple(advertise), relay_url, _locator_key(locator)), advertise, relay_url, locator
+
     def _due(self, now: float) -> bool:
         """Whether anything needs the registry now (see the constructor)."""
         if self._last is None:
@@ -548,9 +559,7 @@ class ReachabilityCache:
         announced = self._announced
         if self.last_announce is not None and (now - self.last_announce[0]) >= self._ttl / 2:
             return True
-        if announced is not None and announced != (
-            tuple(self.advertised_addrs()), self.announced_relay_url()
-        ):
+        if announced is not None and announced != self._wanted_announce()[0]:
             return True
         last_lookup = self._last_lookup
         spaced = last_lookup is None or (now - last_lookup) >= self._min_lookup_spacing
@@ -617,10 +626,7 @@ class ReachabilityCache:
         self._state("cred", "active", "fleet reachability active: registry=%s org=%s",
                     registry_url, org_uuid[:8])
 
-        advertise = self.advertised_addrs()
-        relay_url = self.announced_relay_url()
-        locator = self.current_relay_locator()
-        wanted = (tuple(advertise), relay_url, _locator_key(locator))
+        wanted, advertise, relay_url, locator = self._wanted_announce()
         descriptor = self._descriptor_for(key, advertise, wanted, locator)
         keepalive_due = (
             self.last_announce is None
