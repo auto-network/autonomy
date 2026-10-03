@@ -5873,7 +5873,9 @@ def cmd_session_auth(args):
                 urllib.request.urlopen(req, timeout=30, context=ctx).read())
         except (urllib.error.URLError, ValueError):
             live = {}
-        if live.get("unlocked") and live.get("expires_at"):
+        # A session about to end would die mid-task: ask for a fresh one.
+        if (live.get("unlocked")
+                and int(live.get("expires_at") or 0) - time.time() > 300):
             _inject(jar_cookie)
             _receipt(int(live["expires_at"]), "still granted to")
             return
