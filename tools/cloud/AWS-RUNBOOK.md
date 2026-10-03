@@ -42,6 +42,22 @@ a new machine from the baseline is about two minutes away. Before reporting
 anything, list running instances and terminate every one not in use (operator
 rule, 2026-09-26).
 
+**How rule 0 is enforced: every instance terminates itself 24 hours after
+boot.** The AWS peer of 2026-09-30 was left running for three and a half days
+(archived as `snap-07762f637b43edae1`), so no launch relies on someone
+remembering. Launch every instance with both of these:
+
+```bash
+--instance-initiated-shutdown-behavior terminate \
+--user-data '<powershell>shutdown /s /t 86400</powershell>'
+```
+
+A shutdown from inside the machine then terminates it instead of stopping it
+(a stopped instance still bills its EBS volume). To keep a machine longer on
+purpose, run `shutdown /a` and then a new `shutdown /s /t <seconds>` through
+`tools/cloud/win-run`, and say why in the run's record. A stopped instance is
+not a parked instance: snapshot what must be kept, then terminate.
+
 1. Tag everything created: `autonomy:purpose=install-test`, `autonomy:session=<tmux name>`.
 2. Tear down what a run created before the run is reported (instances, volumes,
    snapshots that are not a named baseline, security groups, key pairs).
@@ -140,7 +156,9 @@ the final status.
 
 ### Each run
 
-Launch from the baseline, then as `tester` (`win-run-user`): install Ubuntu
+Launch from the baseline with the self-terminate guard from rule 0
+(`--instance-initiated-shutdown-behavior terminate` and the 24-hour
+`shutdown /s /t 86400` user data), then as `tester` (`win-run-user`): install Ubuntu
 24.04 under WSL, copy `deploy/install-published.sh` and a signed lock onto the
 machine, and run the installer as root inside WSL with `--install-docker
 --yes`. Check `/api/ping` from the Windows side with `curl.exe`, take Edge
