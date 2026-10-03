@@ -63,6 +63,7 @@ hand-typed dotted strings; substrate-level prefix matching covers
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -1712,7 +1713,11 @@ class SettingSchema:
         cls._variants = {}
         inherited = _merged_inherited_field_metadata(cls)
         explicit = dict(cls.__dict__.get("_field_metadata", {}) or {})
-        anns = cls.__dict__.get("__annotations__")
+        # The class's OWN annotations, through the accessor: from Python 3.14
+        # (PEP 649/749) a module without ``from __future__ import annotations``
+        # builds them lazily, so ``cls.__dict__`` holds no ``__annotations__``
+        # and reading it there silently dropped every field of the schema.
+        anns = inspect.get_annotations(cls)
         if not anns:
             if inherited and explicit:
                 merged = dict(inherited)
