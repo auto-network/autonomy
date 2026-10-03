@@ -1034,8 +1034,9 @@ def _generate_codex_config(base_config: Path, trusted: list[str], run_dir: Path)
     ``--dangerously-bypass-approvals-and-sandbox``: Codex 0.157 restarts its
     app-server daemon to self-update about five minutes into a session, and
     the restarted daemon kept only what the config says, so the session
-    began asking for approval. ``features.in_app_updates = false`` stops that
-    self-update; the image's pinned version is the session's version.
+    began asking for approval. (``features.in_app_updates = false`` does not
+    stop that update: verified on auto-1003-143728, which updated to 0.160.0
+    after 5 min 7 s and still ran commands unprompted with this config.)
     """
     try:
         text = base_config.read_text() if base_config.exists() else ""
@@ -1048,11 +1049,6 @@ def _generate_codex_config(base_config: Path, trusted: list[str], run_dir: Path)
         ]
         if top:
             text = "\n".join(top) + "\n" + text
-        if not re.search(r"(?m)^\s*in_app_updates\s*=", text):
-            if re.search(r"(?m)^\[features\]\s*$", text):
-                text = re.sub(r"(?m)^\[features\]\s*$", "[features]\nin_app_updates = false", text, count=1)
-            else:
-                text = text.rstrip("\n") + "\n\n[features]\nin_app_updates = false\n"
         for path in trusted:
             marker = f'[projects."{path}"]'
             if marker not in text:

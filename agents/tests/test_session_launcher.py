@@ -3013,7 +3013,7 @@ def test_a_codex_session_trusts_its_working_dir_without_a_host_codex_config(tmp_
     assert '[projects."/workspace/idea-board"]\ntrust_level = "trusted"' in text
 
 
-def test_a_codex_session_config_keeps_the_bypass_and_its_pinned_version(tmp_path, monkeypatch):
+def test_a_codex_session_config_keeps_the_bypass_when_its_daemon_restarts(tmp_path, monkeypatch):
     """Home 2026-10-03: Codex 0.157's app-server updated itself to 0.160.0
     about five minutes into every session and restarted; the restarted daemon
     kept only the config, not --dangerously-bypass-approvals-and-sandbox, and
@@ -3027,7 +3027,6 @@ def test_a_codex_session_config_keeps_the_bypass_and_its_pinned_version(tmp_path
     config = tomllib.loads((run_dir / "codex-config.toml").read_text())
     assert config["approval_policy"] == "never"
     assert config["sandbox_mode"] == "danger-full-access"
-    assert config["features"]["in_app_updates"] is False
     assert config["projects"]["/workspace/repo"]["trust_level"] == "trusted"
 
 
